@@ -296,6 +296,8 @@ def test_bounded_counts_reach_the_durable_ring(
         "semantic_excerpt_count_cut_for_case_bound",
         "semantic_excerpt_byte_limit",
         "semantic_excerpt_ceiling_rounds",
+        "semantic_check_change_parts_selected",
+        "semantic_edit_evidence_in_case",
     ),
 )
 def test_packet_composition_diagnostics_admit_counts_but_not_content(

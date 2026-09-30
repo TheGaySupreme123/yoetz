@@ -17,7 +17,12 @@ from yoetz.domain.coordination import (
     SessionHealth,
     WorkState,
 )
-from yoetz.domain.events import EventDraft, LedgerRecord, MissingForAssessmentItem
+from yoetz.domain.events import (
+    CheckChangeShownFiles,
+    EventDraft,
+    LedgerRecord,
+    MissingForAssessmentItem,
+)
 from yoetz.domain.findings import (
     CheckVerdict,
     Finding,
@@ -2041,6 +2046,7 @@ class LedgerPort(Protocol):
         semantic_conclusion: str | None = None,
         prior_finding_verdicts: tuple[PriorFindingVerdictRecord, ...] = (),
         missing_for_assessment: tuple[MissingForAssessmentItem, ...] = (),
+        check_change_files: CheckChangeShownFiles | None = None,
     ) -> CheckCommitResult: ...
 
     async def fail_check_if_current(

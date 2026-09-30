@@ -36,3 +36,24 @@ def test_capacity_summary_names_non_dispatch_and_bounded_next_step() -> None:
     assert "sha256:" + "a" * 64 in text
     assert "No provider attempt" not in text
     assert len(text.encode("ascii")) <= 512
+
+
+def test_check_summary_states_why_the_check_time_change_was_unavailable() -> None:
+    text = summary_for_check(
+        {
+            "verdict": "no_issue_detected",
+            "findings": [],
+            "suppressed_count": "0",
+            "semantic_status": "succeeded",
+            "semantic_reason": "completed",
+            "result_frontier": {"sequence": "3", "head_digest": "sha256:" + "a" * 64},
+            "coverage": {
+                "known_gaps": [
+                    "check_time_change_unavailable",
+                    "check_time_change_unavailable_changed_during_capture",
+                ]
+            },
+        }
+    )
+    assert "The check-time change was unavailable: the working tree kept changing" in text
+    assert len(text.encode("ascii")) <= 512

@@ -21,6 +21,8 @@ from yoetz.adapters.sqlite.migrations import initialize_bundle
 from yoetz.adapters.sqlite.repository import SqliteLedger
 from yoetz.domain.events import (
     SEMANTIC_EVENT_SCHEMA_VERSION,
+    CheckChangePartialFile,
+    CheckChangeShownFiles,
     CheckRecordedPayload,
     EventDraft,
     EventPayload,
@@ -55,8 +57,13 @@ from yoetz.kernel.deterministic_checks import (
     deterministic_case_from_json,
     deterministic_case_to_json,
 )
-from yoetz.kernel.projections import ProjectionState
+from yoetz.kernel.projections import ProjectionState, projection_snapshot
 from yoetz.kernel.ranking import CheckCompleteness, RankingContext, rank_findings
+from yoetz.ports.change_capture import (
+    TASK_CHANGE_BASE_MEDIA_TYPE,
+    TaskChangeBase,
+    encode_task_change_base,
+)
 from yoetz.ports.ledger import (
     AppendCommand,
     AppendEntry,
@@ -1785,6 +1792,75 @@ async def test_an_itemless_insufficient_packet_keeps_the_pending_request_on_both
 
 
 @pytest.mark.anyio
+async def test_check_change_shown_files_replay_to_the_same_raise_facts_in_both_ledgers() -> None:
+    """ADR-031: the raising check's shown files reach the finding row identically on replay."""
+
+    files = CheckChangeShownFiles(
+        ("hmac-sha256:" + "1" * 64, "hmac-sha256:" + "2" * 64),
+        (CheckChangePartialFile("hmac-sha256:" + "3" * 64, 2_048, 1, True, 67),),
+        complete=True,
+    )
+    command = ledger_command()
+    snapshots: list[JsonValue] = []
+    memory = memory_ledger(command)
+    sqlite = sqlite_ledger(command)
+    for adapter in (memory, sqlite):
+        await adapter.append_batch(command)
+        frozen = await _ready_case(
+            adapter,
+            command,
+            "req_00000000-0000-4000-8000-00000000004d",
+            "sha256:" + "d" * 64,
+        )
+        selected = _descending_rank_findings(
+            frozen.case.frontier, command.entries[0].coverage, semantic_lead=True
+        )
+        await adapter.commit_check_if_current(
+            frozen,
+            RankedFindings(selected, 0, CheckVerdict.ACTION_REQUIRED, command.entries[0].coverage),
+            (CheckPolicyExecution("work-integrity", "0.1.0", "run", "completed"),),
+            SemanticStatus.SUCCEEDED,
+            SemanticReason.SEMANTIC_COMPLETED,
+            selected[0].provenance,
+            frozen.lease.operation_id,
+            semantic_conclusion="challenges_returned",
+            check_change_files=files,
+        )
+        checks = [
+            row
+            async for row in adapter.load_events(command.session_id)
+            if row.schema.name == "check_recorded"
+        ]
+        assert [row.schema.version for row in checks] == ["1.3.0"]
+        payload = checks[0].payload
+        assert isinstance(payload, CheckRecordedPayload) and payload.check_change_files == files
+        stored = await adapter.load_projection(
+            command.session_id, ProjectionView.CANDIDATE_FINDINGS
+        )
+        assert stored is not None and type(stored.state) is ProjectionState
+        raised = stored.state.findings[selected[0].finding_id]
+        assert raised.check_change_raising_check_event_ids == (checks[0].event_id,)
+        assert raised.check_change_raised_files == files
+        assert stored.state.findings[selected[1].finding_id].check_change_raised_files is None
+        snapshots.append(projection_snapshot(stored.state))
+
+    restarted = SqliteLedger(
+        db=sqlite._db,  # pyright: ignore[reportPrivateUsage]
+        task_id=command.task_id,
+        ownership_fence=_fence(),
+        clock=sqlite._clock,  # pyright: ignore[reportPrivateUsage]
+        ids=sqlite._ids,  # pyright: ignore[reportPrivateUsage]
+        objects=sqlite._objects,  # pyright: ignore[reportPrivateUsage]
+    )
+    replayed = await restarted.load_projection(
+        command.session_id, ProjectionView.CANDIDATE_FINDINGS
+    )
+    assert replayed is not None and type(replayed.state) is ProjectionState
+    snapshots.append(projection_snapshot(replayed.state))
+    assert snapshots[0] == snapshots[1] == snapshots[2]
+
+
+@pytest.mark.anyio
 async def test_invalid_semantic_outcome_commits_and_does_not_poison_later_checks() -> None:
     """A designed provider-invalid outcome must be durable in both ledger adapters."""
 
@@ -3249,3 +3325,78 @@ async def test_semantic_progress_selected_attempt_terminates_as_succeeded() -> N
         assert progress.phase is SemanticProgressPhase.TERMINAL
         assert progress.terminal_outcome == "succeeded"
         assert progress.terminal_reason is SemanticReason.SEMANTIC_COMPLETED
+
+
+async def _task_change_base_ref(
+    adapter: MemoryLedgerAdapter | SqliteLedger, command: AppendCommand, commit: str
+) -> ObjectRef:
+    objects = adapter._objects  # pyright: ignore[reportPrivateUsage]
+    assert objects is not None
+    payload = encode_task_change_base(TaskChangeBase("sha1", commit))
+    staged = await objects.stage(
+        ObjectSource(data=payload, declared_size=len(payload)),
+        ObjectMetadata(
+            ObjectKind.CHANGE_CAPTURE,
+            TASK_CHANGE_BASE_MEDIA_TYPE,
+            command.task_id,
+            datetime(2026, 7, 19, 12, 0, tzinfo=UTC),
+        ),
+    )
+    return await objects.finalize(staged)
+
+
+@pytest.mark.anyio
+async def test_task_change_base_is_kept_once_with_adapter_parity(tmp_path: Path) -> None:
+    """ADR-031: the task-start base is one durable, inventoried root that a later call never moves."""
+
+    command = ledger_command(request_suffix="9")
+    database = tmp_path / "task-change-base.sqlite3"
+    db = apsw.Connection(str(database))
+    initialize_bundle(
+        db,
+        {
+            "task_id": command.task_id,
+            "owner_generation": "1",
+            "owner_nonce": "ledger-test-nonce",
+        },
+    )
+    sqlite_ids = _Ids()
+    sqlite_objects = _Objects(sqlite_ids)
+    sqlite = SqliteLedger(
+        db=db,
+        task_id=command.task_id,
+        ownership_fence=_fence(),
+        clock=_Clock(),
+        ids=sqlite_ids,
+        objects=sqlite_objects,
+    )
+    for adapter in (memory_ledger(command), sqlite):
+        await adapter.append_batch(command)
+        assert await adapter.load_task_change_base() is None
+        first = await _task_change_base_ref(adapter, command, "a" * 40)
+        later = await _task_change_base_ref(adapter, command, "b" * 40)
+        assert await adapter.record_task_change_base(first) is True
+        assert await adapter.record_task_change_base(later) is False
+        assert await adapter.load_task_change_base() == first
+        wrong_kind = replace(
+            later, metadata=replace(later.metadata, kind=ObjectKind.CAPTURED_CONTENT)
+        )
+        with pytest.raises(ValueError, match="task_change_base_invalid"):
+            await adapter.record_task_change_base(wrong_kind)
+
+    kept = await sqlite.load_task_change_base()
+    assert kept is not None
+    inventory = db.execute(
+        "SELECT kind, state FROM objects WHERE object_id=?", (kept.object_id,)
+    ).fetchall()
+    assert inventory == [("change_capture", "present")]
+    db.close()
+    restarted = SqliteLedger(
+        db=apsw.Connection(str(database)),
+        task_id=command.task_id,
+        ownership_fence=_fence(),
+        clock=_Clock(),
+        ids=sqlite_ids,
+        objects=sqlite_objects,
+    )
+    assert await restarted.load_task_change_base() == kept

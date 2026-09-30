@@ -11,11 +11,18 @@ the finding exactly as it was.
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import cast
 
 import pytest
 
 from builders.policy_cases import clm, evt, finding_record, fnd, obl
-from yoetz.domain.events import CheckMode, CheckRecordedPayload, PolicyVersion
+from yoetz.domain.events import (
+    CheckChangePartialFile,
+    CheckChangeShownFiles,
+    CheckMode,
+    CheckRecordedPayload,
+    PolicyVersion,
+)
 from yoetz.domain.findings import (
     FINDING_KIND_TRAITS,
     CheckVerdict,
@@ -25,8 +32,16 @@ from yoetz.domain.findings import (
     SemanticDispatchKind,
     SemanticProvenance,
 )
-from yoetz.domain.values import Frontier
+from yoetz.domain.receipts import (
+    CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP,
+    CHECK_TIME_CHANGE_GAPS,
+    CHECK_TIME_CHANGE_REDACTED_GAP,
+    CHECK_TIME_CHANGE_TRUNCATED_GAP,
+    CHECK_TIME_CHANGE_UNAVAILABLE_GAP,
+)
+from yoetz.domain.values import FindingId, Frontier
 from yoetz.kernel.finding_resolution import (
+    SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS,
     apply_check_resolution,
     finding_is_resolved,
     issue_key,
@@ -35,6 +50,7 @@ from yoetz.kernel.finding_resolution import (
     resolved_finding_ids,
 )
 from yoetz.kernel.projections import (
+    MAX_CHECK_CHANGE_RAISING_CHECKS,
     FindingProjectionRecord,
     ProjectionState,
     empty_projection_state,
@@ -301,6 +317,8 @@ def test_a_non_semantic_gap_weakens_every_proof_class(gap: str) -> None:
         "semantic_review_not_configured",
         "semantic_relevance_review_not_run",
         "optional_semantic_review_blocked_by_policy",
+        # The check-time change is AI-powered review input only (ADR-031).
+        *sorted(CHECK_TIME_CHANGE_GAPS),
     ),
 )
 def test_semantic_absence_does_not_weaken_a_deterministic_proof(gap: str) -> None:
@@ -1058,6 +1076,9 @@ def test_completed_semantic_recheck_can_retain_original_readable_capture_limits(
         "redacted_event",
         "missing_ref",
         "observation_input_loss",
+        CHECK_TIME_CHANGE_TRUNCATED_GAP,
+        CHECK_TIME_CHANGE_REDACTED_GAP,
+        CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP,
     ],
 )
 def test_matching_material_gaps_never_become_semantic_absence_proof(gap: str) -> None:
@@ -1491,3 +1512,754 @@ def test_a_finding_raised_before_the_task_statement_resolves_within_that_baselin
         )
         is resolves
     )
+
+
+def test_no_check_time_change_code_is_a_semantic_capture_baseline() -> None:
+    """Issue #883: check-time limits are governed by the shown-file rule, never stamped."""
+
+    assert not SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS & CHECK_TIME_CHANGE_GAPS
+
+
+_FILE_A = "hmac-sha256:" + "a" * 64
+_FILE_B = "hmac-sha256:" + "b" * 64
+_FILE_C = "hmac-sha256:" + "c" * 64
+_RAISING_EVENT = evt(5)
+_REPAIR_EVENT = evt(9)
+
+
+def _partial(
+    commitment: str,
+    shown: int,
+    redactions: int = 0,
+    admitted: bool = False,
+    clean: int | None = None,
+) -> CheckChangePartialFile:
+    """A partial view; without markers the whole shown length is clean, with them none is."""
+
+    if clean is None:
+        clean = shown if redactions == 0 else 0
+    return CheckChangePartialFile(commitment, shown, redactions, admitted, clean)
+
+
+def _files(
+    full: tuple[str, ...] = (),
+    partial: tuple[tuple[str, int] | tuple[str, int, int], ...] = (),
+    *,
+    complete: bool = True,
+    views: tuple[CheckChangePartialFile, ...] = (),
+) -> CheckChangeShownFiles:
+    """A shown-files record; a partial entry is (commitment, shown bytes[, redacted spans])."""
+
+    return CheckChangeShownFiles(
+        full,
+        tuple(_partial(entry[0], entry[1], entry[2] if len(entry) > 2 else 0) for entry in partial)
+        + views,
+        complete=complete,
+    )
+
+
+def _raise_then_repair(
+    *,
+    raising_gaps: tuple[str, ...] = (),
+    raising_files: CheckChangeShownFiles | None = None,
+    raising_conclusion: str | None = "challenges_returned",
+    repair_gaps: tuple[str, ...],
+    repair_files: CheckChangeShownFiles | None,
+) -> dict[FindingId, FindingProjectionRecord]:
+    """Fold the check whose review raised an AI-powered finding, then a later repair check."""
+
+    findings = {fnd(1): finding_record(_finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED), 4)}
+    raising = replace(
+        _check(
+            tested=3,
+            returned=(fnd(1),),
+            semantic=_SEMANTIC_OK,
+            coverage=_coverage(gaps=raising_gaps, semantic=True),
+        ),
+        semantic_conclusion=raising_conclusion,
+        check_change_files=raising_files,
+    )
+    apply_check_resolution(findings, raising, _RAISING_EVENT)
+    repair = replace(
+        _check(semantic=_SEMANTIC_OK, coverage=_coverage(gaps=repair_gaps, semantic=True)),
+        semantic_conclusion="no_material_discrepancy",
+        check_change_files=repair_files,
+    )
+    apply_check_resolution(findings, repair, _REPAIR_EVENT, proof_state=_changed_state(repair))
+    return findings
+
+
+def test_large_change_truncated_on_both_checks_resolves_when_the_file_was_shown_in_both() -> None:
+    findings = _raise_then_repair(
+        raising_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
+        raising_files=_files(full=(_FILE_A,), partial=((_FILE_B, 900),)),
+        repair_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
+        repair_files=_files(full=(_FILE_A, _FILE_B), partial=((_FILE_C, 10),)),
+    )
+
+    record = findings[fnd(1)]
+    assert record.check_change_raising_check_event_ids == (_RAISING_EVENT,)
+    assert record.check_change_raised_files == _files(full=(_FILE_A,), partial=((_FILE_B, 900),))
+    assert record.resolved_by_check_event_id == _REPAIR_EVENT
+    assert record.resolution_depends_on_check_event_ids == (_RAISING_EVENT,)
+
+
+@pytest.mark.parametrize(
+    "repair_files",
+    [
+        _files(full=(_FILE_B,), partial=((_FILE_A, 399),)),  # less of the file arrived
+        _files(full=(_FILE_B,)),  # the file did not arrive at all
+        _files(full=(_FILE_B,), complete=False),  # a partial record without the file
+        None,  # no record of which files arrived
+    ],
+    ids=("shorter", "absent", "incomplete_without_it", "unrecorded"),
+)
+def test_file_the_raising_review_saw_but_the_repair_did_not_see_whole_blocks(
+    repair_files: CheckChangeShownFiles | None,
+) -> None:
+    findings = _raise_then_repair(
+        raising_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
+        raising_files=_files(partial=((_FILE_A, 400),)),
+        repair_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
+        repair_files=repair_files,
+    )
+
+    assert findings[fnd(1)].resolved_by_check_event_id is None
+
+
+def test_pre_upgrade_finding_resolves_under_a_truncated_repair() -> None:
+    """A raising check from before ADR-031 carried no check-time material: R is empty."""
+
+    findings = _raise_then_repair(
+        raising_conclusion=None,
+        repair_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP, CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP),
+        repair_files=_files(full=(_FILE_C,), partial=((_FILE_A, 5),)),
+    )
+
+    assert findings[fnd(1)].check_change_raised_files == _files()
+    assert findings[fnd(1)].resolved_by_check_event_id == _REPAIR_EVENT
+
+
+def test_unavailable_raising_change_resolves_under_an_unavailable_repair() -> None:
+    findings = _raise_then_repair(
+        raising_gaps=(CHECK_TIME_CHANGE_UNAVAILABLE_GAP,),
+        repair_gaps=(CHECK_TIME_CHANGE_UNAVAILABLE_GAP,),
+        repair_files=None,
+    )
+
+    assert findings[fnd(1)].resolved_by_check_event_id == _REPAIR_EVENT
+
+
+def test_repair_that_lost_a_change_the_raising_review_saw_blocks() -> None:
+    findings = _raise_then_repair(
+        raising_files=_files(full=(_FILE_A,)),
+        repair_gaps=(CHECK_TIME_CHANGE_UNAVAILABLE_GAP,),
+        repair_files=None,
+    )
+
+    assert findings[fnd(1)].resolved_by_check_event_id is None
+
+
+def test_base_unavailable_legacy_task_resolves_when_the_file_was_shown_in_both() -> None:
+    """Same HEAD base on both checks: the file commits the same way (ADR-031)."""
+
+    findings = _raise_then_repair(
+        raising_gaps=(CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP,),
+        raising_files=_files(full=(_FILE_A,)),
+        repair_gaps=(CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP,),
+        repair_files=_files(full=(_FILE_A,)),
+    )
+
+    assert findings[fnd(1)].resolved_by_check_event_id == _REPAIR_EVENT
+
+
+def test_base_unavailable_repair_after_head_moved_blocks() -> None:
+    """HEAD moved: the same path under the new base is a different commitment."""
+
+    findings = _raise_then_repair(
+        raising_gaps=(CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP,),
+        raising_files=_files(full=(_FILE_A,)),
+        repair_gaps=(CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP,),
+        repair_files=_files(full=(_FILE_B,)),
+    )
+
+    assert findings[fnd(1)].resolved_by_check_event_id is None
+
+
+def test_redacted_span_in_the_repairs_copy_of_the_file_blocks() -> None:
+    findings = _raise_then_repair(
+        raising_files=_files(full=(_FILE_A,)),
+        repair_gaps=(CHECK_TIME_CHANGE_REDACTED_GAP,),
+        repair_files=_files(full=(_FILE_B,), partial=((_FILE_A, 10_000),)),
+    )
+
+    assert findings[fnd(1)].resolved_by_check_event_id is None
+
+
+def test_raising_check_that_carried_parts_without_a_record_is_unknown_and_blocks() -> None:
+    """0.3 development-build rows: parts reached the packet, no files were recorded."""
+
+    findings = _raise_then_repair(
+        raising_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
+        repair_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
+        repair_files=_files(full=(_FILE_A, _FILE_B)),
+    )
+
+    assert findings[fnd(1)].check_change_raised_files is None
+    assert findings[fnd(1)].resolved_by_check_event_id is None
+
+
+def test_repair_with_a_complete_change_needs_no_shown_file_proof() -> None:
+    findings = _raise_then_repair(
+        raising_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
+        repair_gaps=(),
+        repair_files=_files(full=(_FILE_B,)),
+    )
+
+    record = findings[fnd(1)]
+    assert record.resolved_by_check_event_id == _REPAIR_EVENT
+    assert record.resolution_depends_on_check_event_ids == ()
+
+
+def test_redacting_the_raising_check_reopens_a_resolution_that_depended_on_it() -> None:
+    findings = _raise_then_repair(
+        raising_files=_files(full=(_FILE_A,)),
+        repair_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
+        repair_files=_files(full=(_FILE_A,)),
+    )
+    assert findings[fnd(1)].resolved_by_check_event_id == _REPAIR_EVENT
+
+    reopen_findings_resolved_by(findings, frozenset({_RAISING_EVENT}))
+
+    record = findings[fnd(1)]
+    assert record.resolved_by_check_event_id is None
+    assert record.resolution_depends_on_check_event_ids == ()
+    assert record.check_change_raising_check_event_ids == (_RAISING_EVENT,)
+    assert record.check_change_raised_files is None  # unknown from now on
+    # A later truncated repair can no longer lean on the redacted check's files.
+    again = replace(
+        _check(
+            tested=10,
+            semantic=_SEMANTIC_OK,
+            coverage=_coverage(gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,), semantic=True),
+        ),
+        semantic_conclusion="no_material_discrepancy",
+        check_change_files=_files(full=(_FILE_A,)),
+    )
+    apply_check_resolution(findings, again, evt(11), proof_state=_changed_state(again))
+    assert findings[fnd(1)].resolved_by_check_event_id is None
+
+
+def test_redacting_the_repair_check_reopens_as_before() -> None:
+    findings = _raise_then_repair(
+        raising_files=_files(full=(_FILE_A,)),
+        repair_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
+        repair_files=_files(full=(_FILE_A,)),
+    )
+
+    reopen_findings_resolved_by(findings, frozenset({_REPAIR_EVENT}))
+
+    record = findings[fnd(1)]
+    assert record.resolved_by_check_event_id is None
+    assert record.check_change_raised_files == _files(full=(_FILE_A,))
+
+
+def test_check_time_raise_facts_round_trip_through_the_projection_snapshot() -> None:
+    findings = _raise_then_repair(
+        raising_files=_files(full=(_FILE_A,), partial=((_FILE_B, 77),)),
+        repair_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
+        repair_files=_files(full=(_FILE_A, _FILE_B)),
+    )
+    state = replace(empty_projection_state(), frontier=9, head_digest=_DIGEST, findings=findings)
+
+    decoded = projection_from_snapshot(projection_snapshot(state))
+
+    assert decoded == state
+    assert decoded.findings[fnd(1)].check_change_raised_files == _files(
+        full=(_FILE_A,), partial=((_FILE_B, 77),)
+    )
+
+
+@pytest.mark.parametrize(
+    ("repair_bytes", "resolved"), [(4_096, True), (4_095, True), (4_094, False)]
+)
+def test_file_straddling_the_packet_edge_on_both_checks_compares_shown_bytes(
+    repair_bytes: int, resolved: bool
+) -> None:
+    """A large change almost always cuts one file at the packet edge on both checks."""
+
+    findings = _raise_then_repair(
+        raising_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
+        raising_files=_files(full=(_FILE_A,), partial=((_FILE_B, 4_095),)),
+        repair_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
+        repair_files=_files(full=(_FILE_A,), partial=((_FILE_B, repair_bytes),)),
+    )
+
+    assert (findings[fnd(1)].resolved_by_check_event_id == _REPAIR_EVENT) is resolved
+
+
+def test_repair_record_past_its_file_bound_still_proves_the_files_it_holds() -> None:
+    """Only the shown files count; a repair may keep the first 128 and still cover R."""
+
+    findings = _raise_then_repair(
+        raising_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
+        raising_files=_files(full=(_FILE_A,)),
+        repair_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
+        repair_files=_files(full=(_FILE_A, _FILE_C), complete=False),
+    )
+
+    assert findings[fnd(1)].resolved_by_check_event_id == _REPAIR_EVENT
+
+
+def test_raising_record_past_its_file_bound_is_unknown_and_blocks() -> None:
+    findings = _raise_then_repair(
+        raising_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
+        raising_files=_files(full=(_FILE_A,), complete=False),
+        repair_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
+        repair_files=_files(full=(_FILE_A, _FILE_B, _FILE_C)),
+    )
+
+    assert findings[fnd(1)].check_change_raised_files is None
+    assert findings[fnd(1)].resolved_by_check_event_id is None
+
+
+def test_few_shown_files_of_a_change_with_many_changed_files_resolve() -> None:
+    """More than 128 changed files, a handful shown: the record holds only the shown ones."""
+
+    findings = _raise_then_repair(
+        raising_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
+        raising_files=_files(full=(_FILE_A,), partial=((_FILE_B, 2_000),)),
+        repair_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
+        repair_files=_files(full=(_FILE_A, _FILE_B)),
+    )
+
+    assert findings[fnd(1)].resolved_by_check_event_id == _REPAIR_EVENT
+
+
+def test_repair_that_saw_a_raising_partial_file_redacted_earlier_blocks() -> None:
+    findings = _raise_then_repair(
+        raising_files=_files(partial=((_FILE_A, 3_000),)),
+        repair_gaps=(CHECK_TIME_CHANGE_REDACTED_GAP,),
+        repair_files=_files(partial=((_FILE_A, 1_200),)),
+    )
+
+    assert findings[fnd(1)].resolved_by_check_event_id is None
+
+
+def _review(
+    tested: int,
+    attempt: int,
+    files: CheckChangeShownFiles | None,
+    *,
+    returned: tuple[object, ...] = (),
+    gaps: tuple[str, ...] = (CHECK_TIME_CHANGE_TRUNCATED_GAP,),
+    conclusion: str = "challenges_returned",
+) -> CheckRecordedPayload:
+    provenance = replace(
+        _provenance(), semantic_attempt_id=f"att_00000000-0000-4000-8000-{attempt:012x}"
+    )
+    return replace(
+        _check(
+            tested=tested,
+            returned=returned,
+            semantic=_SEMANTIC_OK,
+            coverage=_coverage(gaps=gaps, semantic=True),
+        ),
+        semantic_conclusion=conclusion,
+        semantic_provenance=provenance,
+        check_change_files=files,
+    )
+
+
+def _raise_reraise(
+    first: CheckChangeShownFiles, second: CheckChangeShownFiles
+) -> dict[FindingId, FindingProjectionRecord]:
+    """C1 raises the finding; C2, a later review, returns the same finding id again."""
+
+    findings = {fnd(1): finding_record(_finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED), 4)}
+    apply_check_resolution(findings, _review(3, 1, first, returned=(fnd(1),)), evt(5))
+    apply_check_resolution(findings, _review(6, 2, second, returned=(fnd(1),)), evt(7))
+    return findings
+
+
+def _repair_with(
+    findings: dict[FindingId, FindingProjectionRecord], files: CheckChangeShownFiles
+) -> FindingProjectionRecord:
+    repair = _review(8, 3, files, conclusion="no_material_discrepancy")
+    apply_check_resolution(findings, repair, evt(9), proof_state=_changed_state(repair))
+    return findings[fnd(1)]
+
+
+def test_a_re_raise_widens_what_the_repair_must_have_seen() -> None:
+    """Probe: C1 saw A, C2 re-raised after seeing B in part, C3 shows only A: not resolved."""
+
+    findings = _raise_reraise(
+        _files(full=(_FILE_A,)), _files(full=(_FILE_A,), partial=((_FILE_B, 900),))
+    )
+    record = findings[fnd(1)]
+    assert record.check_change_raising_check_event_ids == (evt(5), evt(7))
+    assert record.check_change_raised_files == _files(full=(_FILE_A,), partial=((_FILE_B, 900),))
+
+    assert _repair_with(dict(findings), _files(full=(_FILE_A,))).resolved_by_check_event_id is None
+    resolved = _repair_with(dict(findings), _files(full=(_FILE_A,), partial=((_FILE_B, 900),)))
+    assert resolved.resolved_by_check_event_id == evt(9)
+    assert resolved.resolution_depends_on_check_event_ids == (evt(5), evt(7))
+
+
+@pytest.mark.parametrize(
+    ("repair_entry", "resolved"),
+    [((_FILE_B, 900, 1), True), ((_FILE_B, 900, 2), False), ((_FILE_B, 899, 0), False)],
+)
+def test_merged_raising_views_keep_the_stronger_requirement_per_file(
+    repair_entry: tuple[str, int, int], resolved: bool
+) -> None:
+    findings = _raise_reraise(
+        _files(partial=((_FILE_B, 500, 2),)), _files(partial=((_FILE_B, 900, 1),))
+    )
+    assert findings[fnd(1)].check_change_raised_files == _files(partial=((_FILE_B, 900, 1),))
+
+    record = _repair_with(findings, _files(partial=(repair_entry,)))
+
+    assert (record.resolved_by_check_event_id == evt(9)) is resolved
+
+
+def test_a_file_one_raising_review_saw_whole_must_be_whole_in_the_repair() -> None:
+    findings = _raise_reraise(_files(partial=((_FILE_A, 100),)), _files(full=(_FILE_A,)))
+    assert findings[fnd(1)].check_change_raised_files == _files(full=(_FILE_A,))
+
+    assert (
+        _repair_with(findings, _files(partial=((_FILE_A, 9_000),))).resolved_by_check_event_id
+        is None
+    )
+
+
+def test_redacting_a_re_raising_check_makes_r_unknown_and_reopens() -> None:
+    findings = _raise_reraise(_files(full=(_FILE_A,)), _files(full=(_FILE_A,)))
+    record = _repair_with(findings, _files(full=(_FILE_A,)))
+    assert record.resolved_by_check_event_id == evt(9)
+
+    reopen_findings_resolved_by(findings, frozenset({evt(7)}))
+
+    assert findings[fnd(1)].resolved_by_check_event_id is None
+    assert findings[fnd(1)].check_change_raised_files is None
+
+
+def test_partial_file_needs_the_whole_shown_length_not_the_prefix_before_a_redaction() -> None:
+    """Probe: a fully admitted 3038 B section with one redacted span is n=3038, k=1, not n=67."""
+
+    raising = _files(partial=((_FILE_A, 3_038, 1),))
+    findings = _raise_reraise(raising, raising)
+
+    assert (
+        _repair_with(
+            dict(findings), _files(partial=((_FILE_A, 100, 1),))
+        ).resolved_by_check_event_id
+        is None
+    )
+    # The redaction persists and the repair saw at least as much: covered.
+    assert _repair_with(
+        dict(findings), _files(partial=((_FILE_A, 3_100, 1),))
+    ).resolved_by_check_event_id == evt(9)
+
+
+def test_a_redaction_new_in_the_repair_blocks() -> None:
+    findings = _raise_reraise(
+        _files(partial=((_FILE_A, 3_000, 0),)), _files(partial=((_FILE_A, 3_000, 0),))
+    )
+
+    record = _repair_with(findings, _files(partial=((_FILE_A, 5_000, 1),)))
+
+    assert record.resolved_by_check_event_id is None
+
+
+def test_edge_cut_raise_is_covered_by_a_longer_repair_whose_first_n_bytes_are_clean() -> None:
+    """L1: the raising view stopped before a marker the repair later showed."""
+
+    findings = _raise_reraise(
+        _files(views=(_partial(_FILE_A, 995),)), _files(views=(_partial(_FILE_A, 995),))
+    )
+
+    record = _repair_with(findings, _files(views=(_partial(_FILE_A, 4_322, 1, False, 2_100),)))
+
+    assert record.resolved_by_check_event_id == evt(9)
+
+
+def test_whole_section_raise_is_covered_by_a_shrunk_whole_repair_with_the_same_markers() -> None:
+    """L2: the fix shortened the diff; the persistent redaction stays at one span."""
+
+    raised = _partial(_FILE_A, 3_000, 1, True, 67)
+    findings = _raise_reraise(_files(views=(raised,)), _files(views=(raised,)))
+
+    record = _repair_with(findings, _files(views=(_partial(_FILE_A, 2_400, 1, True, 67),)))
+
+    assert record.resolved_by_check_event_id == evt(9)
+
+
+@pytest.mark.parametrize(
+    "repair",
+    [
+        _partial(_FILE_A, 2_400, 2, True, 50),  # whole, but more hidden and not clean for n
+        _partial(_FILE_A, 2_400, 1, False, 67),  # shorter and not the whole section
+    ],
+    ids=("more_redactions", "shorter_cut"),
+)
+def test_whole_or_shorter_repair_views_that_hide_more_still_block(
+    repair: CheckChangePartialFile,
+) -> None:
+    raised = _partial(_FILE_A, 3_000, 1, True, 67)
+    findings = _raise_reraise(_files(views=(raised,)), _files(views=(raised,)))
+
+    assert _repair_with(findings, _files(views=(repair,))).resolved_by_check_event_id is None
+
+
+def test_contributors_past_the_bound_make_r_unknown() -> None:
+    findings = {fnd(1): finding_record(_finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED), 4)}
+    files = _files(full=(_FILE_A,))
+    for index in range(MAX_CHECK_CHANGE_RAISING_CHECKS):
+        apply_check_resolution(
+            findings, _review(3, index + 1, files, returned=(fnd(1),)), evt(100 + index)
+        )
+    assert len(findings[fnd(1)].check_change_raising_check_event_ids) == 64
+    assert findings[fnd(1)].check_change_raised_files == files
+
+    apply_check_resolution(findings, _review(3, 999, files, returned=(fnd(1),)), evt(999))
+
+    record = findings[fnd(1)]
+    assert len(record.check_change_raising_check_event_ids) == 64
+    assert record.check_change_raised_files is None
+
+
+def test_merged_requirement_may_outgrow_one_event_row_up_to_its_own_bound() -> None:
+    def record(offset: int, count: int) -> CheckChangeShownFiles:
+        return _files(full=tuple(f"hmac-sha256:{offset + index:064x}" for index in range(count)))
+
+    merged = record(0, 128)
+    for batch in range(1, 8):
+        step = merged.merged(record(batch * 128, 128))
+        assert step is not None
+        merged = step
+    assert len(merged.fully_shown) == 1_024
+    assert merged.merged(record(10_000, 1)) is None
+    # The same wide requirement survives the projection snapshot.
+    findings = {
+        fnd(1): replace(
+            finding_record(_finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED), 4),
+            check_change_raising_check_event_ids=(evt(5),),
+            check_change_raised_files=merged,
+        )
+    }
+    state = replace(empty_projection_state(), frontier=9, head_digest=_DIGEST, findings=findings)
+    assert projection_from_snapshot(projection_snapshot(state)) == state
+
+
+# --- R945-02 (maintainer decision 2026-09-30): view commitments bind where spans and hunks lie --
+
+_VIEW_1 = "hmac-sha256:" + "1" * 64
+_VIEW_2 = "hmac-sha256:" + "2" * 64
+
+
+def _viewed(
+    shown: int, redactions: int, admitted: bool, clean: int, view: str | None
+) -> CheckChangePartialFile:
+    return CheckChangePartialFile(_FILE_A, shown, redactions, admitted, clean, view)
+
+
+def test_a_moved_redaction_with_equal_counts_is_not_covered() -> None:
+    """The reviewer's exact probe, now with the view commitment each check records."""
+
+    raised = CheckChangeShownFiles((), (_viewed(100, 1, False, 20, _VIEW_1),), True)
+    moved = CheckChangeShownFiles((), (_viewed(100, 1, False, 80, _VIEW_2),), True)
+    same = CheckChangeShownFiles((), (_viewed(100, 1, False, 20, _VIEW_1),), True)
+
+    assert not moved.covers(raised)
+    assert same.covers(raised)
+    assert CheckChangeShownFiles((_FILE_A,), (), True).covers(raised)  # whole still covers
+
+
+def test_a_moved_packet_edge_hunk_with_a_longer_view_is_not_covered() -> None:
+    raised = CheckChangeShownFiles((), (_viewed(995, 0, False, 995, _VIEW_1),), True)
+    longer = CheckChangeShownFiles((), (_viewed(4_322, 0, False, 4_322, _VIEW_2),), True)
+
+    assert not longer.covers(raised)
+
+
+def test_a_repair_record_without_a_view_never_covers_a_committed_raise() -> None:
+    raised = CheckChangeShownFiles((), (_viewed(100, 1, True, 20, _VIEW_1),), True)
+    legacy_repair = CheckChangeShownFiles((), (_viewed(100, 1, True, 20, None),), True)
+
+    assert not legacy_repair.covers(raised)
+
+
+def test_raises_with_different_views_merge_into_a_whole_file_requirement() -> None:
+    first = CheckChangeShownFiles((), (_viewed(500, 1, True, 20, _VIEW_1),), True)
+    second = CheckChangeShownFiles((), (_viewed(500, 1, True, 20, _VIEW_2),), True)
+
+    merged = first.merged(second)
+
+    assert merged == CheckChangeShownFiles((_FILE_A,), (), True)
+    assert first.merged(first) == first
+
+
+def test_legacy_raise_falls_back_and_is_reported_unverified() -> None:
+    legacy = CheckChangeShownFiles((), (_viewed(100, 1, False, 20, None),), True)
+    committed = CheckChangeShownFiles((), (_viewed(100, 1, False, 20, _VIEW_1),), True)
+    repair = CheckChangeShownFiles((), (_viewed(100, 1, False, 20, _VIEW_2),), True)
+
+    assert repair.covers(legacy)  # the old length/count comparison
+    assert legacy.has_unverified_views()
+    assert not committed.has_unverified_views()
+    assert not CheckChangeShownFiles((_FILE_A,), (), True).has_unverified_views()
+
+
+def test_view_commitment_round_trips_and_legacy_rows_still_decode() -> None:
+    from yoetz.domain.events import check_change_files_from_json, check_change_files_to_json
+
+    committed = CheckChangeShownFiles((), (_viewed(100, 1, False, 20, _VIEW_1),), True)
+    wire = check_change_files_to_json(committed)
+    assert check_change_files_from_json(wire) == committed
+    legacy = CheckChangeShownFiles((), (_viewed(100, 1, False, 20, None),), True)
+    legacy_wire = check_change_files_to_json(legacy)
+    partial = legacy_wire["partially_shown"]
+    assert isinstance(partial, tuple) and "view_commitment" not in partial[0]
+    assert check_change_files_from_json(legacy_wire) == legacy
+
+
+def test_resolution_through_a_legacy_raise_is_marked_unverified() -> None:
+    from yoetz.kernel.finding_resolution import check_change_resolution_unverified
+
+    legacy = _files(views=(_viewed(3_000, 1, True, 67, None),))
+    findings = _raise_reraise(legacy, legacy)
+    record = _repair_with(findings, _files(views=(_viewed(3_000, 1, True, 67, _VIEW_1),)))
+    assert record.resolved_by_check_event_id == evt(9)
+    assert check_change_resolution_unverified(record)
+
+    committed = _files(views=(_viewed(3_000, 1, True, 67, _VIEW_1),))
+    findings = _raise_reraise(committed, committed)
+    record = _repair_with(findings, committed)
+    assert record.resolved_by_check_event_id == evt(9)
+    assert not check_change_resolution_unverified(record)
+
+
+def test_receipt_discloses_a_resolution_through_a_legacy_raise() -> None:
+    from yoetz.application.receipt import (
+        _check_change_resolution_gaps,  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+    )
+    from yoetz.domain.receipts import (
+        CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP,
+        check_time_change_gap_sentence,
+    )
+    from yoetz.kernel.receipt_builder import ReceiptFindingState
+
+    legacy = _files(views=(_viewed(3_000, 1, True, 67, None),))
+    findings = _raise_reraise(legacy, legacy)
+    _repair_with(findings, _files(views=(_viewed(3_000, 1, True, 67, _VIEW_1),)))
+    projection = replace(
+        empty_projection_state(), frontier=20, head_digest=_DIGEST, findings=findings
+    )
+
+    gaps = _check_change_resolution_gaps(projection, (ReceiptFindingState(fnd(1), True),))
+
+    assert [gap.code for gap in gaps] == [CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP]
+    sentence = check_time_change_gap_sentence(CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP)
+    assert sentence is not None and "only the lengths and counts" in sentence
+    assert not _check_change_resolution_gaps(projection, (ReceiptFindingState(fnd(1), False),))
+
+
+def _legacy_resolved_projection(count: int) -> tuple[ProjectionState, tuple[object, ...]]:
+    from yoetz.domain.events import encode_payload
+    from yoetz.kernel.ranking import rank_key
+    from yoetz.kernel.receipt_builder import ReceiptFindingState
+    from yoetz.protocol.canonical import canonical_digest
+
+    legacy = _files(views=(_viewed(3_000, 1, True, 67, None),))
+    findings = _raise_reraise(legacy, legacy)
+    template = _repair_with(findings, _files(views=(_viewed(3_000, 1, True, 67, _VIEW_1),)))
+    assert template.payload is not None
+    many: dict[FindingId, FindingProjectionRecord] = {}
+    for index in range(1, count + 1):
+        identifier = fnd(index)
+        payload = replace(template.payload, finding_id=identifier, subject_refs=(obl(index),))
+        many[identifier] = replace(
+            template,
+            payload=payload,
+            payload_digest=canonical_digest(encode_payload(payload)),
+        )
+    projection = replace(empty_projection_state(), frontier=20, head_digest=_DIGEST, findings=many)
+    ordered = sorted(many.values(), key=lambda item: rank_key(cast(Finding, item.payload)))
+    states = tuple(
+        ReceiptFindingState(cast(Finding, item.payload).finding_id, True) for item in ordered
+    )
+    return projection, states
+
+
+def test_legacy_disclosure_is_one_task_wide_gap_however_many_findings_it_covers() -> None:
+    """65 affected findings still build a receipt: one gap row, never one per finding."""
+
+    from yoetz.application.receipt import (
+        _check_change_resolution_gaps,  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+    )
+    from yoetz.domain.receipts import CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP
+    from yoetz.kernel.finding_resolution import unverified_resolution_finding_ids
+    from yoetz.kernel.receipt_builder import ReceiptFindingState
+
+    projection, states = _legacy_resolved_projection(65)
+    typed_states = cast(tuple[ReceiptFindingState, ...], states)
+
+    gaps = _check_change_resolution_gaps(projection, typed_states)
+
+    assert [(gap.marker, gap.code) for gap in gaps] == [
+        (CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP, CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP)
+    ]
+    resolved = (state.finding_id for state in typed_states if state.resolved)
+    assert len(unverified_resolution_finding_ids(projection, resolved)) == 65
+
+
+def test_receipt_names_legacy_resolutions_boundedly_in_one_gap() -> None:
+    """A receipt section holds at most 64 findings; 20 show the bounded id list."""
+
+    from yoetz.domain.receipts import (
+        CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP,
+        render_receipt_human,
+    )
+    from yoetz.kernel.deterministic_checks import CaseAvailabilityFacts, CaseGap
+    from yoetz.kernel.receipt_builder import ReceiptBuildContext, ReceiptFindingState
+
+    projection, states = _legacy_resolved_projection(20)
+    from yoetz.protocol.coverage import weakest
+
+    coverage = _coverage(
+        gaps=(CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP, "check_not_recorded"),
+        freshness=projection.freshness,
+    )
+    for record in projection.findings.values():
+        assert record.payload is not None
+        coverage = weakest(coverage, record.payload.coverage)
+    context = ReceiptBuildContext(
+        projection=projection,
+        subject_frontier=Frontier(20, _DIGEST),
+        availability=CaseAvailabilityFacts(),
+        coverage=coverage,
+        gaps=(
+            CaseGap("check_not_recorded", "check_not_recorded", ()),
+            CaseGap(
+                CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP,
+                CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP,
+                (),
+            ),
+        ),
+        finding_states=cast(tuple[ReceiptFindingState, ...], states),
+        applicable_check=None,
+    )
+
+    from unit.kernel.test_receipt_builder import _build  # pyright: ignore[reportPrivateUsage]
+
+    receipt = _build(context)
+
+    (gap,) = [
+        item for item in receipt.gaps if item.code == CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP
+    ]
+    assert gap.detail is not None and "20 resolved AI-powered findings" in gap.detail
+    for markdown in (True, False):
+        text = render_receipt_human(receipt, markdown=markdown)
+        assert "20 resolved AI-powered findings" in text
+        assert str(fnd(1)) in text and "and 4 more" in text

@@ -6,6 +6,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
+from types import MappingProxyType
 from typing import Final, Literal, cast
 
 from yoetz.domain.findings import (
@@ -66,6 +67,14 @@ from yoetz.protocol.recovery import continuation_for_semantic_outcome, directive
 __all__ = [
     "receipt_document_carries_terminal_sections",
     "CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP",
+    "CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP",
+    "CHECK_TIME_CHANGE_GAPS",
+    "CHECK_TIME_CHANGE_REDACTED_GAP",
+    "CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP",
+    "CHECK_TIME_CHANGE_TRUNCATED_GAP",
+    "CHECK_TIME_CHANGE_UNAVAILABLE_GAP",
+    "CHECK_TIME_CHANGE_UNAVAILABLE_REASONS",
+    "CHECK_TIME_CHANGE_UNAVAILABLE_REASON_GAPS",
     "COMPLETION_CLAIM_OUTSIDE_PLAN_GAP",
     "COMPLETION_PLAN_NOT_CLAIMED_GAP",
     "COMPLETION_SCOPE_DECLARED_NONE_GAP",
@@ -113,6 +122,8 @@ __all__ = [
     "resolved_finding_ids_for_render",
     "unresolved_findings_for_render",
     "semantic_coverage_gap_code",
+    "check_time_change_gap_sentence",
+    "check_time_change_unavailable_reason_gap",
 ]
 
 # Structural completion-scope gaps. These are case-coverage facts, not policy findings: an
@@ -181,6 +192,102 @@ SEMANTIC_PRIOR_VERDICTS_UNSUPPORTED_GAP: Final = "semantic_prior_verdicts_unsupp
 # Issue #905: a challenge that restated a recorded AI-powered finding (same kind, subjects within
 # that finding's, nothing recorded since) was "seen again, suppressed" instead of minted twice.
 SEMANTIC_RESTATEMENTS_SUPPRESSED_GAP: Final = "semantic_restatements_suppressed"
+# The check-time change (ADR-031) is the service's own read of the task's repository when a check
+# runs. Each code names one limit on what that single object could show the reviewer. None of
+# them describes an input of a local policy pack, so they bound the review and the receipt only.
+# ``unavailable``: the review's recipe selected the change and the check named a workspace, but the
+# service could carry none of it (a workspace outside the task's repository, an unsupported Git
+# state, a failed or timed-out capture, a change withheld whole by redaction, or no packet
+# subject). A check whose connection named no workspace has nothing to read and reports no code.
+CHECK_TIME_CHANGE_UNAVAILABLE_GAP: Final = "check_time_change_unavailable"
+# The commit recorded when the task started was absent or unresolvable, so the change is shown
+# against the commit the task's first check pinned (or, when no pin could be kept, HEAD): work
+# committed during the task before that commit is missing from it.
+CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP: Final = "check_time_change_base_unavailable"
+# The capture, or its share of the packet, stopped early: the files and parts it names as not
+# shown never reached the reviewer.
+CHECK_TIME_CHANGE_TRUNCATED_GAP: Final = "check_time_change_truncated"
+# Credential-like spans were replaced before the change was stored or offered for review.
+CHECK_TIME_CHANGE_REDACTED_GAP: Final = "check_time_change_redacted"
+# Why the change was unavailable, as one closed code beside ``check_time_change_unavailable``:
+# ``check_time_change_unavailable_<reason>``. Each maps to one fixed sentence; neither carries a
+# path, Git output or any other user-controlled text. A check recorded before reasons existed
+# carries only the generic code.
+CHECK_TIME_CHANGE_UNAVAILABLE_REASONS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "git_unavailable": "Git is not installed where the Yoetz service runs.",
+        "not_git": "the check's directory is not a Git repository.",
+        "unsafe_root": (
+            "the repository failed a safety check (a link, another owner, a working tree "
+            "redirected elsewhere, or a directory replaced while it was read)."
+        ),
+        "unsupported_repository": (
+            "the repository uses a setup the capture does not read (a Git filter or include, a "
+            "partial clone, a borrowed object store, or Git older than 2.26)."
+        ),
+        "git_failed": "a Git command failed or ran out of time.",
+        "changed_during_capture": (
+            "the working tree kept changing while it was read, through every attempt."
+        ),
+        "redaction_incomplete": (
+            "credential-like text remained after every redaction pass, so the change was "
+            "withheld whole."
+        ),
+        "repository_mismatch": (
+            "the check's connection named a different repository from the task's."
+        ),
+        "capture_failed": "the capture failed unexpectedly; service diagnostics record it.",
+        "no_linked_subject": (
+            "the review packet had no claim, obligation or plan to attach the change to."
+        ),
+        "no_packet_room": (
+            "the review recipe's excerpt budget is too small for any part of the change."
+        ),
+    }
+)
+_CHECK_TIME_CHANGE_REASON_PREFIX: Final = CHECK_TIME_CHANGE_UNAVAILABLE_GAP + "_"
+CHECK_TIME_CHANGE_UNAVAILABLE_REASON_GAPS: Final = frozenset(
+    _CHECK_TIME_CHANGE_REASON_PREFIX + reason for reason in CHECK_TIME_CHANGE_UNAVAILABLE_REASONS
+)
+# A receipt-only disclosure (R945-02): an AI-powered finding was resolved by tolerating a repair
+# review's check-time limits against a raising view recorded before view commitments existed, so
+# only lengths and counts were compared. The resolution stands; it is never presented as
+# content-verified. It is not a check coverage code and never tolerates anything.
+CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP: Final = "check_time_change_resolution_unverified"
+CHECK_TIME_CHANGE_GAPS: Final = frozenset(
+    {
+        CHECK_TIME_CHANGE_UNAVAILABLE_GAP,
+        CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP,
+        CHECK_TIME_CHANGE_TRUNCATED_GAP,
+        CHECK_TIME_CHANGE_REDACTED_GAP,
+        *CHECK_TIME_CHANGE_UNAVAILABLE_REASON_GAPS,
+    }
+)
+
+
+def check_time_change_unavailable_reason_gap(reason: str) -> str:
+    """The closed gap code naming why the check-time change was unavailable."""
+
+    if reason not in CHECK_TIME_CHANGE_UNAVAILABLE_REASONS:
+        raise ValueError("check_time_change_reason_invalid")
+    return _CHECK_TIME_CHANGE_REASON_PREFIX + reason
+
+
+def check_time_change_gap_sentence(code: str) -> str | None:
+    """One plain sentence for a check-time reason or resolution code; ``None`` otherwise."""
+
+    if code == CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP:
+        return (
+            "An AI-powered finding was resolved against a raising review recorded before file "
+            "view commitments existed, so only the lengths and counts of what each review saw "
+            "were compared, not where redactions and hunks lay."
+        )
+    if code not in CHECK_TIME_CHANGE_UNAVAILABLE_REASON_GAPS:
+        return None
+    text = CHECK_TIME_CHANGE_UNAVAILABLE_REASONS[code[len(_CHECK_TIME_CHANGE_REASON_PREFIX) :]]
+    return "The check-time change was unavailable: " + text
+
+
 OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP: Final = "optional_semantic_review_blocked_by_policy"
 # The strict route ceiling blocked this process, but the durable applied-route record says the
 # last install applied the policy route (issue #537). The disagreement is the whole claim: a

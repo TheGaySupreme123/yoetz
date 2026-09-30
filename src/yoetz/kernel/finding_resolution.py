@@ -16,12 +16,13 @@ projection checkpoint all read the same fact.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, MutableMapping
+from collections.abc import Iterable, Mapping, MutableMapping
 from dataclasses import replace
 from typing import Final, Literal
 
 from yoetz.domain.coordination import CoordinationGapCode
 from yoetz.domain.events import (
+    CheckChangeShownFiles,
     CheckRecordedPayload,
     ClaimKind,
     LedgerRecord,
@@ -30,6 +31,9 @@ from yoetz.domain.events import (
 )
 from yoetz.domain.findings import Finding, FindingKind, FindingOrigin, ResponseDisposition
 from yoetz.domain.receipts import (
+    CHECK_TIME_CHANGE_GAPS,
+    CHECK_TIME_CHANGE_UNAVAILABLE_GAP,
+    CHECK_TIME_CHANGE_UNAVAILABLE_REASON_GAPS,
     OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
     OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP,
     SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
@@ -53,6 +57,7 @@ from yoetz.domain.values import EventId, FindingId, ResultId
 from yoetz.kernel.claims import effective_claim_items
 from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.projections import (
+    MAX_CHECK_CHANGE_RAISING_CHECKS,
     FindingProjectionRecord,
     ProjectionRecord,
     ProjectionState,
@@ -69,6 +74,9 @@ __all__ = [
     "OPEN_REVIEW_VERDICTS",
     "apply_check_resolution",
     "apply_check_rulings",
+    "check_change_limits_tolerated",
+    "check_change_resolution_unverified",
+    "unverified_resolution_finding_ids",
     "finding_is_resolved",
     "issue_key",
     "prior_finding_verdict",
@@ -110,6 +118,9 @@ _SEMANTIC_ONLY_GAPS: Final = frozenset(
         SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
         # The reviewer's missing task statement (issue #908) says nothing about a local pack.
         *TASK_STATEMENT_GAPS,
+        # The check-time change is AI-powered review input only (ADR-031); local packs never
+        # read it, so its limits cannot weaken a local absence proof.
+        *CHECK_TIME_CHANGE_GAPS,
     }
 )
 # Evidence-strength gaps: the cited evidence was readable but its content was not captured or
@@ -476,6 +487,7 @@ def qualifying_check_resolves(
     *,
     proof_state: ProjectionState | None = None,
     raised_before_task_statement: bool = False,
+    check_change_raised_files: CheckChangeShownFiles | None = None,
 ) -> bool:
     """True when *check* proves the issue *finding* reports is absent from the state it tested.
 
@@ -483,6 +495,8 @@ def qualifying_check_resolves(
     whose tested subject frontier is earlier never saw the finding, so it cannot speak to it.
     ``returned_issue_keys`` are the issue keys of every finding the check returned; a check that
     returned the same issue re-fired it rather than proving it gone.
+    ``check_change_raised_files`` is what the review that raised an AI-powered *finding* saw of
+    the check-time change (``None`` while unknown); see ``check_change_limits_tolerated``.
     """
 
     if type(finding) is not Finding or type(check) is not CheckRecordedPayload:
@@ -496,6 +510,62 @@ def qualifying_check_resolves(
         returned_issue_keys,
         proof_state=proof_state,
         raised_before_task_statement=raised_before_task_statement,
+        check_change_raised_files=check_change_raised_files,
+    )
+
+
+_NO_CHECK_CHANGE_FILES: Final = CheckChangeShownFiles((), (), complete=True)
+
+
+def check_change_limits_tolerated(
+    check: CheckRecordedPayload, raised_files: CheckChangeShownFiles | None
+) -> bool:
+    """The shown-file rule for check-time change limits on an AI-powered repair review (ADR-031).
+
+    A repair review's ``check_time_change_*`` codes say only that part of that one object did not
+    reach it. They are tolerated when the repair saw at least what the raising review saw of the
+    change: every file the raising review saw whole reached the repair whole, and every file the
+    raising review saw in part (a clean prefix of n bytes) reached the repair whole or in part
+    with at least n clean bytes. Commitments bind the change's base, which stays fixed for a task.
+    A raising review that carried no check-time change (an empty record) is always covered; an
+    unknown one (``None``) never is. The repair's record may be incomplete: each entry it holds
+    is still true.
+    """
+
+    if raised_files is None:
+        return False
+    repair = check.check_change_files
+    return (_NO_CHECK_CHANGE_FILES if repair is None else repair).covers(raised_files)
+
+
+def check_change_resolution_unverified(record: FindingProjectionRecord) -> bool:
+    """Whether a resolution tolerated check-time limits through a legacy raising view (R945-02).
+
+    A raising view recorded before view commitments is compared by length and count only, so a
+    moved redaction or hunk could pass. Such a resolution still stands (backward compatibility)
+    but is never presented as content-verified: callers disclose it with
+    ``check_time_change_resolution_unverified``.
+    """
+
+    files = record.check_change_raised_files
+    return (
+        record.resolved_by_check_event_id is not None
+        and bool(record.resolution_depends_on_check_event_ids)
+        and files is not None
+        and files.has_unverified_views()
+    )
+
+
+def unverified_resolution_finding_ids(
+    projection: ProjectionState, resolved: Iterable[FindingId]
+) -> tuple[FindingId, ...]:
+    """The resolved findings among ``resolved`` whose resolution compared a legacy view."""
+
+    return tuple(
+        identifier
+        for identifier in resolved
+        if identifier in projection.findings
+        and check_change_resolution_unverified(projection.findings[identifier])
     )
 
 
@@ -507,6 +577,7 @@ def resolution_blockers(
     *,
     proof_state: ProjectionState | None = None,
     raised_before_task_statement: bool = False,
+    check_change_raised_files: CheckChangeShownFiles | None = None,
 ) -> tuple[str, ...]:
     """Explain the exact qualification predicate without weakening its proof requirements.
 
@@ -559,6 +630,10 @@ def resolution_blockers(
                 # owner consents to sending the user's words, and forever under Structural. The
                 # codes stay on every receipt.
                 tolerated |= TASK_STATEMENT_GAPS
+        if gaps & CHECK_TIME_CHANGE_GAPS and check_change_limits_tolerated(
+            check, check_change_raised_files
+        ):
+            tolerated |= CHECK_TIME_CHANGE_GAPS
         if not _semantic_freshness_proven(check.coverage.ledger_freshness, gaps, tolerated):
             reasons.append("freshness_unproven")
         if not _semantic_subject_changed(finding, finding_source_frontier, check, proof_state):
@@ -861,6 +936,7 @@ def _finding_resolution_explanation(
         raised_before_task_statement=_raised_before_task_statement(
             finding_record.payload, first_task_statement_sequence_of(records)
         ),
+        check_change_raised_files=_record_raised_files(finding_record),
     )
     returned_again = "issue_returned_again" in reasons
     relation = "Returned again" if returned_again else "Not returned; absence remains unproven"
@@ -918,6 +994,80 @@ def first_task_statement_sequence_of(records: tuple[LedgerRecord, ...]) -> int |
     )
 
 
+# Codes that imply a check-time change reached the packet in part: without ``unavailable`` they
+# mean parts were carried.
+_CHECK_TIME_CHANGE_CARRIED_GAPS: Final = CHECK_TIME_CHANGE_GAPS - {
+    CHECK_TIME_CHANGE_UNAVAILABLE_GAP,
+    *CHECK_TIME_CHANGE_UNAVAILABLE_REASON_GAPS,
+}
+
+
+def _raised_by(check: CheckRecordedPayload, finding: Finding) -> bool:
+    """Whether *check* is the completed review that raised the AI-powered *finding*.
+
+    Same tested frontier and same AI-powered review attempt, as the raising check of issue #904.
+    """
+
+    return (
+        finding.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+        and finding.subject_frontier == check.subject_frontier
+        and finding.provenance is not None
+        and check.semantic_provenance is not None
+        and finding.provenance.semantic_attempt_id == check.semantic_provenance.semantic_attempt_id
+    )
+
+
+def _raised_check_change_files(check: CheckRecordedPayload) -> CheckChangeShownFiles | None:
+    """What *check*'s review saw of the change: its complete record, empty without one, else
+    unknown (an incomplete record, or parts carried without a record)."""
+
+    files = check.check_change_files
+    if files is not None:
+        return files if files.complete else None
+    gaps = set(check.coverage.known_gaps)
+    if CHECK_TIME_CHANGE_UNAVAILABLE_GAP not in gaps and gaps & _CHECK_TIME_CHANGE_CARRIED_GAPS:
+        # Parts reached the packet but no record of which files did (0.3 development builds).
+        return None
+    return _NO_CHECK_CHANGE_FILES
+
+
+def _record_raised_files(record: FindingProjectionRecord) -> CheckChangeShownFiles | None:
+    return record.check_change_raised_files
+
+
+def _with_raising_check(
+    record: FindingProjectionRecord, check: CheckRecordedPayload, check_event_id: EventId
+) -> FindingProjectionRecord:
+    """Add one raising review's view of the change to R (ADR-031).
+
+    The first contributor sets R; each later one merges into it. Unknown on either side stays
+    unknown. The contributing checks are kept so redacting any of them makes R unknown.
+    """
+
+    if check_event_id in record.check_change_raising_check_event_ids:
+        return record
+    if len(record.check_change_raising_check_event_ids) >= MAX_CHECK_CHANGE_RAISING_CHECKS:
+        # Past the contributor bound R becomes unknown and stays so; the ids already kept still
+        # reopen what depended on them.
+        return replace(record, check_change_raised_files=None)
+    seen = _raised_check_change_files(check)
+    prior = record.check_change_raised_files
+    if not record.check_change_raising_check_event_ids:
+        merged = seen
+    elif prior is None or seen is None:
+        merged = None
+    else:
+        merged = prior.merged(seen)
+    return replace(
+        record,
+        check_change_raising_check_event_ids=(
+            *record.check_change_raising_check_event_ids,
+            check_event_id,
+        ),
+        check_change_raised_files=merged,
+    )
+
+
 def apply_check_resolution(
     findings: dict[FindingId, FindingProjectionRecord],
     check: CheckRecordedPayload,
@@ -938,12 +1088,23 @@ def apply_check_resolution(
     readable = True
     for returned_id in check.returned_finding_ids:
         record = findings.get(returned_id)
-        if record is None or record.payload is None:
+        if record is None or (payload := record.payload) is None:
             readable = False
             continue
-        returned_keys.add(issue_key(record.payload))
+        returned_keys.add(issue_key(payload))
         if record.resolved_by_check_event_id is not None:
-            findings[returned_id] = replace(record, resolved_by_check_event_id=None)
+            record = replace(
+                record,
+                resolved_by_check_event_id=None,
+                resolution_depends_on_check_event_ids=(),
+            )
+        if payload.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED and (
+            check.semantic_conclusion is not None or _raised_by(check, payload)
+        ):
+            # ADR-031: every review that raised or re-raised the issue adds what it was shown;
+            # a repair must then have seen at least what each of them saw.
+            record = _with_raising_check(record, check, check_event_id)
+        findings[returned_id] = record
     if not readable:
         return
     frozen_keys = frozenset(returned_keys)
@@ -956,6 +1117,7 @@ def apply_check_resolution(
             or current_id in check.returned_finding_ids
         ):
             continue
+        raised_files = _record_raised_files(record)
         if qualifying_check_resolves(
             record.payload,
             record.source_frontier,
@@ -965,8 +1127,21 @@ def apply_check_resolution(
             raised_before_task_statement=_raised_before_task_statement(
                 record.payload, first_task_statement_sequence
             ),
+            check_change_raised_files=raised_files,
         ):
-            findings[current_id] = replace(record, resolved_by_check_event_id=check_event_id)
+            # A check-time limit on this check was tolerated only through the raising checks'
+            # recorded files; redacting any of those checks must reopen the finding.
+            depends_on = (
+                record.check_change_raising_check_event_ids
+                if record.payload.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+                and set(check.coverage.known_gaps) & CHECK_TIME_CHANGE_GAPS
+                else ()
+            )
+            findings[current_id] = replace(
+                record,
+                resolved_by_check_event_id=check_event_id,
+                resolution_depends_on_check_event_ids=depends_on,
+            )
 
 
 OPEN_REVIEW_VERDICTS: Final = frozenset({"answered_not_fixed", "still_present", "unassessable"})
@@ -1015,6 +1190,8 @@ def apply_check_rulings(
             findings[current_id] = replace(
                 record,
                 resolved_by_check_event_id=None,
+                # A resolution this ruling outranks keeps no check-time dependency (ADR-031).
+                resolution_depends_on_check_event_ids=(),
                 rejection_accepted_by_check_event_id=check_event_id,
             )
             continue
@@ -1067,14 +1244,24 @@ def reopen_findings_resolved_by(
     """Drop resolution whose proving check was redacted: unreadable proof is no proof.
 
     The same holds for a ``rejection_accepted`` latch whose withdrawing check was redacted.
+    A redacted raising check likewise leaves the check-time change files unknown (ADR-031), and a
+    resolution that tolerated check-time limits only through those files is dropped with it.
     """
 
     for current_id, record in tuple(findings.items()):
-        if record.resolved_by_check_event_id in event_ids:
-            record = replace(record, resolved_by_check_event_id=None)
-            findings[current_id] = record
+        if record.resolved_by_check_event_id in event_ids or (
+            event_ids & set(record.resolution_depends_on_check_event_ids)
+        ):
+            record = replace(
+                record,
+                resolved_by_check_event_id=None,
+                resolution_depends_on_check_event_ids=(),
+            )
         if record.rejection_accepted_by_check_event_id in event_ids:
-            findings[current_id] = replace(record, rejection_accepted_by_check_event_id=None)
+            record = replace(record, rejection_accepted_by_check_event_id=None)
+        if event_ids & set(record.check_change_raising_check_event_ids):
+            record = replace(record, check_change_raised_files=None)
+        findings[current_id] = record
 
 
 def finding_is_resolved(state: ProjectionState, finding_id: FindingId) -> bool:

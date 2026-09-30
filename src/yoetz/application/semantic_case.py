@@ -15,7 +15,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from types import MappingProxyType
-from typing import Final, Literal, cast
+from typing import Final, Literal, NamedTuple, cast
 
 from yoetz.application.check import (
     CheckScope,
@@ -58,9 +58,15 @@ from yoetz.domain.privacy import (
     ReviewSelectionPolicy,
 )
 from yoetz.domain.receipts import (
+    CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP,
+    CHECK_TIME_CHANGE_REDACTED_GAP,
+    CHECK_TIME_CHANGE_TRUNCATED_GAP,
+    CHECK_TIME_CHANGE_UNAVAILABLE_GAP,
+    CHECK_TIME_CHANGE_UNAVAILABLE_REASONS,
     SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
     SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
     SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
+    check_time_change_unavailable_reason_gap,
 )
 from yoetz.domain.task_statement import (
     TASK_STATEMENT_NOT_AUTHORIZED_GAP,
@@ -95,6 +101,7 @@ from yoetz.kernel.projections import (
     FindingProjectionRecord,
     ProjectionState,
 )
+from yoetz.ports.change_capture import CHECK_CHANGE_MEDIA_TYPE, CheckChangeCapture
 from yoetz.ports.objects import ObjectKind, ObjectRef
 from yoetz.ports.semantic import (
     MAX_PRIOR_FINDING_ITEMS,
@@ -134,8 +141,13 @@ from yoetz.protocol.models import (
 __all__ = [
     "MAX_TASK_STATEMENT_ITEM_BYTES",
     "TASK_STATEMENT_ITEM_ID",
+    "CHECK_TIME_CHANGE_ITEM_PREFIX",
+    "CheckTimeChangeShownFile",
+    "check_time_change_parts_carried",
+    "check_time_change_shown_files",
     "CapturedContentScope",
     "CapturedSemanticContent",
+    "CheckTimeChange",
     "MAX_CAPTURED_SEMANTIC_CONTENT_BYTES",
     "MAX_CAPTURED_SEMANTIC_CONTENT_PARTS",
     "MAX_CAPTURED_SEMANTIC_INPUT_BYTES",
@@ -450,6 +462,233 @@ class _CapturedGroup:
     source_kind: _ExcerptKind
     digest_provenance: ExcerptDigestProvenance
     capture_gaps: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CheckTimeChange:
+    """The one service-captured check-time change a case may carry (ADR-031).
+
+    The service read the task's repository when this check ran, redacted the rendered change, and
+    stored it as one encrypted object before building the case. The builder never reads Git or an
+    object: it verifies the frozen value, links it to the case's claims and obligations, and splits
+    its text into bounded excerpts ahead of every other excerpt.
+    """
+
+    object_ref: ObjectRef
+    capture: CheckChangeCapture
+
+    def __post_init__(self) -> None:
+        if type(self.object_ref) is not ObjectRef or type(self.capture) is not CheckChangeCapture:
+            raise ValueError("semantic_case_check_change_invalid")
+        if (
+            self.object_ref.metadata.kind is not ObjectKind.CHANGE_CAPTURE
+            or self.object_ref.metadata.media_type != CHECK_CHANGE_MEDIA_TYPE
+        ):
+            raise ValueError("semantic_case_check_change_invalid")
+
+
+# Item ids sort ahead of every other case item, so the provider document lists the change first.
+CHECK_TIME_CHANGE_ITEM_PREFIX: Final = "change-check-time-"
+_CHECK_TIME_CHANGE_SOURCE_REF: Final = "check-time-change"
+_CHECK_TIME_CHANGE_MARKER: Final = "[Yoetz check-time change, part {index} of {count}]\n"
+_CHECK_TIME_CHANGE_MIN_CHUNK: Final = 256
+
+
+def _check_time_change_reservation(
+    selection: ReviewSelectionPolicy, first_part_bytes: int
+) -> tuple[int, int]:
+    """Excerpt slots and bytes held for the check-time change before any other excerpt (#883).
+
+    Half of the recipe's excerpt count and total bytes, and never less than one slot, are offered
+    to the service-captured change first. The byte share is rounded up to the change's first part,
+    so a recipe whose total budget carries one part always admits it ahead of every other excerpt
+    (a part is never larger than that total, see ``_check_time_change_part_limit``). Room it does
+    not use stays with the other excerpts; its parts left over after every other excerpt backfill
+    whatever the recipe still has free.
+    """
+
+    return (
+        max(1, selection.max_excerpts // 2),
+        max(selection.max_total_excerpt_bytes // 2, first_part_bytes),
+    )
+
+
+def _check_time_change_part_limit(selection: ReviewSelectionPolicy) -> int:
+    # A part never exceeds the recipe's whole excerpt budget, so one part always fits it.
+    return min(
+        selection.max_excerpt_bytes,
+        selection.max_total_excerpt_bytes,
+        MAX_REVIEW_TEXT_BYTES,
+        MAX_SEMANTIC_ITEM_BYTES,
+    )
+
+
+def _check_time_change_parts(text: bytes, part_limit: int) -> tuple[str, ...]:
+    """Split the rendered change into self-describing parts, preferring line boundaries."""
+
+    chunks = _check_time_change_chunks(text, part_limit)
+    count = len(chunks)
+    return tuple(
+        _CHECK_TIME_CHANGE_MARKER.format(index=index + 1, count=count) + chunk.decode("utf-8")
+        for index, chunk in enumerate(chunks)
+    )
+
+
+def _check_time_change_chunks(text: bytes, part_limit: int) -> tuple[bytes, ...]:
+    """The raw byte slices of ``text`` each part carries, in order; they concatenate to ``text``."""
+
+    marker_room = len(_CHECK_TIME_CHANGE_MARKER.format(index=999, count=999).encode("ascii"))
+    chunk_limit = part_limit - marker_room
+    if chunk_limit < _CHECK_TIME_CHANGE_MIN_CHUNK:
+        return ()
+    chunks: list[bytes] = []
+    rest = text
+    while rest:
+        if len(rest) <= chunk_limit:
+            chunks.append(rest)
+            break
+        window = rest[:chunk_limit]
+        cut = window.rfind(b"\n") + 1
+        if cut < chunk_limit // 2:
+            # One very long line: cut on a UTF-8 boundary instead of a line boundary.
+            cut = len(window.decode("utf-8", errors="ignore").encode("utf-8"))
+        chunks.append(rest[:cut])
+        rest = rest[cut:]
+    return tuple(chunks)
+
+
+_CHECK_TIME_CHANGE_FILE_START: Final = re.compile(rb"^diff --git ", re.MULTILINE)
+_CHECK_TIME_CHANGE_BINARY: Final = re.compile(rb"^Binary files ", re.MULTILINE)
+_CHECK_TIME_CHANGE_DELETED: Final = re.compile(rb"^deleted file mode ", re.MULTILINE)
+_REDACTION_MARKER: Final = b"[REDACTED]"
+_CHECK_TIME_CHANGE_HUNK: Final = re.compile(rb"^@@ [^\n]*", re.MULTILINE)
+_VIEW_DOMAIN: Final = b"yoetz/check-change-view/v1\x00"
+
+
+def _check_time_change_view(
+    text: bytes, start: int, visible_end: int, marker_limit: int, section_admitted: bool
+) -> bytes:
+    """Length-prefixed structure of one file's shown view: where markers and hunks lie."""
+
+    parts: list[bytes] = [
+        _VIEW_DOMAIN,
+        (visible_end - start).to_bytes(4, "big"),
+        b"\x01" if section_admitted else b"\x00",
+    ]
+    markers: list[int] = []
+    position = text.find(_REDACTION_MARKER, start, marker_limit)
+    while position >= 0:
+        markers.append(position - start)
+        position = text.find(_REDACTION_MARKER, position + 1, marker_limit)
+    parts.append(len(markers).to_bytes(4, "big"))
+    parts.extend(offset.to_bytes(4, "big") for offset in markers)
+    hunks = [
+        (match.start() - start, text[match.start() : min(match.end(), visible_end)])
+        for match in _CHECK_TIME_CHANGE_HUNK.finditer(text, start, visible_end)
+    ]
+    parts.append(len(hunks).to_bytes(4, "big"))
+    for offset, header in hunks:
+        parts.extend((offset.to_bytes(4, "big"), len(header).to_bytes(4, "big"), header))
+    return b"".join(parts)
+
+
+class CheckTimeChangeShownFile(NamedTuple):
+    """One changed file whose diff reached a review packet (ADR-031); counts, never content.
+
+    ``view`` is the canonical structure of what reached the packet, for a keyed commitment only
+    and never stored: the shown length, whether the whole section was admitted, the offset of
+    every redaction marker, and the offset and header line of every hunk shown (R945-02).
+    """
+
+    identity: bytes
+    whole: bool
+    shown_bytes: int
+    redactions: int
+    section_admitted: bool
+    clean_bytes: int
+    view: bytes
+
+
+def check_time_change_shown_files(
+    capture: CheckChangeCapture,
+    selection: ReviewSelectionPolicy,
+    admitted_parts: int,
+) -> tuple[CheckTimeChangeShownFile, ...]:
+    """Each changed file whose diff reached the packet, and how much of it (ADR-031).
+
+    A file is its ``diff --git`` section of the stored change. Its identity is that section's
+    first line plus its change kind (a binary or a deleted file), so a file whose kind changed
+    between two checks never matches itself. It was shown when any of its bytes lie in the
+    ``admitted_parts`` parts the packet carried, and fully shown when the whole section did and it
+    holds no redaction marker. Each also carries the section bytes that reached the packet
+    (markers included), the ``[REDACTED]`` markers among them, whether the whole section reached
+    it, and where the first shown marker starts (the shown length without one). Files the change lists
+    only in its header (not shown) are not returned. The answer is a pure function of the stored
+    object, the selection and the admitted part count, so a recovered job derives the same files.
+    """
+
+    if type(capture) is not CheckChangeCapture or type(admitted_parts) is not int:
+        raise ValueError("semantic_case_check_change_invalid")
+    chunks = _check_time_change_chunks(capture.text, _check_time_change_part_limit(selection))
+    if not 0 <= admitted_parts <= len(chunks):
+        raise ValueError("semantic_case_check_change_invalid")
+    shown_bytes = sum(len(chunk) for chunk in chunks[:admitted_parts])
+    text = capture.text
+    starts = [match.start() for match in _CHECK_TIME_CHANGE_FILE_START.finditer(text)]
+    files: list[CheckTimeChangeShownFile] = []
+    for index, start in enumerate(starts):
+        if start >= shown_bytes:
+            break
+        end = starts[index + 1] if index + 1 < len(starts) else len(text)
+        line_end = text.find(b"\n", start, end)
+        identity = text[start : end if line_end < 0 else line_end]
+        section = text[start:end]
+        if _CHECK_TIME_CHANGE_BINARY.search(section) is not None:
+            identity += b"\x00binary"
+        if _CHECK_TIME_CHANGE_DELETED.search(section) is not None:
+            identity += b"\x00deleted"
+        visible_end = min(end, shown_bytes)
+        # A marker the packet edge cut still counts: part of a redacted span was shown.
+        marker_limit = min(end, visible_end + len(_REDACTION_MARKER) - 1)
+        redactions = text.count(_REDACTION_MARKER, start, marker_limit)
+        first_marker = text.find(_REDACTION_MARKER, start, marker_limit)
+        section_admitted = end <= shown_bytes
+        files.append(
+            CheckTimeChangeShownFile(
+                identity=identity,
+                whole=section_admitted and _REDACTION_MARKER not in section,
+                shown_bytes=visible_end - start,
+                redactions=redactions,
+                section_admitted=section_admitted,
+                clean_bytes=visible_end - start if first_marker < 0 else first_marker - start,
+                view=_check_time_change_view(
+                    text, start, visible_end, marker_limit, section_admitted
+                ),
+            )
+        )
+    return tuple(files)
+
+
+def _check_time_change_links(
+    projection: ProjectionState, allowed: frozenset[str]
+) -> tuple[str, ...]:
+    """The case subjects the change is the work product of: its claims, then its obligations."""
+
+    refs = {
+        str(claim_id)
+        for claim_id, record in effective_claim_items(projection)
+        if record.payload is not None and not record.redacted
+    }
+    refs.update(
+        str(obligation_id)
+        for obligation_id, record in projection.obligations.items()
+        if record.payload is not None and not record.redacted
+    )
+    linked = tuple(sorted(refs & allowed, key=str.encode))[:MAX_SEMANTIC_ITEM_SUBJECT_REFS]
+    if linked or not projection.plans:
+        return linked
+    plan_ref = str(projection.plans[max(projection.plans)].source_event_id)
+    return (plan_ref,) if plan_ref in allowed else ()
 
 
 _EVIDENCE_EXCERPT_KIND: Final[Mapping[EvidenceKind, _ExcerptKind]] = {
@@ -1844,6 +2083,7 @@ def _select_targeted_excerpts(
     captured_groups: Mapping[str, _CapturedGroup],
     captured_group_leader: Mapping[str, str],
     excerpt_byte_budget: int,
+    excerpt_count_budget: int | None = None,
 ) -> _ExcerptSelection:
     """Choose the excerpts that fill the approved count and byte budget, most valuable first.
 
@@ -2094,6 +2334,12 @@ def _select_targeted_excerpts(
     targeted: list[TargetedExcerptRef] = []
     over_limit: set[str] = set()
     excerpt_bytes_used = 0
+    # The slots other excerpts (the check-time change, ADR-031) already hold are not offered here.
+    excerpt_count_limit = (
+        selection.max_excerpts
+        if excerpt_count_budget is None
+        else max(0, min(selection.max_excerpts, excerpt_count_budget))
+    )
     for index in sorted(range(len(candidates)), key=rank):
         candidate = candidates[index]
         admitted_before = len(targeted)
@@ -2101,7 +2347,7 @@ def _select_targeted_excerpts(
         for part_index, part in enumerate(candidate.parts):
             part_bytes = len(part.encode("utf-8"))
             if (
-                len(targeted) >= selection.max_excerpts
+                len(targeted) >= excerpt_count_limit
                 or excerpt_bytes_used + part_bytes > excerpt_byte_budget
             ):
                 truncated = True
@@ -2378,8 +2624,17 @@ def build_semantic_case(
     captured_content_gaps: Sequence[str] = (),
     prepared_byte_ceiling: int | None = None,
     workspace_root: str | None = None,
+    check_time_change: CheckTimeChange | None = None,
+    check_time_change_unavailable: bool = False,
+    check_time_change_unavailable_reason: str | None = None,
 ) -> SemanticCase:
     """Build one pre-egress AI-powered review case from frozen authority only.
+
+    ``check_time_change`` is the service's own capture of the repository when this check ran
+    (ADR-031); ``check_time_change_unavailable`` records that the recipe selected it but the
+    service could not capture it, and ``check_time_change_unavailable_reason`` the closed code
+    for why, disclosed beside the generic gap. All are ignored when the recipe selects no diff
+    excerpts.
 
     Excerpts may now fill the approved per-excerpt bound, so the case plans its excerpts below
     the channel byte ceiling as measured on the exact prepared document the gateway will size
@@ -2419,6 +2674,9 @@ def build_semantic_case(
             captured_content_gaps=captured_content_gaps,
             excerpt_byte_budget=excerpt_byte_budget,
             workspace_root=workspace_root,
+            check_time_change=check_time_change,
+            check_time_change_unavailable=check_time_change_unavailable,
+            check_time_change_unavailable_reason=check_time_change_unavailable_reason,
         )
 
     def fits(candidate: SemanticCase) -> bool | None:
@@ -2474,6 +2732,9 @@ def _build_semantic_case_once(
     captured_content_gaps: Sequence[str],
     excerpt_byte_budget: int | None,
     workspace_root: str | None = None,
+    check_time_change: CheckTimeChange | None = None,
+    check_time_change_unavailable: bool = False,
+    check_time_change_unavailable_reason: str | None = None,
 ) -> SemanticCase:
     if type(frozen_case) is not DeterministicCase:
         raise TypeError("deterministic_case_invalid")
@@ -2506,6 +2767,17 @@ def _build_semantic_case_once(
         # Content is an explicitly scoped disclosure. A bare byte sequence cannot enter a case,
         # even when it happens to match a durable evidence digest.
         raise ValueError("semantic_case_capture_scope_required")
+    if check_time_change is not None and type(check_time_change) is not CheckTimeChange:
+        raise TypeError("semantic_case_check_change_invalid")
+    if type(check_time_change_unavailable) is not bool or (
+        check_time_change_unavailable and check_time_change is not None
+    ):
+        raise ValueError("semantic_case_check_change_invalid")
+    if check_time_change_unavailable_reason is not None and (
+        not check_time_change_unavailable
+        or check_time_change_unavailable_reason not in CHECK_TIME_CHANGE_UNAVAILABLE_REASONS
+    ):
+        raise ValueError("semantic_case_check_change_invalid")
     if review_context_profile is not ReviewContextProfile.CUSTOM:
         expected = ReviewSelectionPolicy.for_profile(review_context_profile)
         if review_selection != expected:
@@ -2516,6 +2788,17 @@ def _build_semantic_case_once(
 
     selection = review_selection
     sections = frozenset(selection.sections)
+    # The check-time change is diff content: a recipe without diff excerpts never carries it and
+    # never reports its absence, exactly as it declines every other excerpt kind.
+    check_change_selected = (
+        "targeted_excerpts" in sections
+        and selection.max_excerpts > 0
+        and "diff" in selection.excerpt_kinds
+    )
+    if not check_change_selected:
+        check_time_change = None
+        check_time_change_unavailable = False
+        check_time_change_unavailable_reason = None
     frontier_refs = frozenset(str(ref) for ref in frozen_case.allowed_ids)
     local_check_refs = frozenset(str(item.finding_id) for item in findings)
     # A recheck re-derives a live recorded finding under its recorded id (issue #186), so the same
@@ -3148,7 +3431,95 @@ def _build_semantic_case_once(
                 omissions.append(projected.omission)
 
     # --- Targeted excerpts (recorded text only; never fetch objects) ---
+    excerpt_bytes_used = 0
+    # One excerpt byte budget for every excerpt: the recipe total, narrowed by in-builder
+    # planning below an explicit ceiling (#907). The check-time change shares it (ADR-031).
+    total_excerpt_budget = (
+        selection.max_total_excerpt_bytes
+        if excerpt_byte_budget is None
+        else min(selection.max_total_excerpt_bytes, excerpt_byte_budget)
+    )
+    check_change_parts: tuple[str, ...] = ()
+    check_change_links: tuple[str, ...] = ()
+    check_change_admitted = 0
+    if check_time_change_unavailable:
+        capture_gap_set.add(CHECK_TIME_CHANGE_UNAVAILABLE_GAP)
+        if check_time_change_unavailable_reason is not None:
+            capture_gap_set.add(
+                check_time_change_unavailable_reason_gap(check_time_change_unavailable_reason)
+            )
+    if check_time_change is not None:
+        change = check_time_change.capture
+        if change.base in {"head", "first_check"}:
+            # Not the task-start commit: work committed before the base is not in the change.
+            capture_gap_set.add(CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP)
+        if change.truncated:
+            capture_gap_set.add(CHECK_TIME_CHANGE_TRUNCATED_GAP)
+        if change.redacted:
+            capture_gap_set.add(CHECK_TIME_CHANGE_REDACTED_GAP)
+        check_change_links = _check_time_change_links(projection, allowed)
+        if check_change_links:
+            check_change_parts = _check_time_change_parts(
+                change.text, _check_time_change_part_limit(selection)
+            )
+
+    def admit_check_time_change(slot_limit: int, byte_limit: int) -> None:
+        """Admit the next check-time change parts within one budget share (ADR-031)."""
+
+        nonlocal excerpt_bytes_used, check_change_admitted
+        slots_used = 0
+        bytes_used = 0
+        while check_change_admitted < len(check_change_parts):
+            part = check_change_parts[check_change_admitted]
+            size = len(part.encode("utf-8"))
+            if (
+                slots_used >= slot_limit
+                or bytes_used + size > byte_limit
+                or len(targeted) >= selection.max_excerpts
+                or excerpt_bytes_used + size > total_excerpt_budget
+            ):
+                return
+            item = _content_item(
+                item_id=f"{CHECK_TIME_CHANGE_ITEM_PREFIX}{check_change_admitted + 1:03d}",
+                section="excerpt",
+                # The service read this from the repository itself: it leaves only where the
+                # channel allows repository excerpts, never as recorded evidence.
+                category=DataCategory.REPOSITORY_EXCERPT,
+                source_kind="diff",
+                source_ref=_CHECK_TIME_CHANGE_SOURCE_REF,
+                linked_subject_refs=check_change_links,
+                # Ordered ahead of every recorded excerpt: it is the change under review.
+                occurred_order=0,
+                text=part,
+                over_limit=over_limit,
+            )
+            items.append(item)
+            targeted.append(
+                TargetedExcerptRef(
+                    excerpt_item_id=item.item_id,
+                    source_kind="diff",
+                    linked_subject_refs=check_change_links,
+                    subject_state_relation=SubjectStateRelation.UNKNOWN,
+                    content_visibility="available",
+                    content_digest=item.content_digest,
+                    content_bytes=item.content_bytes,
+                )
+            )
+            excerpt_bytes_used += item.content_bytes
+            slots_used += 1
+            bytes_used += item.content_bytes
+            check_change_admitted += 1
+
     if "targeted_excerpts" in sections and selection.max_excerpts > 0:
+        # The service-captured change takes its reserved share first; see
+        # ``_check_time_change_reservation`` for how the rest of the budget is shared.
+        admit_check_time_change(
+            *_check_time_change_reservation(
+                selection,
+                len(check_change_parts[0].encode("utf-8")) if check_change_parts else 0,
+            )
+        )
+        # Recorded excerpts then fill what the change left, most valuable first (#907).
         excerpts = _select_targeted_excerpts(
             projection=projection,
             allowed=allowed,
@@ -3157,17 +3528,31 @@ def _build_semantic_case_once(
             review_assessments=review_assessments,
             captured_groups=captured_groups,
             captured_group_leader=captured_group_leader,
-            excerpt_byte_budget=(
-                selection.max_total_excerpt_bytes
-                if excerpt_byte_budget is None
-                else min(selection.max_total_excerpt_bytes, excerpt_byte_budget)
-            ),
+            excerpt_count_budget=selection.max_excerpts - len(targeted),
+            excerpt_byte_budget=(max(0, total_excerpt_budget - excerpt_bytes_used)),
         )
         items.extend(excerpts.items)
         targeted.extend(excerpts.targeted)
         omissions.extend(excerpts.omissions)
         capture_gap_set.update(excerpts.gaps)
         over_limit.update(excerpts.over_limit)
+        excerpt_bytes_used += sum(ref.content_bytes for ref in excerpts.targeted)
+
+        # Parts the reservation could not hold backfill whatever budget the others left.
+        admit_check_time_change(selection.max_excerpts, selection.max_total_excerpt_bytes)
+
+    if check_time_change is not None:
+        if not check_change_admitted:
+            # Captured, but nothing reached the packet: no linkable subject, or a recipe budget
+            # too small for one readable part.
+            capture_gap_set.add(CHECK_TIME_CHANGE_UNAVAILABLE_GAP)
+            capture_gap_set.add(
+                check_time_change_unavailable_reason_gap(
+                    "no_linked_subject" if not check_change_links else "no_packet_room"
+                )
+            )
+        elif check_change_admitted < len(check_change_parts):
+            capture_gap_set.add(CHECK_TIME_CHANGE_TRUNCATED_GAP)
 
     lineage_items: tuple[SemanticCaseItem, ...] = ()
     if lineage_evaluation is not None:
@@ -3246,6 +3631,22 @@ def _build_semantic_case_once(
             ),
         },
     )
+
+    if check_change_admitted:
+        # The case-bound cut drops the lowest-ranked excerpts, which can include check-time change
+        # parts that only backfilled free room. The binding and the shown-file record must name
+        # the parts the case still carries, and the cut is disclosed like any other (ADR-031).
+        carried_parts = sum(
+            excerpt.excerpt_item_id.startswith(CHECK_TIME_CHANGE_ITEM_PREFIX)
+            for excerpt in targeted
+        )
+        if carried_parts < check_change_admitted:
+            check_change_admitted = carried_parts
+            if carried_parts:
+                capture_gap_set.add(CHECK_TIME_CHANGE_TRUNCATED_GAP)
+            else:
+                capture_gap_set.add(CHECK_TIME_CHANGE_UNAVAILABLE_GAP)
+                capture_gap_set.add(check_time_change_unavailable_reason_gap("no_packet_room"))
 
     kind_order = {
         kind: ordinal
@@ -3572,6 +3973,28 @@ def _build_semantic_case_once(
         )
 
     selection_digest = review_selection_digest(selection)
+    # A case without a selected check-time change keeps its historical digest input exactly.
+    check_change_binding: dict[str, JsonValue] = {}
+    if check_time_change is not None:
+        check_change_binding["check_time_change"] = {
+            "base": check_time_change.capture.base,
+            "content_digest": "sha256:"
+            + hashlib.sha256(check_time_change.capture.text).hexdigest(),
+            "envelope_digest": check_time_change.object_ref.envelope_digest,
+            "object_id": check_time_change.object_ref.object_id,
+            "parts_admitted": check_change_admitted,
+            "redacted": check_time_change.capture.redacted,
+            "truncated": check_time_change.capture.truncated,
+        }
+    elif check_time_change_unavailable:
+        check_change_binding["check_time_change"] = {
+            "unavailable": True,
+            **(
+                {}
+                if check_time_change_unavailable_reason is None
+                else {"reason": check_time_change_unavailable_reason}
+            ),
+        }
     # A pure function of the frozen projection, so recovery rebuilds the same phase and digest.
     question_set = review_question_set(select_semantic_budget_profile(frozen_case.projection))
     # Bind assessments/omissions/packet lists into the digest so provenance covers the full case.
@@ -3579,6 +4002,7 @@ def _build_semantic_case_once(
         cast(
             JsonValue,
             {
+                **check_change_binding,
                 "dependency_digest": dependency_digest,
                 "frontier_refs": sorted(frontier_refs),
                 "omitted_reference_count": omitted_reference_count,
@@ -4450,6 +4874,38 @@ def semantic_case_packet_view(case: SemanticCase) -> SemanticPacketView:
     return SemanticPacketView(
         prior, frozenset(case.frontier_refs | case.local_check_refs), prior != carried
     )
+
+
+def check_time_change_parts_carried(
+    case: SemanticCase, *, withheld_categories: Sequence[str] = ()
+) -> int:
+    """How many leading check-time change parts the provider-facing envelope carries (ADR-031).
+
+    The shown-file record must describe what the reviewer could read, not the case before
+    ``bounded_case_envelope`` minimized it: a part whose catalog row bounding dropped is never
+    offered for authorization, and a channel that withholds ``repository_excerpt`` receives no
+    part at all. Parts are admitted and dropped in order, so only the unbroken run from the
+    first part counts. The answer is a pure function of the frozen case and the policy's
+    withheld categories, so a recovered job derives the same count.
+    """
+
+    if type(case) is not SemanticCase:
+        raise TypeError("semantic_case_invalid")
+    if DataCategory.REPOSITORY_EXCERPT.value in withheld_categories:
+        return 0
+    admitted = sum(
+        item.excerpt_item_id.startswith(CHECK_TIME_CHANGE_ITEM_PREFIX)
+        for item in case.packet.targeted_excerpts
+    )
+    if not admitted:
+        return 0
+    catalogued = _catalog_item_ids(
+        cast(Mapping[str, JsonValue], strict_json_parse(bounded_case_envelope(case)))
+    )
+    carried = 0
+    while carried < admitted and f"{CHECK_TIME_CHANGE_ITEM_PREFIX}{carried + 1:03d}" in catalogued:
+        carried += 1
+    return carried
 
 
 def semantic_case_to_candidate_context(

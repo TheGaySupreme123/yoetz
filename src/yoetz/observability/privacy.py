@@ -131,6 +131,8 @@ _LOG_FIELDS: Final = frozenset(
         "semantic_excerpt_count_cut_for_case_bound",
         "semantic_excerpt_byte_limit",
         "semantic_excerpt_ceiling_rounds",
+        "semantic_check_change_parts_selected",
+        "semantic_edit_evidence_in_case",
     }
 )
 _MANIFEST_FIELDS: Final = frozenset(
@@ -237,6 +239,8 @@ _INTEGER_FIELDS: Final = frozenset(
         "semantic_excerpt_count_cut_for_case_bound",
         "semantic_excerpt_byte_limit",
         "semantic_excerpt_ceiling_rounds",
+        "semantic_check_change_parts_selected",
+        "semantic_edit_evidence_in_case",
     }
 )
 _BOOLEAN_FIELDS: Final = frozenset({"sqlite_compile_options_ok"})

@@ -26,6 +26,7 @@ import apsw
 
 import yoetz.adapters.sqlite.connection as connection_module
 import yoetz.adapters.sqlite.recovery as recovery_module
+from yoetz.adapters.git_change_capture import GitChangeCaptureAdapter
 from yoetz.adapters.importers.codex_plan import CodexImportPlans
 from yoetz.adapters.integrations.hook_spool import (
     DEFAULT_HOOK_SPOOL_CLAIM_LIMIT,
@@ -75,6 +76,13 @@ from yoetz.adapters.sqlite.project_operations import SqliteProjectOperationJourn
 from yoetz.adapters.sqlite.repository import SqliteLedger
 from yoetz.adapters.sqlite.start_catalog import SqliteStartCatalog
 from yoetz.application.check import FinalSemanticEvaluation
+from yoetz.application.check_change import (
+    CheckChangeOutcome,
+    capture_check_time_change,
+    check_change_shown_files,
+    check_time_change_selected,
+    recover_check_time_change,
+)
 from yoetz.application.coordination import (
     EncryptedCoordinationDetailStore,
     build_coordination_runtime,
@@ -145,6 +153,7 @@ from yoetz.application.semantic_attempts import (
     status_for_semantic_reason,
 )
 from yoetz.application.semantic_case import (
+    CHECK_TIME_CHANGE_ITEM_PREFIX,
     MAX_CAPTURED_SEMANTIC_CONTENT_PARTS,
     MAX_CAPTURED_SEMANTIC_INPUT_BYTES,
     LineageSemanticCapacityExceeded,
@@ -153,10 +162,14 @@ from yoetz.application.semantic_case import (
     SemanticPacketView,
     build_semantic_case,
     captured_edit_paths,
+    check_time_change_parts_carried,
     semantic_case_packet_view,
     semantic_case_to_candidate_context,
 )
-from yoetz.application.semantic_content import resolve_captured_semantic_content
+from yoetz.application.semantic_content import (
+    edit_capture_evidence_count,
+    resolve_captured_semantic_content,
+)
 from yoetz.application.service import (
     ControlProjectionBinding,
     ReadyApplicationFactory,
@@ -182,7 +195,7 @@ from yoetz.domain.coordination import (
     ProjectTextStore,
     WorkState,
 )
-from yoetz.domain.events import RuntimeProfile, SessionOpenedPayload
+from yoetz.domain.events import CheckChangeShownFiles, RuntimeProfile, SessionOpenedPayload
 from yoetz.domain.findings import (
     Finding,
     SemanticDispatchKind,
@@ -215,6 +228,7 @@ from yoetz.domain.privacy import (
     ReviewSelectionPolicy,
 )
 from yoetz.domain.receipts import (
+    CHECK_TIME_CHANGE_GAPS,
     SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
     SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
     SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
@@ -250,6 +264,7 @@ from yoetz.observability.semantic_context import (
     semantic_check_request,
     semantic_progress_sink,
 )
+from yoetz.ports.change_capture import ChangeCapturePort, current_check_workspace_source
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.control import ControlError, ControlMethod
 from yoetz.ports.diagnostics import (
@@ -3359,7 +3374,7 @@ def _execution_from_json(value: object) -> _SemanticExecution:
 async def _read_semantic_execution(
     runtime: TaskRuntime,
     ref: ObjectRef,
-) -> tuple[_SemanticExecution | None, str, str]:
+) -> tuple[_SemanticExecution | None, str, str, object | None]:
     from yoetz.protocol.canonical import strict_json_parse
 
     resolved = await runtime.objects.resolve_verified(ref.object_id, ref.envelope_digest)
@@ -3379,7 +3394,9 @@ async def _read_semantic_execution(
         if body["schema"] == "yoetz.semantic-case/1"
         else _execution_from_json(body["execution"])
     )
-    return execution, case_id, case_digest
+    # Absent on jobs created before ADR-031 or without a trusted workspace source: such a job
+    # rebuilds its case without a check-time change, exactly as it was first built.
+    return execution, case_id, case_digest, body.get("check_change")
 
 
 def _without_provider_provenance(
@@ -3458,21 +3475,24 @@ async def _publish_semantic_case_object(
     dependency_digest: str,
     clock: ClockPort,
     execution: _SemanticExecution,
+    check_change: CanonicalJsonValue | None = None,
 ) -> ObjectRef:
-    """Persist a structural SEMANTIC_CASE object bound into the durable job row."""
+    """Persist a structural SEMANTIC_CASE object bound into the durable job row.
 
-    payload = canonical_encode(
-        cast(
-            CanonicalJsonValue,
-            {
-                "schema": "yoetz.semantic-case/2",
-                "case_id": case_id,
-                "case_digest": case_digest,
-                "dependency_digest": dependency_digest,
-                "execution": _execution_json(execution),
-            },
-        )
-    )
+    ``check_change`` is the pointer to the one check-time change object (ADR-031), or the record
+    that it was unavailable; the change's content stays in its own object.
+    """
+
+    body: dict[str, CanonicalJsonValue] = {
+        "schema": "yoetz.semantic-case/2",
+        "case_id": case_id,
+        "case_digest": case_digest,
+        "dependency_digest": dependency_digest,
+        "execution": _execution_json(execution),
+    }
+    if check_change is not None:
+        body["check_change"] = check_change
+    payload = canonical_encode(cast(CanonicalJsonValue, body))
     staged = await runtime.objects.stage(
         ObjectSource(data=payload, declared_size=len(payload)),
         ObjectMetadata(
@@ -4126,6 +4146,7 @@ def _privacy_gated_semantic_evaluator(
     lineage_source_gate: LineageSourceGate | None = None,
     local_observation: object | None = None,
     attention: SemanticAttentionTracker | None = None,
+    change_capture: ChangeCapturePort | None = None,
 ):
     total_timeout = float(max(1, min(int(timeout_seconds), 3600)))
     # The fallback endpoint owns its own deadline share (#582): a primary that spends its whole
@@ -4166,6 +4187,7 @@ def _privacy_gated_semantic_evaluator(
         reference_scope_reduced = False
         content_gaps: tuple[str, ...] = ()
         unsuppliable: tuple[str, ...] = ()
+        check_change_files: CheckChangeShownFiles | None = None
 
         def _on_lease_renewed(renewed: object) -> None:
             assert type(renewed) is _OpLease
@@ -4268,6 +4290,7 @@ def _privacy_gated_semantic_evaluator(
             execution: _SemanticExecution | None = None
             recovered_case_id: str | None = None
             recovered_case_digest: str | None = None
+            recovered_check_change: object | None = None
             if runtime is not None:
                 job = await runtime.ledger.load_semantic_job(
                     frozen.lease.writer_id, frozen.lease.operation_id
@@ -4277,6 +4300,7 @@ def _privacy_gated_semantic_evaluator(
                         execution,
                         recovered_case_id,
                         recovered_case_digest,
+                        recovered_check_change,
                     ) = await _read_semantic_execution(runtime, job.case_object_ref)
                     if execution is None:
                         return await _finish_legacy_semantic_job(
@@ -4437,6 +4461,26 @@ def _privacy_gated_semantic_evaluator(
                         )
                         captured_content_gaps = ("content_capture_unavailable",)
                         captured_local_fence_required = False
+            # The check-time change (ADR-031): captured once for a new job, reloaded from the
+            # job's own case object on recovery, never re-read from a working tree that moved.
+            check_change = CheckChangeOutcome()
+            if runtime is not None and check_time_change_selected(review_selection):
+                if job is not None:
+                    if recovered_check_change is not None:
+                        check_change = await recover_check_time_change(
+                            runtime, recovered_check_change
+                        )
+                else:
+                    workspace_source = current_check_workspace_source()
+                    if workspace_source is not None and change_capture is not None:
+                        check_change = await capture_check_time_change(
+                            runtime=runtime,
+                            source=workspace_source,
+                            route_repository_commitment=repository,
+                            port=change_capture,
+                            clock=clock,
+                            request_id=frozen.lease.operation_id,
+                        )
             workspace_root = await _workspace_root_for_runtime(runtime)
             semantic_case_id = recovered_case_id or ids.new(IdKind.OUTBOUND_CASE)
 
@@ -4456,6 +4500,9 @@ def _privacy_gated_semantic_evaluator(
                     captured_content_gaps=gaps,
                     prepared_byte_ceiling=_semantic_prepared_byte_ceiling(policy),
                     workspace_root=workspace_root,
+                    check_time_change=check_change.change,
+                    check_time_change_unavailable=check_change.unavailable,
+                    check_time_change_unavailable_reason=check_change.reason,
                 )
 
             try:
@@ -4530,6 +4577,15 @@ def _privacy_gated_semantic_evaluator(
                     ),
                     "semantic_excerpt_byte_limit": planned_selection.max_total_excerpt_bytes,
                     "semantic_excerpt_ceiling_rounds": ceiling_rounds,
+                    "semantic_check_change_parts_selected": sum(
+                        item.excerpt_item_id.startswith(CHECK_TIME_CHANGE_ITEM_PREFIX)
+                        for item in semantic_case.packet.targeted_excerpts
+                    ),
+                    # Edit captures the frozen case holds, before any resolver fence: zero
+                    # here with native edits in the session means none reached the ledger.
+                    "semantic_edit_evidence_in_case": edit_capture_evidence_count(
+                        frozen.case.projection
+                    ),
                 },
             )
             if captured_local_fence_required and captured_content_scope is not None:
@@ -4572,6 +4628,7 @@ def _privacy_gated_semantic_evaluator(
                         # A missing or title-only task statement is a packet fact the check
                         # result and its receipt must disclose too (issue #908).
                         *TASK_STATEMENT_GAPS,
+                        *CHECK_TIME_CHANGE_GAPS,
                     }
                 )
             )
@@ -4579,6 +4636,29 @@ def _privacy_gated_semantic_evaluator(
                 SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP
                 in semantic_case.packet.coverage.known_gaps
             )
+            if check_change.change is not None and runtime is not None:
+                # Which changed files this packet carried, as keyed commitments: AI-powered
+                # finding resolution compares them across checks (ADR-031). They are counted from
+                # the bounded provider envelope, after minimization and the channel's withheld
+                # categories, never from the case before them. A record that cannot be computed
+                # says it is incomplete, which never tolerates a check-time limit.
+                try:
+                    check_change_files = await check_change_shown_files(
+                        runtime,
+                        check_change.change,
+                        review_selection,
+                        check_time_change_parts_carried(
+                            semantic_case, withheld_categories=withheld
+                        ),
+                    )
+                except Exception as exc:
+                    record_unexpected_exception_without_raising(
+                        exc,
+                        component="semantic_composition",
+                        operation="check_change_shown_files_failed",
+                        request_id=frozen.lease.operation_id,
+                    )
+                    check_change_files = CheckChangeShownFiles((), (), complete=False)
             if (
                 recovered_case_digest is not None
                 and semantic_case.case_digest != recovered_case_digest
@@ -4636,6 +4716,7 @@ def _privacy_gated_semantic_evaluator(
                     case_citable_refs=packet_citable_refs,
                     case_captured_edit_paths=packet_edit_paths,
                     case_workspace_root=workspace_root,
+                    check_change_files=check_change_files,
                 )
 
             # Build the packet before anything durable exists. A packet that cannot be built is a
@@ -4676,6 +4757,7 @@ def _privacy_gated_semantic_evaluator(
                     dependency_digest=semantic_case.dependency_digest,
                     clock=clock,
                     execution=execution,
+                    check_change=check_change.binding_json() if check_change.offered else None,
                 )
                 job = await runtime.ledger.enqueue_semantic_job(
                     frozen.lease,
@@ -4970,6 +5052,7 @@ def _privacy_gated_semantic_evaluator(
                     case_citable_refs=packet_citable_refs,
                     case_captured_edit_paths=packet_edit_paths,
                     case_workspace_root=workspace_root,
+                    check_change_files=check_change_files,
                     continuation=continuation,
                 )
 
@@ -5752,6 +5835,8 @@ async def provide_service_ready_context(
             ),
         )
 
+    # One read-only Git adapter serves both the task-start base and the check-time change.
+    change_capture = GitChangeCaptureAdapter()
     if not semantic_configured:
         semantic_evaluator = _semantic_not_configured
     elif not provider_endpoint_bound:
@@ -5777,6 +5862,7 @@ async def provide_service_ready_context(
             lineage_source_gate=lineage_semantic_gate,
             local_observation=local_observation,
             attention=semantic_attention,
+            change_capture=change_capture,
         )
 
     # attempt_id -> (physical request identity, provider identity) of the single in-flight
@@ -6680,6 +6766,7 @@ async def provide_service_ready_context(
         project_application=project_application,
         host_lineage_registry=host_lineage_registry,
         reconcile_observation_losses=observation_coordinator.reconcile_task_selection_losses,
+        change_capture=change_capture,
     )
 
 

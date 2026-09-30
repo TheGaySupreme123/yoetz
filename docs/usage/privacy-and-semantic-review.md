@@ -136,9 +136,11 @@ is the only surface that renders them.
 asymmetry is the point: tightening can flow through gates, widening always requires a human.
 
 Privacy commands bind to the repository derived from their actual working directory. The service
-resolves symlinks and Git's common root, commits it under the installation key, and discards the raw
-path. Branches and linked worktrees share authority; independent clones and unrelated repositories
-do not. A task's public `workspace_ref` is not consulted.
+resolves symlinks and Git's common root and commits it under the installation key. It never stores
+the raw path; it keeps it in memory for that connection only, so a check can read the change
+described in [What AI-powered review actually sends](#what-ai-powered-review-actually-sends).
+Branches and linked worktrees share authority; independent clones and unrelated repositories do not.
+A task's public `workspace_ref` is not consulted.
 
 The CLI recommends **Assisted review** when the exact configured provider route has a current
 reviewed data-use record stating no default training and retention no longer than 30 days, and
@@ -201,14 +203,50 @@ include the configured pair in the review screen before approval.
 When you accept the CLI's recommended `assisted-review` recipe, it shows and confirms a standing
 exact-repository policy that sends the reviewer a structured packet: the goal, obligations, claims, the
 material timeline, local findings and their exact bases, coverage gaps, and bounded
-problem-local excerpts of evidence, tests, diffs, or source **already recorded in the case**. It
-also carries the earlier AI-powered findings still open, what the reviewer asked for, and your
-recorded responses to them, so the next review can rule on each one. These are the same finding and
-response records the case already held; no new kind of data is sent.
+problem-local excerpts of evidence, tests, diffs, or source **already recorded in the case**, plus
+the **check-time change**. It also carries the earlier AI-powered findings still open, what the
+reviewer asked for, and your recorded responses to them, so the next review can rule on each one.
+These are the same finding and response records the case already held; no new kind of data is
+sent for them.
+
+The check-time change is the one thing Yoetz reads from your repository for review. When the recipe
+includes diff excerpts, each check reads the change from the commit the task started on (for a task
+started before this version, the commit at its first check) — committed and uncommitted edits to
+tracked files, plus untracked files Git does not ignore — from the repository the check's own
+connection named (only when that directory is the repository's own working tree: a repository whose
+Git settings point its working tree elsewhere is not read), and shows it to the reviewer first, with
+a header naming every changed file. It covers edits made by scripts and commits that no hook
+captured. Because the starting point is a commit, uncommitted or untracked work that was already in
+your working tree when the task started is included too. Git hooks, helpers, filters and network
+access are off while it is read, credential-like text is redacted, and each part still passes the
+never-send check. Files named like credentials (`.env`, `.env.*`, `.netrc`, `*.pem`, `*.key` and
+similar) are listed by name only and their content is never shown; this is a check on file names, so
+a secret kept in an ordinarily named file relies on the redaction and never-send checks instead.
+Files that are links, or that have a second name elsewhere on disk, are listed but their content and
+line counts are never shown; Git may still open such a file while it works, but that output is
+discarded and never enters the change. Every stored Git object a shown diff uses must match its own
+name, and a repository whose object store is reached through a link or borrowed from another
+repository is not read; a local `git clone` that hard-links its objects is read normally. If your
+working tree or object store keeps changing while the change is read, Yoetz reads it again, up to
+three times, and otherwise reports the change as unavailable rather than send a mix of two states.
+Whenever the change is unavailable, the check result, `yoetz status` and the receipt say why in one
+plain sentence (for example, that the working tree kept changing, or that the repository failed a
+safety check). A later review clears an AI-powered finding despite these limits only when it saw
+each file the raising review saw, whole or through an identical view; for a file shown in part each
+check records a keyed commitment to where its redactions and hunks lay, never its content, so a
+moved redaction or hunk keeps the finding open. A task that still carries check records from a 0.3
+development build may have a finding resolved by the older comparison of lengths and counts only;
+its receipt says so under limitations and, because that resolution was not fully verified, reports
+insufficient coverage rather than a clean conclusion. A change larger than the packet is cut and
+says so.
+
+The change travels as **repository excerpts**. If your policy's AI-powered review channel does not
+allow repository excerpts, the change is never sent, and the check result says the review ran with
+part of its context withheld.
 
 Sensitive and confidential content is off. The never-send set remains absolute. The reviewer gets a
-packet built from the ledger, not a handle on your repository — composition passes bundled provider
-adapters no repository, storage, environment, or transcript handles.
+packet, not a handle on your repository — composition passes bundled provider adapters no
+repository, storage, environment, or transcript handles.
 
 The Codex subscription evaluator follows the same policy and receives the same approved packet.
 The difference is credential and transport authority: Codex owns ChatGPT login and internally

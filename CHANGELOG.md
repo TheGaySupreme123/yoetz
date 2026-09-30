@@ -182,6 +182,37 @@ reverse-chronological released versions.
   the projection omits; it names published IDs, `filter.author=mine`,
   `filter.strength=immutable_snapshot` and structural links instead (#914).
 
+- AI-powered review now sees the change under review even when no hook captured it. When the
+  review recipe selects diff excerpts, each check reads the task's repository once and gives the
+  reviewer the change from the task's starting commit (committed and uncommitted edits, plus
+  untracked files Git does not ignore, including work already present when the task started) ahead
+  of other excerpts, with a header naming every changed file. Script edits, commits, missed hooks
+  and Cursor's ordinary profile are covered on every host. The change travels as repository
+  excerpts, so a policy that does not allow them never sends it and the check says its context was
+  withheld. Repositories whose Git config defines a filter or an include are not read, files named
+  like credentials are listed by name only, and the whole read has 20 seconds. The task-start
+  commit is recorded when `start` creates a task; limits are disclosed as
+  `check_time_change_unavailable`, `check_time_change_base_unavailable`,
+  `check_time_change_truncated` and `check_time_change_redacted` coverage gaps (#883, ADR-031).
+  Those limits on a later review still let it clear an AI-powered finding when the later review
+  saw every file the raising review saw, whole or through the identical view; each check records
+  which files it showed and, for each partly shown one, how much and a keyed commitment to where
+  its redactions and hunks lay, never paths or content, so a moved redaction or hunk no longer
+  clears a finding (maintainer decision 2026-09-30). A resolution relying on a raising record from
+  before those view commitments is disclosed on the receipt as
+  `check_time_change_resolution_unverified`. A task started
+  before this version takes its base from its first check, so commits between checks stay in the
+  change. The read is pinned to the validated repository directory and its own `.git` (a
+  `core.worktree` redirection is refused), never shows a tracked or untracked file that is a link
+  or has a second name, refuses an object store reached through a link or borrowed from another
+  repository, verifies every Git object it shows against its name (so a local `git clone` that
+  hard-links its objects is read normally), and retakes the change (up to three times, then
+  `changed_during_capture`) when the working tree or object store moves while it is read. When the
+  change is unavailable, a closed reason code beside `check_time_change_unavailable` makes the
+  check result, status, receipts (JSON, markdown and text) and the MCP check summary say why in
+  one fixed sentence. A custom recipe whose half-share is smaller than one part still carries the
+  first part, and the files a review is recorded as having seen are counted from the packet the
+  reviewer actually received.
 - With the Codex subscription evaluator bound, the service no longer re-hashes the retained Codex
   runtime (about 359 MB on Linux) on the event loop for every observation advice cycle. Structural
   readiness is memoized by binding and file fingerprints and re-checked off the event loop only

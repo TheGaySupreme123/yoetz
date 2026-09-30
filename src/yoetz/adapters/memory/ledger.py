@@ -18,6 +18,7 @@ from yoetz.domain.events import (
     AcceptedEvent,
     ActionRecordedPayload,
     AssignmentRecordedPayload,
+    CheckChangeShownFiles,
     CheckMode,
     CheckRecordedPayload,
     ClaimRecordedPayload,
@@ -129,6 +130,7 @@ from yoetz.kernel.reducers import (
     replay_with_index,
 )
 from yoetz.observability.logging import record_unexpected_exception_without_raising
+from yoetz.ports.change_capture import TASK_CHANGE_BASE_MEDIA_TYPE
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import (
@@ -460,6 +462,8 @@ class MemoryLedgerState:
     # Keyed by job_id: at most one disclosure wait per AI-powered review job.
     disclosure_waits: dict[str, SemanticDisclosureWait] = field(default_factory=lambda: {})
     object_refs: dict[str, ObjectRef] = field(default_factory=lambda: {})
+    # The task-start base object of the check-time change (ADR-031); kept once per task.
+    task_change_base: ObjectRef | None = None
     # Keyed by job_id: the last non-terminal structural progress row (issue #571 A2). The
     # terminal phase is derived from the job row itself, never stored here.
     semantic_progress: dict[str, SemanticProgressRecord] = field(default_factory=lambda: {})
@@ -3272,6 +3276,27 @@ class MemoryLedgerAdapter:
                 lease.dependency_digest,
             )
 
+    async def record_task_change_base(self, ref: ObjectRef) -> bool:
+        """Keep the first task-start base object (ADR-031) as an inventoried root."""
+
+        if (
+            type(ref) is not ObjectRef
+            or ref.metadata.kind is not ObjectKind.CHANGE_CAPTURE
+            or ref.metadata.media_type != TASK_CHANGE_BASE_MEDIA_TYPE
+            or ref.metadata.task_id != self._task_id
+        ):
+            raise ValueError("task_change_base_invalid")
+        async with self._lock:
+            if self._state.task_change_base is not None:
+                return False
+            self._state.task_change_base = ref
+            self._state.object_refs[ref.object_id] = ref
+            return True
+
+    async def load_task_change_base(self) -> ObjectRef | None:
+        async with self._lock:
+            return self._state.task_change_base
+
     async def load_semantic_job(
         self, writer_id: str, operation_id: str
     ) -> SemanticJobRecord | None:
@@ -3526,6 +3551,7 @@ class MemoryLedgerAdapter:
         semantic_conclusion: str | None = None,
         prior_finding_verdicts: tuple[PriorFindingVerdictRecord, ...] = (),
         missing_for_assessment: tuple[MissingForAssessmentItem, ...] = (),
+        check_change_files: CheckChangeShownFiles | None = None,
     ) -> CheckCommitResult:
         key = (frozen.lease.writer_id, frozen.lease.operation_id)
         async with self._lock:
@@ -3636,6 +3662,7 @@ class MemoryLedgerAdapter:
             semantic_conclusion=semantic_conclusion,
             missing_for_assessment=missing_for_assessment,
             prior_finding_verdicts=prior_finding_verdicts,
+            check_change_files=check_change_files,
         )
         event_payloads.append((event_id(self._ids.new(IdKind.EVENT)), check_payload))
         accepted_at = _now(self._clock)

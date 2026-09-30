@@ -7,6 +7,9 @@ capability matrix and privacy/path-canary tests from an installed artifact.
 `src/yoetz/domain/events.py`, and the CLI/capability/subprocess suites.
 **Relates to:** ADR-002 (canonical protocol), ADR-005 (Codex capability identity), ADR-009
 (local privacy boundary), and ADR-010 (harness integration).
+**Amended by:** ADR-031, which lets the service read one check-time change for AI-powered review
+through this adapter's hardened runner and root fences. This ADR's own capture stays
+content-withholding and client-local.
 
 ## Context
 
@@ -44,7 +47,8 @@ say whether two material actions referred to the same repository state.
    `harness_observed`, `artifact_verified`, or `independently_reproduced` by itself.
 6. **General artifact inspection stays deferred.** This ADR authorizes no content-returning read,
    AI-powered review fetch, repository browser, broad source capture, or ambient workspace search. A
-   future `ArtifactInspectionPort` still requires its own ADR.
+   future `ArtifactInspectionPort` still requires its own ADR. ADR-031 is that decision for exactly
+   one object, the check-time change, and authorizes nothing broader.
 
 ## Consequences
 

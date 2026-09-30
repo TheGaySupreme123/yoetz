@@ -37,6 +37,7 @@ from types import MappingProxyType
 from typing import Final, Literal
 
 from yoetz.domain.events import CheckRecordedPayload, LedgerRecord
+from yoetz.domain.receipts import CHECK_TIME_CHANGE_UNAVAILABLE_REASON_GAPS
 from yoetz.domain.values import FindingId, ObligationId
 from yoetz.kernel.finding_resolution import finding_is_resolved
 from yoetz.kernel.finding_todo import finding_blocks_receipt
@@ -188,6 +189,15 @@ GAP_CLASSIFICATION: Final[Mapping[str, GapClass]] = MappingProxyType(
         "task_statement_unavailable": _S,
         "task_statement_not_authorized": _S,
         "task_statement_not_supplied": _A,
+        # ADR-031: the service's own check-time read of the repository. Every limit on it is the
+        # service's (capture, Git state, redaction, packet room), not work the agent can redo.
+        "check_time_change_unavailable": _S,
+        "check_time_change_base_unavailable": _S,
+        "check_time_change_truncated": _S,
+        "check_time_change_redacted": _S,
+        "check_time_change_resolution_unverified": _S,
+        # Each closed unavailability reason travels beside the generic code with the same class.
+        **{code: _S for code in sorted(CHECK_TIME_CHANGE_UNAVAILABLE_REASON_GAPS)},
         "semantic_case_capacity_exceeded": _S,
         "semantic_reference_scope_reduced": _S,  # deliberate selection: bounded review scope (#904)
         "optional_semantic_review_blocked_by_policy": _S,

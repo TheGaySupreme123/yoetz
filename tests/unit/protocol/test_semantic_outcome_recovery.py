@@ -215,3 +215,58 @@ def test_check_renderers_project_registry_text_without_raw_output() -> None:
     assert "Continuation: semantic_transport_retry" in rendered
     assert directive_for("semantic_transport_retry") is not None
     assert _CANARY not in rendered
+
+
+def test_human_check_and_status_state_why_the_check_time_change_was_unavailable() -> None:
+    from yoetz.cli.render import render_human_status
+    from yoetz.protocol.models import StatusClosureReadinessModel, StatusSuccessModel
+
+    gaps = ("check_time_change_unavailable", "check_time_change_unavailable_unsafe_root")
+    result = CheckSuccessModel.model_construct(
+        verdict="no_issue_detected",
+        semantic_status="succeeded",
+        semantic_reason="completed",
+        semantic_provenance=None,
+        findings=(),
+        suppressed_count="0",
+        coverage=CoverageModel.model_construct(known_gaps=gaps),
+        children=None,
+        advisory_notes=(),
+    )
+    rendered = render_human_check(result)
+    assert "The check-time change was unavailable: the repository failed a safety check" in (
+        rendered
+    )
+    assert (
+        render_human_check(
+            result.model_copy(
+                update={"coverage": CoverageModel.model_construct(known_gaps=gaps[:1])}
+            )
+        ).count("The check-time change was unavailable")
+        == 0
+    )
+    status = StatusSuccessModel.model_construct(
+        head_frontier=type("Frontier", (), {"sequence": "7"})(),
+        coverage=CoverageModel.model_construct(ledger_freshness="partial", known_gaps=gaps),
+        # A real readiness model (issue #913 renders it); constructed without a checklist, as an
+        # earlier build's result carries, so only the counts reach the text.
+        closure_readiness=StatusClosureReadinessModel.model_construct(
+            open_obligation_count="0",
+            unanswered_finding_count="0",
+            receipt_blocking_finding_count="0",
+            state=None,
+            agent_actionable=None,
+            standing_limitations=None,
+            acknowledged_not_done=None,
+            acknowledged_not_done_count=None,
+        ),
+        page=None,
+        gaps=(),
+    )
+    rendered_status = render_human_status(status)
+    assert "Gaps: check_time_change_unavailable, check_time_change_unavailable_unsafe_root" in (
+        rendered_status
+    )
+    assert "The check-time change was unavailable: the repository failed a safety check" in (
+        rendered_status
+    )

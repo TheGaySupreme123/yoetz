@@ -13,6 +13,7 @@ from yoetz.domain.events import (
     PAYLOAD_TYPES,
     ActionRecordedPayload,
     AssignmentRecordedPayload,
+    CheckChangeShownFiles,
     ClaimRecordedPayload,
     ClaimRecordedPayloadV1_1,
     CoordinationContextRecordedPayload,
@@ -30,6 +31,8 @@ from yoetz.domain.events import (
     PlanRevisedPayload,
     ResponseRecordedPayload,
     ResultRecordedPayload,
+    check_change_files_from_json,
+    check_change_files_to_json,
     decode_payload,
     encode_payload,
     is_observation_authored,
@@ -75,6 +78,7 @@ from yoetz.protocol.coverage import (
 
 __all__ = [
     "OBSERVATION_LIMITATION_KINDS",
+    "MAX_CHECK_CHANGE_RAISING_CHECKS",
     "PROJECTION_GENERATION",
     "PROJECTION_VERSION",
     "ContradictionKey",
@@ -103,6 +107,8 @@ __all__ = [
 
 PROJECTION_VERSION: Final = "yoetz/0.1.0"
 PROJECTION_GENERATION: Final = 1
+# At most this many checks contribute to one finding's check-time requirement (ADR-031).
+MAX_CHECK_CHANGE_RAISING_CHECKS: Final = 64
 
 _MAX_SAFE_INTEGER: Final = 2**53 - 1
 _MAX_SQLITE_SIGNED_INTEGER: Final = 2**63 - 1
@@ -339,11 +345,24 @@ class FindingProjectionRecord(ProjectionRecord[Finding]):
     budget and never closes anything. ``rejection_accepted_by_check_event_id`` names the later
     check whose reviewer withdrew this AI-powered finding after the agent rejected it with a
     reason; it latches the terminal ``rejection_accepted`` state.
+
+    The check-time change facts (ADR-031) are replay-derived from recorded checks, never from the
+    finding's own payload. ``check_change_raising_check_event_ids`` names, in fold order, every
+    ``check_recorded`` event whose completed AI-powered review raised or re-raised this finding;
+    ``check_change_raised_files`` merges what those reviews were shown of the check-time change
+    (keyed commitments; for each file seen in part, the bytes shown and the redacted spans among
+    them), empty when they carried none, and ``None`` while unknown (an incomplete record, parts
+    carried without a record, or a contributing check since redacted).
+    ``resolution_depends_on_check_event_ids`` are those checks when the resolving check's
+    check-time limits were tolerated only because of those files; redacting any reopens it.
     """
 
     resolved_by_check_event_id: EventId | None = None
     review_rounds: int = 0
     rejection_accepted_by_check_event_id: EventId | None = None
+    check_change_raising_check_event_ids: tuple[EventId, ...] = ()
+    check_change_raised_files: CheckChangeShownFiles | None = None
+    resolution_depends_on_check_event_ids: tuple[EventId, ...] = ()
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -361,6 +380,29 @@ class FindingProjectionRecord(ProjectionRecord[Finding]):
             type(self.review_rounds) is not int
             or not 0 <= self.review_rounds <= _MAX_SQLITE_SIGNED_INTEGER
         ):
+            raise _invalid()
+        for name in (
+            "check_change_raising_check_event_ids",
+            "resolution_depends_on_check_event_ids",
+        ):
+            value = getattr(self, name)
+            if type(value) is not tuple:
+                raise _invalid()
+            try:
+                ids = tuple(event_id(item) for item in cast(tuple[object, ...], value))
+            except ValueError as exc:
+                raise _invalid() from exc
+            if len(set(ids)) != len(ids) or len(ids) > MAX_CHECK_CHANGE_RAISING_CHECKS:
+                raise _invalid()
+            object.__setattr__(self, name, ids)
+        files = self.check_change_raised_files
+        if files is not None and (
+            not self.check_change_raising_check_event_ids
+            or type(files) is not CheckChangeShownFiles
+            or not files.complete
+        ):
+            raise _invalid()
+        if self.resolution_depends_on_check_event_ids and self.resolved_by_check_event_id is None:
             raise _invalid()
 
 
@@ -1046,6 +1088,19 @@ def _record_snapshot(record: _ProjectionRecordLike) -> dict[str, JsonValue]:
             result["rejection_accepted_by_check_event_id"] = (
                 record.rejection_accepted_by_check_event_id
             )
+        # Likewise emitted only when set (ADR-031), so earlier snapshots keep their bytes.
+        if record.check_change_raising_check_event_ids:
+            result["check_change_raising_check_event_ids"] = list(
+                record.check_change_raising_check_event_ids
+            )
+        if record.check_change_raised_files is not None:
+            result["check_change_raised_files"] = cast(
+                JsonValue, freeze_json(check_change_files_to_json(record.check_change_raised_files))
+            )
+        if record.resolution_depends_on_check_event_ids:
+            result["resolution_depends_on_check_event_ids"] = list(
+                record.resolution_depends_on_check_event_ids
+            )
     return result
 
 
@@ -1336,6 +1391,9 @@ def _record_from_snapshot(
                 "rejection_accepted_by_check_event_id",
                 "resolved_by_check_event_id",
                 "review_rounds",
+                "check_change_raising_check_event_ids",
+                "check_change_raised_files",
+                "resolution_depends_on_check_event_ids",
             }
         )
     else:
@@ -1426,12 +1484,33 @@ def _record_from_snapshot(
             redacted_object_id=cast(ObjectId | None, source.get("redacted_object_id")),
         )
     if collection == "findings":
-        for name in ("resolved_by_check_event_id", "rejection_accepted_by_check_event_id"):
+        for name in (
+            "resolved_by_check_event_id",
+            "rejection_accepted_by_check_event_id",
+            "check_change_raising_check_event_ids",
+            "check_change_raised_files",
+            "resolution_depends_on_check_event_ids",
+        ):
             if name in source and source[name] is None:
                 raise _invalid()
+
         rounds = source.get("review_rounds", 0)
         if "review_rounds" in source and (type(rounds) is not int or rounds < 1):
             raise _invalid()
+
+        def event_ids(name: str) -> tuple[EventId, ...]:
+            raw = source.get(name)
+            if raw is None:
+                return ()
+            if type(raw) not in {list, tuple} or not raw:
+                raise _invalid()
+            return cast(tuple[EventId, ...], tuple(cast(list[object], raw)))
+
+        raw_files = source.get("check_change_raised_files")
+        try:
+            raised_files = None if raw_files is None else check_change_files_from_json(raw_files)
+        except ValueError as exc:
+            raise _invalid() from exc
         return FindingProjectionRecord(
             payload=cast(Finding | None, payload),
             payload_digest=payload_digest,
@@ -1444,6 +1523,11 @@ def _record_from_snapshot(
             review_rounds=cast(int, rounds),
             rejection_accepted_by_check_event_id=cast(
                 EventId | None, source.get("rejection_accepted_by_check_event_id")
+            ),
+            check_change_raising_check_event_ids=event_ids("check_change_raising_check_event_ids"),
+            check_change_raised_files=raised_files,
+            resolution_depends_on_check_event_ids=event_ids(
+                "resolution_depends_on_check_event_ids"
             ),
         )
     return ProjectionRecord(

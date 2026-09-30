@@ -208,11 +208,11 @@ def test_reviewed_commitment_vectors_are_byte_exact() -> None:
     vectors = cast(list[dict[str, object]], fixture_input["commitment_vectors"])
     key = MacKeyForObjectTest(bytes(range(32, 64)))
     # CAN-009 is a frozen v1.0 corpus.  PROJECT_TEXT was added by the current 0.3
-    # coordination surface, so its current domain is pinned below without rewriting that
-    # historical vector set.
+    # coordination surface and CHANGE_CAPTURE by the check-time change (ADR-031), so their
+    # current domains are pinned below without rewriting that historical vector set.
     assert len(vectors) == 17
     vector_kinds = {ObjectKind(cast(str, vector["kind"])) for vector in vectors}
-    assert vector_kinds == set(ObjectKind) - {ObjectKind.PROJECT_TEXT}
+    assert vector_kinds == set(ObjectKind) - {ObjectKind.PROJECT_TEXT, ObjectKind.CHANGE_CAPTURE}
     for vector in vectors:
         kind = ObjectKind(cast(str, vector["kind"]))
         domain = base64.b64decode(cast(str, vector["domain_base64"]), validate=True)
@@ -223,6 +223,11 @@ def test_reviewed_commitment_vectors_are_byte_exact() -> None:
     assert project_text_domain == b"yoetz/object/project_text/v1\0"
     assert key.mac(project_text_domain, plaintext) == (
         "hmac-sha256:cb9066d717d938caee9d1013127c792b38891acb4ced2303849a2111c30f66c6"
+    )
+    change_capture_domain = OBJECT_COMMITMENT_DOMAINS[ObjectKind.CHANGE_CAPTURE]
+    assert change_capture_domain == b"yoetz/object/change_capture/v1\0"
+    assert key.mac(change_capture_domain, plaintext) == (
+        "hmac-sha256:3ebd0ba68f42370fff7c53aa0016b92099fa7c688f92bd8f103eb1088c711675"
     )
 
 

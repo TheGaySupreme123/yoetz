@@ -50,16 +50,35 @@ def document(root: Path) -> dict[str, Any]:
         "semantic_provenance": provenance,
     }
     vectors: list[dict[str, Any]] = []
-    for conclusion in [
-        None,
-        "no_material_discrepancy",
-        "challenges_returned",
-        "insufficient_packet",
+    # ADR-031 (#883) appends one vector: a completed review that carried a check-time change
+    # records keyed commitments to the files it was shown. Earlier vectors keep their bytes.
+    check_change_files = {
+        "complete": True,
+        "fully_shown": ["hmac-sha256:" + "1" * 64, "hmac-sha256:" + "2" * 64],
+        "partially_shown": [
+            {
+                "clean_bytes": 67,
+                "commitment": "hmac-sha256:" + "3" * 64,
+                "redactions": 1,
+                "section_admitted": True,
+                "shown_bytes": 1024,
+                "view_commitment": "hmac-sha256:" + "4" * 64,
+            }
+        ],
+    }
+    for conclusion, files in [
+        (None, None),
+        ("no_material_discrepancy", None),
+        ("challenges_returned", None),
+        ("insufficient_packet", None),
+        ("no_material_discrepancy", check_change_files),
     ]:
         version = "1.2.0" if conclusion is None else "1.3.0"
         wire = dict(base)
         if conclusion is not None:
             wire["semantic_conclusion"] = conclusion
+        if files is not None:
+            wire["check_change_files"] = files
         payload = decode_payload(EventSchema("check_recorded", version), freeze_json(wire))
         encoded = encode_payload(payload)
         vectors.append(

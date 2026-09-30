@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from enum import Enum
 from typing import Final, cast
 
+from yoetz.domain.receipts import check_time_change_gap_sentence
 from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.errors import normalize_safe_details
 from yoetz.protocol.models import (
@@ -289,6 +290,7 @@ def render_human_check(result: CheckSuccessModel) -> str:
             lines.append(f"- {_token(item.kind)} ({refs}): {_token(item.availability)}")
     if result.coverage.known_gaps:
         lines.append("Coverage gaps: " + ", ".join(result.coverage.known_gaps))
+        lines.extend(_check_time_change_sentences(result.coverage.known_gaps))
         # The strict ceiling blocked this process while the last install applied the policy
         # route (issue #537). A ceiling with no applied-policy record keeps today's terminal
         # wording with no recovery line.
@@ -529,6 +531,7 @@ def render_human_status(result: StatusSuccessModel) -> str:
                 )
     gaps = tuple(result.gaps) + tuple(result.coverage.known_gaps)
     lines.append("Gaps: " + (", ".join(dict.fromkeys(gaps)) if gaps else "none"))
+    lines.extend(_check_time_change_sentences(tuple(dict.fromkeys(gaps))))
     return "\n".join(lines)
 
 
@@ -554,6 +557,14 @@ def _render_result_items(page: StatusResultsPageModel) -> list[str]:
     if page.next_cursor is not None:
         lines.append(f"Next page: {page.next_cursor}")
     return lines
+
+
+def _check_time_change_sentences(codes: Iterable[str]) -> list[str]:
+    """The fixed sentence for each check-time change unavailability code (ADR-031)."""
+
+    return [
+        sentence for code in codes if (sentence := check_time_change_gap_sentence(code)) is not None
+    ]
 
 
 def _render_lineage(page: StatusLineagePageModel) -> list[str]:

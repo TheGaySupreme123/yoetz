@@ -1562,6 +1562,50 @@ def _check_recorded_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
             ]
         }
     )
+
+    # ADR-031 (#883): keyed commitments to the check-time change files this review was shown.
+    commitments: dict[str, JsonValue] = {
+        "items": {"pattern": "^hmac-sha256:[0-9a-f]{64}$", "type": "string"},
+        "maxItems": 128,
+        "type": "array",
+        "uniqueItems": True,
+    }
+    partial: dict[str, JsonValue] = {
+        "items": {
+            "additionalProperties": False,
+            "properties": {
+                "clean_bytes": {"maximum": 262144, "minimum": 0, "type": "integer"},
+                "commitment": {"pattern": "^hmac-sha256:[0-9a-f]{64}$", "type": "string"},
+                "redactions": {"maximum": 262144, "minimum": 0, "type": "integer"},
+                "section_admitted": {"type": "boolean"},
+                "shown_bytes": {"maximum": 262144, "minimum": 0, "type": "integer"},
+                # R945-02: keyed commitment to where the view's redactions and hunks lie.
+                # Optional only so a record written before it existed still decodes.
+                "view_commitment": {"pattern": "^hmac-sha256:[0-9a-f]{64}$", "type": "string"},
+            },
+            "required": [
+                "clean_bytes",
+                "commitment",
+                "redactions",
+                "section_admitted",
+                "shown_bytes",
+            ],
+            "type": "object",
+        },
+        "maxItems": 128,
+        "type": "array",
+        "uniqueItems": True,
+    }
+    properties["check_change_files"] = {
+        "additionalProperties": False,
+        "properties": {
+            "complete": {"type": "boolean"},
+            "fully_shown": commitments,
+            "partially_shown": partial,
+        },
+        "required": ["complete", "fully_shown", "partially_shown"],
+        "type": "object",
+    }
     return document
 
 

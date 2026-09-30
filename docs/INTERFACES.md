@@ -1201,6 +1201,23 @@ Four further codes describe a review that did run but could not deliver everythi
 - `task_statement_unavailable`, `task_statement_not_supplied`, `task_statement_not_authorized` —
   what the reviewer knew of the user's request (issue #908; see "Task statement" below).
 
+Four codes bound the ADR-031 check-time change, the service's one read of the task's repository
+for a check whose recipe selects diff excerpts. They appear on the packet and check coverage only
+when that recipe selected the change:
+
+- `check_time_change_unavailable` — the check named a workspace but no part reached the packet: a
+  workspace outside the task's repository, an unsupported Git state (linked worktree, unsafe root,
+  a filter or include in the effective config, partial clone, Git older than 2.26), a failed or
+  timed-out capture, a change withheld whole by redaction, or no claim, obligation or plan to link
+  it to. A check whose connection named no workspace has nothing to read and reports no
+  check-time code;
+- `check_time_change_base_unavailable` — no resolvable task-start commit, so the change is shown
+  against the commit the task's first check pinned (or HEAD when no pin could be kept), and work
+  committed before it is missing;
+- `check_time_change_truncated` — a changed file (named in the change's header), a part of the
+  change, or untracked names beyond the listing bound did not reach the reviewer;
+- `check_time_change_redacted` — credential-like spans were replaced before storage and review.
+
 Post-validation fences each challenge independently: a rejected challenge costs only itself, the
 challenges beside it still become findings, and the drop is declared through this gap. A judgment
 that fails the *structural* fence yields no AI-powered findings at all and is recorded as
@@ -1859,7 +1876,9 @@ semantic_missing_agent_suppliable|semantic_missing_structurally_unavailable|
 semantic_missing_already_supplied|semantic_missing_items_rejected|
 semantic_case_content_over_item_limit|semantic_case_finding_refs_over_limit|
 semantic_prior_findings_over_limit|semantic_prior_verdicts_unsupported|
-semantic_restatements_suppressed`) plus the evidence-strength
+semantic_restatements_suppressed|check_time_change_unavailable|
+check_time_change_base_unavailable|check_time_change_truncated|
+check_time_change_redacted`) plus the evidence-strength
 codes
 (`evidence_content_digest_only|evidence_content_withheld|evidence_digest_subject_legacy_unknown`)
 and the host-observation codes (`captured_object_unavailable|content_unselected|
@@ -2500,8 +2519,11 @@ the client itself: CLI/UI use their actual process working directory and the MCP
 configured/session working directory. It is never populated from an operation body or public
 `workspace_ref`. The service resolves symlinks, resolves a Git worktree to its canonical common
 repository root (or a non-Git workspace to its resolved directory), computes the installation-keyed
-`repository_privacy_commitment`, and discards the raw locator before the handshake completes. The
-resulting `ControlSession` carries only `RepositoryPrivacyContext(commitment, identity_kind)`.
+`repository_privacy_commitment`, and keeps no other copy of the raw locator. The resulting
+`ControlSession` carries `RepositoryPrivacyContext(commitment, identity_kind)` plus, in service
+memory only and outside its equality and `repr`, the exact `workspace_locator` the commitment was
+derived from. That locator is read only by the ADR-031 check-time change capture of the same
+connection's `start` and `check` calls; it is never stored, logged, projected or returned.
 Branches and
 linked worktrees share one commitment; independent clones and unrelated repositories do not. An
 older hello decoder or omitted locator produces an unbound session and cannot create, migrate, or
@@ -3852,7 +3874,10 @@ complete result contains both `tree_digest` and `diff_digest`; every partial, ch
 unsupported, or over-limit capture returns no subject state and explicit closed limitations. The
 port returns no repository content, path, filename, branch, remote, Git output, or component
 digest. It is client-local support used before ordinary publication, not a seventh MCP/workflow
-operation, not service-owned ambient inspection, and not an `ArtifactInspectionPort`.
+operation, not service-owned ambient inspection, and not an `ArtifactInspectionPort`. The adapter
+also exposes its hardened runner and root fences (`discover_workspace_root`,
+`local_workspace_root`, `run_read_only_git`) to the ADR-031 check-time change capture; that sibling
+returns content, under its own decision, and this port still returns none.
 
 The closed limitation values are `not_git`, `unsafe_root`, `submodule_present`,
 `symlink_unsupported`, `object_format_unsupported`, `git_config_limit_exceeded`,
@@ -7144,17 +7169,57 @@ Semantic finding resolution compares the later completed review's native capture
 the readable original finding's capture baseline (ADR-006, issue #884). Only the closed existing
 baseline is tolerated; it does not remove any receipt coverage gap. `insufficient_packet` cannot
 resolve a prior semantic finding. Response disposition and limitation acceptance are not proofs.
-Semantic findings carry their review's closed capture limits in their own coverage, and resolve
-only after a readable material change recorded after the finding
-(`no_material_change_since_finding` otherwise).
+Semantic findings carry their review's closed capture limits in their own coverage, and resolve only
+after a readable material change recorded after the finding (`no_material_change_since_finding`
+otherwise). No ADR-031 check-time change code is a capture baseline. A semantic repair check's
+`check_time_change_*` codes are tolerated for a finding only by the shown-file rule
+(`check_change_limits_tolerated`, `CheckChangeShownFiles.covers`): every file the raising reviews
+(R) need whole is in the repair check's `fully_shown`, and every file R saw in part (`shown_bytes`
+n, `redactions` k, `view_commitment` v) is in the repair's `fully_shown` or has a repair partial
+entry q with `q.view_commitment == v` (maintainer decision 2026-09-30, R945-02). A raising partial
+entry without `view_commitment` (written before the field existed) falls back to (`q.shown_bytes >=
+n` or `q.section_admitted`) and (`q.redactions <= k` or `q.clean_bytes >= n`);
+`check_change_resolution_unverified(record)` is true for a resolution that tolerated check-time
+limits while R held such an entry, and the receipt then adds the gap
+`check_time_change_resolution_unverified` once, with the task-wide marker
+`check_time_change_resolution_unverified` however many findings it covers (receipts hold at most 64
+gaps and fail to build past that, so a per-finding marker could make the receipt unavailable);
+`unverified_resolution_finding_ids(projection, resolved_ids)` lists them, and the gap's `detail` and
+the limitations body carry the fixed sentence plus up to 16 affected finding ids and a count of the
+rest. As a receipt gap it lowers ledger freshness from `current` to `partial`, which turns a
+`no_unresolved_deterministic_findings` conclusion into `insufficient_coverage`; that is deliberate,
+and only tasks carrying check records from 0.3 development builds of ADR-031 can reach it. A repair
+entry without `view_commitment` never matches a raising entry that has one. The repair record may be
+incomplete; an empty R is always tolerated and an unknown R never. `FindingProjectionRecord` carries
+the replay-derived `check_change_raising_check_event_ids` (every contributing check, in fold order),
+`check_change_raised_files` (R as a complete `CheckChangeShownFiles`; `None` while unknown) and
+`resolution_depends_on_check_event_ids` (the contributors, when a resolution needed that tolerance).
+A check contributes to each semantic finding it returns when it recorded a conclusion or is the
+finding's raising check (same subject frontier and AI-powered review attempt). A contribution is the
+check's complete record, unknown for an incomplete record or carried-part codes without one, and
+empty otherwise; contributions merge with `CheckChangeShownFiles.merged` (union of whole files; a
+file seen in part through one view keeps it, through two different views (or one legacy and one
+committed) it must be seen whole, and two legacy views keep the larger length and fewer redactions;
+unknown past `MAX_CHECK_CHANGE_RAISED_FILES` = 1024 files or when either side is unknown); past
+`MAX_CHECK_CHANGE_RAISING_CHECKS` = 64 contributors R is unknown. Redacting any contributor sets R
+unknown and reopens a resolution that depended on it; all three fields are emitted in projection
+snapshots only when set.
 
 
 `check_recorded` version `1.3.0` adds required `semantic_conclusion` on succeeded attempts. The
 closed values are `no_material_discrepancy`, `challenges_returned`, and `insufficient_packet`.
-Versions 1.0–1.2 keep their frozen payload shapes and read without a recorded conclusion. Only
-an explicitly assessable conclusion enables capture-baseline resolution. An unassessable
-conclusion blocks semantic absence proof even if a producer omitted its coverage-gap marker.
-Failed and local-only attempts retain their existing version. The owning schema generator and
+Versions 1.0–1.2 keep their frozen payload shapes and read without a recorded conclusion. Only an
+explicitly assessable conclusion enables capture-baseline resolution. An unassessable conclusion
+blocks semantic absence proof even if a producer omitted its coverage-gap marker. Failed and
+local-only attempts retain their existing version. Version `1.3.0` (unreleased, so edited in place)
+also admits optional `check_change_files`, `{"complete": bool, "fully_shown": [commitment],
+"partially_shown": [{"clean_bytes", "commitment", "redactions", "section_admitted", "shown_bytes",
+"view_commitment"?}]}`, only beside a conclusion (`view_commitment` is optional only so a record
+written before it existed still decodes; every new record carries it): disjoint `hmac-sha256`
+commitments sorted by commitment, counts in `0..262144` with `clean_bytes <= shown_bytes`, at most
+128 files in all; `complete` false means more files were shown and the record holds the first 128 in
+change order (ADR-031 decision 9). Rows written by the branch-only builds of this field before its
+final shape no longer decode. The owning schema generator and
 `fixtures/canonical/check-conclusion-1.3.0.case.json` lock the new and legacy bytes.
 
 ### Review packet selection and named missing items (issue #907, Phase 1a)
@@ -7336,10 +7401,13 @@ content profile and does not increase the owner's configured capacity.
 
 The owner-only `service diagnostics` ring also records `semantic_composition/semantic_case_built`
 with integer counts: `semantic_capture_parts_resolved`, `semantic_diff_parts_resolved`,
-`semantic_excerpts_selected`, `semantic_diff_excerpts_selected`, and
-`semantic_excerpt_bytes_selected`. Resolved parts have passed capture authentication; selected
-excerpts are in the built packet. These counts precede privacy minimization and do not prove
-provider delivery or code correctness. The record contains no content, paths, or content hashes.
+`semantic_excerpts_selected`, `semantic_diff_excerpts_selected`,
+`semantic_excerpt_bytes_selected`, `semantic_check_change_parts_selected` (ADR-031 parts in the
+packet), and `semantic_edit_evidence_in_case` (materialized native edit captures in the frozen
+case, before any resolver fence; zero beside known native edits means their captures never reached
+the ledger). Resolved parts have passed capture authentication; selected excerpts are in the built
+packet. These counts precede privacy minimization and do not prove provider delivery or code
+correctness. The record contains no content, paths, or content hashes.
 
 ### Review dialogue record (issue #905)
 
@@ -7651,3 +7719,135 @@ plan. Names and contracts:
   "Maximum: …". The ceremony adds fixed words to a `max_excerpts` change.
 - Golden vectors: TSK-001's privacy-policy wire now also pins the PRIV-004 Expanded policy under
   both presets: 1.1.0 with 16 excerpts, byte-identical to origin/0.3, and 1.2.0 with 64.
+
+### Check-time change (ADR-031, #883)
+
+`ChangeCapturePort` (`yoetz.ports.change_capture`) has two blocking, read-only calls:
+`read_task_base(workspace) -> TaskChangeBase` and `capture(workspace, base | None) ->
+CheckChangeCapture`. `GitChangeCaptureAdapter` is the only implementation; the service runs it and
+every redaction pass off the event loop. One 20-second deadline bounds a capture: each Git call
+(including workspace discovery and the global `core.excludesFile` read) gets `min(10 s, time left)`.
+Assembly may use the first 75% (`_ASSEMBLY_SHARE`); the rest is kept for the closing stability
+check. Past the assembly share a file whose diff was not read is listed with `capture_limit` and
+untracked files are not listed; before the file list exists, or during the stability check, the
+capture is unavailable. Before any diff the adapter lists the effective config with `git config
+--list --name-only --includes --show-scope -z` and refuses any non-`command` scope key `filter.*`,
+`include.*`, `includeIf.*`, `extensions.partialClone`, `remote.*.promisor` or
+`remote.*.partialCloneFilter` (`unsupported_repository`); a Git that rejects `--show-scope` fails as
+`git_failed`; an effective `core.worktree` is `unsupported_repository` too.
+`discover_workspace_root` runs `rev-parse --path-format=absolute --show-toplevel --git-dir` and
+raises `unsafe_root` unless the git dir is `<top>/.git` and the candidate lies inside `<top>`. Every
+capture Git call runs as `git --no-replace-objects -c core.quotePath=true -c protocol.allow=never
+--git-dir=<root>/.git --work-tree=<root> ...` through `run_read_only_git` (whose environment is a
+fixed dict, so no `GIT_*` variable is inherited); `_open` requires that invocation's `rev-parse
+--path-format=absolute --show-toplevel --git-dir` to print exactly `<root>` and `<root>/.git`.
+Before and after each call the root pathname and its `.git` must still `lstat` to the device and
+inode recorded from the validated descriptor (`unsafe_root` otherwise).
+`_refuse_unsafe_object_store` requires `.git/objects`, `objects/info` and `objects/pack` to be real
+directories of the service user and each fan-out directory a real directory, and every
+pack-directory entry a regular file of the service user, not group- or world-writable (any link
+count; a link or a foreign-owned or writable entry is `unsafe_root`, more than 4096 entries
+`unsupported_repository`); `objects/info/alternates` and `objects/info/http-alternates` are
+`unsafe_root`, as the ADR-011 open fence already makes static alternates, and `.git/commondir` is
+`unsupported_repository`. It returns the identities of the object directories, fan-out directories
+and pack entries, taken at the start of each attempt and compared by the closing check. The tracked
+list is `git diff --raw -z --no-abbrev <base> --`, which reads no file or blob content; immediately
+after it, before `--numstat`, the patch or verification, the adapter records the no-follow identity
+of each changed working copy and of each loose blob path (and its fan-out directory) the diff names.
+Each changed working copy must be a regular, single-link file of the service user unless the entry
+is a deletion or a submodule, otherwise it is omitted as `not_regular_file` with its line counts
+(Git's output for it is discarded). Every blob a shown section reads (`src`, and a non-zero `dst`,
+of mode 100644, 100755 or 120000) is verified: a loose object must be a regular, owner-only file
+(any link count) whose descriptor still has the recorded identity before and after it is read, and
+is inflated (`zlib`) and hashed from that descriptor; the blob is also read with `git cat-file blob`
+(at most 8 MiB each, 64 MiB in all) and hashed. Either mismatch omits the section as
+`object_unverified` (or `too_large` / `capture_limit` at the bounds), line counts withheld. The
+adapter overwrites the compressed and inflated buffers it owns. Tracked and untracked files whose
+base name is on the adapter's credential-name list are listed by name only (`credential_name`). The
+untracked listing uses `run_read_only_git(..., keep_prefix_on_limit=True)`: past 8 MiB the hardened
+runner raises `GitOutputTruncated` (still a `ValueError("git_output_limit")`) holding the whole
+names that fit, and the header says the untracked count is a lower bound. Each untracked file read
+must still have the identity its path had just before (mode, device, inode, size, mtime and ctime in
+ns, link count, owner) when opened and after it is read, with exactly `st_size` bytes read. The
+closing stability check re-reads the object-store snapshot, the raw tracked list, every recorded
+working-copy, loose-object and untracked identity, the untracked listing, `HEAD^{commit}` and the
+identity of `.git/index`; any difference retakes the whole capture, at most `_CAPTURE_ATTEMPTS` (3)
+times while the assembly share lasts. `discover_workspace_root` and `open_local_workspace` take an
+optional `timeout_seconds`. `ChangeCaptureUnavailable.reason` is one of `git_unavailable`,
+`not_git`, `unsafe_root`, `unsupported_repository`, `git_failed` (a Git call over its time bound
+included), `changed_during_capture` (the working tree moved during every attempt) or
+`redaction_incomplete` (credential-shaped spans still found after 64 redaction passes, so the change
+is withheld whole), recorded as a bounded `semantic_composition/check_time_change_unavailable` (or
+`start/task_change_base_unavailable`) diagnostic and never as text.
+
+- **Base.** A `start` whose outcome is `created` or `delegated` records
+  `TaskChangeBase(object_format, commit)` (the empty tree for an unborn repository) as an encrypted
+  `change_capture` object of media type `application/vnd.yoetz.task-change-base+json`, schema
+  `yoetz.task-change-base/1`. The optional ledger seam `record_task_change_base(ref) -> bool` keeps
+  the first one only (pointer in `bundle_meta` key `task_change_base`, object inventoried as a
+  root); `load_task_change_base()` authenticates it. Attach and resume record nothing. A task with
+  no base gets one from its first check that captures a change: `TaskChangeBase(...,
+  origin="first_check")`, HEAD at that check, recorded through the same seam (a concurrent check
+  that loses the race loads the kept one).
+- **Source.** `Application.check` binds `CheckWorkspaceSource(workspace, repository_commitment)`
+  from its own `RepositoryPrivacyContext` for the duration of the check
+  (`check_workspace_source_scope`). The semantic composition captures only when that commitment
+  equals the task route's, and only for a new durable job whose recipe selects diff excerpts.
+- **Object.** `CheckChangeCapture(base, text, tracked_files, untracked_files, omitted_files,
+  truncated, redacted)` is stored after capture-time redaction as one `change_capture` object of
+  media type `application/vnd.yoetz.check-change+json`, schema `yoetz.check-change/1`. `base` is
+  `task_start`, `first_check` (the pinned first-check base; the header names its commit),
+  `head` (no base could be kept or resolved) or `empty` (no commit exists); `first_check` and
+  `head` report `check_time_change_base_unavailable`. The job's
+  `yoetz.semantic-case/2` object gains an optional `check_change` member,
+  `{"schema": "yoetz.check-change-binding/1", "object": pointer | null, "unavailable": bool}`
+  plus, for an unavailable change, an optional `"reason"` (one of the closed reasons below);
+  jobs without it rebuild without a change.
+- **Packet.** `build_semantic_case(check_time_change=CheckTimeChange(ref, capture) | None,
+  check_time_change_unavailable=bool, check_time_change_unavailable_reason=str | None)` admits
+  parts with ids `change-check-time-NNN`, section `excerpt`, category `repository_excerpt`, source
+  kind `diff`, source ref `check-time-change`, linked to effective claims and obligations (else the
+  latest plan), each prefixed `[Yoetz check-time change, part i of n]`. Each part is at most
+  `min(max_excerpt_bytes, max_total_excerpt_bytes, 4 KiB, item bound)` bytes, marker included.
+  `_check_time_change_reservation(selection, first_part_bytes)` returns the share admitted before
+  other excerpts (half the excerpt count, at least one, and half the total bytes rounded up to the
+  first part); leftovers backfill after every other excerpt. The case digest binds the object
+  identity, content digest, base, flags, admitted part count and any unavailability reason; a case
+  without a selected change keeps its historical digest input.
+- **Unavailability reasons.** `CheckChangeOutcome.reason` and the builder's reason are keys of
+  `yoetz.domain.receipts.CHECK_TIME_CHANGE_UNAVAILABLE_REASONS` (`git_unavailable`, `not_git`,
+  `unsafe_root`, `unsupported_repository`, `git_failed`, `changed_during_capture`,
+  `redaction_incomplete`, `repository_mismatch`, `capture_failed`, `no_linked_subject`,
+  `no_packet_room`); every `ChangeCaptureUnavailable` reason is one of them.
+  `check_time_change_unavailable_reason_gap(reason)` gives the coverage code
+  `check_time_change_unavailable_<reason>`, recorded beside `check_time_change_unavailable` in
+  `known_gaps` (no schema change: gap codes are closed tokens) and a member of
+  `CHECK_TIME_CHANGE_GAPS`, so finding resolution treats it as a check-time limit.
+  `check_time_change_gap_sentence(code)` returns its one fixed sentence, which the receipt builder
+  puts in the gap's `detail` and the limitations section body (so JSON, markdown and text receipts
+  carry it), `render_human_check` and `render_human_status` print after the gap list, and the MCP
+  check summary appends when it fits the 512-byte bound.
+- **Shown files.** `check_time_change_shown_files(capture, selection, admitted_parts)` returns each
+  `diff --git` section of the stored change that reached the admitted parts, whether it arrived
+  whole and without a `[REDACTED]` marker, the section bytes that arrived, the markers among them,
+  whether the whole section arrived, and where the first shown marker starts. The identity is the
+  section's first line plus `\0binary` for a `Binary files ` line and `\0deleted` for a `deleted
+  file mode ` line. `admitted_parts` is `check_time_change_parts_carried(case,
+  withheld_categories=)`: the unbroken run of parts from the first whose catalog rows
+  `bounded_case_envelope(case)` kept, or 0 when the policy withholds `repository_excerpt`.
+  `check_change_shown_files(runtime, change, selection, admitted_parts)` commits each through
+  `runtime.objects.commitment_for(..., CHANGE_CAPTURE)` over the domain
+  `yoetz/check-change-shown-file/v1`, the base commit and that identity. Each partially shown file
+  also gets `view_commitment`, the same key over `yoetz/check-change-shown-view/v1`, the base
+  commit, the identity and `CheckTimeChangeShownFile.view`: the length-prefixed shown length, the
+  whole-section flag, every marker offset, and every hunk's offset and header line within the shown
+  bytes. The view is never stored; it is derived from the same `admitted_parts`, so envelope
+  minimization cannot desynchronize it from the accounting. `CheckChangeCapture` and
+  `yoetz.check-change/1` carry `base_commit`. The composition passes it to
+  `FinalSemanticEvaluation.check_change_files`, and `commit_check_if_current(...,
+  check_change_files=)` records it only beside a conclusion.
+- **Consent.** `ReviewSelectionPolicy.carries_check_time_change` (targeted excerpts, a positive
+  excerpt count and the `diff` kind) is the one predicate for whether a recipe carries the change,
+  and `required_categories()` then includes `repository_excerpt`. An inference channel without that
+  category approves no check-time part, and `withheld_review_categories` names it, so the check
+  reports `semantic_review_context_withheld`.

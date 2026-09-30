@@ -26,6 +26,7 @@ from yoetz.adapters.memory.ledger import (
 from yoetz.adapters.sqlite.observation import SqliteObservationStore
 from yoetz.domain.events import (
     AcceptedEvent,
+    CheckChangeShownFiles,
     CheckRecordedPayload,
     EventSchema,
     EvidenceDigestProvenance,
@@ -73,6 +74,7 @@ from yoetz.kernel.projections import (
     unanswered_finding_count,
 )
 from yoetz.kernel.reducers import replay
+from yoetz.ports.change_capture import TASK_CHANGE_BASE_MEDIA_TYPE
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import (
@@ -131,6 +133,8 @@ from yoetz.protocol.models import (
 __all__ = ["CheckpointReport", "SqliteLedger"]
 
 _GENESIS_DIGEST: Final = "genesis"
+# ``bundle_meta`` key of the task-start base pointer (ADR-031); the base itself is encrypted.
+_TASK_CHANGE_BASE_META_KEY: Final = "task_change_base"
 _CAPTURE_TICKET_SCHEMA_VERSION: Final = 11
 
 
@@ -2631,6 +2635,82 @@ class SqliteLedger:
         except (TypeError, ValueError) as exc:
             raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc
 
+    async def record_task_change_base(self, ref: ObjectRef) -> bool:
+        """Keep the task-start base object (ADR-031) as a durable root, once per task.
+
+        The pointer lives in ``bundle_meta`` beside the bundle's other identity facts and the
+        object joins the inventory, so orphan sweeps and backups keep it. A second call keeps the
+        first base: the base is the state when the task was created, never a later one.
+        """
+
+        if (
+            type(ref) is not ObjectRef
+            or ref.metadata.kind is not ObjectKind.CHANGE_CAPTURE
+            or ref.metadata.media_type != TASK_CHANGE_BASE_MEDIA_TYPE
+            or ref.metadata.task_id != self._task_id
+        ):
+            raise ValueError("task_change_base_invalid")
+        pointer = canonical_encode(
+            {
+                "commitment": ref.commitment,
+                "envelope_digest": ref.envelope_digest,
+                "object_id": ref.object_id,
+            }
+        ).decode("ascii")
+        await self._ensure_recovered()
+        async with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._verify_owner()
+                existing = self._db.execute(
+                    "SELECT 1 FROM bundle_meta WHERE key=?", (_TASK_CHANGE_BASE_META_KEY,)
+                ).fetchone()
+                if existing is None:
+                    self._inventory_object(ref)
+                    self._db.execute(
+                        "INSERT INTO bundle_meta(key, value) VALUES (?, ?)",
+                        (_TASK_CHANGE_BASE_META_KEY, pointer),
+                    )
+                self._db.execute("COMMIT")
+            except BaseException:
+                if self._db.get_autocommit() is False:
+                    self._db.execute("ROLLBACK")
+                raise
+        return existing is None
+
+    async def load_task_change_base(self) -> ObjectRef | None:
+        """Return the authenticated task-start base object, or ``None`` when none was kept."""
+
+        await self._ensure_recovered()
+        objects = self._objects
+        if objects is None:
+            return None
+        async with self._lock:
+            row = self._db.execute(
+                "SELECT value FROM bundle_meta WHERE key=?", (_TASK_CHANGE_BASE_META_KEY,)
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            parsed = strict_json_parse(cast(str, row[0]).encode("ascii"))
+            if type(parsed) is not dict:
+                raise ValueError("task_change_base_pointer_invalid")
+            pointer = cast(dict[str, object], parsed)
+            if set(pointer) != {"commitment", "envelope_digest", "object_id"}:
+                raise ValueError("task_change_base_pointer_invalid")
+            ref = await objects.resolve_verified(
+                cast(str, pointer["object_id"]), cast(str, pointer["envelope_digest"])
+            )
+            if (
+                ref.commitment != pointer["commitment"]
+                or ref.metadata.kind is not ObjectKind.CHANGE_CAPTURE
+                or ref.metadata.task_id != self._task_id
+            ):
+                raise ValueError("task_change_base_pointer_invalid")
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc
+        return ref
+
     async def renew_leases(self, lease: OperationLease) -> OperationLease:
         await self._ensure_recovered()
         async with self._lock:
@@ -2664,6 +2744,7 @@ class SqliteLedger:
         semantic_conclusion: str | None = None,
         prior_finding_verdicts: tuple[PriorFindingVerdictRecord, ...] = (),
         missing_for_assessment: tuple[MissingForAssessmentItem, ...] = (),
+        check_change_files: CheckChangeShownFiles | None = None,
     ) -> CheckCommitResult:
         await self._ensure_recovered()
         async with self._lock:
@@ -2692,6 +2773,7 @@ class SqliteLedger:
                     semantic_conclusion=semantic_conclusion,
                     missing_for_assessment=missing_for_assessment,
                     prior_finding_verdicts=prior_finding_verdicts,
+                    check_change_files=check_change_files,
                 )
             except PublicOperationError:
                 # The memory oracle terminalizes a frontier conflict before raising it. Preserve

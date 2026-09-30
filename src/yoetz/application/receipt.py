@@ -26,6 +26,7 @@ from yoetz.domain.events import (
 )
 from yoetz.domain.receipts import (
     CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP,
+    CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP,
     ReceiptDocument,
     ReceiptVersionSlice,
     receipt_document_from_json,
@@ -46,6 +47,9 @@ from yoetz.domain.values import (
     timestamp_from_datetime,
 )
 from yoetz.kernel.deterministic_checks import CaseGap, build_deterministic_case, case_coverage
+from yoetz.kernel.finding_resolution import (
+    unverified_resolution_finding_ids,
+)
 from yoetz.kernel.finding_todo import FindingTodoState, finding_todo_state
 from yoetz.kernel.lineage import evaluate_recorded_lineage
 from yoetz.kernel.projections import ProjectionState, observation_limitation_finding_ids
@@ -450,6 +454,30 @@ def _finding_states(projection: object) -> tuple[ReceiptFindingState, ...]:
     return tuple(states)
 
 
+def _check_change_resolution_gaps(
+    projection: ProjectionState, finding_states: tuple[ReceiptFindingState, ...]
+) -> list[CaseGap]:
+    """Disclose resolutions that compared a legacy raising view by length only (R945-02).
+
+    Such a resolution stands, but a receipt never presents it as content-verified. One task-wide
+    marker carries the code however many findings it covers, so the disclosure can never exhaust
+    the receipt's 64-gap bound; the receipt builder names the affected findings, boundedly.
+    """
+
+    affected = unverified_resolution_finding_ids(
+        projection, (state.finding_id for state in finding_states if state.resolved)
+    )
+    if not affected:
+        return []
+    return [
+        CaseGap(
+            CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP,
+            CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP,
+            (),
+        )
+    ]
+
+
 def _context(
     projection: object,
     frontier: Frontier,
@@ -558,6 +586,7 @@ def _context(
         record = projection.findings[state.finding_id]
         assert record.payload is not None
         coverage = weakest(coverage, record.payload.coverage)
+    gaps.extend(_check_change_resolution_gaps(projection, finding_states))
 
     # Lineage is replay-only.  The coordinator may have read live children earlier, but a
     # receipt never does: it evaluates the aggregate manifest events already present in this

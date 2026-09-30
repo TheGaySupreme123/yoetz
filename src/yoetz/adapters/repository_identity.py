@@ -150,4 +150,6 @@ async def resolve_repository_privacy_context(
     return RepositoryPrivacyContext(
         commitment=key.mac(REPOSITORY_PRIVACY_MAC_DOMAIN, message),
         identity_kind=identity_kind,
+        # Kept in memory beside the commitment it produced; see RepositoryPrivacyContext.
+        workspace_locator=locator,
     )

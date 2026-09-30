@@ -14,7 +14,7 @@ from yoetz.application.missing_for_assessment import (
     review_missing_for_assessment,
 )
 from yoetz.domain.coordination import CoordinationError, CoordinationErrorCode
-from yoetz.domain.events import LedgerRecord
+from yoetz.domain.events import CheckChangeShownFiles, LedgerRecord
 from yoetz.domain.findings import (
     FINDING_KIND_TRAITS,
     MAX_RECORDED_VERDICTS,
@@ -32,6 +32,7 @@ from yoetz.domain.findings import (
     semantic_provenance_to_json,
 )
 from yoetz.domain.receipts import (
+    CHECK_TIME_CHANGE_GAPS,
     COMPLETION_SCOPE_DECLARED_NONE_GAP,
     COMPLETION_SCOPE_UNDECLARED_GAP,
     OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
@@ -1135,6 +1136,8 @@ class FinalSemanticEvaluation:
     # Issue #907: the absolute workspace root the session opened with, anchoring absolute paths
     # an agent names; in process only, never recorded. ``None`` when it was not resolved.
     case_workspace_root: str | None = None
+    # ADR-031: keyed commitments to the check-time change files the review packet carried.
+    check_change_files: CheckChangeShownFiles | None = None
     # Set only on the nonterminal awaiting_human branch: what the caller must do to resume this
     # exact request. Every terminal outcome leaves it None. A one-use disclosure wait keeps its
     # job and attempt open; a missing standing repository grant stops before either exists.
@@ -1154,6 +1157,7 @@ class FinalSemanticEvaluation:
                 SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
                 SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
                 *TASK_STATEMENT_GAPS,
+                *CHECK_TIME_CHANGE_GAPS,
             }
         ):
             raise _invalid("semantic_judgment_invalid")
@@ -3080,6 +3084,12 @@ async def execute_check_commit(
                 CheckPhase.READY_TO_FINALIZE,
             )
             frozen = FrozenCase(frozen.case, lease)
+        semantic_conclusion = (
+            semantic_result.judgment.conclusion
+            if semantic_result.status is SemanticStatus.SUCCEEDED
+            and semantic_result.judgment is not None
+            else None
+        )
         committed = await runtime.ledger.commit_check_if_current(
             frozen,
             ranked,
@@ -3089,11 +3099,10 @@ async def execute_check_commit(
             semantic_result.provenance,
             request.request_id,
             scope=CheckScopeModel(claim_ids=scope.claim_ids, obligation_ids=scope.obligation_ids),
-            semantic_conclusion=(
-                semantic_result.judgment.conclusion
-                if semantic_result.status is SemanticStatus.SUCCEEDED
-                and semantic_result.judgment is not None
-                else None
+            semantic_conclusion=semantic_conclusion,
+            # Recorded only beside a conclusion: resolution reads it from completed reviews only.
+            check_change_files=(
+                None if semantic_conclusion is None else semantic_result.check_change_files
             ),
             prior_finding_verdicts=(
                 review.verdicts if semantic_result.status is SemanticStatus.SUCCEEDED else ()

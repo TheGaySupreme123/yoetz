@@ -51,6 +51,9 @@ class ObjectKind(str, Enum):  # noqa: UP042 - exact durable enum base
     CAPABILITY_EVIDENCE = "capability_evidence"
     PRIVACY_AUDIT = "privacy_audit"
     PROJECT_TEXT = "project_text"
+    # Service-captured repository change material (ADR-031): the task-start base record and the
+    # one check-time change object a check's AI-powered review reads.
+    CHANGE_CAPTURE = "change_capture"
 
 
 MAX_OBJECT_HEADER_BYTES: Final = 16 * 1024
@@ -74,6 +77,7 @@ OBJECT_COMMITMENT_DOMAINS: Final[Mapping[ObjectKind, bytes]] = MappingProxyType(
         ObjectKind.CAPABILITY_EVIDENCE: b"yoetz/object/capability_evidence/v1\x00",
         ObjectKind.PRIVACY_AUDIT: b"yoetz/object/privacy_audit/v1\x00",
         ObjectKind.PROJECT_TEXT: b"yoetz/object/project_text/v1\x00",
+        ObjectKind.CHANGE_CAPTURE: b"yoetz/object/change_capture/v1\x00",
     }
 )
 

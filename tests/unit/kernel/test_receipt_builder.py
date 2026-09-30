@@ -1659,3 +1659,44 @@ def test_a_rejection_accepted_row_stops_blocking_only_where_the_receipt_disclose
     )
     assert current.conclusion is not ReceiptConclusion.UNRESOLVED_FINDINGS_REMAIN
     assert current.rejection_accepted_finding_ids == (finding.finding_id,)
+
+
+@pytest.mark.parametrize(
+    ("reason", "phrase"),
+    (
+        ("unsafe_root", "failed a safety check"),
+        ("unsupported_repository", "setup the capture does not read"),
+        ("changed_during_capture", "kept changing while it was read"),
+        ("git_failed", "a Git command failed or ran out of time"),
+        ("repository_mismatch", "named a different repository"),
+    ),
+)
+def test_check_time_change_unavailable_reason_is_a_plain_sentence_in_every_format(
+    reason: str, phrase: str
+) -> None:
+    from yoetz.domain.receipts import (
+        CHECK_TIME_CHANGE_UNAVAILABLE_GAP,
+        check_time_change_unavailable_reason_gap,
+    )
+
+    code = check_time_change_unavailable_reason_gap(reason)
+    gaps = tuple(sorted((CHECK_TIME_CHANGE_UNAVAILABLE_GAP, code)))
+    coverage = _coverage(gaps=gaps)
+    receipt = _build(
+        _context(
+            coverage=coverage,
+            gaps=tuple(CaseGap(item, item, ()) for item in gaps),
+            check=_check(CheckVerdict.NO_ISSUE_DETECTED, coverage),
+        )
+    )
+    detail = next(gap.detail for gap in receipt.gaps if gap.code == code)
+    assert detail is not None and phrase in detail
+    wire = receipt_document_to_json(receipt)
+    assert wire == receipt_document_to_json(receipt_document_from_json(wire))
+    for rendered in (
+        str(wire),
+        render_receipt_human(receipt, markdown=True),
+        render_receipt_human(receipt, markdown=False),
+    ):
+        assert "The check-time change was unavailable: " in rendered
+        assert phrase in rendered

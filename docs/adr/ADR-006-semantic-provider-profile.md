@@ -174,9 +174,11 @@ and AI-powered review/privacy capability and conformance tests.
     way; script-mediated edits are not. Authenticated
     code is split into UTF-8-safe items within the existing per-item, item-count and total-byte caps;
     a delivered prefix reports `truncated_payload`, and excluded retained content reports
-    `content_unselected`. This is not a fresh Git snapshot at check time: shell-mediated edits,
-    changes outside supported visible fields, and uncaptured current state still need separately
-    recorded content/state evidence. A digest alone cannot supply missing code.
+    `content_unselected`. These captures are not a Git snapshot. The one repository read is the
+    check-time change of ADR-031: when the recipe selects diff excerpts, the service (never the
+    case builder) captures the change from the task-start commit to the working tree once per
+    check and the packet reserves room for it ahead of other excerpts, as `repository_excerpt`
+    items the inference channel must allow. A digest alone cannot supply missing code.
 13. **Reviewer output talks to the main agent through the existing workflow:** a successful model
     judgment may propose bounded `ReviewerChallenge` values. Each challenge names only case-bound
     refs, explains the discrepancy, states an alternative interpretation, addresses the main agent
@@ -854,7 +856,9 @@ while retaining the original readable finding's closed native capture limits:
 `host_outcome_unavailable`, `unpaired_event`, and `semantic_case_content_over_item_limit`
 (recorded clipping of an oversized item). Only codes already present on that original finding are
 tolerated. The check stamps the capture limits its review ran under onto every semantic finding it
-raises, so the baseline is durable finding coverage rather than the deterministic case alone.
+raises, so the baseline is durable finding coverage rather than the deterministic case alone. The
+ADR-031 check-time change limits are not baseline codes: ADR-031 decision 9 tolerates them on a
+re-review by comparing the files the raising and the re-review were shown.
 Original and current freshness must be readable (`current` or `partial`); `redacted_gap` is
 accepted only when a tolerated `captured_object_unavailable` explains it, mirroring the local
 host-limited exception. New gaps, redacted or missing ledger payloads, stale/unknown state,

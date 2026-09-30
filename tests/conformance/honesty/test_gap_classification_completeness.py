@@ -32,7 +32,10 @@ import pytest
 import yoetz
 from yoetz.domain.coordination import CoordinationGapCode
 from yoetz.domain.observation import ObservationGapCode
-from yoetz.domain.receipts import semantic_coverage_gap_code
+from yoetz.domain.receipts import (
+    CHECK_TIME_CHANGE_UNAVAILABLE_REASON_GAPS,
+    semantic_coverage_gap_code,
+)
 from yoetz.kernel.closure_readiness import (
     GAP_CLASSIFICATION,
     GAP_CLASSIFICATION_VERSION,
@@ -68,6 +71,10 @@ _NOT_GAP_CODES: Final = {
     "known_gaps": "field name of a coverage object",
     # A lineage read-gap *reason*; it is emitted only as lineage_manifest_<reason>.
     "unreadable": "lineage read-gap reason, emitted as lineage_manifest_unreadable",
+    # Check-time change unavailability reasons (ADR-031); emitted only as
+    # check_time_change_unavailable_<reason>, which the typed producers enumerate.
+    "no_linked_subject": "check-time change reason, emitted with its check_time_change prefix",
+    "no_packet_room": "check-time change reason, emitted with its check_time_change prefix",
 }
 
 # Formatted gap markers: literal prefix -> base code the marker classifies by (None when the
@@ -317,6 +324,8 @@ def _typed_producers() -> dict[str, str]:
             produced[code] = "COVERAGE_DEFAULTS_BY_CHANNEL"
     for reason in _READ_GAP_REASONS:
         produced[f"lineage_manifest_{reason}"] = "lineage manifest read-gap template"
+    for code in CHECK_TIME_CHANGE_UNAVAILABLE_REASON_GAPS:
+        produced[code] = "check_time_change_unavailable_reason_gap"
     return produced
 
 

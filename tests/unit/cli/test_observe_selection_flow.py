@@ -548,3 +548,74 @@ async def test_refused_summary_drains_its_lane_and_ingestion_continues(
         ] != []
     finally:
         sweeper.close()
+
+
+def test_pressure_that_withholds_detail_is_disclosed_on_check_coverage_and_spares_edits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#883 body ask 3: a pressure downgrade never silently thins what a check reviews.
+
+    Optional routine detail withheld under pressure carries its own gap from the envelope, through
+    materialized ledger coverage, into the check's folded coverage. Native edit content is never
+    optional, so the same pressure still captures it; the check-time change (ADR-031) is read by
+    the service at check time and is independent of observation pressure altogether.
+    """
+
+    from builders.policy_cases import act, make_case
+    from yoetz.domain.observation_budget import PressureEvaluation
+    from yoetz.kernel.deterministic_checks import case_coverage
+
+    store, root, workspace, commitment, session = setup_store(tmp_path)
+    store.set_session_selection(
+        commitment, session, ObservationSelection(detail=ObservationMode.DETAILED)
+    )
+    original = LocalObservationStore.update_selection_pressure
+
+    def pressured(
+        self: LocalObservationStore, workspace_commitment: str, session_commitment: str
+    ) -> PressureEvaluation:
+        evaluation = original(self, workspace_commitment, session_commitment)
+        return replace(evaluation, content_allowed=False)
+
+    captures: list[str] = []
+
+    def capture(phase: str, *args: object, **kwargs: object):
+        captures.append(phase)
+        return (), False
+
+    monkeypatch.setattr(LocalObservationStore, "update_selection_pressure", pressured)
+    monkeypatch.setattr(observe_hooks, "_visible_content_chunks", capture)
+    hook(root, workspace, "PreToolUse", "pressured-read")
+    hook(root, workspace, "PostToolUse", "pressured-read")
+
+    assert captures == []
+    post = store.list_pending_outbox_rows(commitment)[-1].envelope
+    assert "optional_observation_detail_omitted" in post.gap_codes
+    batch = materialize_observation_envelope(post, task_id=TASK)
+    assert "optional_observation_detail_omitted" in batch.coverage.known_gaps
+    case = make_case(extra_refs=(act(1),), coverage_overrides={act(1): batch.coverage})
+    assert "optional_observation_detail_omitted" in case_coverage(case, semantic=True).known_gaps
+
+    patch = "*** Begin Patch\n*** Update File: app.py\n@@\n-old\n+new\n*** End Patch\n"
+    for phase in ("PreToolUse", "PostToolUse"):
+        payload: dict[str, JsonValue] = {
+            "session_id": HOST,
+            "hook_event_name": phase,
+            "tool_name": "apply_patch",
+            "tool_use_id": "pressured-edit",
+            "tool_input": {"command": patch},
+        }
+        if phase == "PostToolUse":
+            payload["tool_response"] = "Exit code: 0\nWall time: 0.1 seconds\nOutput:\nSuccess."
+        assert (
+            observe_hooks.handle_observe(
+                event_name=phase,
+                stdin_bytes=canonical_encode(payload),
+                stdout=io.BytesIO(),
+                workspace=str(workspace),
+                _state=root,
+                skip_service=True,
+            )
+            == 0
+        )
+    assert captures == ["PreToolUse", "PostToolUse"]

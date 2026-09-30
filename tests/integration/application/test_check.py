@@ -36,6 +36,7 @@ from yoetz.application.service import VerificationPolicy
 from yoetz.domain.events import (
     ActionKind,
     ActionRecordedPayload,
+    CheckChangeShownFiles,
     ClaimKind,
     ClaimRecordedPayload,
     ClaimRecordedPayloadV1_1,
@@ -287,6 +288,7 @@ class _Ledger:
         semantic_conclusion: str | None = None,
         prior_finding_verdicts: tuple[object, ...] = (),
         missing_for_assessment: tuple[MissingForAssessmentItem, ...] = (),
+        check_change_files: CheckChangeShownFiles | None = None,
     ) -> CheckCommitResult:
         assert frozen == self.frozen
         self.last_verdicts = prior_finding_verdicts
