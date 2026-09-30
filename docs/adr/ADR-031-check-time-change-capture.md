@@ -217,15 +217,22 @@ content-returning read needed its own decision. This is that decision, for exact
    before `view_commitment` existed is still compared by the earlier rule (at least n bytes or the
    whole section, and at most k redactions or a clean first n bytes), and a resolution that relied
    on such a view is disclosed on the receipt as `check_time_change_resolution_unverified`, never
-   presented as verified; a repair record without a view commitment never covers a raising view that
-   has one. The repair's record may be incomplete, since each entry it holds is still true. An empty
-   R (reviews that carried no change, including every review from before this decision) is always
-   tolerated. R is also unknown, which never tolerates, when a raising record is incomplete or when
-   a raising review carried parts without a readable record (0.3 development builds). None of these
-   codes is a capture baseline stamped on the finding. Redacting any contributing check makes R
-   unknown and reopens a resolution that depended on it; redacting the resolving check reopens it as
-   before. The relation is a pure fold over recorded checks, so the memory and SQLite ledgers replay
-   it identically.
+   presented as verified. That disclosure is one task-wide receipt gap however many findings it
+   covers, so it never exhausts the receipt's 64-gap bound; its detail and the limitations section
+   name up to 16 affected findings and count the rest. Like every receipt gap it lowers the
+   receipt's ledger freshness from current to partial, so a receipt that would otherwise conclude
+   `no_unresolved_deterministic_findings` concludes `insufficient_coverage`. That downgrade is
+   deliberate: the resolution really was not verified against where the spans and hunks lay. It can
+   arise only for tasks carrying check records from 0.3 development builds of this change, because
+   every other record carries view commitments; a repair record without a view commitment never
+   covers a raising view that has one. The repair's record may be incomplete, since each entry it
+   holds is still true. An empty R (reviews that carried no change, including every review from
+   before this decision) is always tolerated. R is also unknown, which never tolerates, when a
+   raising record is incomplete or when a raising review carried parts without a readable record
+   (0.3 development builds). None of these codes is a capture baseline stamped on the finding.
+   Redacting any contributing check makes R unknown and reopens a resolution that depended on it;
+   redacting the resolving check reopens it as before. The relation is a pure fold over recorded
+   checks, so the memory and SQLite ledgers replay it identically.
 
 ## Consequences
 

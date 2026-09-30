@@ -221,7 +221,11 @@ plain sentence (for example, that the working tree kept changing, or that the re
 safety check). A later review clears an AI-powered finding despite these limits only when it saw
 each file the raising review saw, whole or through an identical view; for a file shown in part each
 check records a keyed commitment to where its redactions and hunks lay, never its content, so a
-moved redaction or hunk keeps the finding open. A change larger than the packet is cut and says so.
+moved redaction or hunk keeps the finding open. A task that still carries check records from a 0.3
+development build may have a finding resolved by the older comparison of lengths and counts only;
+its receipt says so under limitations and, because that resolution was not fully verified, reports
+insufficient coverage rather than a clean conclusion. A change larger than the packet is cut and
+says so.
 
 The change travels as **repository excerpts**. If your policy's AI-powered review channel does not
 allow repository excerpts, the change is never sent, and the check result says the review ran with

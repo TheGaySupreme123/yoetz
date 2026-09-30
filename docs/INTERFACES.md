@@ -6843,22 +6843,29 @@ entry without `view_commitment` (written before the field existed) falls back to
 n` or `q.section_admitted`) and (`q.redactions <= k` or `q.clean_bytes >= n`);
 `check_change_resolution_unverified(record)` is true for a resolution that tolerated check-time
 limits while R held such an entry, and the receipt then adds the gap
-`check_time_change_resolution_unverified` (marker `check_change_resolution_unverified:<finding id>`,
-with its fixed sentence). A repair entry without `view_commitment` never matches a raising entry
-that has one. The repair record may be incomplete; an empty R is always tolerated and an unknown R
-never. `FindingProjectionRecord` carries the replay-derived `check_change_raising_check_event_ids`
-(every contributing check, in fold order), `check_change_raised_files` (R as a complete
-`CheckChangeShownFiles`; `None` while unknown) and `resolution_depends_on_check_event_ids` (the
-contributors, when a resolution needed that tolerance). A check contributes to each semantic finding
-it returns when it recorded a conclusion or is the finding's raising check (same subject frontier
-and AI-powered review attempt). A contribution is the check's complete record, unknown for an
-incomplete record or carried-part codes without one, and empty otherwise; contributions merge with
-`CheckChangeShownFiles.merged` (union of whole files; a file seen in part through one view keeps it,
-through two different views (or one legacy and one committed) it must be seen whole, and two legacy
-views keep the larger length and fewer redactions; unknown past `MAX_CHECK_CHANGE_RAISED_FILES` =
-1024 files or when either side is unknown); past `MAX_CHECK_CHANGE_RAISING_CHECKS` = 64 contributors
-R is unknown. Redacting any contributor sets R unknown and reopens a resolution that depended on it;
-all three fields are emitted in projection snapshots only when set.
+`check_time_change_resolution_unverified` once, with the task-wide marker
+`check_time_change_resolution_unverified` however many findings it covers (receipts hold at most 64
+gaps and fail to build past that, so a per-finding marker could make the receipt unavailable);
+`unverified_resolution_finding_ids(projection, resolved_ids)` lists them, and the gap's `detail` and
+the limitations body carry the fixed sentence plus up to 16 affected finding ids and a count of the
+rest. As a receipt gap it lowers ledger freshness from `current` to `partial`, which turns a
+`no_unresolved_deterministic_findings` conclusion into `insufficient_coverage`; that is deliberate,
+and only tasks carrying check records from 0.3 development builds of ADR-031 can reach it. A repair
+entry without `view_commitment` never matches a raising entry that has one. The repair record may be
+incomplete; an empty R is always tolerated and an unknown R never. `FindingProjectionRecord` carries
+the replay-derived `check_change_raising_check_event_ids` (every contributing check, in fold order),
+`check_change_raised_files` (R as a complete `CheckChangeShownFiles`; `None` while unknown) and
+`resolution_depends_on_check_event_ids` (the contributors, when a resolution needed that tolerance).
+A check contributes to each semantic finding it returns when it recorded a conclusion or is the
+finding's raising check (same subject frontier and AI-powered review attempt). A contribution is the
+check's complete record, unknown for an incomplete record or carried-part codes without one, and
+empty otherwise; contributions merge with `CheckChangeShownFiles.merged` (union of whole files; a
+file seen in part through one view keeps it, through two different views (or one legacy and one
+committed) it must be seen whole, and two legacy views keep the larger length and fewer redactions;
+unknown past `MAX_CHECK_CHANGE_RAISED_FILES` = 1024 files or when either side is unknown); past
+`MAX_CHECK_CHANGE_RAISING_CHECKS` = 64 contributors R is unknown. Redacting any contributor sets R
+unknown and reopens a resolution that depended on it; all three fields are emitted in projection
+snapshots only when set.
 
 
 `check_recorded` version `1.3.0` adds required `semantic_conclusion` on succeeded attempts. The
