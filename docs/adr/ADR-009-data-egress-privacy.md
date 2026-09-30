@@ -123,8 +123,10 @@ case → single-use authorization → bounded gateway → bound sink/provider �
    **Revised 2026-09-29 — the provenance resolver ships (issue #914).** Production now composes
    `LocalPrivacyEnforcer` with a ledger-authorship resolver, so an agent reads back the evidence it
    published. The resolver consumes only authorship the service read from accepted event envelopes
-   at the page's frozen frontier (writer chain, session, ingestion sequence, service-derived
-   publication channel, observation stamp); it never reads a caller field. It attributes status
+   at the page's frozen frontier (writer chain, session, ingestion sequence, ledger-recorded
+   publication channel, observation stamp); it never reads a field of the request being projected.
+   A cooperative writer can record only the `cooperative_mcp` or `local_cli` channel; import and
+   observation channels are service-only. It attributes status
    evidence rows, whose prose comes from one source event: a row is `self_authored` only when that
    event was written by the requesting writer, in the requesting session, at or before the frontier,
    through `cooperative_mcp` or `local_cli`, without the observation stamp. Import channels are
@@ -134,10 +136,14 @@ case → single-use authorization → bounded gateway → bound sink/provider �
    matching session or host is not authorship and that host-captured prose must not be widened into
    the default ceiling. Reconciling that forward contract is left to a maintainer decision recorded
    on #914. Every other leaf is ambiguous and keeps the category ceiling, including every finding.
-   A reattached session is a new session, so rows the same writer published earlier are not
-   self-authored in it. The never-send scan still runs first, `sensitive_confidential` stays
-   absolute, and each projection still writes its receipt, whose approved categories show the
-   inclusion.
+   Attach opens a new session with a new writer, so rows published before it are not
+   self-authored for the attached session. A row whose source event a later redaction targets is
+   withdrawn from attribution even on a pinned read, so the exemption never re-discloses redacted
+   prose. The never-send scan still runs first, `sensitive_confidential` stays absolute, and each
+   projection still writes its receipt. The receipt's approved categories show the inclusion but
+   not the reason: the `self_authored` provenance is recorded only in the internal audit subject,
+   and surfacing it in `privacy receipts get` needs a design-gated egress-receipt schema change,
+   left as a follow-up.
 
    **Revised 2026-07-24 — default agent-context disclosure of verification output.** Under the
    default LOCAL_ONLY bootstrap policy, `agent_context` may include Yoetz-authored verification

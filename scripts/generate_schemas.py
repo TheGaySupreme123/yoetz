@@ -2464,7 +2464,7 @@ def _status_result_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         if "coordination" not in policy_values:
             policy_values.append("coordination")
             policy_values.sort(key=lambda item: str(item).encode("ascii"))
-    # Issue #914, unreleased in-place addition: each evidence row's service-stamped channel. It is
+    # Issue #914, unreleased in-place addition: each evidence row's ledger-recorded channel. It is
     # optional so rows produced by earlier 0.3 builds still validate; the service always fills it.
     evidence_properties = cast(
         dict[str, JsonValue], cast(dict[str, JsonValue], definitions["evidence_item"])["properties"]

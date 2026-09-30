@@ -42,6 +42,9 @@ from yoetz.domain.events import (
     EventSchema,
     EvidenceKind,
     EvidenceRecordedPayload,
+    RedactionMethod,
+    RedactionReasonCategory,
+    RedactionRecordedPayload,
     encode_payload,
     media_type_for,
 )
@@ -595,11 +598,11 @@ async def test_never_send_match_in_own_evidence_stays_redacted() -> None:
 
 
 async def test_provenance_is_recomputed_per_session_and_frontier() -> None:
-    """Reattach opens a new session: the old session's rows are not self-authored in it.
+    """Attach opens a new session and writer: earlier rows are not self-authored for it.
 
-    The later ``start`` attach is the event that changes the answer for the same task and writer
-    identity; the successor's read of the very frontier the predecessor already read must not
-    reuse the predecessor's decision.
+    The later ``start`` attach is the event that changes the answer for the same task; the
+    successor's read of the very frontier the predecessor already read must not reuse the
+    predecessor's decision.
     """
 
     app, _policy = await build_projection_application(seed=9500)
@@ -615,6 +618,7 @@ async def test_provenance_is_recomputed_per_session_and_frontier() -> None:
     assert attached.outcome == "attached"
     assert attached.task_id == started.task_id
     assert attached.session_id != started.session_id
+    assert attached.writer_id != started.writer_id
 
     for seed, at_frontier in ((9540, None), (9542, first)):
         _internal, successor = await _status(
@@ -747,7 +751,7 @@ async def test_author_mine_returns_exactly_the_callers_items_across_pages() -> N
     assert captured_rows
     assert {channels[key] for key in captured_rows} == {"hook_observed"}
 
-    # A reattached session owns none of the predecessor's rows.
+    # An attached session (new session and writer) owns none of the rows published before it.
     attached = await app.start(start_request(9695, title="Evidence read-back", refs=True))
     assert type(attached) is StartInternalResult
     _internal, successor = await _status(
@@ -759,3 +763,53 @@ async def test_author_mine_returns_exactly_the_callers_items_across_pages() -> N
         evidence_filter=mine,
     )
     assert _rows(successor) == {}
+
+
+async def test_later_redaction_withdraws_self_authored_prose_from_pinned_reads() -> None:
+    """A pinned read replays its own prefix; the exemption must not re-disclose redacted prose."""
+
+    app, _policy = await build_projection_application(seed=9700)
+    started = await _start(app, 9701)
+    published, diff_id, test_id = await _publish_agent_evidence(app, started, 9710)
+    first = published.result_frontier.sequence
+    payload = RedactionRecordedPayload(
+        target_event_ids=(event_id(published.accepted_events[0].event_id),),
+        target_object_ids=(),
+        method=next(iter(RedactionMethod)),
+        reason_category=next(iter(RedactionReasonCategory)),
+        authority=actor_id("local-human"),
+        remaining_gap="redacted_evidence",
+    )
+    await _append(
+        app,
+        started,
+        seed=9720,
+        expected_frontier=first,
+        writer=started.writer_id,
+        author=_agent_actor("projection-sweep"),
+        channel=PublicationChannel.COOPERATIVE_MCP,
+        drafts=(
+            (
+                EventDraft(
+                    event_id(protocol_id("evt_", 9721)),
+                    EventSchema("redaction_recorded", "1.0.0"),
+                    timestamp_from_datetime(datetime(2026, 7, 28, 12, 5, tzinfo=UTC)),
+                    (),
+                    payload,
+                    (),
+                    (),
+                ),
+                canonical_encode(encode_payload(payload)),
+            ),
+        ),
+    )
+
+    _internal, head = await _status(app, started, 9730)
+    assert diff_id not in _rows(head)
+    assert _rows(head)[test_id]["description"] == _TEST_DESCRIPTION
+    _internal, pinned = await _status(app, started, 9732, at_frontier=first)
+    rows = _rows(pinned)
+    assert rows[diff_id]["description"] == _OMITTED
+    assert rows[diff_id]["reference"] == _OMITTED
+    assert rows[test_id]["description"] == _TEST_DESCRIPTION
+    assert _DIFF_DESCRIPTION.encode() not in canonical_encode(cast(JsonValue, dict(pinned)))

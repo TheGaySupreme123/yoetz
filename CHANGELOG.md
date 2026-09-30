@@ -10,8 +10,9 @@ reverse-chronological released versions.
 
 - `status view=evidence` accepts `filter.author=mine`, which lists exactly the evidence the
   requesting writer published in its current session (decided by the service from ledger
-  authorship, never a caller flag), and every evidence row now names its service-stamped
-  `publication_channel`. Both are optional additions made in place to the unreleased 0.3 status
+  authorship, never a caller flag), and every evidence row now names the ledger-recorded
+  `publication_channel` of its source event (a cooperative writer can record only `cooperative_mcp`
+  or `local_cli`; import and observation channels are service-only). Both are optional additions made in place to the unreleased 0.3 status
   request 1.2.0 and status result 1.4.0. The CLI human status and the MCP text summary show the
   channel. Dogfood evidence per host remains tracked in #914.
 

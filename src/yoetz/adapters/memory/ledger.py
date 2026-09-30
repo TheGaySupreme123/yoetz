@@ -1179,7 +1179,7 @@ def _evidence_source_authorship(
     """Read each readable evidence row's source-event authorship from the frozen prefix.
 
     Every value comes from the accepted event envelope (writer chain, session, ingestion sequence,
-    service-derived publication channel and observation stamp). It is recomputed for every query
+    ledger-recorded publication channel and observation stamp). It is recomputed for every query
     so a requester-specific decision is never cached across frontiers or writers.
     """
 
@@ -2393,8 +2393,26 @@ class MemoryLedgerAdapter:
         selected = tuple(filtered_items[: query.limit])
         item_sources: tuple[tuple[SourceAuthorship, ...], ...] = ()
         if view is ProjectionView.EVIDENCE and selected:
+            # A pinned read replays its own prefix, so a row redacted later still carries its
+            # prose there. The self-authorship exemption must never re-disclose what the current
+            # ledger has redacted: such a row stays unattributed and keeps the category ceiling.
+            redacted_later = frozenset(
+                target
+                for row in records
+                if row.ledger.ingestion_sequence > query.requested_frontier.sequence
+                and row.schema.name == "redaction_recorded"
+                for target in row.projection_locator.redaction_target_event_ids
+            )
+            withdrawn = frozenset(
+                evidence
+                for evidence, record in effective_projection.evidence.items()
+                if record.source_event_id in redacted_later
+            )
             item_sources = tuple(
-                () if (source := evidence_sources.get(item.evidence_id)) is None else (source,)
+                ()
+                if item.evidence_id in withdrawn
+                or (source := evidence_sources.get(item.evidence_id)) is None
+                else (source,)
                 for item in selected
                 if type(item) is StatusEvidenceItemModel
             )

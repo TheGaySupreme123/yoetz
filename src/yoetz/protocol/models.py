@@ -3023,7 +3023,8 @@ class StatusEvidenceItemModel(_ClosedModel):
     optional_non_null_fields = frozenset({"publication_channel"})
 
     evidence_id: EvidenceIdWire
-    # Service-stamped channel of the row's source event (structural, never caller-asserted). The
+    # The ledger-recorded channel of the row's source event: a cooperative writer can record only
+    # cooperative_mcp or local_cli, while import and observation channels are service-only. The
     # service always fills it; it stays optional so rows from earlier 0.3 builds still parse.
     publication_channel: (
         Literal[

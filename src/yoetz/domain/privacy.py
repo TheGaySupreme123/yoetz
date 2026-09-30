@@ -1453,11 +1453,14 @@ _MAX_ITEM_SOURCES: Final = 64
 
 @dataclass(frozen=True, slots=True)
 class SourceAuthorship:
-    """Service-stamped authorship of one accepted ledger event that contributes to a row.
+    """Ledger-recorded authorship of one accepted event that contributes to a row.
 
-    Every field is read from the accepted event envelope in the ledger; nothing here is caller
-    input. ``observation_authored`` is the service-stamped observation coordinator authorship
-    predicate, which a cooperative writer cannot assert for itself.
+    Every field is read from the accepted event envelope in the ledger, never from the request
+    being projected. Writer chain, session and sequence are service-assigned. The publication
+    channel is the ledger-recorded channel: a cooperative writer can record only
+    ``cooperative_mcp`` or ``local_cli``, while import and observation channels are service-only.
+    ``observation_authored`` is the observation coordinator authorship predicate, which a
+    cooperative writer cannot assert for itself.
     """
 
     writer_id: str

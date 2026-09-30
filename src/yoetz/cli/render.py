@@ -368,8 +368,8 @@ def render_human_status(result: StatusSuccessModel) -> str:
         if page.next_cursor is not None:
             lines.append(f"Next page: {page.next_cursor}")
     if isinstance(result.page, StatusEvidencePageModel):
-        # One line per row: the service-stamped channel lets a reader tell their own published
-        # evidence from host-observed captures without reading any prose.
+        # One line per row: the ledger-recorded channel lets a reader tell cooperative evidence
+        # from host-observed captures without reading any prose.
         for item in result.page.items:
             availability = "" if item.available else ", unavailable"
             lines.append(

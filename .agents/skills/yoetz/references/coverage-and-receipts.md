@@ -198,24 +198,24 @@ Installing a harness integration or firing a trigger-only hook does not strength
 
 ## Discover evidence before authoring replacements
 
-Before publishing evidence for a material claim, check what already exists instead of
-re-authoring it. Cite the `evidence_id`s you already published: they are in your own
-`publish_work` requests, and each accepted result confirms the events were recorded.
-`status view=evidence` with `filter.author=mine` lists exactly the items you published in this
-session, with their descriptions returned to you. Find native captures with
-`filter.strength=immutable_snapshot`; every row names its `publication_channel`. Preserve the view,
-filter, frontier and original `limit` with each cursor; changing page size starts a fresh query
-with no cursor. Cite a native capture only when a structural link you can read ties it to the
-claim: a `status view=results` row whose `evidence_refs` names it, with that result's `action_id`
-and `outcome`, or a matching subject-state or byte digest. A captured object ID alone is not a
-typed provenance label or evidence of relevance; if no structural link establishes the relation,
-leave it unknown.
+Before publishing evidence for a material claim, check what already exists instead of re-authoring
+it. Cite the `evidence_id`s you already published: they are in your own `publish_work` requests, and
+each accepted result confirms the events were recorded. `status view=evidence` with
+`filter.author=mine` lists exactly the items you published in this session, with their descriptions
+returned to you. Find native captures with `filter.strength=immutable_snapshot`; every row names its
+`publication_channel`. Preserve the view, filter, frontier and original `limit` with each cursor;
+changing page size starts a fresh query with no cursor. Cite a native capture only when a structural
+link you can read ties it to the claim: a `status view=results` row whose `evidence_refs` names it,
+with that result's `action_id` and `outcome`, or a matching subject-state or byte digest. A captured
+object ID alone is not a typed provenance label or evidence of relevance; if no structural link
+establishes the relation, leave it unknown.
 
 A `description` or `reference` returned as omitted with `local_disclosure_not_authorized` is a
 privacy setting, not missing evidence: the item still exists, and republishing it does not reveal
 it. Host-observed and other writers' descriptions stay omitted unless the owner grants
-`evidence_excerpt` to agent context. Walk the unfiltered list and match on descriptions only when the current projection shows
-them; never page through every item to match prose the projection omits.
+`evidence_excerpt` to agent context. Walk the unfiltered list and match on descriptions only when
+the current projection shows them; never page through every item to match prose the projection
+omits.
 
 Reuse suitable existing native evidence IDs directly in the claim's `supporting_refs` and relevant
 result evidence references. Do not replace matching observed bytes with a duplicate
