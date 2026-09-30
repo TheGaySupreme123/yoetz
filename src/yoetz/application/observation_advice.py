@@ -51,6 +51,7 @@ __all__ = [
     "ADVICE_SEMANTIC_DEFERRED_GAP",
     "ADVICE_SEMANTIC_DEFERRED_REASON",
     "ADVICE_SEMANTIC_PENDING_GAP",
+    "ADVICE_SEMANTIC_UNREACHABLE_REASON",
     "ADVICE_SEMANTIC_UNAVAILABLE_GAP",
     "semantic_state_from_addon",
     "SemanticAdviceScheduler",
@@ -92,6 +93,11 @@ ADVICE_SEMANTIC_UNAVAILABLE_GAP: Final = "advice_semantic_unavailable"
 ADVICE_SEMANTIC_DEFERRED_GAP: Final = "advice_semantic_deferred"
 _ADVICE_SEMANTIC_PENDING_REASON: Final = "pending"
 ADVICE_SEMANTIC_DEFERRED_REASON: Final = "deferred"
+# No reachable provider (#923): no endpoint bound, LLM-inference egress denied, the configured
+# credential absent, or the task route not ACTIVE with a granted repository authority. Nothing is
+# enqueued and no provider is contacted; the condition surfaces once as
+# ``advice_semantic_unavailable`` and never as pending work.
+ADVICE_SEMANTIC_UNREACHABLE_REASON: Final = "provider_unreachable"
 _SEMANTIC_SUMMARY_FALLBACK: Final = "Model-derived observation note"
 _SEMANTIC_DETAIL_FALLBACK: Final = "Additive AI-powered advice over minimized evidence"
 _VALID_ADVICE_NEXT_ACTIONS: Final[frozenset[str]] = frozenset(
@@ -212,10 +218,11 @@ def semantic_state_from_addon(
 
     ``output_usable`` is False when a succeeded attempt's output failed advice-side structural
     validation and left no usable finding; ADR-006 records that as ``failed`` (a terminal attempt
-    without validated output), not ``ready``.
+    without validated output), not ``ready``. With no reachable provider no attempt was
+    requested, so the state is ``disabled`` (#923); the addon still carries the unavailable gap.
     """
 
-    if addon is None:
+    if addon is None or addon.failure_reason == ADVICE_SEMANTIC_UNREACHABLE_REASON:
         return "disabled"
     if addon.failure_reason is None:
         return "ready" if output_usable else "failed"
@@ -820,7 +827,9 @@ def build_observation_advice_snapshot(
     semantic_evidence_digest: str | None = None
     # A durable attempt that has not finished, or finished without validated output, is a
     # coverage gap and never an AI-powered review check type (#619). The addon carries no finding ids in
-    # either case, so the structural validation below cannot mistake it for provider output.
+    # either case, so the structural validation below cannot mistake it for provider output. A
+    # condition with no reachable provider has no row at all and reads as unavailable, never
+    # pending (#923).
     semantic_pending = (
         semantic is not None and semantic.failure_reason == _ADVICE_SEMANTIC_PENDING_REASON
     )

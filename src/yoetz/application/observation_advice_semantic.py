@@ -9,11 +9,23 @@ may add AI-powered advice; every other state stays a truthful bounded coverage g
 
 Frequency bound (#888): reuse is keyed by the stable candidate identity (rule, kind, next action,
 summary, and scoped gaps; never the rolling evidence basis or per-rule evidence counts). A
-terminal non-success for that identity is re-admitted after an exponential backoff, or at once
-for ``authorization_missing`` when the task route has since become active. A new admission is
+terminal non-success for that identity is re-admitted after an exponential backoff. A new
+admission is
 refused while the session's last provider-reaching attempt is younger than the configured
 minimum interval; the refusal is reported as ``deferred`` and a revisit is scheduled for when
 the interval elapses, so suppressed work is retried without waiting for another hook.
+
+Reachability (#923): admission first asks whether a usable provider exists right now (an endpoint
+bound, LLM-inference egress admitted by the machine policy, the configured credential present) and
+whether the session's task route can reach it (ACTIVE, with a granted repository authority that
+admits LLM inference). Without both, nothing is written and no revisit is scheduled; an
+already-succeeded review of the same identity is still reused, and every other state reports
+``provider_unreachable`` (the ``advice_semantic_unavailable`` gap), never ``pending``. The probes
+run on every build, so a stored credential, an enabled channel, a granted repository, or a newly
+bound provider (which recomposes the service) admits the next eligible condition without
+restarting the host session. A row that still ends ``authorization_missing`` (authority lost
+between admission and dispatch) waits out the base backoff like any pre-provider failure, so a
+disagreement between probe and dispatch can never re-admit on every build.
 """
 
 from __future__ import annotations
@@ -22,10 +34,11 @@ import asyncio
 import contextlib
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Final, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Final, Literal, Protocol, cast
 
 from yoetz.application.observation_advice import (
     ADVICE_SEMANTIC_DEFERRED_REASON,
+    ADVICE_SEMANTIC_UNREACHABLE_REASON,
     ObservationAdviceCandidate,
     ObservationAdviceSemanticAddon,
     minimized_semantic_evidence_packet,
@@ -38,16 +51,22 @@ from yoetz.ports.semantic_budget import (
 )
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 
+if TYPE_CHECKING:
+    from yoetz.application.egress import SemanticEgressAttemptUnknown
+
 __all__ = [
+    "ADVICE_SEMANTIC_CANCEL_RECOVERY_SECONDS",
     "ADVICE_SEMANTIC_FAILURE_REASONS",
     "ADVICE_SEMANTIC_PENDING_REASON",
     "DEFAULT_ADVICE_SEMANTIC_MAX_PENDING",
     "DEFAULT_ADVICE_SEMANTIC_MIN_INTERVAL_SECONDS",
+    "DEFAULT_ADVICE_SEMANTIC_RECONCILE_TIMEOUT_SECONDS",
     "MAX_ADVICE_SEMANTIC_BACKOFF_FACTOR",
     "MAX_ADVICE_SEMANTIC_ATTEMPTS",
     "AdviceSemanticCancellationReconciler",
     "AdviceSemanticDispatch",
     "AdviceSemanticDrainHandle",
+    "AdviceSemanticProviderReady",
     "ObservationAdviceSemanticAttempt",
     "ObservationAdviceSemanticDeferral",
     "ObservationAdviceSemanticOutcome",
@@ -58,6 +77,7 @@ __all__ = [
     "addon_from_attempt",
     "advice_candidate_identity",
     "advice_semantic_retry_delay_seconds",
+    "reconcile_cancelled_advice_request",
 ]
 
 type AttemptStatus = Literal[
@@ -90,6 +110,15 @@ DEFAULT_ADVICE_SEMANTIC_MIN_INTERVAL_SECONDS: Final = 180
 # Retries of one failed candidate identity back off exponentially from the minimum interval and
 # stop growing at this multiple of it (180 s -> 360 s -> ... -> 48 min at the default).
 MAX_ADVICE_SEMANTIC_BACKOFF_FACTOR: Final = 16
+# Upper bound on the shielded post-cancellation reconciliation, so it can never hold a foreground
+# rebind open. A reconciler that needs a slower lookup must bound it below this itself.
+DEFAULT_ADVICE_SEMANTIC_RECONCILE_TIMEOUT_SECONDS: Final = 5.0
+# The cancelled-request egress lookup waits on the privacy admission lock, which a foreground check
+# may hold for its whole provider call, so it is bounded inside the worker's bound above: a lookup
+# that cannot finish still records the usage-unknown provider identity (#923).
+ADVICE_SEMANTIC_CANCEL_RECOVERY_SECONDS: Final = (
+    DEFAULT_ADVICE_SEMANTIC_RECONCILE_TIMEOUT_SECONDS * 0.8
+)
 _MAX_REVISIT_TIMERS: Final = 256
 # Failure reasons recorded before any provider request: they neither consume the session's rate
 # limit nor wait on a provider-failure backoff longer than the base interval.
@@ -238,7 +267,6 @@ class ObservationAdviceSemanticRepository(Protocol):
         max_pending: int,
         min_interval_seconds: int = 0,
         retry_base_seconds: int = 0,
-        retry_now: bool = False,
     ) -> ObservationAdviceSemanticAttempt | ObservationAdviceSemanticDeferral: ...
 
     def lookup(
@@ -280,9 +308,14 @@ type AdviceSemanticCancellationReconciler = Callable[
     [ObservationAdviceSemanticAttempt], Awaitable[ObservationAdviceSemanticOutcome | None]
 ]
 type NowProvider = Callable[[], str]
-# ``(yoetz_session_id) -> route is ACTIVE with repository authority``; consulted only to let an
-# ``authorization_missing`` identity retry before its backoff once the route became active.
+# ``(yoetz_session_id) -> the task route can reach a provider`` (#923): the route is ACTIVE, and
+# its repository authority is granted and admits LLM-inference egress. Read from the policy store,
+# never through the privacy admission lock; gates admission together with provider readiness.
 type AdviceSemanticRouteReady = Callable[[str], Awaitable[bool]]
+# ``() -> a usable provider exists now`` (#923): an endpoint is bound, the machine privacy policy
+# admits LLM-inference egress, and the configured credential is present. Read from current facts
+# on every build, never from the READY snapshot; a probe failure counts as not ready.
+type AdviceSemanticProviderReady = Callable[[], Awaitable[bool]]
 # ``(workspace, yoetz_session_id, delay_seconds)``: ask for an advice rebuild once a deferred or
 # backed-off admission becomes eligible. Must not block; the supervisor owns the timer.
 type AdviceSemanticRevisit = Callable[[str, str, float], None]
@@ -334,6 +367,51 @@ def addon_from_attempt(
     )
 
 
+async def reconcile_cancelled_advice_request(
+    minted: tuple[str, str] | None,
+    recover: Callable[[str], Awaitable[SemanticEgressAttemptUnknown | None]] | None,
+    *,
+    timeout_seconds: float = ADVICE_SEMANTIC_CANCEL_RECOVERY_SECONDS,
+) -> ObservationAdviceSemanticOutcome | None:
+    """Outcome for an advisory dispatch cancelled by a foreground rebind (#755, #923).
+
+    ``minted`` is the ``(request_id, provider_id)`` the dispatch minted before entering the
+    privacy-gated provider path, or ``None`` when it was cancelled earlier. ``None`` is returned
+    only when no provider call can have started: nothing was minted, or the audit proves the
+    request's disclosure authorization was never consumed. Otherwise the call's usage is unknown
+    and the row names the provider, plus the consumed attempt's terminal receipt (else its
+    privacy proposal) when the bounded lookup finds it. The provider is never re-entered.
+    """
+
+    if minted is None:
+        return None
+    request_id, provider_id = minted
+    usage_unknown = ObservationAdviceSemanticOutcome(
+        status="cancelled", failure_reason="cancelled", provider_identity=provider_id
+    )
+    if recover is None:
+        return usage_unknown
+    try:
+        recovered = await asyncio.wait_for(recover(request_id), timeout_seconds)
+    except TimeoutError:
+        return usage_unknown
+    except Exception as exc:  # noqa: BLE001 - an unreadable audit cannot prove no call started
+        record_unexpected_exception_without_raising(
+            exc,
+            component="application.observation_advice_semantic",
+            operation="cancelled_request_recovery_failed",
+        )
+        return usage_unknown
+    if recovered is None:
+        return None
+    return ObservationAdviceSemanticOutcome(
+        status="cancelled",
+        failure_reason="cancelled",
+        attempt_receipt=recovered.receipt_id or recovered.privacy_proposal_id,
+        provider_identity=provider_id,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ObservationAdviceSemanticScheduler:
     """Advice-build side of the worker: look up or enqueue, never dispatch.
@@ -349,6 +427,7 @@ class ObservationAdviceSemanticScheduler:
     min_interval_seconds: int = DEFAULT_ADVICE_SEMANTIC_MIN_INTERVAL_SECONDS
     route_ready: AdviceSemanticRouteReady | None = field(default=None, compare=False)
     revisit: AdviceSemanticRevisit | None = field(default=None, compare=False)
+    provider_ready: AdviceSemanticProviderReady | None = field(default=None, compare=False)
 
     async def review(
         self,
@@ -379,21 +458,19 @@ class ObservationAdviceSemanticScheduler:
         latest = repository.latest_for_identity(
             yoetz_session_id=yoetz_session_id, identity=identity
         )
-        retry_now = False
-        if (
-            latest is not None
-            and latest.status == "unavailable"
-            and latest.failure_reason == "authorization_missing"
-            and self.route_ready is not None
+        if not (
+            await self._probe(self.provider_ready, "provider_ready_probe_failed")
+            and await self._probe(self.route_ready, "route_ready_probe_failed", yoetz_session_id)
         ):
-            try:
-                retry_now = bool(await self.route_ready(yoetz_session_id))
-            except Exception as exc:  # noqa: BLE001 - a probe failure keeps the normal backoff
-                record_unexpected_exception_without_raising(
-                    exc,
-                    component="application.observation_advice_semantic",
-                    operation="route_ready_probe_failed",
-                )
+            # Advice that cannot reach a provider never enqueues (#923): no row, no revisit, no
+            # pending gap. A review this identity already completed stays a recorded fact.
+            if latest is not None and latest.status == "succeeded":
+                return addon_from_attempt(latest)
+            return ObservationAdviceSemanticAddon(
+                finding_ids=(),
+                evidence_digest=None,
+                failure_reason=ADVICE_SEMANTIC_UNREACHABLE_REASON,
+            )
         payload = canonical_encode(cast(JsonValue, dict(packet)))
         subject = canonical_digest(cast(JsonValue, dict(packet)))
         scheduled = repository.schedule(
@@ -407,7 +484,6 @@ class ObservationAdviceSemanticScheduler:
             max_pending=self.max_pending,
             min_interval_seconds=self.min_interval_seconds,
             retry_base_seconds=self.min_interval_seconds,
-            retry_now=retry_now,
         )
         if isinstance(scheduled, ObservationAdviceSemanticDeferral):
             self._request_revisit(workspace, yoetz_session_id, scheduled.retry_after_seconds)
@@ -420,6 +496,24 @@ class ObservationAdviceSemanticScheduler:
                 failure_reason=ADVICE_SEMANTIC_DEFERRED_REASON,
             )
         return addon_from_attempt(scheduled)
+
+    async def _probe(
+        self,
+        probe: Callable[..., Awaitable[bool]] | None,
+        operation: str,
+        *arguments: str,
+    ) -> bool:
+        if probe is None:
+            return True
+        try:
+            return bool(await probe(*arguments))
+        except Exception as exc:  # noqa: BLE001 - an unreadable fact admits nothing this build
+            record_unexpected_exception_without_raising(
+                exc,
+                component="application.observation_advice_semantic",
+                operation=operation,
+            )
+            return False
 
     def _request_revisit(self, workspace: str, yoetz_session_id: str, delay: float) -> None:
         revisit = self.revisit
@@ -456,7 +550,7 @@ class ObservationAdviceSemanticWorker:
     now: NowProvider
     lease_expires_at: NowProvider
     reconcile_cancelled: AdviceSemanticCancellationReconciler | None = None
-    reconcile_timeout_seconds: float = 5.0
+    reconcile_timeout_seconds: float = DEFAULT_ADVICE_SEMANTIC_RECONCILE_TIMEOUT_SECONDS
 
     def __post_init__(self) -> None:
         self._active_task: asyncio.Task[object] | None = None

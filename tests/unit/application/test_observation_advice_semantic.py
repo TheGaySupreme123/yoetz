@@ -39,6 +39,7 @@ from yoetz.application.observation_advice_semantic import (
 )
 from yoetz.application.observation_coordinator import ObservationCoordinator
 from yoetz.domain.observation import (
+    AdviceSnapshot,
     ObservationCursor,
     ObservationEnvelope,
     ObservationGapCode,
@@ -1174,8 +1175,13 @@ def test_more_evidence_for_the_same_rule_reuses_the_reviewed_identity() -> None:
     assert only.status == "succeeded"
 
 
-def test_authorization_missing_retries_after_backoff_or_once_route_is_active() -> None:
-    """Review P1 (#890): a non-success row is not sticky for an unchanged condition."""
+def test_authorization_missing_backs_off_instead_of_retrying_on_every_build() -> None:
+    """A non-success row is not sticky (#890), but never re-admitted hot (#923).
+
+    ``authorization_missing`` now only arises when authority was lost between the route probe
+    and the dispatch, so it waits the base backoff like any pre-provider failure; an
+    unreachable route writes nothing at all.
+    """
 
     db, repository = _repository()
     store = _Store(repository)
@@ -1187,7 +1193,7 @@ def test_authorization_missing_retries_after_backoff_or_once_route_is_active() -
         ),
         at="2026-09-08T21:00:01.000Z",
     )
-    # Inside the backoff with the route still inactive: no new row, truthful reason, revisit.
+    # The route cannot reach a provider: no row, no revisit, disclosed as unavailable.
     revisits: list[tuple[str, str, float]] = []
     held = asyncio.run(
         _scheduler_builder("2026-09-08T21:01:00.000Z", revisits, route_ready=False).build(
@@ -1198,11 +1204,24 @@ def test_authorization_missing_retries_after_backoff_or_once_route_is_active() -
     )
     assert held is not None
     assert ADVICE_SEMANTIC_UNAVAILABLE_GAP in held.confidence_coverage.known_gaps
+    assert ADVICE_SEMANTIC_PENDING_GAP not in held.confidence_coverage.known_gaps
     assert len(_rows(db, repository)) == 1
-    assert revisits == [(_COMMITMENT, _SESSION, pytest.approx(121.0))]
-    # The route became active: retry at once. Pre-provider failures consume no rate limit.
+    assert revisits == []
+    # Reachable again, but inside the base backoff: still no new row; the revisit waits it out.
+    backing_off = asyncio.run(
+        _scheduler_builder("2026-09-08T21:01:30.000Z", revisits, route_ready=True).build(
+            _COMMITMENT,
+            store,
+            yoetz_session_id=_SESSION,  # type: ignore[arg-type]
+        )
+    )
+    assert backing_off is not None
+    assert ADVICE_SEMANTIC_UNAVAILABLE_GAP in backing_off.confidence_coverage.known_gaps
+    assert len(_rows(db, repository)) == 1
+    assert revisits == [(_COMMITMENT, _SESSION, pytest.approx(91.0))]
+    # The backoff elapsed: retried once. Pre-provider failures consume no rate limit.
     asyncio.run(
-        _scheduler_builder("2026-09-08T21:01:30.000Z", route_ready=True).build(
+        _scheduler_builder("2026-09-08T21:03:01.000Z", route_ready=True).build(
             _COMMITMENT,
             store,
             yoetz_session_id=_SESSION,  # type: ignore[arg-type]
@@ -1212,7 +1231,7 @@ def test_authorization_missing_retries_after_backoff_or_once_route_is_active() -
     assert first.failure_reason == "authorization_missing"
     assert retry.basis_digest == first.basis_digest + "#1"
     assert retry.status == "pending"
-    retried = _complete_next(repository, _SUCCEEDED, at="2026-09-08T21:01:40.000Z")
+    retried = _complete_next(repository, _SUCCEEDED, at="2026-09-08T21:03:10.000Z")
     assert retried.attempt_id == retry.attempt_id
     ready = asyncio.run(
         _scheduler_builder("2026-09-08T21:30:00.000Z").build(
@@ -1223,6 +1242,58 @@ def test_authorization_missing_retries_after_backoff_or_once_route_is_active() -
     )
     assert ready is not None and ready.semantic_attempt_state == "ready"
     assert len(_rows(db, repository)) == 2
+
+
+def test_route_that_cannot_reach_a_provider_writes_no_row() -> None:
+    """An inactive route, or one without a granted repository authority, enqueues nothing."""
+
+    db, repository = _repository()
+    store = _ManyFailuresStore(repository)
+    revisits: list[tuple[str, str, float]] = []
+    for failures in range(1, 6):
+        store.failures = failures
+        snapshot = asyncio.run(
+            _scheduler_builder("2026-09-08T21:00:00.000Z", revisits, route_ready=False).build(
+                _COMMITMENT,
+                store,
+                yoetz_session_id=_SESSION,  # type: ignore[arg-type]
+            )
+        )
+        assert snapshot is not None
+        gaps = snapshot.confidence_coverage.known_gaps
+        assert gaps.count(ADVICE_SEMANTIC_UNAVAILABLE_GAP) == 1
+        assert ADVICE_SEMANTIC_PENDING_GAP not in gaps
+        assert snapshot.semantic_attempt_state == "disabled"
+    assert _rows(db, repository) == ()
+    assert revisits == []
+
+
+def test_probe_and_dispatch_disagreeing_never_loops() -> None:
+    """Authority lost after the probe: one row per backoff, never one per hook or drain."""
+
+    db, repository = _repository()
+    store = _Store(repository)
+    revisits: list[tuple[str, str, float]] = []
+    missing = ObservationAdviceSemanticOutcome(
+        status="unavailable", failure_reason="authorization_missing"
+    )
+    snapshot = None
+    for _ in range(12):
+        # A hook build, then the drain and its post-attempt rebuild, all within one second.
+        snapshot = asyncio.run(
+            _scheduler_builder("2026-09-08T21:00:00.500Z", revisits, route_ready=True).build(
+                _COMMITMENT,
+                store,
+                yoetz_session_id=_SESSION,  # type: ignore[arg-type]
+            )
+        )
+        if repository.list_pending_workspaces():
+            _complete_next(repository, missing, at="2026-09-08T21:00:00.000Z")
+    assert snapshot is not None
+    assert ADVICE_SEMANTIC_PENDING_GAP not in snapshot.confidence_coverage.known_gaps
+    assert ADVICE_SEMANTIC_UNAVAILABLE_GAP in snapshot.confidence_coverage.known_gaps
+    (only,) = _rows(db, repository)
+    assert only.failure_reason == "authorization_missing"
 
 
 def test_provider_failure_backs_off_exponentially_then_retries_without_a_new_hook() -> None:
@@ -1356,3 +1427,291 @@ def test_disabled_dispatch_does_not_rediscover_pending_work() -> None:
         advice_semantic_dispatch=None,
     )
     asyncio.run(coordinator.rediscover_pending_advice_semantic())
+
+
+# --- Provider readiness and cancelled-call usage (issue #923) ---------------------------------
+
+
+@dataclass
+class _ManyFailuresStore(_Store):
+    """A session that keeps producing distinct advice candidates, one failed command each."""
+
+    failures: int = 1
+
+    def list_envelopes(self, workspace: str) -> tuple[ObservationEnvelope, ...]:
+        assert workspace == _COMMITMENT
+        return tuple(
+            _envelope(
+                f"hook:fail-{index}",
+                {
+                    "tool_name": "shell",
+                    "exit_status": 1,
+                    "correlation_id": f"hook:fail-{index}",
+                },
+                pos=index + 1,
+            )
+            for index in range(self.failures)
+        )
+
+
+class _Readiness:
+    """A live provider-readiness fact that tests flip between builds."""
+
+    def __init__(self, ready: bool) -> None:
+        self.ready = ready
+        self.probes = 0
+
+    async def __call__(self) -> bool:
+        self.probes += 1
+        return self.ready
+
+
+def _readiness_builder(
+    readiness: Callable[[], object],
+    revisits: list[tuple[str, str, float]] | None = None,
+    *,
+    stamp: str = "2026-09-08T21:00:00.000Z",
+) -> ObservationAdviceContextBuilder:
+    return ObservationAdviceContextBuilder(
+        semantic_scheduler=ObservationAdviceSemanticScheduler(
+            now=_at(stamp),
+            revisit=None if revisits is None else lambda w, s, d: revisits.append((w, s, d)),
+            provider_ready=readiness,  # type: ignore[arg-type]
+        )
+    )
+
+
+def test_no_usable_provider_writes_no_row_and_reports_unavailable_once() -> None:
+    """Arm B of #923: many candidates, no provider, no rows, and never a pending gap."""
+
+    db, repository = _repository()
+    store = _ManyFailuresStore(repository)
+    readiness = _Readiness(False)
+    revisits: list[tuple[str, str, float]] = []
+    builder = _readiness_builder(readiness, revisits)
+
+    snapshots: list[AdviceSnapshot] = []
+    for failures in range(1, 9):
+        # Every observation changes the candidate set, as a busy session would.
+        store.failures = failures
+        snapshot = asyncio.run(builder.build(_COMMITMENT, store, yoetz_session_id=_SESSION))  # type: ignore[arg-type]
+        assert snapshot is not None and snapshot.ranked_items
+        snapshots.append(snapshot)
+
+    assert readiness.probes == 8
+    assert _rows(db, repository) == ()
+    assert repository.list_pending_workspaces() == ()
+    assert revisits == []
+    for snapshot in snapshots:
+        gaps = snapshot.confidence_coverage.known_gaps
+        assert gaps.count(ADVICE_SEMANTIC_UNAVAILABLE_GAP) == 1
+        assert ADVICE_SEMANTIC_PENDING_GAP not in gaps
+        assert ADVICE_SEMANTIC_DEFERRED_GAP not in gaps
+        assert CheckType.SEMANTIC_MODEL_DERIVED not in snapshot.confidence_coverage.check_types
+        # No attempt was requested, so none is reported as pending or failed.
+        assert snapshot.semantic_attempt_state == "disabled"
+
+    # The same evidence rebuilt is the same advice: nothing new to deliver.
+    again = asyncio.run(builder.build(_COMMITMENT, store, yoetz_session_id=_SESSION))  # type: ignore[arg-type]
+    assert again is not None
+    assert again.suppression_identity == snapshots[-1].suppression_identity
+    assert again.confidence_coverage == snapshots[-1].confidence_coverage
+    assert _rows(db, repository) == ()
+
+
+def test_provider_probe_failure_admits_nothing() -> None:
+    db, repository = _repository()
+
+    async def unreadable() -> bool:
+        raise RuntimeError("vault locking race")
+
+    snapshot = asyncio.run(
+        _readiness_builder(unreadable).build(
+            _COMMITMENT,
+            _Store(repository),
+            yoetz_session_id=_SESSION,  # type: ignore[arg-type]
+        )
+    )
+    assert snapshot is not None
+    assert ADVICE_SEMANTIC_UNAVAILABLE_GAP in snapshot.confidence_coverage.known_gaps
+    assert ADVICE_SEMANTIC_PENDING_GAP not in snapshot.confidence_coverage.known_gaps
+    assert _rows(db, repository) == ()
+
+
+def test_binding_later_admits_advice_and_unbinding_stops_it_without_restart() -> None:
+    """Readiness is read per build: bind admits the next condition, unbind admits nothing."""
+
+    db, repository = _repository()
+    store = _ManyFailuresStore(repository)
+    readiness = _Readiness(False)
+    builder = _readiness_builder(readiness)
+
+    unbound = asyncio.run(builder.build(_COMMITMENT, store, yoetz_session_id=_SESSION))  # type: ignore[arg-type]
+    assert unbound is not None
+    assert ADVICE_SEMANTIC_UNAVAILABLE_GAP in unbound.confidence_coverage.known_gaps
+    assert _rows(db, repository) == ()
+
+    # The owner binds a provider and enables LLM inference: same scheduler, no restart.
+    readiness.ready = True
+    bound = asyncio.run(builder.build(_COMMITMENT, store, yoetz_session_id=_SESSION))  # type: ignore[arg-type]
+    assert bound is not None
+    assert ADVICE_SEMANTIC_PENDING_GAP in bound.confidence_coverage.known_gaps
+    assert ADVICE_SEMANTIC_UNAVAILABLE_GAP not in bound.confidence_coverage.known_gaps
+    (admitted,) = _rows(db, repository)
+    assert admitted.status == "pending"
+
+    # Removing the binding stops admission at once. The queued row is not reported as
+    # pending work: the service dispatch drains it as ``provider_unavailable``.
+    readiness.ready = False
+    store.failures = 3
+    unbound_again = asyncio.run(builder.build(_COMMITMENT, store, yoetz_session_id=_SESSION))  # type: ignore[arg-type]
+    assert unbound_again is not None
+    assert ADVICE_SEMANTIC_PENDING_GAP not in unbound_again.confidence_coverage.known_gaps
+    assert ADVICE_SEMANTIC_UNAVAILABLE_GAP in unbound_again.confidence_coverage.known_gaps
+    assert _rows(db, repository) == (admitted,)
+
+
+def test_completed_review_stays_visible_after_the_provider_goes_away() -> None:
+    db, repository = _repository()
+    store = _Store(repository)
+    readiness = _Readiness(True)
+    builder = _readiness_builder(readiness)
+    asyncio.run(builder.build(_COMMITMENT, store, yoetz_session_id=_SESSION))  # type: ignore[arg-type]
+    _complete_next(repository, _SUCCEEDED, at="2026-09-08T21:00:01.000Z")
+    (completed,) = _rows(db, repository)
+
+    readiness.ready = False
+    snapshot = asyncio.run(builder.build(_COMMITMENT, store, yoetz_session_id=_SESSION))  # type: ignore[arg-type]
+    assert snapshot is not None
+    assert snapshot.semantic_attempt_state == "ready"
+    assert ADVICE_SEMANTIC_UNAVAILABLE_GAP not in snapshot.confidence_coverage.known_gaps
+    assert ADVICE_SEMANTIC_PENDING_GAP not in snapshot.confidence_coverage.known_gaps
+    assert _rows(db, repository) == (completed,)
+
+
+def test_cancelled_request_reconciliation_marks_unknown_usage_unless_proven_unsent() -> None:
+    """A cancelled advisory call names its provider whenever it may have started (#923)."""
+
+    from yoetz.application.egress import SemanticEgressAttemptUnknown
+    from yoetz.application.observation_advice_semantic import (
+        ADVICE_SEMANTIC_CANCEL_RECOVERY_SECONDS,
+        DEFAULT_ADVICE_SEMANTIC_RECONCILE_TIMEOUT_SECONDS,
+        reconcile_cancelled_advice_request,
+    )
+
+    # The lookup's own bound sits inside the worker's, so it always finishes first.
+    assert (
+        ADVICE_SEMANTIC_CANCEL_RECOVERY_SECONDS < DEFAULT_ADVICE_SEMANTIC_RECONCILE_TIMEOUT_SECONDS
+    )
+    minted = ("req_00000000-0000-4000-8000-000000000923", "provider-under-test")
+    stuck = asyncio.Event()
+
+    async def consumed(_request: str) -> SemanticEgressAttemptUnknown | None:
+        return SemanticEgressAttemptUnknown(
+            _request, "ppr_00000000-0000-4000-8000-000000000923", "egr_consumed"
+        )
+
+    async def consumed_without_receipt(_request: str) -> SemanticEgressAttemptUnknown | None:
+        return SemanticEgressAttemptUnknown(_request, "ppr_00000000-0000-4000-8000-000000000924")
+
+    async def unconsumed(_request: str) -> SemanticEgressAttemptUnknown | None:
+        return None
+
+    async def unreadable(_request: str) -> SemanticEgressAttemptUnknown | None:
+        raise RuntimeError("audit unreadable")
+
+    async def blocked(_request: str) -> SemanticEgressAttemptUnknown | None:
+        await stuck.wait()
+        return None
+
+    def run(
+        request: tuple[str, str] | None, recover: object
+    ) -> ObservationAdviceSemanticOutcome | None:
+        return asyncio.run(
+            reconcile_cancelled_advice_request(
+                request,
+                recover,  # type: ignore[arg-type]
+                timeout_seconds=0.05,
+            )
+        )
+
+    # Never minted, or authorization provably never consumed: nothing was sent.
+    assert run(None, consumed) is None
+    assert run(minted, unconsumed) is None
+    # Consumed: the terminal receipt (else its proposal) and the provider.
+    assert run(minted, consumed) == ObservationAdviceSemanticOutcome(
+        status="cancelled",
+        failure_reason="cancelled",
+        attempt_receipt="egr_consumed",
+        provider_identity="provider-under-test",
+    )
+    with_proposal = run(minted, consumed_without_receipt)
+    assert with_proposal is not None
+    assert with_proposal.attempt_receipt == "ppr_00000000-0000-4000-8000-000000000924"
+    # Cannot establish either way: usage unknown, never a free call and never a success.
+    unknown = ObservationAdviceSemanticOutcome(
+        status="cancelled", failure_reason="cancelled", provider_identity="provider-under-test"
+    )
+    assert run(minted, unreadable) == unknown
+    assert run(minted, blocked) == unknown
+    assert run(minted, None) == unknown
+
+
+def test_cancelled_call_row_records_usage_unknown_when_the_lookup_is_blocked() -> None:
+    """The stored row keeps the provider identity even when the audit lock is held (#923)."""
+
+    from yoetz.application.observation_advice_semantic import reconcile_cancelled_advice_request
+
+    _db, repository = _repository()
+    basis = "sha256:" + "9" * 64
+    repository.schedule(
+        workspace=_COMMITMENT,
+        yoetz_session_id=_SESSION,
+        basis_digest=basis,
+        subject_digest=basis,
+        coverage_gaps=(),
+        packet_json=b"{}",
+        enqueued_at=_clock(),
+        max_pending=16,
+    )
+    minted: dict[str, tuple[str, str]] = {}
+    held = asyncio.Event()
+
+    async def dispatch(
+        attempt: ObservationAdviceSemanticAttempt,
+    ) -> ObservationAdviceSemanticOutcome:
+        # The provider request was minted, then a foreground rebind cancelled the call.
+        minted[attempt.attempt_id] = ("req_00000000-0000-4000-8000-000000000925", "codex")
+        raise asyncio.CancelledError
+
+    async def lookup_behind_foreground_check(_request: str) -> None:
+        await held.wait()  # a foreground check holds the privacy admission lock
+
+    async def reconcile(
+        attempt: ObservationAdviceSemanticAttempt,
+    ) -> ObservationAdviceSemanticOutcome | None:
+        return await reconcile_cancelled_advice_request(
+            minted.pop(attempt.attempt_id, None),
+            lookup_behind_foreground_check,
+            timeout_seconds=0.05,
+        )
+
+    worker = ObservationAdviceSemanticWorker(
+        repository=repository,
+        dispatch=dispatch,
+        service_generation=1,
+        lease_owner="svc-1",
+        now=_clock,
+        lease_expires_at=_later,
+        reconcile_cancelled=reconcile,
+        reconcile_timeout_seconds=1.0,
+    )
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(worker.run_once())
+
+    row = repository.lookup(yoetz_session_id=_SESSION, basis_digest=basis)
+    assert row is not None
+    assert (row.status, row.failure_reason) == ("cancelled", "cancelled")
+    assert row.provider_identity == "codex"
+    assert row.attempt_receipt is None
+    assert row.finding_ids == ()

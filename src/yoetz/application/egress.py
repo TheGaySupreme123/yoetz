@@ -38,6 +38,7 @@ from yoetz.domain.privacy import (
     PreDispatchAuditDecision,
     PrivacyDecision,
     PrivacyOutcome,
+    PrivacyPolicy,
     PrivacyProfile,
     PrivacyReason,
     ProviderBinding,
@@ -91,6 +92,7 @@ __all__ = [
     "SemanticEgressProviderOutcome",
     "SemanticEgressResult",
     "SemanticEgressSuccess",
+    "semantic_policy_refusal",
 ]
 
 type LocalDisclosureResult = (
@@ -127,6 +129,46 @@ _SCOPE_KIND_RANK = {
     AuthorizationScopeKind.TASK: 2,
     AuthorizationScopeKind.REQUEST: 3,
 }
+
+
+def semantic_policy_refusal(
+    policy: PrivacyPolicy,
+    binding: ProviderBinding,
+    purpose: str,
+    scope_kind: AuthorizationScopeKind,
+) -> tuple[PrivacyOutcome, PrivacyReason] | None:
+    """The static policy leg of LLM-inference egress admission, or ``None`` when it admits.
+
+    Pure over the effective policy: the destination, channel, exact provider binding, purpose, and
+    scope-ceiling checks the semantic pipeline applies before classification. Readiness probes
+    (background advice admission, #923) reuse it so they never call a route usable that dispatch
+    would refuse; the pipeline stays the enforcing call site.
+    """
+
+    llm = next(
+        item for item in policy.channel_policies if item.channel is EgressChannel.LLM_INFERENCE
+    )
+    if policy.profile is PrivacyProfile.LOCAL_ONLY and binding.transport == "external":
+        return PrivacyOutcome.BLOCKED_BY_POLICY, PrivacyReason.DESTINATION_NOT_ALLOWED
+    if not policy.network_egress_permitted or not llm.enabled:
+        if binding.transport == "external":
+            return PrivacyOutcome.CHANNEL_UNAVAILABLE, PrivacyReason.CHANNEL_UNAVAILABLE
+    # Exact membership in the row's authorized destinations: the primary, plus the one
+    # fallback the same approval named (#582). Never a prefix, wildcard, or provider-id match.
+    if (
+        llm.provider_binding is not None
+        and binding.transport == "external"
+        and binding not in llm.authorized_provider_bindings
+    ):
+        return PrivacyOutcome.BLOCKED_BY_POLICY, PrivacyReason.DESTINATION_NOT_ALLOWED
+    if purpose not in llm.allowed_purposes:
+        return PrivacyOutcome.BLOCKED_BY_POLICY, PrivacyReason.PURPOSE_NOT_ALLOWED
+    # Block only a candidate whose scope is *broader* than the ceiling the channel commits to.
+    # A narrower candidate (task under a workspace ceiling) is inside the consented authority,
+    # which is the shipped assisted_review / expanded_review shape.
+    if _SCOPE_KIND_RANK[scope_kind] < _SCOPE_KIND_RANK[llm.scope_ceiling]:
+        return PrivacyOutcome.BLOCKED_BY_POLICY, PrivacyReason.SCOPE_MISMATCH
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -490,7 +532,9 @@ class PrivacyCoordinator:
         owns the exact request identity it minted. ``None`` means no durable disclosure
         reservation reached the consume CAS for that request, so no authority was spent. A
         consumed reservation is terminally unknown: this never resumes, redispatches, mints an
-        authorization, or converts the attempt into a success.
+        authorization, or converts the attempt into a success. An audit that cannot be read
+        raises instead of answering ``None``: it cannot establish that no authority was spent,
+        so the caller keeps the call's usage unknown (#923).
         """
 
         if type(request_id) is not str:
@@ -542,21 +586,23 @@ class PrivacyCoordinator:
     async def _load_started_disclosure_attempt(self, request_id: str) -> PrivacyAuditState | None:
         loader = getattr(self._audit, "load_started_disclosure_attempt", None)
         if not callable(loader):
-            return None
+            raise RuntimeError("privacy_audit_started_lookup_unavailable")
         typed_loader = cast(
             Callable[[str], Awaitable[PrivacyAuditState | None]],
             loader,
         )
         try:
             return await typed_loader(request_id)
-        except Exception as exc:  # noqa: BLE001 - an unreadable row is not a spent authorization
+        except Exception as exc:
+            # Unreadable is not "never consumed": record it and let the caller keep the
+            # attempt's usage unknown rather than reading this as proof nothing was sent (#923).
             record_unexpected_exception_without_raising(
                 exc,
                 component="privacy_egress",
                 operation="audit_started_attempt_lookup_failed",
                 request_id=request_id,
             )
-            return None
+            raise
 
     async def _load_disclosure_attempt(
         self, request_id: str, case_digest: str
@@ -1057,53 +1103,10 @@ class PrivacyCoordinator:
                 PrivacyReason.CHANNEL_UNAVAILABLE,
             )
 
-        llm = next(
-            item for item in policy.channel_policies if item.channel is EgressChannel.LLM_INFERENCE
-        )
-        if policy.profile is PrivacyProfile.LOCAL_ONLY and binding.transport == "external":
+        refusal = semantic_policy_refusal(policy, binding, candidate.purpose, candidate.scope.kind)
+        if refusal is not None:
             return await self._complete_semantic_predispatch(
-                candidate,
-                effective,
-                PrivacyOutcome.BLOCKED_BY_POLICY,
-                PrivacyReason.DESTINATION_NOT_ALLOWED,
-            )
-        if not policy.network_egress_permitted or not llm.enabled:
-            if binding.transport == "external":
-                return await self._complete_semantic_predispatch(
-                    candidate,
-                    effective,
-                    PrivacyOutcome.CHANNEL_UNAVAILABLE,
-                    PrivacyReason.CHANNEL_UNAVAILABLE,
-                )
-        # Exact membership in the row's authorized destinations: the primary, plus the one
-        # fallback the same approval named (#582). Never a prefix, wildcard, or provider-id match.
-        if (
-            llm.provider_binding is not None
-            and binding.transport == "external"
-            and binding not in llm.authorized_provider_bindings
-        ):
-            return await self._complete_semantic_predispatch(
-                candidate,
-                effective,
-                PrivacyOutcome.BLOCKED_BY_POLICY,
-                PrivacyReason.DESTINATION_NOT_ALLOWED,
-            )
-        if candidate.purpose not in llm.allowed_purposes:
-            return await self._complete_semantic_predispatch(
-                candidate,
-                effective,
-                PrivacyOutcome.BLOCKED_BY_POLICY,
-                PrivacyReason.PURPOSE_NOT_ALLOWED,
-            )
-        # Block only a candidate whose scope is *broader* than the ceiling the channel commits to.
-        # A narrower candidate (task under a workspace ceiling) is inside the consented authority,
-        # which is the shipped assisted_review / expanded_review shape.
-        if _SCOPE_KIND_RANK[candidate.scope.kind] < _SCOPE_KIND_RANK[llm.scope_ceiling]:
-            return await self._complete_semantic_predispatch(
-                candidate,
-                effective,
-                PrivacyOutcome.BLOCKED_BY_POLICY,
-                PrivacyReason.SCOPE_MISMATCH,
+                candidate, effective, refusal[0], refusal[1]
             )
         if (
             policy.require_current_provider_data_use_evidence

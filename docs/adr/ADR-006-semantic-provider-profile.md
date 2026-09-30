@@ -734,6 +734,58 @@ rediscovered pending work. Re-enabling it on service restart permits pending wor
 Claude Code and Cursor on macOS, Linux and Windows through WSL 2. This does not change capture
 consent, deterministic advice, or the explicit check policy.
 
+### Background advice requires a usable provider (2026-09-30, issue #923)
+
+Background advice is admitted only while a provider is usable now: review is not disabled, an
+endpoint is bound, the current machine privacy policy admits network egress on the
+`llm_inference` channel, and the configured credential is present. These are the same live facts
+that decide standing `provider_not_ready` advice; they are read on every advice build and every
+background dispatch, never from the READY snapshot. Admission also requires the route leg: the
+session's task route is ACTIVE and its repository authority, read from the privacy policy store
+without the coordinator admission lock, is granted and passes the same static policy leg the egress
+pipeline applies before dispatch (`semantic_policy_refusal`): `llm_inference` open to the
+destination, the configured primary binding among the channel's exactly authorized bindings, the
+`semantic-review` purpose allowed, and the task scope within the channel ceiling. A granted
+authority that names a different binding or omits the purpose would be refused at dispatch, so it
+admits nothing here either (PR #938 review). The owner switches above still decide whether
+background advice exists at all.
+
+Background advice dispatches only to the primary binding; it never engages a declared fallback
+endpoint (fallback endpoint amendment, #582), whose closed engagement rule and two-endpoint
+provenance belong to the explicit check's semantic job. Readiness therefore reads only the primary:
+an unusable primary with a usable fallback admits no background advice, matching what dispatch
+would do. Extending background advice to the fallback would be a new egress path and needs its own
+decision.
+
+Without a usable provider the scheduler writes no attempt row, contacts no provider and schedules
+no revisit. The advice snapshot carries `advice_semantic_unavailable` once and semantic state
+`disabled` (no attempt was requested), never `advice_semantic_pending`: pending means a
+provider-reaching attempt is actually queued or in flight. A review the same candidate identity
+already completed stays reusable. A row queued before readiness was lost (a binding removed, a
+channel disabled, or a row an older service queued without a provider) is closed at dispatch as
+`unavailable` / `provider_unavailable` before any route, repository-authority or provider work, so
+it is not re-attempted on every restart and does not consume the session interval. Storing a
+credential or enabling the channel admits the next eligible condition in the same service
+generation; binding or removing a provider recomposes the service, not the host session.
+
+The route leg replaces the #888 shortcut that re-admitted an `authorization_missing` identity at
+once when the route became ACTIVE. That shortcut read only the route, so an ACTIVE route without a
+repository grant re-admitted a row on every build and on the drain's own post-attempt rebuild. An
+`authorization_missing` row can now arise only when authority was lost between admission and
+dispatch; it waits the base backoff like any other pre-provider failure and stays disclosed as
+`advice_semantic_unavailable`.
+
+A background dispatch cancelled by a foreground rebind after it minted its provider request now
+names `provider_identity` on its `cancelled` row unless the privacy audit proves the request's
+disclosure authorization was never consumed. That lookup is bounded inside the worker's own
+reconciliation bound, because a foreground check can hold the privacy admission lock for its whole
+provider call; a lookup that cannot finish still records the provider. A `cancelled` row naming a
+provider is therefore a call that may have started with usage unknown, and a plain `cancelled`
+row is one that sent nothing. Background advice rows retain no token counts for any outcome;
+retained usage and a usage-unknown count in status or diagnostics would need a bundle schema and
+wire change and remain open on #923. The same service behavior applies to Codex, Claude Code and
+Cursor on macOS, Linux and Windows through WSL 2.
+
 ### Unassessable content and repair-first feedback (issue #885)
 
 The existing `insufficient_packet` judgment is the nonblocking outcome when missing content

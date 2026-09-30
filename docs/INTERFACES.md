@@ -4228,7 +4228,17 @@ Shared closed types:
   `advice_semantic_unavailable` with its closed reason (`authorization_missing`,
   `provider_unavailable`, `provider_failed`, `output_invalid`, `queue_full`, `superseded`,
   `cancelled`, `interrupted`). An admission refused by the per-session interval writes no row and
-  adds `advice_semantic_deferred` (semantic state `unavailable`). Only a `succeeded` row with validated finding ids adds
+  adds `advice_semantic_deferred` (semantic state `unavailable`). The scheduler first reads live
+  provider readiness (review not disabled, an endpoint bound, the machine policy admitting
+  `llm_inference` egress, the configured credential present) and route readiness (an ACTIVE task
+  route whose repository authority is granted and passes the egress pipeline's static policy leg,
+  `semantic_policy_refusal`, for the configured primary binding, the `semantic-review` purpose and
+  task scope, read from the policy store without the privacy admission lock; background advice never
+  engages a declared fallback endpoint, so readiness reads only the primary; ADR-006 issue #923):
+  without both no row
+  is written, no provider is contacted, and the snapshot adds `advice_semantic_unavailable` once
+  with semantic state `disabled`, never `advice_semantic_pending`; only a completed review of the
+  same identity is still reused. Only a `succeeded` row with validated finding ids adds
   `semantic_model_derived`; a succeeded attempt that returned no challenges is an honest receipt and
   no finding.
 
@@ -4292,10 +4302,12 @@ Independent verification support (local control, not MCP):
 - `ObservationAdviceSemanticSupervisor` / `ObservationAdviceSemanticWorker` — the same shape for
   observation AI-powered advice (issue #619). The coordinator registers a per-workspace drain when
   an advice build leaves `advice_semantic_pending`, and rediscovers pending rows after service
-  start. The worker claims one row at a time under a generation-fenced two-minute lease, resolves
-  the task route, repository authority, and provider binding at dispatch time (never from the
-  READY snapshot), runs the privacy-gated attempt with a 60-second deadline, records the closed
-  outcome, and re-runs advice for that workspace. A lease held by a previous service generation
+  start. The worker claims one row at a time under a generation-fenced two-minute lease, closes it
+  as `unavailable` / `provider_unavailable` with no further work when no provider is usable now
+  (#923), otherwise resolves the task route, repository authority, and provider binding at
+  dispatch time (never from the READY snapshot), runs the privacy-gated attempt with a 60-second
+  deadline, records the closed outcome, and re-runs advice for that workspace. A lease held by a
+  previous service generation
   or past its expiry is reclaimed as `pending` and re-attempted; a row reclaimed three times
   terminates as `failed` / `interrupted`. An interrupted, cancelled, or unattempted row is never
   an AI-powered review success. The advice worker is separate from approved-check workers and
@@ -4318,8 +4330,12 @@ Independent verification support (local control, not MCP):
   exact request identity the cancelled dispatch minted (a cancelled dispatch never observes the
   prepared case digest), and the cancelled advice row records that provenance as
   `attempt_receipt` (the reconciled egress receipt, else its privacy proposal) plus
-  `provider_identity`. A cancelled row carrying neither cannot establish whether disclosure authorization was
-  consumed: bounded reconciliation may fail or time out. The privacy audit owns that fact. The cancelled packet is never treated as successful, and the resulting
+  `provider_identity`. When the dispatch minted a provider request and the bounded lookup cannot
+  prove its authorization was never consumed (it failed, or timed out behind a foreground check
+  holding the privacy admission lock), the row still records `provider_identity` without a receipt
+  (#923). A cancelled row naming a provider is a call that may have started with usage unknown;
+  a cancelled row naming none sent nothing. Background advice rows retain no token counts. The
+  privacy audit owns the disclosure fact. The cancelled packet is never treated as successful, and the resulting
   `advice_semantic_unavailable` coverage remains visible. This cooperative yield applies only to additive observation advice; an explicit
   required semantic check keeps its own operation and recovery contract. The foreground start
   retains its request identity and continues through the existing bounded same-request recovery

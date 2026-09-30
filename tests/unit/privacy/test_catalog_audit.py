@@ -1420,6 +1420,37 @@ def test_advice_cancellation_before_consume_leaves_authority_unspent() -> None:
     advice_db.close()
 
 
+def test_unreadable_audit_keeps_the_cancelled_call_usage_unknown() -> None:
+    """An audit that cannot be read never proves a minted request sent nothing (#923).
+
+    ``recover_started_request`` must not collapse an unreadable lookup into ``None`` (the proof
+    that authority was never consumed): the cancelled advice row then keeps its provider marker.
+    """
+
+    from yoetz.application.observation_advice_semantic import (
+        reconcile_cancelled_advice_request,
+    )
+
+    class _UnreadableAudit(CatalogPrivacyAudit):
+        async def load_started_disclosure_attempt(self, request_id: str) -> None:
+            raise apsw.IOError("disk I/O error")
+
+    catalog_db = _database()
+    audit = _UnreadableAudit(catalog_db, _StoredObjects(), _Key(), _Clock())  # type: ignore[arg-type]
+    coordinator = _coordinator(audit)
+
+    with pytest.raises(apsw.IOError):
+        asyncio.run(coordinator.recover_started_request(_REQUEST))
+    outcome = asyncio.run(
+        reconcile_cancelled_advice_request(
+            (_REQUEST, "provider-under-test"), coordinator.recover_started_request
+        )
+    )
+    assert outcome == ObservationAdviceSemanticOutcome(
+        status="cancelled", failure_reason="cancelled", provider_identity="provider-under-test"
+    )
+
+
 def _network_receipt(authorization: EgressAuthorization) -> EgressReceipt:
     """The receipt a completed subscription review records through the gateway."""
 

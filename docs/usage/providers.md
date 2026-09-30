@@ -574,8 +574,20 @@ request, which is already capped at 2,048 output tokens. A review is reused whil
 advice candidates and coverage gaps is unchanged, even as more evidence for them arrives. New
 advice is reviewed at most once every three minutes per session by default; advice waiting for
 that interval shows `advice_semantic_deferred` and is reviewed automatically when it elapses. A
-failed or unavailable review is retried with backoff, and immediately once the task route
-becomes active. Explicit checks continue to use their normal review policy.
+failed or unavailable review is retried with backoff. Explicit checks continue to use their
+normal review policy.
+
+Background advice only runs when AI-powered review can actually reach your provider: a provider
+is connected, your privacy policy allows the AI-powered review channel, the provider's
+credential or sign-in is in place, and this repository has been granted AI-powered review for the
+task with that exact provider and for review. Background advice uses only your primary endpoint; a
+paired fallback serves explicit checks, never background advice, so a primary that cannot serve
+pauses background advice even when the fallback could. Otherwise nothing is queued and nothing
+leaves your machine;
+advice shows `advice_semantic_unavailable` instead of `advice_semantic_pending`, and receipts no
+longer say AI-powered advice is pending. Signing in or enabling the channel takes effect on the
+next observation; connecting or disconnecting a provider takes effect when Yoetz restarts its
+service, which setup does for you. Your coding session keeps running either way.
 
 To change background advice, edit the existing `[observation]` table in your Yoetz configuration:
 

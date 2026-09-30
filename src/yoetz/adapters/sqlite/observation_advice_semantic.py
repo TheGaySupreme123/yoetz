@@ -91,14 +91,13 @@ class SqliteObservationAdviceSemanticRepository:
         max_pending: int,
         min_interval_seconds: int = 0,
         retry_base_seconds: int = 0,
-        retry_now: bool = False,
     ) -> ObservationAdviceSemanticAttempt | ObservationAdviceSemanticDeferral:
         """Admit, reuse, or defer one candidate identity for a session (#619, #888).
 
         ``basis_digest`` is the stable identity key. Its rows form one family: the first is
         stored under the key itself and each retry under ``<key>#<generation>``. A pending,
         running, or succeeded latest row is reused. A terminal non-success is re-admitted once
-        its backoff elapses (or at once when ``retry_now``). Admission is refused while the
+        its backoff elapses. Admission is refused while the
         session's last provider-reaching attempt is younger than ``min_interval_seconds``.
         Every check and the insert share one transaction, so a reopened service cannot reset
         either bound, and a refusal writes no row.
@@ -112,17 +111,16 @@ class SqliteObservationAdviceSemanticRepository:
             if latest is not None:
                 if latest.status in {"pending", "running", "succeeded"}:
                     return latest
-                if not retry_now or latest.failure_reason != "authorization_missing":
-                    delay = advice_semantic_retry_delay_seconds(
-                        latest, generation=len(family), base_seconds=retry_base_seconds
+                delay = advice_semantic_retry_delay_seconds(
+                    latest, generation=len(family), base_seconds=retry_base_seconds
+                )
+                eligible = _parse_time(family[0][1]) + timedelta(seconds=delay)
+                if now < eligible:
+                    return ObservationAdviceSemanticDeferral(
+                        reason="retry_backoff",
+                        retry_after_seconds=(eligible - now).total_seconds(),
+                        previous=latest,
                     )
-                    eligible = _parse_time(family[0][1]) + timedelta(seconds=delay)
-                    if now < eligible:
-                        return ObservationAdviceSemanticDeferral(
-                            reason="retry_backoff",
-                            retry_after_seconds=(eligible - now).total_seconds(),
-                            previous=latest,
-                        )
             if min_interval_seconds > 0:
                 # Only attempts that could have reached a provider consume the session budget.
                 # Unattempted pending rows are superseded below instead, never double-counted.
