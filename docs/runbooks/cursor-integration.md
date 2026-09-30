@@ -1566,7 +1566,8 @@ request omits the field, and the recorded statement stays current. The review pa
 the `task_statement` section labelled `agent_transcribed`, apart from the plan, only when the
 approved privacy policy names that section (privacy policy 1.2.0 presets Goal-aware, Assisted and
 Expanded; never Structural). With no statement recorded the task title stands in, labelled
-`task_title_only`, and no gap is added. When the policy withholds the section the check and receipt
+`task_title_only`, and no gap is added. When the policy withholds the section, or its review channel
+does not allow `task_description`, the check and receipt
 carry `task_statement_unavailable` with `task_statement_not_authorized`; with neither a statement
 nor a readable title they carry `task_statement_unavailable` with `task_statement_not_supplied`.
 

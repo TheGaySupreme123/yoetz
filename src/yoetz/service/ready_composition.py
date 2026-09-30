@@ -209,7 +209,7 @@ from yoetz.domain.receipts import (
     ReceiptVersionSlice,
     SchemaVersionEntry,
 )
-from yoetz.domain.task_statement import TASK_STATEMENT_GAPS
+from yoetz.domain.task_statement import TASK_STATEMENT_GAPS, review_selection_for_delivery
 from yoetz.domain.values import (
     Frontier,
     JsonObject,
@@ -4194,7 +4194,9 @@ def _privacy_gated_semantic_evaluator(
             effective = await policy_app.policy_store.effective_policy(scope)
             policy = effective.policy
             review_profile = policy.review_context_profile
-            review_selection = policy.review_selection
+            # A statement the review channel withholds is named as absent in the packet itself,
+            # not only as generic withheld context (issue #908).
+            review_selection = review_selection_for_delivery(policy)
             policy_id = policy.policy_id
             policy_version = str(policy.version)
             # Selection and channel categories are configured independently. When they disagree

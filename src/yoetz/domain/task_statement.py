@@ -18,7 +18,7 @@ the accepted prefix, and every earlier one stays in the ledger history.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Final
 
@@ -31,7 +31,9 @@ from yoetz.domain.events import (
     SessionOpenedPayload,
     SessionResumedPayload,
 )
+from yoetz.domain.privacy import PrivacyPolicy, ReviewSelectionPolicy
 from yoetz.domain.values import EventId, event_id
+from yoetz.protocol.models import DataCategory
 
 __all__ = [
     "TASK_STATEMENT_GAPS",
@@ -44,6 +46,7 @@ __all__ = [
     "current_task_statement",
     "may_carry_task_statement",
     "recorded_task_title",
+    "review_selection_for_delivery",
     "task_statement_disclosure_text",
     "task_statement_gap_detail",
 ]
@@ -57,8 +60,10 @@ TASK_STATEMENT_SECTION: Final = "task_statement"
 TASK_STATEMENT_UNAVAILABLE_GAP: Final = "task_statement_unavailable"
 # Neither an agent-supplied statement nor a readable task title is recorded for the task.
 TASK_STATEMENT_NOT_SUPPLIED_GAP: Final = "task_statement_not_supplied"
-# The approved privacy policy does not list the ``task_statement`` review section, so nothing is
-# sent even when a statement is recorded. An approval that predates the section never covers it.
+# The approved privacy policy does not let the statement out: its review selection does not list
+# the ``task_statement`` section (an approval that predates the section never covers it), or its
+# AI-powered review channel does not allow ``task_description``. Nothing is sent even when a
+# statement is recorded.
 TASK_STATEMENT_NOT_AUTHORIZED_GAP: Final = "task_statement_not_authorized"
 TASK_STATEMENT_GAPS: Final = frozenset(
     {
@@ -77,8 +82,9 @@ _GAP_DETAILS: Final = {
         "request verbatim in start.task_statement."
     ),
     TASK_STATEMENT_NOT_AUTHORIZED_GAP: (
-        "The approved privacy policy does not list the task_statement review section, so the "
-        "recorded statement stayed local. Run 'yoetz --privacy' to review and approve it."
+        "The approved privacy policy does not list the task_statement review section, or its "
+        "AI-powered review channel does not allow task_description, so the recorded statement "
+        "stayed local. Run 'yoetz --privacy' to review and approve it."
     ),
 }
 
@@ -210,6 +216,28 @@ def may_carry_task_statement(record: LedgerRecord) -> bool:
         type(record) is AcceptedEvent
         and (record.schema.name, record.schema.version) in _STATEMENT_CAPABLE_SCHEMAS
     )
+
+
+def review_selection_for_delivery(policy: PrivacyPolicy) -> ReviewSelectionPolicy:
+    """The review selection a case is built from, given what the review channel lets out.
+
+    A statement the LLM channel withholds (``task_description`` outside its allowed categories)
+    would be built and then filtered at egress, and the review would say only that some context was
+    withheld. Dropping the section here makes the packet name the absence itself:
+    ``task_statement_unavailable`` with ``task_statement_not_authorized`` (issue #908). Every other
+    section is left to the existing withheld-category disclosure.
+    """
+
+    selection = policy.review_selection
+    if (
+        TASK_STATEMENT_SECTION in selection.sections
+        and DataCategory.TASK_DESCRIPTION in policy.withheld_review_categories
+    ):
+        return replace(
+            selection,
+            sections=tuple(item for item in selection.sections if item != TASK_STATEMENT_SECTION),
+        )
+    return selection
 
 
 def recorded_task_title(records: Iterable[LedgerRecord]) -> str | None:
