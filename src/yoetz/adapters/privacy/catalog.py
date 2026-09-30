@@ -359,6 +359,11 @@ def _receipt_view_from_row(destination_kind: object, canonical: object) -> Priva
 # unreadable rows that is listed repeatedly must not evict unrelated failures from it.
 _MAX_SKIPPED_ROW_DIAGNOSTICS_PER_PAGE: Final = 5
 
+# ``format_rfc3339_millis`` output, as a SQLite GLOB: ``YYYY-MM-DDTHH:MM:SS.mmmZ``.
+_CANONICAL_TIME_GLOB: Final = (
+    "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z"
+)
+
 _UNDECODABLE_ROW_REASONS: Final = {
     "local": "privacy_audit_local_row_undecodable",
     "network": "privacy_audit_network_row_undecodable",
@@ -2596,23 +2601,37 @@ class CatalogPrivacyAudit:
             if count_row is None or type(count_row[0]) is not int:
                 raise PrivacyAuditUnreadable("privacy_audit_generation_unavailable")
             snapshot_generation = cast(int, count_row[0])
-            after_at: datetime | None = None
+            after_at: str | None = None
             after_id: str | None = None
         else:
             cursor = self._decode_cursor(query.cursor)
             if cursor.get("query_digest") != query_digest:
                 raise PrivacyReceiptCursorInvalid("privacy_receipt_cursor_query_mismatch")
+            # The position is the last listed row's own ``receipt_finished_at`` and ``receipt_id``
+            # text, carried verbatim and compared as text exactly as the ORDER BY sorts. It is
+            # deliberately not parsed: a corrupt row can end a page, and the next page must still
+            # start strictly after it rather than refuse the cursor and strand every readable
+            # receipt behind it (issue #921).
+            raw_after_at = cursor.get("after_at")
+            raw_after_id = cursor.get("after_id")
             try:
                 snapshot_at = parse_rfc3339_millis(cursor["snapshot_at"])
                 snapshot_generation = _integer(cursor["snapshot_generation"])
-                after_at = parse_rfc3339_millis(cursor["after_at"])
-                after_id = validate_id(IdKind.EGRESS_RECEIPT, cursor["after_id"])
+                if type(raw_after_at) is not str or type(raw_after_id) is not str:
+                    raise TypeError("privacy_receipt_cursor_position_invalid")
             except (KeyError, TypeError, ValueError) as exc:
                 # The MAC and the query digest verified, so only this store could have minted this
-                # cursor, and it minted the position from its own row columns: a malformed position
-                # is the store's integrity fault, not something the caller could have fixed.
+                # cursor: a malformed one is the store's integrity fault, not the caller's.
                 raise PrivacyAuditUnreadable("privacy_audit_page_invariant_violated") from exc
-        clauses = ["receipt_id IS NOT NULL", "receipt_finished_at <= ?"]
+            after_at = raw_after_at
+            after_id = raw_after_id
+        # A row whose stored finish time is not a canonical timestamp cannot be placed against the
+        # snapshot bound; it is kept in the listing, where it sorts deterministically and is
+        # skipped and disclosed as unreadable, rather than silently falling outside the snapshot.
+        clauses = [
+            "receipt_id IS NOT NULL",
+            f"(receipt_finished_at <= ? OR receipt_finished_at NOT GLOB '{_CANONICAL_TIME_GLOB}')",
+        ]
         parameters: list[apsw.SQLiteValue] = [format_rfc3339_millis(snapshot_at)]
         fields = (
             ("receipt_id", query.receipt_id),
@@ -2638,8 +2657,7 @@ class CatalogPrivacyAudit:
             clauses.append(
                 "(receipt_finished_at < ? OR (receipt_finished_at = ? AND receipt_id < ?))"
             )
-            rendered = format_rfc3339_millis(after_at)
-            parameters.extend((rendered, rendered, after_id))
+            parameters.extend((after_at, after_at, after_id))
         parameters.append(query.limit + 1)
         rows = self._db.execute(
             f"""SELECT destination_kind, receipt_canonical, receipt_finished_at, receipt_id,
@@ -2669,10 +2687,14 @@ class CatalogPrivacyAudit:
         next_cursor = None
         if len(rows) > query.limit and selected:
             last = selected[-1]
+            # STRICT TEXT columns that the receipt CHECK makes non-null whenever receipt_id is set,
+            # so both are strings even on a corrupt row; the cursor carries them as stored.
+            if type(last[2]) is not str or type(last[3]) is not str:
+                raise PrivacyAuditUnreadable("privacy_audit_page_invariant_violated")
             next_cursor = self._encode_cursor(
                 {
-                    "after_at": cast(str, last[2]),
-                    "after_id": cast(str, last[3]),
+                    "after_at": last[2],
+                    "after_id": last[3],
                     "query_digest": query_digest,
                     "snapshot_at": format_rfc3339_millis(snapshot_at),
                     "snapshot_generation": snapshot_generation,

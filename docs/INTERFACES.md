@@ -3175,15 +3175,19 @@ page. The skip is counted and named: the 2.9 result carries `undecodable_count` 
 only on a partial page, so a complete page keeps its exact bytes; the first five skipped rows of a
 page also each leave an owner-only `privacy_receipts_list_row_skipped` diagnostic whose reason names
 the destination kind and whose `request_id` is the row's own, so a heavily corrupt audit listed
-repeatedly cannot evict unrelated records from the bounded diagnostics ring. The cursor still
-advances past skipped rows, so paging neither repeats nor loses one. A failure of the store itself
--- an unreadable row fetched by `get`, an ordering or uniqueness violation among rows that did
-decode, an unavailable snapshot generation, a malformed position inside a cursor whose MAC and query
-digest verified (only this store could mint it) -- is the closed, non-retryable control reason
-`privacy_audit_unreadable` (public code `STORAGE_CORRUPT`, exit 40, continuation
-`privacy_audit_review`) with a correlation id the diagnostic sink resolves; the client reports a
-frame it validated but cannot decode into receipts the same way. The CLI prints a partial page in
-full and exits 40 with the count and ids on stderr. Both audit adapters project stored network
+repeatedly cannot evict unrelated records from the bounded diagnostics ring. The cursor carries the
+last listed row's `receipt_finished_at` and `receipt_id` text as stored and compares it as text, as
+the ordering does, so it advances past skipped rows and a corrupt row can end one page without
+stranding the pages behind it; paging neither repeats nor loses a row. A row whose stored finish
+time is not a canonical timestamp is kept in the listing and skipped as unreadable rather than
+falling outside the snapshot bound. A failure of the store itself -- an unreadable row fetched by
+`get`, an ordering or uniqueness violation among rows that did decode, an unavailable snapshot
+generation, a malformed cursor whose MAC and query digest verified (only this store could mint it)
+-- is the closed, non-retryable control reason `privacy_audit_unreadable` (public code
+`STORAGE_CORRUPT`, exit 40, continuation `privacy_audit_review`) with a correlation id the
+diagnostic sink resolves; the client reports a frame it validated but cannot decode into receipts
+the same way. The CLI prints a partial page in full and exits 40 with the count and ids on stderr.
+Both audit adapters project stored network
 egress receipts as well as local disclosure receipts, so a completed subscription review is
 retrievable by its recorded receipt ID and listable by `channel`, `provider_id`, or
 `endpoint_profile_id`.

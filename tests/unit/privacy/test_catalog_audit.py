@@ -1683,9 +1683,98 @@ def test_skipped_row_diagnostics_are_bounded_per_page_while_the_page_names_every
     ]
 
 
-def test_a_malformed_position_in_a_cursor_this_store_minted_is_a_store_fault() -> None:
-    """Only this store can mint a cursor whose MAC and query digest verify, so a bad position
-    inside one is the store's integrity fault -- never the caller's ``invalid_request``."""
+def _corrupt_columns(
+    db: apsw.Connection,
+    receipt: LocalDisclosureReceipt,
+    *,
+    finished_at: str | None = None,
+    receipt_id: str | None = None,
+) -> None:
+    """Corrupt a row's indexed columns the way disk damage or tampering could; the schema
+    constrains their type (STRICT TEXT) and presence, not their format."""
+
+    db.execute(
+        """UPDATE privacy_audit_records
+           SET receipt_finished_at = coalesce(?, receipt_finished_at),
+               receipt_id = coalesce(?, receipt_id)
+           WHERE receipt_id = ?""",
+        (finished_at, receipt_id, receipt.receipt_id),
+    )
+
+
+def _page_through(
+    audit: CatalogPrivacyAudit, limit: int
+) -> tuple[list[str], list[PrivacyReceiptPage]]:
+    pages: list[PrivacyReceiptPage] = []
+    cursor: str | None = None
+    while True:
+        page = asyncio.run(
+            audit.list_receipts(
+                PrivacyReceiptQuery(limit=limit, cursor=cursor),
+                PrivacyReceiptAudience.TRUSTED_LOCAL_CONTROL,
+            )
+        )
+        pages.append(page)
+        assert len(pages) <= 20, "paging must always make progress"
+        cursor = page.next_cursor
+        if cursor is None:
+            return [
+                view.receipt.receipt_id for view in (v for p in pages for v in p.receipts)
+            ], pages
+
+
+def test_a_corrupt_row_at_either_end_of_a_page_never_strands_the_pages_behind_it() -> None:
+    """The cursor carries the last row's key as stored, so a corrupt row can end one page and
+    start the next while every readable receipt after it stays reachable and the skip is named.
+    """
+
+    db = _database()
+    audit = CatalogPrivacyAudit(db, _UnusedObjects(), _Key(), _Clock())  # type: ignore[arg-type]
+    stored = [_stored_projection(audit, index) for index in range(1, 9)]
+    ending, starting = stored[2], stored[3]
+    # Last row of page one: neither indexed column is canonical any more, but both still sort
+    # where the row was.
+    _corrupt_columns(
+        db,
+        ending,
+        finished_at=format_rfc3339_millis(ending.finished_at) + "~corrupt",
+        receipt_id="egr_corrupted",
+    )
+    # First row of page two: only its finish time is damaged, so its structural id is named.
+    _corrupt_columns(
+        db, starting, finished_at=format_rfc3339_millis(starting.finished_at) + "~corrupt"
+    )
+
+    listed, pages = _page_through(audit, 3)
+
+    readable = [receipt for receipt in stored if receipt not in (ending, starting)]
+    assert listed == [receipt.receipt_id for receipt in readable]
+    assert [(page.undecodable_count, page.undecodable_receipt_ids) for page in pages] == [
+        (1, ()),
+        (1, (starting.receipt_id,)),
+        (0, ()),
+    ]
+
+
+def test_a_row_whose_finish_time_is_not_a_timestamp_is_disclosed_not_dropped() -> None:
+    """Text such as ``zzzz`` sorts above every snapshot bound; it must still be listed as
+    unreadable instead of silently falling outside the listing."""
+
+    db = _database()
+    audit = CatalogPrivacyAudit(db, _UnusedObjects(), _Key(), _Clock())  # type: ignore[arg-type]
+    stored = [_stored_projection(audit, index) for index in range(1, 4)]
+    _corrupt_columns(db, stored[1], finished_at="zzzz-not-a-timestamp")
+
+    listed, pages = _page_through(audit, 1)
+
+    assert listed == [stored[0].receipt_id, stored[2].receipt_id]
+    assert pages[0].undecodable_receipt_ids == (stored[1].receipt_id,)
+    assert sum(page.undecodable_count for page in pages) == 1
+
+
+def test_a_cursor_this_store_minted_with_a_non_text_position_is_a_store_fault() -> None:
+    """Only this store can mint a cursor whose MAC and query digest verify, so a malformed one
+    is the store's integrity fault -- never the caller's ``invalid_request``."""
 
     db = _database()
     audit = CatalogPrivacyAudit(db, _UnusedObjects(), _Key(), _Clock())  # type: ignore[arg-type]
@@ -1698,7 +1787,7 @@ def test_a_malformed_position_in_a_cursor_this_store_minted_is_a_store_fault() -
     )
     assert first.next_cursor is not None
     payload = dict(audit._decode_cursor(first.next_cursor))  # pyright: ignore[reportPrivateUsage]
-    payload["after_at"] = "not-a-timestamp"
+    payload["after_at"] = 17
     minted = audit._encode_cursor(payload)  # pyright: ignore[reportPrivateUsage]
 
     with pytest.raises(PrivacyAuditUnreadable) as raised:
