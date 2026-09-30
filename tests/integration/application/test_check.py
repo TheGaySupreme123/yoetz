@@ -17,6 +17,7 @@ from builders.ledger_adapters import FixedClock, MemoryObjects
 from builders.policy_cases import (
     FRONTIER,
     act,
+    claim_record,
     clm,
     evd,
     evidence_record,
@@ -37,6 +38,7 @@ from yoetz.domain.events import (
     ActionRecordedPayload,
     ClaimKind,
     ClaimRecordedPayload,
+    ClaimRecordedPayloadV1_1,
     EvidenceContentAvailability,
     EvidenceDigestBinding,
     EvidenceDigestProvenance,
@@ -64,6 +66,7 @@ from yoetz.domain.receipts import (
     SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
 )
 from yoetz.domain.values import (
+    ClaimId,
     EvidenceId,
     Frontier,
     disclosure_continuation,
@@ -72,7 +75,11 @@ from yoetz.domain.values import (
 )
 from yoetz.kernel import deterministic_checks as deterministic_checks_module
 from yoetz.kernel.deterministic_checks import DeterministicCase
-from yoetz.kernel.projections import EvidenceProjectionRecord, PendingMissingForAssessment
+from yoetz.kernel.projections import (
+    ClaimProjectionRecord,
+    EvidenceProjectionRecord,
+    PendingMissingForAssessment,
+)
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import (
@@ -1310,7 +1317,29 @@ def _missing_case(*, pending: bool = False, supplied: bool = False) -> Determini
     """A claimed completion, optionally with a prior review's request and an answer since."""
 
     evidence: dict[EvidenceId, EvidenceProjectionRecord] = {}
+    claims: dict[ClaimId, ClaimProjectionRecord] = {
+        clm(1): record(
+            ClaimRecordedPayload(clm(1), ClaimKind.COMPLETION, "Lookups repaired", ()), 3
+        )
+    }
     if supplied:
+        # The agent answers the named claim: the output, and a claim correction that cites it
+        # in place of the unsupported claim, so the output is bound to the named target.
+        claims[clm(1)] = claim_record(
+            ClaimRecordedPayload(clm(1), ClaimKind.COMPLETION, "Lookups repaired", ()),
+            3,
+            superseded_by_claim_id=clm(61),
+        )
+        claims[clm(61)] = record(
+            ClaimRecordedPayloadV1_1(
+                clm(61),
+                ClaimKind.COMPLETION,
+                "Lookups repaired",
+                (evd(60),),
+                supersedes_claim_refs=(clm(1),),
+            ),
+            61,
+        )
         evidence[evd(60)] = evidence_record(
             EvidenceRecordedPayload(
                 evd(60),
@@ -1321,15 +1350,7 @@ def _missing_case(*, pending: bool = False, supplied: bool = False) -> Determini
             ),
             60,
         )
-    case = make_case(
-        claims={
-            clm(1): record(
-                ClaimRecordedPayload(clm(1), ClaimKind.COMPLETION, "Lookups repaired", ()), 3
-            )
-        },
-        evidence=evidence,
-        extra_refs=(clm(1),),
-    )
+    case = make_case(claims=claims, evidence=evidence, extra_refs=(clm(1),))
     if not pending:
         return case
     return replace(

@@ -917,8 +917,10 @@ is a policy choice and adds no gap.
 `missing_for_assessment`); a reply that names nothing is read backward, keeping its conclusion and
 #905 rulings, and discloses `semantic_missing_items_rejected`. Yoetz fences targets to the packet's
 `citable_refs`, drops a request the reviewer repeats without citing what the agent published since
-(hook-captured tool output never counts as supplied, and a result supplies verification output only
-when it carries output), classifies each item as `agent_suppliable` or
+for every target it names (material counts for a target only when recorded refs tie it to that
+target, so a same-kind record for another path, run or claim never answers it; only an untargeted
+item matches by record family; hook-captured tool output never counts as supplied, and a result
+supplies verification output only when it carries output), classifies each item as `agent_suppliable` or
 `structurally_unavailable_on_this_host`, records the structural items as the optional
 `missing_for_assessment` field of the unreleased `check_recorded` 1.3.0 (extended in place, only
 beside `insufficient_packet`) and shows the prior request with `supplied_since` refs to the next

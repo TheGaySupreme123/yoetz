@@ -5,7 +5,17 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import replace
 
-from builders.policy_cases import act, evt, make_case, record, res
+from builders.policy_cases import (
+    act,
+    claim_record,
+    clm,
+    evd,
+    evidence_record,
+    evt,
+    make_case,
+    record,
+    res,
+)
 from builders.privacy_policies import local_only_policy, minimal_external_policy
 from yoetz.application.missing_for_assessment import (
     review_missing_for_assessment,
@@ -15,6 +25,11 @@ from yoetz.application.missing_for_assessment import (
 from yoetz.domain.events import (
     ActionKind,
     ActionRecordedPayload,
+    ClaimKind,
+    ClaimRecordedPayload,
+    ClaimRecordedPayloadV1_1,
+    EvidenceKind,
+    EvidenceRecordedPayload,
     MissingForAssessmentItem,
     ResultOutcome,
     ResultRecordedPayload,
@@ -25,12 +40,18 @@ from yoetz.domain.privacy import (
     ReviewContextProfile,
     ReviewSelectionPolicy,
 )
-from yoetz.domain.values import ResultId
+from yoetz.domain.values import ResultId, timestamp_from_string
 from yoetz.kernel.deterministic_checks import DeterministicCase
 from yoetz.kernel.projections import PendingMissingForAssessment, ProjectionRecord
 from yoetz.mcp.summaries import summary_for_check
-from yoetz.ports.semantic import MissingForAssessment, PriorFindingVerdict, SemanticJudgment
+from yoetz.ports.semantic import (
+    MissingForAssessment,
+    MissingForAssessmentKind,
+    PriorFindingVerdict,
+    SemanticJudgment,
+)
 from yoetz.protocol.canonical import JsonValue
+from yoetz.protocol.coverage import EvidenceImmutability
 from yoetz.service import ready_composition
 
 _CLAIM = "clm_10000000-0000-4000-8000-000000000001"
@@ -246,3 +267,218 @@ def test_an_output_free_result_never_answers_a_request_for_verification_output()
     dropped = review_missing_for_assessment(answered, (), judgment, unsuppliable_kinds=frozenset())
     assert dropped.items == ()
     assert "semantic_missing_already_supplied" in dropped.gaps
+
+
+def _repeat(kind: MissingForAssessmentKind, *targets: str) -> SemanticJudgment:
+    return SemanticJudgment(
+        "insufficient_packet",
+        (),
+        missing_for_assessment=(MissingForAssessment(kind, targets, "still absent"),),
+    )
+
+
+def _run(number: int, command: str) -> ActionRecordedPayload:
+    return ActionRecordedPayload(act(number), ActionKind.COMMAND, "Ran tests", command=command)
+
+
+def _output(number: int, action: int) -> ResultRecordedPayload:
+    return ResultRecordedPayload(
+        res(number), act(action), ResultOutcome.SUCCESS, summary="3 passed, 0 failed"
+    )
+
+
+def _pending(case: DeterministicCase, *items: MissingForAssessmentItem) -> DeterministicCase:
+    pending = PendingMissingForAssessment(evt(50), 50, items)
+    return replace(
+        case, projection=replace(case.projection, pending_missing_for_assessment=pending)
+    )
+
+
+def test_material_for_another_target_never_answers_a_named_request() -> None:
+    """R940-01: a same-kind record for target B leaves the repeated request for A named."""
+
+    case = _pending(
+        make_case(
+            actions={
+                act(1): record(_run(1, "pytest tests/a"), 10),
+                act(62): record(_run(62, "pytest tests/b"), 62),
+            },
+            results={res(63): record(_output(63, 62), 63)},
+            extra_refs=(act(1), act(62), res(63)),
+        ),
+        MissingForAssessmentItem("verification_output", (str(act(1)),), "agent_suppliable"),
+    )
+    pending = case.projection.pending_missing_for_assessment
+    assert pending is not None
+    allowed = frozenset(str(ref) for ref in case.allowed_ids)
+    assert supplied_since(case.projection, pending, allowed) == ((),)
+    review = review_missing_for_assessment(
+        case, (), _repeat("verification_output", str(act(1))), unsuppliable_kinds=frozenset()
+    )
+    assert [(item.kind, item.target_refs, item.availability) for item in review.items] == [
+        ("verification_output", (str(act(1)),), "agent_suppliable")
+    ]
+    assert "semantic_missing_already_supplied" not in review.gaps
+
+    # The output of the named action, or of a rerun of its exact command, does answer it.
+    for action, command in ((1, "pytest tests/a"), (64, "pytest tests/a")):
+        answered = _pending(
+            make_case(
+                actions={
+                    act(1): record(_run(1, "pytest tests/a"), 10),
+                    act(64): record(_run(64, command), 64),
+                },
+                results={res(65): record(_output(65, action), 65)},
+                extra_refs=(act(1), act(64), res(65)),
+            ),
+            MissingForAssessmentItem("verification_output", (str(act(1)),), "agent_suppliable"),
+        )
+        dropped = review_missing_for_assessment(
+            answered,
+            (),
+            _repeat("verification_output", str(act(1))),
+            unsuppliable_kinds=frozenset(),
+        )
+        assert dropped.items == ()
+        assert "semantic_missing_already_supplied" in dropped.gaps
+
+
+def _diff(number: int, path: str) -> EvidenceRecordedPayload:
+    return EvidenceRecordedPayload(
+        evd(number),
+        EvidenceKind.ARTIFACT,
+        EvidenceImmutability.METADATA_ONLY,
+        timestamp_from_string("2026-09-27T00:00:00.000Z"),
+        reference=path,
+        description=f"diff of {path}",
+    )
+
+
+def test_a_diff_of_another_path_never_answers_a_request_for_this_path() -> None:
+    """R940-01: current_diff_for_path for A stays named when only B's diff was recorded."""
+
+    def case_with(later: EvidenceRecordedPayload) -> DeterministicCase:
+        return _pending(
+            make_case(
+                evidence={
+                    evd(1): evidence_record(_diff(1, "src/a.py"), 10),
+                    later.evidence_id: evidence_record(later, 70),
+                },
+                extra_refs=(evd(1), later.evidence_id),
+            ),
+            MissingForAssessmentItem("current_diff_for_path", (str(evd(1)),), "agent_suppliable"),
+        )
+
+    other = case_with(_diff(70, "src/b.py"))
+    review = review_missing_for_assessment(
+        other, (), _repeat("current_diff_for_path", str(evd(1))), unsuppliable_kinds=frozenset()
+    )
+    assert [item.target_refs for item in review.items] == [(str(evd(1)),)]
+    assert "semantic_missing_already_supplied" not in review.gaps
+
+    same = case_with(_diff(70, "src/a.py"))
+    dropped = review_missing_for_assessment(
+        same, (), _repeat("current_diff_for_path", str(evd(1))), unsuppliable_kinds=frozenset()
+    )
+    assert dropped.items == ()
+    assert "semantic_missing_already_supplied" in dropped.gaps
+
+
+def test_a_request_naming_two_targets_converges_per_target() -> None:
+    """Only the target that was answered stops being listed; the other stays named."""
+
+    case = _pending(
+        make_case(
+            actions={
+                act(1): record(_run(1, "pytest tests/a"), 10),
+                act(2): record(_run(2, "pytest tests/b"), 11),
+            },
+            results={res(63): record(_output(63, 2), 63)},
+            extra_refs=(act(1), act(2), res(63)),
+        ),
+        MissingForAssessmentItem(
+            "verification_output",
+            tuple(sorted((str(act(1)), str(act(2))), key=str.encode)),
+            "agent_suppliable",
+        ),
+    )
+    pending = case.projection.pending_missing_for_assessment
+    assert pending is not None
+    allowed = frozenset(str(ref) for ref in case.allowed_ids)
+    assert supplied_since(case.projection, pending, allowed) == ((str(res(63)),),)
+    kept = review_missing_for_assessment(
+        case, (), _repeat("verification_output", str(act(1))), unsuppliable_kinds=frozenset()
+    )
+    assert [item.target_refs for item in kept.items] == [(str(act(1)),)]
+    assert "semantic_missing_already_supplied" not in kept.gaps
+    dropped = review_missing_for_assessment(
+        case, (), _repeat("verification_output", str(act(2))), unsuppliable_kinds=frozenset()
+    )
+    assert dropped.items == ()
+    assert "semantic_missing_already_supplied" in dropped.gaps
+
+
+def test_a_claim_is_answered_only_by_material_its_correction_cites() -> None:
+    """Output recorded beside a claim answers it once a claim correction cites that output."""
+
+    claim = ClaimRecordedPayload(clm(1), ClaimKind.COMPLETION, "Lookups repaired", ())
+    output = _diff(70, "pytest-output.txt")
+
+    def case_with(corrected: bool) -> DeterministicCase:
+        claims = {clm(1): claim_record(claim, 3)}
+        if corrected:
+            claims[clm(1)] = claim_record(claim, 3, superseded_by_claim_id=clm(71))
+            claims[clm(71)] = record(
+                ClaimRecordedPayloadV1_1(
+                    clm(71),
+                    ClaimKind.COMPLETION,
+                    "Lookups repaired",
+                    (evd(70),),
+                    supersedes_claim_refs=(clm(1),),
+                ),
+                71,
+            )
+        return _pending(
+            make_case(
+                claims=claims,
+                evidence={evd(70): evidence_record(output, 70)},
+                extra_refs=(clm(1), evd(70)),
+            ),
+            MissingForAssessmentItem("verification_output", (str(clm(1)),), "agent_suppliable"),
+        )
+
+    loose = review_missing_for_assessment(
+        case_with(False),
+        (),
+        _repeat("verification_output", str(clm(1))),
+        unsuppliable_kinds=frozenset(),
+    )
+    assert [item.target_refs for item in loose.items] == [(str(clm(1)),)]
+    bound = review_missing_for_assessment(
+        case_with(True),
+        (),
+        _repeat("verification_output", str(clm(1))),
+        unsuppliable_kinds=frozenset(),
+    )
+    assert bound.items == ()
+    assert "semantic_missing_already_supplied" in bound.gaps
+
+
+def test_hook_command_placeholders_never_make_two_runs_the_same_command() -> None:
+    """``omitted:structural`` stands in for text Yoetz did not keep; it identifies no command."""
+
+    case = _pending(
+        make_case(
+            actions={
+                act(1): record(_run(1, "omitted:structural"), 10),
+                act(62): record(_run(62, "omitted:structural"), 62),
+            },
+            results={res(63): record(_output(63, 62), 63)},
+            extra_refs=(act(1), act(62), res(63)),
+        ),
+        MissingForAssessmentItem("verification_output", (str(act(1)),), "agent_suppliable"),
+    )
+    review = review_missing_for_assessment(
+        case, (), _repeat("verification_output", str(act(1))), unsuppliable_kinds=frozenset()
+    )
+    assert [item.target_refs for item in review.items] == [(str(act(1)),)]

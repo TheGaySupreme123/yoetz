@@ -898,7 +898,10 @@ def test_next_packet_shows_the_prior_request_and_carries_the_item_supplied_since
         evt(run_frontier - 2),
         run_frontier - 2,
         (
-            MissingForAssessmentItem("verification_output", (str(clm(1)),), "agent_suppliable"),
+            # The reviewer named the earlier failing run; a rerun of its command answers it.
+            MissingForAssessmentItem(
+                "verification_output", (str(pytest_runs[-2]),), "agent_suppliable"
+            ),
             MissingForAssessmentItem(
                 "command_identity", (), "structurally_unavailable_on_this_host"
             ),
@@ -918,7 +921,11 @@ def test_next_packet_shows_the_prior_request_and_carries_the_item_supplied_since
     items = cast(list[dict[str, JsonValue]], body["items"])
     verification = next(item for item in items if item["kind"] == "verification_output")
     assert str(latest_run) in cast(list[str], verification["supplied_since"])
-    assert verification["target_refs"] == [str(clm(1))]
+    assert verification["target_refs"] == [str(pytest_runs[-2])]
+    # The ruff run recorded since is output of another command: it never answers this request.
+    assert not {str(ref) for ref in ledger.verification["ruff"]} & set(
+        cast(list[str], verification["supplied_since"])
+    )
     # The supplied run itself travels in the reserved room, marked as the latest of its command.
     assert rows[f"excerpt-{latest_run}"]["latest_for"] == "command"
     assert "prior-missing-for-assessment" in semantic.packet.timeline_item_ids

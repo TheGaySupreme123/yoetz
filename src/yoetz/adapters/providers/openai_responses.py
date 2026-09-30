@@ -182,7 +182,8 @@ SEMANTIC_REVIEW_INSTRUCTION: Final = (
     "may still be current. With insufficient_packet, list each item you needed in "
     "missing_for_assessment: its kind, the packet refs it concerns (only from citable_refs), and "
     "a short reason. An item in a prior_missing_for_assessment timeline item lists in "
-    "supplied_since the material of that kind the agent recorded since; list it again only if "
+    "supplied_since the material of that kind the agent recorded since for its target_refs "
+    "(any such material when it names none); list it again only if "
     "you cite one of those refs and say why it is still insufficient."
 )
 _SYSTEM_INSTRUCTION: Final = SEMANTIC_REVIEW_INSTRUCTION

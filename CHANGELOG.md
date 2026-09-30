@@ -14,8 +14,9 @@ reverse-chronological released versions.
   recorded order with older hunks and runs marked as superseded; long output keeps its final
   summary line; an oversized plan or claim is clipped instead of replaced by a digest. An
   `insufficient_packet` review must now name what it needed. The check result lists each item and
-  whether you can supply it, as a coverage limitation, never a finding. The excerpt count and the
-  privacy policy are unchanged (#907).
+  whether you can supply it, as a coverage limitation, never a finding. A repeated request stops
+  being listed only after you publish material tied to the ref it names; material for another
+  file, run or claim does not count. The excerpt count and the privacy policy are unchanged (#907).
 
 - Codex, Claude Code and Cursor session-start context can show a fresh repository-grant snapshot
   and name the owner's missing admission command. The notice leaves route and host approval

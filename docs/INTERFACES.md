@@ -6876,7 +6876,14 @@ discloses `semantic_missing_items_rejected`. A malformed item still rejects the 
 fence trims targets to the packet's `citable_refs`, as it trims a ruling's cited refs, dropping an
 item left with none (`semantic_missing_items_rejected`), and drops an item whose earlier request was
 answered by material recorded since unless the reviewer cites that material
-(`semantic_missing_already_supplied`). Only agent-published material answers a request, never
+(`semantic_missing_already_supplied`). "Answered" is judged per named target: a repeat is dropped
+only when the earlier request named every one of its targets and each has answering material that
+the ledger's own refs tie to it (a result of the named action or of a run of the same exact command,
+never a hook `omitted:` placeholder; evidence that result cites or recorded at the same `reference`;
+a claim correction that supersedes or disputes the named claim, or covers its obligations, and the
+material it cites; a response to the named finding; a later plan version), so material for another
+path, run or claim never answers it. Only an item with no target is matched by record family alone,
+and `supplied_since` lists refs on the same rule. Only agent-published material answers a request, never
 hook-captured tool output: authorship is the service-stamped envelope fact, carried on the frozen
 case as `observation_event_ids`, the observation-authored events recorded after the request, emitted
 only when non-empty so other cases keep their bytes; and a result answers `verification_output` only
