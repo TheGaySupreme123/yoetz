@@ -6945,7 +6945,8 @@ plan. Names and contracts:
   absence proof and join `SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS` for semantic findings. A
   finding that carries none of them and was raised before the ledger's first statement-capable
   event (`ReplayIndex.first_task_statement_sequence`, by envelope schema version) tolerates them
-  on a later check, so an AI-powered finding recorded before the upgrade can still clear.
+  on a later check, so an AI-powered finding recorded before the upgrade can still clear: the
+  review that raised it had at most the task title (`task_title_only`), never the user's request.
 - Privacy: review section `task_statement` in privacy-policy 1.2.0. `ReviewSelectionPolicy
   .for_profile(profile, preset_version="1.1.0"|"1.2.0")`; the 1.2.0 goal-aware, Assisted and
   Expanded presets include the section, Structural never does, Custom only when listed.

@@ -519,24 +519,41 @@ async def _bootstrap_finding(
     seed: int,
     mode: str = "deterministic_only",
     refs: bool = False,
+    task_statement: str | None = None,
 ) -> tuple[StartInternalResult, CheckCommitResult, str]:
     """Publish one open obligation plus an unsupported completion claim about it, then check.
 
     This reuses the exact scenario already proven (in ``test_full_workflow.py``) to yield one
     actionable ``completion_with_open_obligations`` finding, so the finding-triggering mechanics
-    themselves are not re-derived here.
+    themselves are not re-derived here. ``task_statement`` records one through a reattaching
+    ``start`` before anything is published (issue #908).
     """
 
     started = await app.start(
         start_request(seed, title="Respond/status/receipt exercise", refs=refs)
     )
+    first_frontier = started.frontier
+    if task_statement is not None:
+        attached = await app.start(
+            StartRequest.model_validate(
+                {
+                    **_request_base(protocol_id("req_", seed + 25)),
+                    "mode": "attach",
+                    "session_id": started.session_id,
+                    "task_title": "Respond/status/receipt exercise",
+                    "requested_view": "compact",
+                    "task_statement": task_statement,
+                }
+            )
+        )
+        first_frontier = attached.frontier
     obligation_id = protocol_id("obl_", seed + 1)
     obligation_event_id = protocol_id("evt_", seed + 2)
     publish_wire: dict[str, JsonValue] = {
         **_request_base(protocol_id("req_", seed + 3)),
         "session_id": started.session_id,
         "writer_id": started.writer_id,
-        "expected_frontier": _frontier(started.frontier),
+        "expected_frontier": _frontier(first_frontier),
         "event_drafts": (
             {
                 "event_id": obligation_event_id,
@@ -4963,9 +4980,9 @@ async def test_a_defect_the_review_still_finds_after_repair_stays_current() -> N
     assert refired and all(not by_id[item.finding_id].resolved for item in refired)
 
 
-@pytest.mark.parametrize("statement_after_finding", [False, True])
+@pytest.mark.parametrize("statement", ["never", "after_finding", "before_finding"])
 async def test_a_finding_raised_before_the_task_statement_is_not_trapped_by_its_gaps(
-    statement_after_finding: bool,
+    statement: str,
 ) -> None:
     """Issue #908: an AI-powered finding recorded before any review could carry a statement.
 
@@ -4973,6 +4990,7 @@ async def test_a_finding_raised_before_the_task_statement_is_not_trapped_by_its_
     every later review under a pre-section approval carries ``task_statement_unavailable`` and
     ``task_statement_not_authorized``. After material work, a completed later review that does not
     return the issue resolves it, the codes stay on the receipt, and the conclusion stays bounded.
+    A finding raised after a statement-capable event gets no such tolerance and stays open.
     """
 
     seed = 5600
@@ -4993,14 +5011,17 @@ async def test_a_finding_raised_before_the_task_statement_is_not_trapped_by_its_
 
     app, _runtime, _ = _build_app(seed_offset=56, semantic="optional", semantic_evaluator=evaluate)
     started, checked, _obligation = await _bootstrap_finding(
-        app, seed=seed, mode="semantic_if_configured"
+        app,
+        seed=seed,
+        mode="semantic_if_configured",
+        task_statement="The user's request, verbatim." if statement == "before_finding" else None,
     )
     finding = next(
         item for item in checked.findings if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
     )
     assert not {gap for gap in finding.coverage.known_gaps if gap.startswith("task_statement")}
     frontier: object = checked.result_frontier
-    if statement_after_finding:
+    if statement == "after_finding":
         attached = await app.start(
             StartRequest.model_validate(
                 {
@@ -5058,5 +5079,8 @@ async def test_a_finding_raised_before_the_task_statement_is_not_trapped_by_its_
         repaired.coverage.known_gaps
     )
     view = await _findings_view(app, started, seed + 41, include_resolved=True)
-    assert next(item for item in view.items if item.finding_id == finding.finding_id).resolved
+    resolved = next(item for item in view.items if item.finding_id == finding.finding_id).resolved
+    # Raised after a statement-capable event, the finding had its chance at the statement, so a
+    # later review that lacks it proves nothing new and the issue stays open.
+    assert resolved is (statement != "before_finding")
     assert conclusions == [] and gaps_by_call == []

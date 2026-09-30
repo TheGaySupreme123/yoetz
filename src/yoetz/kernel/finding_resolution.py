@@ -447,10 +447,11 @@ def resolution_blockers(
             tolerated |= original_gaps & _SEMANTIC_BASELINE_CAPTURE_GAPS
             if raised_before_task_statement and not original_gaps & TASK_STATEMENT_GAPS:
                 # The review that raised this issue predates the task statement (issue #908): it
-                # had no statement and no title, so a later review that still lacks the statement
-                # saw no less. Without this, every AI-powered finding recorded before the upgrade
-                # stays open until the owner consents to sending the user's words, and forever
-                # under Structural. The codes stay on every receipt.
+                # had at most the task title (``task_title_only``), never the user's request, so a
+                # later review that still lacks the statement saw no less of the request. Without
+                # this, every AI-powered finding recorded before the upgrade stays open until the
+                # owner consents to sending the user's words, and forever under Structural. The
+                # codes stay on every receipt.
                 tolerated |= TASK_STATEMENT_GAPS
         if not _semantic_freshness_proven(check.coverage.ledger_freshness, gaps, tolerated):
             reasons.append("freshness_unproven")

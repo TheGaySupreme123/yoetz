@@ -1312,7 +1312,9 @@ def build_semantic_case(
         if elided:
             over_limit.add(item.item_id)
     else:
-        task_statement_gaps.update({TASK_STATEMENT_UNAVAILABLE_GAP, TASK_STATEMENT_NOT_SUPPLIED_GAP})
+        task_statement_gaps.update(
+            {TASK_STATEMENT_UNAVAILABLE_GAP, TASK_STATEMENT_NOT_SUPPLIED_GAP}
+        )
 
     # --- Agent plan (latest plan summary; the agent's own account, not the user's request) ---
     if projection.plans:
@@ -2562,8 +2564,9 @@ def build_semantic_case(
         # The frozen case holds a lifecycle event only because it recorded the statement. When
         # the policy withholds the statement, its own gaps already say so; counting that event
         # as a reduced reference scope would add ``semantic_reference_scope_reduced`` to every
-        # check an existing approval runs (issue #908).
-        frontier_refs = frontier_refs - {str(recorded_statement.source_event_id)}
+        # check an existing approval runs (issue #908). A reference something else requires
+        # stays counted.
+        frontier_refs = frontier_refs - ({str(recorded_statement.source_event_id)} - required_refs)
     selected_frontier_refs = frozenset(required_refs & frontier_refs)
     omitted_reference_count = len(frontier_refs - selected_frontier_refs)
     frontier_refs = selected_frontier_refs

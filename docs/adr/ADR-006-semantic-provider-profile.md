@@ -827,7 +827,8 @@ a requirement both plan and diff omitted.
   followed literally: a title standing in is disclosed by its `task_title_only` label, not by a
   gap. These codes do not weaken deterministic absence proof, and they tolerate semantic absence
   proof only when the finding was raised under the same limit, or was raised before the ledger's
-  first statement-capable event and carries none of them.
+  first statement-capable event and carries none of them: that review had at most the task title
+  (`task_title_only`), never the user's request.
 - `TASK_STATEMENT_REVIEW_INSTRUCTION` is appended to the system instruction: the task statement is
   the specification and wins over the plan; a plan or diff that omits a stated requirement is a
   discrepancy citing the statement; never request behaviour the statement excludes; weigh
