@@ -25,8 +25,16 @@ from yoetz.domain.findings import (
     SemanticDispatchKind,
     SemanticProvenance,
 )
+from yoetz.domain.receipts import (
+    CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP,
+    CHECK_TIME_CHANGE_GAPS,
+    CHECK_TIME_CHANGE_REDACTED_GAP,
+    CHECK_TIME_CHANGE_TRUNCATED_GAP,
+    CHECK_TIME_CHANGE_UNAVAILABLE_GAP,
+)
 from yoetz.domain.values import Frontier
 from yoetz.kernel.finding_resolution import (
+    SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS,
     apply_check_resolution,
     finding_is_resolved,
     issue_key,
@@ -301,6 +309,8 @@ def test_a_non_semantic_gap_weakens_every_proof_class(gap: str) -> None:
         "semantic_review_not_configured",
         "semantic_relevance_review_not_run",
         "optional_semantic_review_blocked_by_policy",
+        # The check-time change is AI-powered review input only (ADR-031).
+        *sorted(CHECK_TIME_CHANGE_GAPS),
     ),
 )
 def test_semantic_absence_does_not_weaken_a_deterministic_proof(gap: str) -> None:
@@ -998,6 +1008,7 @@ def test_supersession_wording_needs_a_closure_for_that_coordination_finding(
         "unpaired_event",
         "content_capture_unavailable",
         "semantic_case_content_over_item_limit",
+        CHECK_TIME_CHANGE_UNAVAILABLE_GAP,
     ],
 )
 def test_completed_semantic_recheck_can_retain_original_readable_capture_limits(gap: str) -> None:
@@ -1039,6 +1050,9 @@ def test_completed_semantic_recheck_can_retain_original_readable_capture_limits(
         "redacted_event",
         "missing_ref",
         "observation_input_loss",
+        CHECK_TIME_CHANGE_TRUNCATED_GAP,
+        CHECK_TIME_CHANGE_REDACTED_GAP,
+        CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP,
     ],
 )
 def test_matching_material_gaps_never_become_semantic_absence_proof(gap: str) -> None:
@@ -1144,3 +1158,55 @@ def test_unassessable_conclusion_blocks_proof_even_without_a_coverage_gap() -> N
     original = _finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
     later = replace(_check(semantic=_SEMANTIC_OK), semantic_conclusion="insufficient_packet")
     assert _resolves(original, later) is False
+
+
+def test_only_an_absent_check_time_change_is_a_semantic_capture_baseline() -> None:
+    """Issue #883: widening or removing this set changes what a repair review may prove."""
+
+    assert SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS & CHECK_TIME_CHANGE_GAPS == {
+        CHECK_TIME_CHANGE_UNAVAILABLE_GAP
+    }
+
+
+@pytest.mark.parametrize(
+    "raised_under", [(), (CHECK_TIME_CHANGE_TRUNCATED_GAP,)], ids=("full", "truncated")
+)
+def test_truncated_check_time_change_on_a_repair_check_never_resolves(
+    raised_under: tuple[str, ...],
+) -> None:
+    """The repair review may have been shown other files than the one the issue was about."""
+
+    original = replace(
+        _finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED),
+        coverage=_coverage(gaps=raised_under, semantic=True),
+    )
+    repair = replace(
+        _check(
+            semantic=_SEMANTIC_OK,
+            coverage=_coverage(gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,), semantic=True),
+        ),
+        semantic_conclusion="no_material_discrepancy",
+    )
+    assert _resolves(original, repair) is False
+
+
+def test_absent_or_unavailable_check_time_change_keeps_the_prior_resolution() -> None:
+    """No capture means the review had exactly the material it had before ADR-031."""
+
+    original = _finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
+    repair = replace(
+        _check(semantic=_SEMANTIC_OK, coverage=_coverage(semantic=True)),
+        semantic_conclusion="no_material_discrepancy",
+    )
+    # No check-time change selected: nothing reported, resolution exactly as before.
+    assert _resolves(original, repair) is True
+    # Unavailable on both reviews: the repair review is no weaker than the one that raised it.
+    unavailable = _coverage(
+        gaps=(CHECK_TIME_CHANGE_UNAVAILABLE_GAP,), semantic=True, freshness=LedgerFreshness.PARTIAL
+    )
+    assert (
+        _resolves(replace(original, coverage=unavailable), replace(repair, coverage=unavailable))
+        is True
+    )
+    # A repair review that lost a change the raising review had is weaker and proves nothing.
+    assert _resolves(original, replace(repair, coverage=unavailable)) is False

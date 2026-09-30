@@ -1803,7 +1803,9 @@ def build_semantic_case(
             item = _content_item(
                 item_id=f"{CHECK_TIME_CHANGE_ITEM_PREFIX}{check_change_admitted + 1:03d}",
                 section="excerpt",
-                category=DataCategory.EVIDENCE_EXCERPT,
+                # The service read this from the repository itself: it leaves only where the
+                # channel allows repository excerpts, never as recorded evidence.
+                category=DataCategory.REPOSITORY_EXCERPT,
                 source_kind="diff",
                 source_ref=_CHECK_TIME_CHANGE_SOURCE_REF,
                 linked_subject_refs=check_change_links,

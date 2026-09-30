@@ -34,6 +34,7 @@ from yoetz.protocol.canonical import JsonValue, canonical_digest
 __all__ = [
     "GIT_SUBJECT_STATE_FORMAT",
     "GitStateComponents",
+    "GitOutputTruncated",
     "GitSubjectStateAdapter",
     "discover_workspace_root",
     "list_changed_relative_paths",
@@ -173,7 +174,22 @@ class _GitProcessFailure(Exception):
 
 
 class _OutputLimit(Exception):
-    pass
+    def __init__(self, prefix: bytes = b"") -> None:
+        super().__init__("git_output_limit")
+        # Only set when the caller asked for it: the stdout bytes that fit before the limit.
+        self.prefix = prefix
+
+
+class GitOutputTruncated(ValueError):
+    """Stdout exceeded its limit; ``prefix`` holds the stdout bytes read before it (ADR-031).
+
+    Raised only by ``run_read_only_git(..., keep_prefix_on_limit=True)``. It is still a
+    ``ValueError("git_output_limit")``, so callers that ignore the prefix see the usual error.
+    """
+
+    def __init__(self, prefix: bytes) -> None:
+        super().__init__("git_output_limit")
+        self.prefix = prefix
 
 
 @dataclass(slots=True)
@@ -188,6 +204,7 @@ class _GitRunner:
         *,
         stdout_limit: int,
         accepted_returncodes: frozenset[int] = frozenset({0}),
+        keep_prefix_on_limit: bool = False,
     ) -> tuple[int, bytearray]:
         argv = (os.fspath(self.executable), *_GIT_SAFE_PREFIX, *arguments)
         environment = {
@@ -219,6 +236,7 @@ class _GitRunner:
                 stdout_limit=stdout_limit,
                 stderr_limit=_STDERR_LIMIT,
                 timeout_seconds=self.timeout_seconds,
+                keep_prefix_on_limit=keep_prefix_on_limit,
             )
             _overwrite(stderr)
             if process.returncode not in accepted_returncodes:
@@ -244,7 +262,9 @@ class _GitRunner:
                     process.stderr.close()
 
 
-def open_local_workspace(path: Path) -> LocalWorkspaceHandle:
+def open_local_workspace(
+    path: Path, *, timeout_seconds: float = _GIT_TIMEOUT_SECONDS
+) -> LocalWorkspaceHandle:
     """Validate one explicit local Git root and return an opaque descriptor handle."""
 
     root = _lexically_safe_absolute(path)
@@ -254,7 +274,7 @@ def open_local_workspace(path: Path) -> LocalWorkspaceHandle:
         descriptor = _open_root_descriptor(root)
         facts = os.fstat(descriptor)
         _verify_root_facts(facts)
-        runner = _default_runner()
+        runner = _default_runner(timeout_seconds)
         _verify_git_metadata(root)
         _verify_git_root(root, runner)
         payload = _WorkspaceDescriptor(root, descriptor, facts.st_dev, facts.st_ino)
@@ -314,7 +334,7 @@ def list_changed_relative_paths(
         raise ValueError("not_git") from exc
 
 
-def discover_workspace_root(path: Path) -> Path:
+def discover_workspace_root(path: Path, *, timeout_seconds: float = _GIT_TIMEOUT_SECONDS) -> Path:
     """Return the Git top level containing ``path`` without opening any file.
 
     A control connection may name a subdirectory of its repository. This resolves the root with
@@ -324,7 +344,7 @@ def discover_workspace_root(path: Path) -> Path:
 
     candidate = _lexically_safe_absolute(path)
     try:
-        runner = _default_runner()
+        runner = _default_runner(timeout_seconds)
         _, top = runner.run(
             candidate,
             ("rev-parse", "--path-format=absolute", "--show-toplevel"),
@@ -362,13 +382,16 @@ def run_read_only_git(
     stdout_limit: int,
     timeout_seconds: float = _GIT_TIMEOUT_SECONDS,
     accepted_returncodes: frozenset[int] = frozenset({0}),
+    keep_prefix_on_limit: bool = False,
 ) -> tuple[int, bytes]:
     """Run one hardened Git subcommand at a validated workspace root.
 
     Shared with the check-time change capture (ADR-031) so both adapters run Git with the same
     disabled global/system config, hooks, fsmonitor, external diff, textconv and credential
     helpers. ``ValueError("git_output_limit")`` means stdout exceeded ``stdout_limit``; every
-    other failure is ``ValueError("git_failed")``. Neither carries Git output.
+    other failure is ``ValueError("git_failed")``. Neither carries Git output, except that
+    ``keep_prefix_on_limit`` turns the limit error into ``GitOutputTruncated`` holding the stdout
+    bytes that fit, for a listing whose caller can use and disclose a partial answer.
     """
 
     if type(stdout_limit) is not int or stdout_limit < 1:
@@ -381,8 +404,11 @@ def run_read_only_git(
             arguments,
             stdout_limit=stdout_limit,
             accepted_returncodes=accepted_returncodes,
+            keep_prefix_on_limit=keep_prefix_on_limit,
         )
     except _OutputLimit as exc:
+        if keep_prefix_on_limit:
+            raise GitOutputTruncated(exc.prefix) from None
         raise ValueError("git_output_limit") from exc
     except (_CaptureFailure, _GitProcessFailure) as exc:
         raise ValueError("git_failed") from exc
@@ -950,6 +976,7 @@ def _bounded_communicate(
     stdout_limit: int,
     stderr_limit: int,
     timeout_seconds: float,
+    keep_prefix_on_limit: bool = False,
 ) -> tuple[bytearray, bytearray]:
     if process.stdout is None or process.stderr is None:
         raise _GitProcessFailure()
@@ -986,6 +1013,8 @@ def _bounded_communicate(
                     del streams[descriptor]
                     continue
                 if len(buffer) + len(chunk) > limit:
+                    if keep_prefix_on_limit and buffer is stdout_buffer:
+                        raise _OutputLimit(bytes(buffer) + chunk[: limit - len(buffer)])
                     raise _OutputLimit
                 buffer.extend(chunk)
         remaining = max(0.0, deadline - time.monotonic())

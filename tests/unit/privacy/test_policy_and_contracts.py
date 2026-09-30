@@ -271,6 +271,26 @@ def test_review_selection_names_the_categories_its_sections_need() -> None:
     assert "bounded_structural_metadata" in structural_required
 
 
+def test_selecting_diff_excerpts_requires_repository_excerpts_for_the_check_time_change() -> None:
+    """The check-time change is the service's repository read (ADR-031, #883)."""
+
+    for profile in ReviewContextProfile:
+        if profile is ReviewContextProfile.CUSTOM:
+            continue
+        selection = ReviewSelectionPolicy.for_profile(profile)
+        required = selection.required_categories()
+        assert (DataCategory.REPOSITORY_EXCERPT in required) is (
+            selection.carries_check_time_change
+        )
+    expanded = ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED)
+    assert expanded.carries_check_time_change
+    without_diff = replace(
+        expanded, excerpt_kinds=tuple(kind for kind in expanded.excerpt_kinds if kind != "diff")
+    )
+    assert not without_diff.carries_check_time_change
+    assert DataCategory.REPOSITORY_EXCERPT not in without_diff.required_categories()
+
+
 def test_withheld_review_categories_reports_a_self_defeating_configuration() -> None:
     """A review profile selecting sections the channel forbids must be nameable, not silent.
 

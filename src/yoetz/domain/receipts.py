@@ -160,8 +160,10 @@ SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP: Final = "semantic_case_finding_refs_o
 # The check-time change (ADR-031) is the service's own read of the task's repository when a check
 # runs. Each code names one limit on what that single object could show the reviewer. None of
 # them describes an input of a local policy pack, so they bound the review and the receipt only.
-# ``unavailable``: the review's recipe selected the change, but the service could carry none of
-# it (no trusted workspace, unsupported Git state, a failed capture, or no packet subject).
+# ``unavailable``: the review's recipe selected the change and the check named a workspace, but the
+# service could carry none of it (a workspace outside the task's repository, an unsupported Git
+# state, a failed or timed-out capture, a change withheld whole by redaction, or no packet
+# subject). A check whose connection named no workspace has nothing to read and reports no code.
 CHECK_TIME_CHANGE_UNAVAILABLE_GAP: Final = "check_time_change_unavailable"
 # The commit recorded when the task started was absent or unresolvable, so the change is shown
 # against HEAD and commits made during the task may be missing from it.

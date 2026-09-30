@@ -100,11 +100,7 @@ class CheckChangeOutcome:
 def check_time_change_selected(selection: ReviewSelectionPolicy) -> bool:
     """Whether this review recipe would carry a check-time change at all."""
 
-    return (
-        "targeted_excerpts" in selection.sections
-        and selection.max_excerpts > 0
-        and "diff" in selection.excerpt_kinds
-    )
+    return selection.carries_check_time_change
 
 
 async def _read(runtime: TaskRuntime, ref: ObjectRef) -> bytes:
@@ -188,6 +184,15 @@ def _redacted(capture: CheckChangeCapture) -> CheckChangeCapture:
     return replace(capture, text=text, redacted=True, truncated=truncated)
 
 
+def _capture_redacted(
+    port: ChangeCapturePort, workspace: str, base: TaskChangeBase | None
+) -> CheckChangeCapture:
+    capture = port.capture(workspace, base)
+    if type(capture) is not CheckChangeCapture:
+        raise TypeError("check_change_capture_invalid")
+    return _redacted(capture)
+
+
 async def capture_check_time_change(
     *,
     runtime: TaskRuntime,
@@ -215,10 +220,9 @@ async def capture_check_time_change(
         return CheckChangeOutcome(unavailable=True)
     base = await _load_task_base(runtime, request_id)
     try:
-        capture = await asyncio.to_thread(port.capture, source.workspace, base)
-        if type(capture) is not CheckChangeCapture:
-            raise TypeError("check_change_capture_invalid")
-        capture = _redacted(capture)
+        # Capture and every redaction pass run off the event loop: a parser-sized change needs
+        # dozens of full scans, which would otherwise stall every other connection for seconds.
+        capture = await asyncio.to_thread(_capture_redacted, port, source.workspace, base)
         ref = await _store(runtime, encode_check_change(capture), CHECK_CHANGE_MEDIA_TYPE, clock)
         return CheckChangeOutcome(CheckTimeChange(ref, capture))
     except ChangeCaptureUnavailable as exc:

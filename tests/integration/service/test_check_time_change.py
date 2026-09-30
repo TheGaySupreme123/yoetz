@@ -37,7 +37,7 @@ from builders.policy_cases import (
 )
 from yoetz.adapters.git_change_capture import GitChangeCaptureAdapter
 from yoetz.adapters.memory.ledger import MemoryLedgerAdapter
-from yoetz.adapters.privacy.local_enforcer import scan_exact_bytes
+from yoetz.adapters.privacy.local_enforcer import LocalPrivacyEnforcer, scan_exact_bytes
 from yoetz.adapters.sqlite.repository import SqliteLedger
 from yoetz.application.check import FinalSemanticEvaluation
 from yoetz.application.check_change import record_task_change_base
@@ -53,8 +53,13 @@ from yoetz.domain.events import (
     ObligationStatus,
 )
 from yoetz.domain.privacy import (
+    AuthorizationScopeKind,
     CandidateContext,
+    ChannelPolicy,
+    DataClass,
+    EgressChannel,
     PrivacyOutcome,
+    PrivacyProfile,
     PrivacyReason,
     ProviderBinding,
     ReviewContextProfile,
@@ -68,10 +73,11 @@ from yoetz.domain.receipts import (
 from yoetz.ports.change_capture import CheckWorkspaceSource, check_workspace_source_scope
 from yoetz.ports.ledger import FrozenCase
 from yoetz.ports.objects import ObjectKind
+from yoetz.ports.privacy import EffectivePrivacyPolicy
 from yoetz.ports.runtime import TaskRuntime
 from yoetz.ports.start_catalog import StartCatalogPort
 from yoetz.protocol.canonical import strict_json_parse
-from yoetz.protocol.models import SemanticStatus
+from yoetz.protocol.models import DataCategory, SemanticStatus
 
 type _Evaluator = Callable[
     [FrozenCase, tuple[object, ...], TaskRuntime], Awaitable[FinalSemanticEvaluation]
@@ -84,6 +90,8 @@ _Privacy = getattr(non_dispatch, "_Privacy")
 _Catalog = getattr(non_dispatch, "_Catalog")
 _route_for = getattr(non_dispatch, "_route_for")
 _durable_semantic_case = getattr(non_dispatch, "_durable_semantic_case")
+_PolicyApplication = getattr(non_dispatch, "_PolicyApplication")
+_test_effective_policy = getattr(non_dispatch, "_test_effective_policy")
 _SECRET = "ghp_" + "Q" * 36
 
 
@@ -375,3 +383,79 @@ async def test_no_trusted_workspace_source_leaves_the_case_as_before(tmp_path: P
         item.item_id.startswith(CHECK_TIME_CHANGE_ITEM_PREFIX)
         for item in privacy.candidates[0].items
     )
+
+
+def _inference_policy_without_repository_excerpts() -> EffectivePrivacyPolicy:
+    """An expanded recipe whose inference channel allows evidence but not repository excerpts."""
+
+    base = cast(EffectivePrivacyPolicy, _test_effective_policy(ReviewContextProfile.EXPANDED))
+    allowed = tuple(
+        sorted(
+            base.policy.review_selection.required_categories() - {DataCategory.REPOSITORY_EXCERPT},
+            key=lambda item: item.value,
+        )
+    )
+    assert DataCategory.EVIDENCE_EXCERPT in allowed
+    channels = tuple(
+        ChannelPolicy(
+            channel.channel,
+            True,
+            allowed,
+            (DataClass.ORDINARY_USER_CONTENT, DataClass.PUBLIC_STRUCTURAL),
+            _PROVIDER,
+            ("selected-code-review",),
+            AuthorizationScopeKind.TASK,
+            False,
+            262_144,
+            65_536,
+            3_600,
+        )
+        if channel.channel is EgressChannel.LLM_INFERENCE
+        else channel
+        for channel in base.policy.channel_policies
+    )
+    policy = replace(
+        base.policy,
+        profile=PrivacyProfile.TRUSTED_PROVIDER,
+        network_egress_permitted=True,
+        channel_policies=channels,
+    )
+    return EffectivePrivacyPolicy(policy, base.generation, base.effective_digest)
+
+
+@pytest.mark.anyio
+async def test_channel_denying_repository_excerpts_never_sends_the_change_and_says_so(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    frozen, runtime = await _kea_case(memory_adapter(append_command()), repository)
+    _python_rewrite(repository, "String(key)", "`${typeof key}:${String(key)}`")
+    effective = _inference_policy_without_repository_excerpts()
+    privacy = _Privacy(task_id=runtime.task_id, profile=ReviewContextProfile.EXPANDED)
+    privacy.policy_application = _PolicyApplication(effective, repository_granted=True)
+
+    source = CheckWorkspaceSource(os.fspath(repository), _REPOSITORY)
+    with check_workspace_source_scope(source):
+        waiting = await _evaluator(privacy, runtime)(frozen, (), runtime)
+
+    # Disclosed: the recipe selects the change, the channel withholds its category.
+    assert effective.policy.withheld_review_categories == (DataCategory.REPOSITORY_EXCERPT,)
+    assert waiting.withheld_review_categories == ("repository_excerpt",)
+    candidate = privacy.candidates[0]
+    change_items = [
+        item for item in candidate.items if item.item_id.startswith(CHECK_TIME_CHANGE_ITEM_PREFIX)
+    ]
+    assert change_items
+    assert all(item.category is DataCategory.REPOSITORY_EXCERPT for item in change_items)
+    # Never sent: the real enforcer and gateway decision approve everything else, not the change.
+    classified = LocalPrivacyEnforcer().classify(candidate, effective)
+    coordinator = object.__new__(PrivacyCoordinator)
+    decision = coordinator._semantic_decision(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+        classified, effective, _PROVIDER
+    )
+    assert decision.outcome is PrivacyOutcome.COMPLETED
+    assert REVIEW_PACKET_ITEM_ID in decision.approved_item_ids
+    assert not any(
+        item_id.startswith(CHECK_TIME_CHANGE_ITEM_PREFIX) for item_id in decision.approved_item_ids
+    )
+    assert DataCategory.REPOSITORY_EXCERPT in decision.blocked_categories

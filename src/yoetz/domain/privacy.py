@@ -553,7 +553,21 @@ class ReviewSelectionPolicy:
             required.add(DataCategory.FINDING_SUMMARY)
         if self.max_excerpts:
             required.add(DataCategory.EVIDENCE_EXCERPT)
+        if self.carries_check_time_change:
+            # The check-time change is the service's own repository read (ADR-031), so it leaves
+            # only as a repository excerpt; a channel without that category withholds it visibly.
+            required.add(DataCategory.REPOSITORY_EXCERPT)
         return frozenset(required)
+
+    @property
+    def carries_check_time_change(self) -> bool:
+        """Whether a review under this selection carries the ADR-031 check-time change."""
+
+        return (
+            "targeted_excerpts" in self.sections
+            and self.max_excerpts > 0
+            and "diff" in self.excerpt_kinds
+        )
 
     def meet(self, other: ReviewSelectionPolicy) -> ReviewSelectionPolicy:
         if type(other) is not ReviewSelectionPolicy:

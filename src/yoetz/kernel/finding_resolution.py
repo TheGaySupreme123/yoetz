@@ -25,6 +25,7 @@ from yoetz.domain.events import CheckRecordedPayload, ClaimKind, LedgerRecord, R
 from yoetz.domain.findings import Finding, FindingKind, FindingOrigin, ResponseDisposition
 from yoetz.domain.receipts import (
     CHECK_TIME_CHANGE_GAPS,
+    CHECK_TIME_CHANGE_UNAVAILABLE_GAP,
     OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
     OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP,
     SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
@@ -126,9 +127,14 @@ SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS: Final = _HOST_OBSERVATION_GAPS | frozens
     {
         "content_capture_unavailable",
         SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
-        # A check-time change limit (ADR-031) is a capture limit too: a repair check under the
-        # same limit as the review that raised the issue is no weaker than that review.
-        *CHECK_TIME_CHANGE_GAPS,
+        # A check-time change (ADR-031) that never reached either review: both ran on exactly
+        # the material every review had before ADR-031, so the later one is no weaker. The other
+        # check-time codes hide part of a change that did arrive: truncated files, redacted
+        # spans, or commits missing behind a HEAD base. The same code on a later check says
+        # nothing about whether what it hid is what the issue was about, so, like the capture
+        # failures of issue #904, they never become a baseline and keep blocking until a rule
+        # compares the files each review was shown.
+        CHECK_TIME_CHANGE_UNAVAILABLE_GAP,
     }
 )
 _SEMANTIC_BASELINE_CAPTURE_GAPS: Final = SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS
