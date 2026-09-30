@@ -613,9 +613,17 @@ def _task_statement_change_note(change: PrivacyPolicyChange) -> str | None:
     """Plain words for adding or removing the ``task_statement`` review section (issue #908).
 
     An approval given for the agent's plan never covers the user's own words, so the ceremony
-    names this content explicitly instead of leaving it to one token in a section list.
+    names this content explicitly instead of leaving it to one token in a section list. A change
+    to the excerpt count gets its own plain words too (issue #907 Phase 1b).
     """
 
+    if (change.area, change.field) == ("review", "max_excerpts"):
+        if change.widens:
+            return (
+                "max_excerpts: more excerpts may be sent in one review; each stays within the "
+                "per-excerpt and total byte limits, which this change does not raise."
+            )
+        return "max_excerpts: fewer excerpts will be sent in one review."
     if (change.area, change.field) != ("review", "sections"):
         return None
     before = "task_statement" in change.before.labels

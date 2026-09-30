@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import cast
@@ -23,8 +24,11 @@ from yoetz.domain.privacy import (
     PrivacyDecision,
     PrivacyOutcome,
     PrivacyPolicy,
+    PrivacyPolicyPresetVersion,
     PrivacyReason,
     ProviderBinding,
+    ReviewContextProfile,
+    ReviewSelectionPolicy,
 )
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
@@ -40,6 +44,7 @@ from yoetz.ports.privacy import (
     PrivacyPolicyStorePort,
 )
 from yoetz.ports.semantic import Deadline
+from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.ids import IdKind
 from yoetz.protocol.models import DataCategory
 
@@ -105,9 +110,10 @@ class _Store:
 
 
 class _Classifier:
-    def __init__(self, *, byte_count: int, token_count: int) -> None:
-        self._byte_count = byte_count
+    def __init__(self, *, byte_count: int, token_count: int, prepared: bytes | None = None) -> None:
+        self._byte_count = byte_count if prepared is None else len(prepared)
         self._token_count = token_count
+        self._prepared = prepared
         self.classify_calls = 0
 
     def classify(
@@ -131,7 +137,13 @@ class _Classifier:
         self, classified: ClassifiedContext, decision: PrivacyDecision
     ) -> MinimizedDisclosure:
         del decision
-        payload = b"x" * self._byte_count
+        # A readable prepared document of exactly the requested size with no excerpt rows, so
+        # only the channel ceilings under test can refuse it.
+        payload = (
+            b'{"p":"' + b"x" * (self._byte_count - 8) + b'"}'
+            if self._prepared is None
+            else self._prepared
+        )
         return MinimizedDisclosure(
             prepared_bytes=payload,
             included_item_ids=tuple(item.candidate.item_id for item in classified.items),
@@ -468,3 +480,94 @@ async def test_shipped_recipe_ceilings_admit_a_full_size_review_case() -> None:
     )
     result = await coordinator.evaluate_semantic(_candidate(), _deadline())
     assert audit.prepared, f"a full-size review case must reach prepare; got {result!r}"
+
+
+def _packet_with_excerpts(count: int, *, content_bytes: int = 64) -> bytes:
+    """A prepared review packet whose ``excerpt`` rows are what the egress check counts."""
+
+    from yoetz.protocol.canonical import canonical_encode
+
+    rows = [
+        {
+            "category": "evidence_excerpt",
+            "content": "x" * content_bytes,
+            "content_bytes": content_bytes,
+            "item_id": f"excerpt-{index:03d}",
+            "section": "excerpt",
+        }
+        for index in range(count)
+    ]
+    return canonical_encode(
+        cast(JsonValue, {"items": rows, "omissions": [], "schema": "yoetz.review-packet-case/1"})
+    )
+
+
+def _expanded(preset_version: PrivacyPolicyPresetVersion) -> PrivacyPolicy:
+    return replace(
+        _policy_with_ceilings(max_bytes=262_144, max_tokens=65_536),
+        review_context_profile=ReviewContextProfile.EXPANDED,
+        review_selection=ReviewSelectionPolicy.for_profile(
+            ReviewContextProfile.EXPANDED, preset_version=preset_version
+        ),
+    )
+
+
+async def _evaluate(policy: PrivacyPolicy, prepared: bytes) -> tuple[object, _Audit]:
+    audit = _Audit()
+    coordinator = PrivacyCoordinator(
+        cast(PrivacyPolicyStorePort, _Store(policy)),
+        cast(
+            PrivacyClassifierPort,
+            _Classifier(byte_count=0, token_count=len(prepared) // 4, prepared=prepared),
+        ),
+        cast(PrivacyAuditPort, audit),
+        cast(OutboundGatewayPort, _Gateway()),
+        cast(ClockPort, _Clock()),
+        cast(IdPort, _Ids()),
+        human_authority=_human_authority(),
+    )
+    return await coordinator.evaluate_semantic(_candidate(), _deadline()), audit
+
+
+@pytest.mark.anyio
+async def test_more_excerpts_than_the_policy_approved_is_policy_denied_never_trimmed() -> None:
+    """Issue #907 Phase 1b: the approved excerpt count is authoritative at egress."""
+
+    current = _expanded("1.2.0")
+    assert current.review_selection.max_excerpts == 64
+    admitted, admitted_audit = await _evaluate(current, _packet_with_excerpts(40))
+    assert admitted_audit.prepared, f"40 excerpts fit a 64-excerpt approval; got {admitted!r}"
+
+    over, over_audit = await _evaluate(current, _packet_with_excerpts(65))
+    assert isinstance(over, SemanticEgressBlocked)
+    assert over.reason is PrivacyReason.POLICY_DENIED
+    assert over_audit.prepared == []
+
+
+@pytest.mark.anyio
+async def test_a_1_1_0_approval_denies_more_than_16_excerpts() -> None:
+    legacy = _expanded("1.1.0")
+    assert legacy.review_selection.max_excerpts == 16
+    within, within_audit = await _evaluate(legacy, _packet_with_excerpts(16))
+    assert within_audit.prepared, f"16 excerpts fit a 1.1.0 approval; got {within!r}"
+
+    over, over_audit = await _evaluate(legacy, _packet_with_excerpts(17))
+    assert isinstance(over, SemanticEgressBlocked)
+    assert over.reason is PrivacyReason.POLICY_DENIED
+    assert over_audit.prepared == []
+
+
+@pytest.mark.anyio
+async def test_excerpt_bytes_over_the_approved_budget_are_policy_denied() -> None:
+    current = _expanded("1.2.0")
+    per_excerpt = current.review_selection.max_excerpt_bytes
+    # Nine full-size excerpts exceed the 128 KiB total while each fits its own 16 KiB bound.
+    over_total, _ = await _evaluate(current, _packet_with_excerpts(9, content_bytes=per_excerpt))
+    assert isinstance(over_total, SemanticEgressBlocked)
+    assert over_total.reason is PrivacyReason.POLICY_DENIED
+    over_one, _ = await _evaluate(current, _packet_with_excerpts(1, content_bytes=per_excerpt + 1))
+    assert isinstance(over_one, SemanticEgressBlocked)
+    assert over_one.reason is PrivacyReason.POLICY_DENIED
+    unreadable, _ = await _evaluate(current, b"not a review packet")
+    assert isinstance(unreadable, SemanticEgressBlocked)
+    assert unreadable.reason is PrivacyReason.POLICY_DENIED

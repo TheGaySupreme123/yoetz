@@ -46,6 +46,7 @@ from yoetz.domain.privacy import (
     ReceiptPolicyBinding,
     ReceiptSecretScan,
     ReceiptTransformations,
+    ReviewSelectionPolicy,
 )
 from yoetz.observability.logging import record_unexpected_exception_without_raising
 from yoetz.observability.semantic_context import semantic_check_request
@@ -76,7 +77,7 @@ from yoetz.ports.semantic import (
     SemanticResultTimeout,
     SemanticResultUnavailable,
 )
-from yoetz.protocol.canonical import canonical_digest, canonical_encode
+from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
 from yoetz.protocol.ids import IdKind
 
 if TYPE_CHECKING:
@@ -1184,6 +1185,18 @@ class PrivacyCoordinator:
                 PrivacyOutcome.BLOCKED_BY_POLICY,
                 PrivacyReason.POLICY_DENIED,
             )
+        # The approved excerpt limits are authoritative here too: a review packet with more
+        # excerpts, or more excerpt bytes, than the effective policy approved is refused whole,
+        # never trimmed to fit (issue #907 Phase 1b).
+        if candidate.purpose == _SEMANTIC_PURPOSE and not _within_excerpt_limits(
+            minimized.prepared_bytes, effective.policy.review_selection
+        ):
+            return await self._complete_semantic_predispatch(
+                candidate,
+                effective,
+                PrivacyOutcome.BLOCKED_BY_POLICY,
+                PrivacyReason.POLICY_DENIED,
+            )
 
         task_id = candidate.scope.task_id
         if task_id is None:
@@ -2157,6 +2170,41 @@ class PrivacyCoordinator:
             reason,
             1,
         )
+
+
+def _within_excerpt_limits(prepared: bytes, selection: ReviewSelectionPolicy) -> bool:
+    """Whether a prepared review packet stays inside the approved excerpt count and bytes.
+
+    Counted off the exact bytes that would leave, from the packet's own ``excerpt`` rows; a
+    document without item rows carries no excerpt. A document this cannot read is outside the
+    limits: the check fails closed.
+    """
+
+    try:
+        document = strict_json_parse(prepared)
+    except Exception:  # noqa: BLE001 - any unreadable packet fails closed
+        return False
+    if not isinstance(document, dict):
+        return False
+    rows = cast(dict[str, object], document).get("items", [])
+    if not isinstance(rows, list):
+        return False
+    sizes: list[int] = []
+    for row in cast(list[object], rows):
+        if not isinstance(row, dict):
+            return False
+        fields = cast(dict[str, object], row)
+        if fields.get("section") != "excerpt":
+            continue
+        size = fields.get("content_bytes")
+        if type(size) is not int:
+            return False
+        sizes.append(size)
+    return (
+        len(sizes) <= selection.max_excerpts
+        and all(size <= selection.max_excerpt_bytes for size in sizes)
+        and sum(sizes) <= selection.max_total_excerpt_bytes
+    )
 
 
 def _scope_digest(scope: AuthorizationScope) -> str:

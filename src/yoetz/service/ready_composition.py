@@ -4309,6 +4309,10 @@ def _privacy_gated_semantic_evaluator(
                         for item in semantic_case.items
                         if item.section == "excerpt"
                     ),
+                    # The approved limits beside what was selected, so a reader can tell which
+                    # one bound: the excerpt count or the byte budget (issue #907 Phase 1b).
+                    "semantic_excerpt_count_limit": review_selection.max_excerpts,
+                    "semantic_excerpt_byte_limit": review_selection.max_total_excerpt_bytes,
                 },
             )
             if captured_local_fence_required and captured_content_scope is not None:

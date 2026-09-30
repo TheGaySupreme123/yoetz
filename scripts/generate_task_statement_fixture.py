@@ -8,7 +8,9 @@ The case pins three contracts:
 * start request identity: a request without a statement keeps the digest it had before the field
   existed, and the statement is part of identity when present;
 * the privacy-policy wire: an approval of a preset made before the ``task_statement`` section keeps
-  its released 1.1.0 bytes and identity digest, and the current preset encodes as 1.2.0.
+  its released 1.1.0 bytes and identity digest, and the current preset encodes as 1.2.0. The
+  Expanded pair also pins the excerpt count: 16 under 1.1.0, the protocol maximum under 1.2.0
+  (issue #907 Phase 1b).
 """
 
 from __future__ import annotations
@@ -50,7 +52,10 @@ from yoetz.protocol.models import StartRequestModel
 
 _RELATIVE = "canonical/task-statement.case.json"
 _ID = "TSK-001"
-_POLICY_SOURCE = "privacy/PRIV-003-minimal-external.case.json"
+_POLICY_SOURCES: tuple[tuple[str, str], ...] = (
+    ("privacy/PRIV-003-minimal-external.case.json", "minimal_external"),
+    ("privacy/PRIV-004-trusted-provider.case.json", "expanded"),
+)
 _STATEMENT = (
     "Under Ascii, Style.Truncate returns plain text without tail; Output.Truncate returns text "
     "with tail. Do not emit ANSI escapes."
@@ -156,31 +161,35 @@ def _start_identity() -> dict[str, Any]:
 
 
 def _privacy_policy_wire(root: Path) -> dict[str, Any]:
-    source = json.loads((root / "fixtures" / _POLICY_SOURCE).read_bytes())
-    released = decode_privacy_policy_canonical(
-        canonical_encode(source["input"]["policies"]["minimal_external"])
-    )
     vectors: list[dict[str, Any]] = []
-    for preset_version in ("1.1.0", "1.2.0"):
-        policy = replace(
-            released,
-            review_selection=ReviewSelectionPolicy.for_profile(
-                released.review_context_profile, preset_version=preset_version
-            ),
+    for path, key in _POLICY_SOURCES:
+        source = json.loads((root / "fixtures" / path).read_bytes())
+        released = decode_privacy_policy_canonical(
+            canonical_encode(source["input"]["policies"][key])
         )
-        wire = encode_privacy_policy_json(policy)
-        identity = {key: value for key, value in wire.items() if key != "policy_digest"}
-        vectors.append(
-            {
-                "preset_version": preset_version,
-                "schema_version": wire["schema_version"],
-                "review_sections": sorted(policy.review_selection.sections),
-                "wire": wire,
-                "canonical_digest": canonical_digest(cast(JsonValue, wire)),
-                "identity_digest": canonical_digest(cast(JsonValue, identity)),
-            }
-        )
-    return {"source": _POLICY_SOURCE, "vectors": vectors}
+        for preset_version in ("1.1.0", "1.2.0"):
+            policy = replace(
+                released,
+                review_selection=ReviewSelectionPolicy.for_profile(
+                    released.review_context_profile, preset_version=preset_version
+                ),
+            )
+            wire = encode_privacy_policy_json(policy)
+            identity = {name: value for name, value in wire.items() if name != "policy_digest"}
+            vectors.append(
+                {
+                    "source": f"{path}#/input/policies/{key}",
+                    "review_context_profile": policy.review_context_profile.value,
+                    "preset_version": preset_version,
+                    "schema_version": wire["schema_version"],
+                    "review_sections": sorted(policy.review_selection.sections),
+                    "max_excerpts": policy.review_selection.max_excerpts,
+                    "wire": wire,
+                    "canonical_digest": canonical_digest(cast(JsonValue, wire)),
+                    "identity_digest": canonical_digest(cast(JsonValue, identity)),
+                }
+            )
+    return {"vectors": vectors}
 
 
 def document(root: Path) -> dict[str, Any]:
@@ -191,10 +200,11 @@ def document(root: Path) -> dict[str, Any]:
         "fixture_id": _ID,
         "purpose": (
             "Pin the task-statement event versions, start request identity without a statement, "
-            "and the privacy-policy wire before and after the task_statement section."
+            "and the privacy-policy wire before and after the task_statement section and the "
+            "Expanded excerpt count."
         ),
         "minimum_versions": {"fixture_contract": "1.0.0", "protocol": "1.0"},
-        "owns_requirements": ["ISSUE-908/task-statement"],
+        "owns_requirements": ["ISSUE-908/task-statement", "ISSUE-907/excerpt-count"],
         "controls": {
             "clock": "fixture_supplied",
             "ids": "fixture_supplied",

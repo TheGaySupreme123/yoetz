@@ -983,6 +983,37 @@ async def _warn_if_agent_route_cannot_dispatch(policy: PrivacyPolicy) -> None:
     )
 
 
+def _excerpt_limits_text(selection: ReviewSelectionPolicy) -> str:
+    if selection.max_excerpts == 0:
+        return "no excerpts are sent"
+    return (
+        f"{selection.max_excerpts} excerpts, {selection.max_excerpt_bytes // 1024} KiB each, "
+        f"{selection.max_total_excerpt_bytes // 1024} KiB in total"
+    )
+
+
+def policy_excerpt_limits_disclosure(policy: PrivacyPolicy) -> str:
+    """The approved excerpt limits, beside what the current recipe would offer (issue #907).
+
+    A policy approved under an earlier recipe keeps its limits; the newer ones apply only after
+    the owner approves them, and approving nothing keeps the current limits.
+    """
+
+    current = policy.review_selection
+    profile = policy.review_context_profile
+    if profile in {ReviewContextProfile.CUSTOM, ReviewContextProfile.STRUCTURAL}:
+        return _excerpt_limits_text(current)
+    offered = ReviewSelectionPolicy.for_profile(profile)
+    limits = ("max_excerpts", "max_excerpt_bytes", "max_total_excerpt_bytes")
+    if all(getattr(current, name) == getattr(offered, name) for name in limits):
+        return f"{_excerpt_limits_text(current)} (the current {profile.value} recipe)"
+    return (
+        f"current {_excerpt_limits_text(current)}; proposed by the current {profile.value} "
+        f"recipe: {_excerpt_limits_text(offered)}. Nothing changes until you approve it with "
+        "'yoetz --privacy'; approving nothing keeps the current limits"
+    )
+
+
 def policy_task_statement_disclosure(policy: PrivacyPolicy) -> str:
     """Whether ``policy`` sends the agent's transcription of the user's request (issue #908)."""
 
@@ -1051,8 +1082,8 @@ def _render_review(candidate: PrivacyPolicy) -> None:
     # admission, so a case above either one is refused, and the operator is entitled to see the
     # numbers that will actually refuse it.
     typer.echo(
-        f"  Maximum: 16 KiB per excerpt; {llm.max_bytes // 1024} KiB / "
-        f"{llm.max_tokens} tokens per case"
+        f"  Maximum: {_excerpt_limits_text(candidate.review_selection)}; "
+        f"{llm.max_bytes // 1024} KiB / {llm.max_tokens} tokens per case"
     )
     typer.echo(
         "  Never sent: credentials, encryption material, environment variables, "
@@ -1215,6 +1246,9 @@ def _render_repository_authority(snapshot: PrivacySetupSnapshot) -> None:
     typer.echo(
         "Current task statement disclosure: "
         + policy_task_statement_disclosure(snapshot.composed_policy)
+    )
+    typer.echo(
+        "Current excerpt limits: " + policy_excerpt_limits_disclosure(snapshot.composed_policy)
     )
     typer.echo("Repository privacy authority:")
     if snapshot.grant_state == "missing":

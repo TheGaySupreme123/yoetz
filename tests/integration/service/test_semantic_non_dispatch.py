@@ -612,6 +612,9 @@ async def test_ready_semantic_content_resolution_and_fence_use_observation_works
     assert built[0]["semantic_diff_parts_resolved"] == 0
     assert built[0]["semantic_diff_excerpts_selected"] == 0
     assert built[0]["semantic_excerpt_bytes_selected"] >= 0
+    # The approved Assisted limits ride beside the selection counts (issue #907 Phase 1b).
+    assert built[0]["semantic_excerpt_count_limit"] == 16
+    assert built[0]["semantic_excerpt_byte_limit"] == 131_072
 
 
 async def _durable_semantic_case(

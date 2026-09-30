@@ -160,7 +160,9 @@ _MAX_SUBJECT_REFS: Final = 16
 # the case builder must decide explicitly what to do with a wider finding (issue #858).
 MAX_SEMANTIC_ITEM_SUBJECT_REFS: Final = _MAX_SUBJECT_REFS
 _MAX_INTERNAL_SUBJECT_REFS: Final = 64
-_MAX_CASE_ITEMS: Final = 256
+# Raised with ``MAX_REVIEW_EXCERPTS`` (issue #907 Phase 1b) so the other sections keep the room
+# they had when a packet carried at most 16 excerpts.
+_MAX_CASE_ITEMS: Final = 256 + MAX_REVIEW_EXCERPTS - 16
 _OPAQUE_REF_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$", re.ASCII)
 _IDENTITY_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9._-]*$", re.ASCII)
 _MODEL_IDENTITY_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$", re.ASCII)
