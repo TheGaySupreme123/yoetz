@@ -47,15 +47,21 @@ Evidence bound to an older material state is stale. Hidden, redacted, or unknown
 
 For a finding, choose one recorded response: accept and act; provide additional evidence; revise the claim; dispute, optionally with evidence; or state an unresolved limitation. Then recheck after material change. A readable response identifying a finding the check itself returned is not material change and demands no recheck; a redacted or unreadable response does. A response never deletes the original challenge and never closes a coverage gap: recording content-bearing evidence may close an evidence-provenance gap such as `evidence_content_digest_only`, while accepting the limitation leaves receipt coverage incomplete.
 
+Set `finding_frontier` to any frontier at or after the finding's own record: the item's `finding_frontier` from `status view=findings` when it carries one, otherwise the current status frontier (the result frontier of the check that returned it also works). No historical frontier search is needed. Only a frontier before that record is rejected, including the finding's `subject_frontier`, which names the state the check tested.
+
+Observation-authored findings that are not actionable (priority 3, such as "Observation coverage is incomplete or stale") disclose a limit of what the harness could observe, not work you can repair. They never block the receipt and never count in `unanswered_finding_count` or `findings_unanswered`, so they need no response. If you want the disclosure noted, acknowledge one once with `acknowledged` and a short reason, before or after the check: that acknowledgement is not material change, needs no recheck, and never resolves the finding. It stays in `status view=findings` and on the receipt as a disclosed limitation. Do not wait for, poll, or recheck a gap that `yoetz observe status` does not report as lag or a drain backlog: a standing gap such as `unpaired_event` does not recover within the session.
+
 Agents can record `acknowledged`, `provenance_disputed`, or `rejected`; `waived` is reserved for an authorized local-CLI human and is not an agent option. Use `provenance_disputed` only to contest the finding's authorship or provenance premise; it does not reject the finding's conclusion or resolve the finding. A readable response removes the finding from `unanswered_finding_count`, but no response disposition changes its receipt state: it stays in `receipt_blocking_finding_count` until a later qualifying check proves the issue absent from the repaired record. A check qualifies when it is whole-case or scoped to the finding's subject, its owning policy pack ran to completion, nothing was suppressed, and it tested a state that already contained the finding with readable proof inputs. Case-wide `captured_object_unavailable`, `content_unselected`, `host_outcome_unavailable`, and `unpaired_event` limitations do not veto an otherwise clean local-check structured-ledger proof, but remain receipt coverage gaps; the exception requires readable original finding coverage, and those same host-observation gaps remain tolerated when they are carried onto a hook-derived finding. For a `semantic_model_derived` finding, a completed AI-powered re-review may tolerate only the closed native capture gaps (including recorded item clipping) already present in its readable original coverage, and only after new material work or a revision of the named claim or obligation was recorded since the finding; an unchanged re-run, a new gap, unassessable packet, unreadable original finding, or weakened review still blocks resolution. Capture limitations remain on the receipt. Event-payload loss, source redaction, missing refs, unknown events, weak original coverage, stale state, failed packs, and scoped-away checks still prove nothing. A resolved finding is not erased: it stays visible in status (`resolved: true`, hidden unless `include_resolved`) and in the receipt as history, and the receipt wording names resolved history apart from current findings. A `provenance_disputed` response keeps its finding current on the released status wire even after such a check. `findings_unanswered` therefore means response work remains; `receipt_findings_unresolved` means repair-then-recheck work remains and must not trigger another response loop. After one recheck, read `resolved`: if the issue did not re-fire but stays current because the check did not qualify, stop rechecking unchanged state, request the bounded receipt, and disclose that limitation. Independent coverage gaps remain separate limitations and are never closed by resolution. Word the final answer according to the receipt-blocking count, the receipt's conclusion, and its weakest coverage.
 
 ## Coverage attribution
 
-A recorded check remains attributable to a later receipt when the only events between them are responses to findings that same check returned and/or a finding-free suffix made entirely of service-stamped observation records. Answering a check's own findings reports on the check, and observation reports what the harness saw rather than publishing new cooperative work on the participant's behalf. The receipt then folds the check's coverage — including `semantic_model_derived` — and carries the gap `check_current_as_of_earlier_frontier`, naming the subject frontier that was actually tested. The limitations sentence also names what followed the check: responses to its findings, finding-free host observations, or both. Observation records are retained in the receipt but were not evaluated by that check; ingestion order is not occurrence time, and routine observation can advance the ledger again after any re-check.
+A recorded check remains attributable to a later receipt when the only events between them are responses to findings that same check returned, acknowledgements of observation-authored non-actionable findings, and/or a finding-free suffix made entirely of service-stamped observation records. Answering a check's own findings reports on the check, and observation reports what the harness saw rather than publishing new cooperative work on the participant's behalf. The receipt then folds the check's coverage — including `semantic_model_derived` — and carries the gap `check_current_as_of_earlier_frontier`, naming the subject frontier that was actually tested. The limitations sentence also names what followed the check: responses to its findings (or to observation-authored limitations), finding-free host observations, or both. Observation records are retained in the receipt but were not evaluated by that check; ingestion order is not occurrence time, and routine observation can advance the ledger again after any re-check.
 
 That gap is a limitation, not a clean state: the verdict is current as of the tested frontier, not the receipt's, so the receipt is still coverage-incomplete and must not be described as a clean completion receipt.
 
-Any other material event after the check — published work, a new finding (including an observation-authored finding), a response to a finding the check did not return, or a response whose payload is redacted or unreadable (it cannot prove which finding it answered) — requires a re-check before the receipt. The receipt reports `check_not_applicable` and the check contributes nothing until you re-run it at the current frontier.
+Any other material event after the check — published work, a new finding (including an observation-authored finding), any other response to a finding the check did not return (a rejection of an observation-authored finding included), or a response whose payload is redacted or unreadable (it cannot prove which finding it answered) — requires a re-check before the receipt. The receipt reports `check_not_applicable` and the check contributes nothing until you re-run it at the current frontier.
+
+Lifecycle records are not material: `work_closed` (and the other work-state and delegation lifecycle events) never supersede a check and never require a re-check.
 
 `status` applies the same rule, so a compact status view and a receipt taken at the same frontier never disagree about what was checked.
 
@@ -69,16 +75,24 @@ For a material repair, use one bounded status → repair → check → read → 
 2. Publish the real repair results, corrected claim/evidence, and any required plan revision. Do not
    fabricate success or infer scope from the user's prompt. A feedback obligation is complete only
    when it is included in an effective plan revision or exact next-version restatement.
-3. Respond to older outstanding findings before the final check, using each recorded finding
-   frontier and a current expected frontier. A response is a disposition, not repair proof.
+3. Before the final check, read `status view=findings` and respond once to each finding with
+   `disposition: none`, using a current expected frontier and a `finding_frontier` as described in
+   [Findings and responses](#findings-and-responses). A row whose detail marks it an
+   observation-authored coverage limitation needs no response. A response is a disposition, not
+   repair proof.
 4. Choose the final check mode deliberately: `semantic_required` for an explicit user, policy, or
    acceptance requirement; omitted `mode` when relying on the configured default; and
    `deterministic_only` only for explicitly local/structural work or a deliberate no-egress choice.
-5. Respond to findings returned by that check at its result frontier, then read
-   `status view=findings` with `filter.include_resolved: true` and `resolved`. If an older response
-   or other material record follows the
-   check, recheck before receipt. “Not returned” is not “resolved.”
-6. Request `receipt` last. Read `closure_readiness.unanswered_finding_count` and
+5. After the final check, respond only to the findings that check returned, then read
+   `status view=findings` with `filter.include_resolved: true` and `resolved`. “Not returned” is
+   not “resolved.” Responses to the check's own findings, an acknowledgement of an
+   observation-authored non-actionable finding, and `work_closed` need no recheck. Recheck before
+   the receipt only when a material record follows the check: a recorded repair (it always gets at
+   least one re-check), other published work, or a response to another finding the check did not
+   return.
+6. Request `receipt`, then publish `work_closed` when the work is complete: a receipt never closes
+   work, and `work_closed` never requires another check. Read
+   `closure_readiness.unanswered_finding_count` and
    `closure_readiness.receipt_blocking_finding_count`, then report those actual counts alongside the
    receipt's checked frontier, AI-powered review status/reason, and coverage limits. If one
    current-state recheck still cannot qualify, stop repeating unchanged state and disclose the
@@ -165,7 +179,7 @@ A non-succeeding `semantic_status` is a coverage gap, not a failure to retry awa
 - `invalid` with reason `response_content_invalid` (an incomplete or overlong provider answer) may spend exactly one in-job repair retry — same frozen case, same job, one final check event, fresh attempt identity — when the profile has retry budget and deadline left. A recorded `response_content_invalid` therefore means that repair was already spent or not admitted; do not spend a second job on it.
 - `refused`, `failed`, and every other `invalid` reason (`response_schema_invalid`, `semantic_judgment_rejected`) are not retried inside the job at all, so a fresh request is a fresh gamble rather than a continuation. Their first answer is already terminal: for optional review, fall back to `deterministic_only` immediately rather than spending a second job to confirm. For required review, report the requirement as unmet and do not downgrade it.
 
-For optional review with `unavailable` and `timeout`, when a second job in one session again returns no judgment, stop requesting AI-powered review: run `deterministic_only` and say in the final answer that AI-powered review was requested and did not run, naming the recorded `semantic_status` and `semantic_reason`. A terminal reason such as `retry_budget_exhausted` describes the retry outcome, not the initiating cause; do not present it as a diagnosis. Likewise `coordinator_failure` names a fault inside yoetz itself, not in the work under review or in the provider: it is not retryable inside the job and is never a diagnosis of the work. That fallback check carries the earlier attempt's gap forward next to `semantic_review_not_requested`, so the receipt still shows the environment refused rather than that you never asked.
+For optional review with `unavailable` and `timeout`, when a second job in one session again returns no judgment, stop requesting AI-powered review: run `deterministic_only` and say in the final answer that AI-powered review was requested and did not run, naming the recorded `semantic_status` and `semantic_reason`. That fallback applies to nothing else: a review that returned `insufficient_packet` did run, so never follow it with a `deterministic_only` check (see [Missing review content](#missing-review-content-and-concrete-repair-attempts)). A terminal reason such as `retry_budget_exhausted` describes the retry outcome, not the initiating cause; do not present it as a diagnosis. Likewise `coordinator_failure` names a fault inside yoetz itself, not in the work under review or in the provider: it is not retryable inside the job and is never a diagnosis of the work. That fallback check carries the earlier attempt's gap forward next to `semantic_review_not_requested`, so the receipt still shows the environment refused rather than that you never asked.
 
 ## Prose the reviewer will not see whole
 
@@ -511,4 +525,7 @@ remaining limitation or narrow the claim. `respond` rejects an `acknowledged` an
 AI-powered review finding unless `evidence_refs` cites evidence or a result recorded after the
 finding (`resolution_attempt_required`); a recorded blocked result counts. An acknowledgement or
 “limitation accepted” is not a repair, a verification result, or a finding resolution. Recheck after a material repair, and
-avoid another identical check when the same content is still unavailable.
+avoid another identical check when the same content is still unavailable. After an
+`insufficient_packet` result with no material repair to publish, go to the receipt and disclose
+`semantic_packet_insufficient`; the `deterministic_only` fallback is only for optional review that
+returned `unavailable` or `timeout`.

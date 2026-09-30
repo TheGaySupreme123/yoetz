@@ -1715,7 +1715,7 @@ class SqliteLedger:
                 projection.frontier,
                 projection.head_digest,
                 len(projection.obligations),
-                unanswered_finding_count(projection),
+                unanswered_finding_count(projection, self._state.records),
                 projection.freshness.value,
                 projection.unknown_event_count,
                 records[0].event_id,
@@ -1842,7 +1842,7 @@ class SqliteLedger:
                 projection.frontier,
                 projection.head_digest,
                 len(projection.obligations),
-                unanswered_finding_count(projection),
+                unanswered_finding_count(projection, self._state.records),
                 projection.freshness.value,
                 projection.unknown_event_count,
                 canonical_encode(

@@ -297,8 +297,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:9c103a3fa8fdb85a6c2c20608bdde6294651e94b24407bca719c7e32a8c50722",
-        "strict": "sha256:e272d0216684ffa792ad0b10b55cdd4c436f1a8877cc03033b2fa14126a737b0",
+        "policy": "sha256:751030d29330d27e8cfc03bbba3fc9ad71bd30dc4507c1716223fca7bb16c7bd",
+        "strict": "sha256:830771d74df67eff89a04a4db15580df3610ea926414053470557736dccf7746",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -313,7 +313,11 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     )
     assert "Omit mode to preserve the configured default" in check_description
     respond_description = descriptor_for("respond").description
-    assert "result frontier of the check that returned it" in respond_description
+    # Issue #911: any in-chain frontier at or after the record is accepted, so the descriptor
+    # never implies the exact check result frontier that sent agents hunting through history.
+    assert "any frontier at or after its record" in respond_description
+    assert "current status frontier" in respond_description
+    assert "result frontier of the check that returned it" not in respond_description
     assert "not its subject_frontier" in respond_description
     for local_description in (descriptor_for("publish_work").description, respond_description):
         assert "local Yoetz ledger" in local_description

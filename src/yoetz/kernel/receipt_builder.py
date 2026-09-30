@@ -16,6 +16,7 @@ from yoetz.domain.events import (
     NoObligationsReason,
     ObligationChangeKind,
     ObligationStatus,
+    ResponseRecordedPayload,
     is_lineage_service_stamped,
     is_observation_authored,
 )
@@ -885,13 +886,17 @@ def _resolved_history_sentence(resolved_count: int) -> str:
     )
 
 
-def _suffix_record_kinds(context: ReceiptBuildContext) -> tuple[str | None, bool]:
-    """Return whether an attributable suffix contains service lineage and host observations.
+def _suffix_record_kinds(context: ReceiptBuildContext) -> tuple[str | None, bool, bool]:
+    """Return whether an attributable suffix contains service lineage, host observations, and
+    acknowledgements of observation-authored limitations the check did not return.
 
     ``CheckSuffixClass`` is intentionally derived by the application and remains the public
     render context.  The builder has the frozen records as well, so it can refine the prose for
     a service-generated lineage manifest without changing that context enum or any receipt wire
     shape.  This is strictly a read over the recorded prefix; it never refreshes child state.
+    The applicability rule already proved that a readable response in the suffix answers either a
+    returned finding or an observation-authored limitation (issue #911), so a response naming a
+    finding outside the returned set is exactly the latter.
     """
 
     if (
@@ -900,14 +905,15 @@ def _suffix_record_kinds(context: ReceiptBuildContext) -> tuple[str | None, bool
         or not context.records
         or context.projection.latest_tested_state is None
     ):
-        return None, False
-    check_event_id = context.projection.latest_tested_state.source_check_event_id
+        return None, False, False
+    latest = context.projection.latest_tested_state
+    check_event_id = latest.source_check_event_id
     check_record = next(
         (record for record in context.records if record.event_id == check_event_id),
         None,
     )
     if check_record is None:
-        return None, False
+        return None, False, False
     later_material = tuple(
         record
         for record in context.records
@@ -932,6 +938,12 @@ def _suffix_record_kinds(context: ReceiptBuildContext) -> tuple[str | None, bool
             is_observation_authored(record) and not is_lineage_service_stamped(record)
             for record in later_material
         ),
+        any(
+            record.schema.name == "response_recorded"
+            and type(record.payload) is ResponseRecordedPayload
+            and record.payload.finding_id not in latest.returned_finding_ids
+            for record in later_material
+        ),
     )
 
 
@@ -943,6 +955,7 @@ def _check_coverage_sentence(
     *,
     engine_derived_suffix: str | None = None,
     host_observation_suffix: bool = False,
+    limitation_response_suffix: bool = False,
 ) -> str:
     """State what the recorded check does or does not cover here, in the reader's terms."""
 
@@ -956,8 +969,14 @@ def _check_coverage_sentence(
         # authorship-aware applicability rule also keeps a check across finding-free host
         # observations (issue #657). Name the suffix class the application established, and fall
         # back to neutral wording rather than inventing an event class it did not establish.
+        # Acknowledging an observation-authored limitation the check never returned also keeps it
+        # attributable (issue #911); name that too rather than implying every response answered
+        # the check's own findings.
+        responses = "responses to the findings it returned" + (
+            " or to observation-authored coverage limitations" if limitation_response_suffix else ""
+        )
         if check_suffix is CheckSuffixClass.RESPONSES_ONLY:
-            later = "only responses to the findings it returned were published after it"
+            later = f"only {responses} were published after it"
         elif check_suffix is CheckSuffixClass.OBSERVATIONS_ONLY:
             if engine_derived_suffix is not None:
                 later = (
@@ -978,14 +997,14 @@ def _check_coverage_sentence(
             if engine_derived_suffix is not None:
                 later = (
                     f"the records accepted after it through frontier {frontier.sequence} are "
-                    "responses to the findings it returned and "
+                    f"{responses} and "
                     + ("finding-free host observations plus " if host_observation_suffix else "")
                     + f"{engine_derived_suffix}, retained here but not evaluated by that check"
                 )
             else:
                 later = (
                     f"the records accepted after it through frontier {frontier.sequence} are "
-                    "responses to the findings it returned and finding-free host observations, "
+                    f"{responses} and finding-free host observations, "
                     "retained here but not evaluated by that check"
                 )
         else:
@@ -1112,6 +1131,7 @@ def _sections(
     check_suffix: CheckSuffixClass | None = None,
     engine_derived_suffix: str | None = None,
     host_observation_suffix: bool = False,
+    limitation_response_suffix: bool = False,
 ) -> tuple[ReceiptSection, ...]:
     gap_codes = coverage.known_gaps
     bodies: dict[ReceiptSectionKey, str] = {}
@@ -1260,6 +1280,7 @@ def _sections(
             check_suffix,
             engine_derived_suffix=engine_derived_suffix,
             host_observation_suffix=host_observation_suffix,
+            limitation_response_suffix=limitation_response_suffix,
         )
         if check_sentence:
             gap_body = f"{check_sentence} Coverage is limited by: {', '.join(gap_codes)}."
@@ -1398,7 +1419,9 @@ def build_receipt(
         responses,
         gaps,
     )
-    engine_derived_suffix, host_observation_suffix = _suffix_record_kinds(context)
+    engine_derived_suffix, host_observation_suffix, limitation_response_suffix = (
+        _suffix_record_kinds(context)
+    )
     # Resolved history is named only for rows the profile retains: a profile that omits a
     # finding row must not leak its id through the summary items.
     retained_ids = frozenset(finding.finding_id for finding in retained_findings)
@@ -1467,6 +1490,7 @@ def build_receipt(
         check_suffix=context.check_suffix,
         engine_derived_suffix=engine_derived_suffix,
         host_observation_suffix=host_observation_suffix,
+        limitation_response_suffix=limitation_response_suffix,
     )
     suppressed_count = (
         0 if context.applicable_check is None else context.applicable_check.suppressed_count

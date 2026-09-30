@@ -434,10 +434,11 @@ async def execute_respond(app: Application, request: RespondRequest) -> RespondI
                 raise _error(
                     PublicErrorCode.INVALID_REQUEST,
                     (
-                        "The finding is unavailable at the supplied frontier. finding_frontier is "
-                        "the frontier at which the finding is on the ledger — the result frontier "
-                        "of the check that returned it — not the finding's subject_frontier, "
-                        "which precedes its own record."
+                        "The finding is unavailable at the supplied frontier. finding_frontier may "
+                        "be any frontier at or after the finding's own record: the finding's "
+                        "finding_frontier from status view=findings when present, or the current "
+                        "status frontier. No historical frontier search is needed. The finding's "
+                        "subject_frontier precedes its record and is rejected."
                     ),
                     reason_code="finding_not_in_prefix",
                     field="finding_frontier",
@@ -453,7 +454,10 @@ async def execute_respond(app: Application, request: RespondRequest) -> RespondI
                     raise _error(
                         PublicErrorCode.INVALID_REQUEST, "A response reference is invalid."
                     )
-                attempted = attempted or present.source_frontier > finding_frontier.sequence
+                # "After the finding" means after the finding's own record, not after whichever
+                # in-chain frontier the caller chose to name it by: any frontier at or after the
+                # record is accepted, including the current status frontier (issue #911).
+                attempted = attempted or present.source_frontier > finding_record.source_frontier
             if (
                 request.disposition == "acknowledged"
                 and finding_record.payload.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED

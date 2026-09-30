@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Set
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -22,6 +22,7 @@ from yoetz.domain.events import (
     EventPayload,
     EventSchema,
     EvidenceRecordedPayload,
+    LedgerRecord,
     ObligationChangeKind,
     ObligationPublishedPayload,
     PlanPublishedPayload,
@@ -30,8 +31,9 @@ from yoetz.domain.events import (
     ResultRecordedPayload,
     decode_payload,
     encode_payload,
+    is_observation_authored,
 )
-from yoetz.domain.findings import CheckVerdict, Finding
+from yoetz.domain.findings import FINDING_KIND_TRAITS, CheckVerdict, Finding
 from yoetz.domain.values import (
     ActionId,
     ClaimId,
@@ -85,10 +87,14 @@ __all__ = [
     "ProjectionRecord",
     "ProjectionState",
     "empty_projection_state",
+    "is_observation_limitation",
+    "observation_finding_event_ids",
+    "observation_limitation_finding_ids",
     "projection_digest",
     "projection_from_snapshot",
     "projection_snapshot",
     "unanswered_finding_count",
+    "unanswered_finding_ids",
 ]
 
 PROJECTION_VERSION: Final = "yoetz/0.1.0"
@@ -850,16 +856,77 @@ def empty_projection_state() -> ProjectionState:
     )
 
 
-def unanswered_finding_count(state: ProjectionState) -> int:
-    """Count findings the ledger still carries no response for.
+def observation_finding_event_ids(records: Iterable[LedgerRecord]) -> frozenset[EventId]:
+    """Return the event ids of service-stamped observation-authored ``finding_recorded`` records.
 
-    Any recorded response answers the finding for this counter, whatever its stance: a rejection,
-    waiver, or provenance dispute answers the finding on the record, and its own quality surfaces
-    as a later finding. This counter does not set the receipt's ``resolved`` field, which remains
-    false for every response disposition.
+    Authorship is an envelope fact the projection does not retain, so surfaces that must tell an
+    observation-authored finding from a check-returned one read it from the accepted records.
     """
 
-    return sum(key not in state.responses for key in state.findings)
+    return frozenset(
+        record.event_id
+        for record in records
+        if record.schema.name == "finding_recorded" and is_observation_authored(record)
+    )
+
+
+def is_observation_limitation(
+    record: FindingProjectionRecord, observation_finding_events: Set[EventId]
+) -> bool:
+    """True for a readable, non-actionable finding whose record the observation service authored.
+
+    Observation advice such as "Observation coverage is incomplete or stale" discloses a coverage
+    limitation of the harness; no check returns it and no agent action in the task can repair it
+    (issue #911). Such a row is carried as a disclosed limitation rather than as response work:
+    it does not count as unanswered, and acknowledging it does not supersede a recorded check.
+    It stays unresolved and keeps its coverage on the receipt. The decision is structural (the
+    record's service-stamped authorship plus the kind's closed ``actionable`` trait), never a
+    finding id, and an unreadable payload is conservatively not a limitation.
+    """
+
+    payload = record.payload
+    return (
+        payload is not None
+        and record.source_event_id in observation_finding_events
+        and not FINDING_KIND_TRAITS[payload.kind][1]
+    )
+
+
+def observation_limitation_finding_ids(
+    state: ProjectionState, records: Iterable[LedgerRecord]
+) -> frozenset[FindingId]:
+    """Every finding id ``is_observation_limitation`` admits for ``state`` over ``records``."""
+
+    events = observation_finding_event_ids(records)
+    if not events:
+        return frozenset()
+    return frozenset(
+        key for key, record in state.findings.items() if is_observation_limitation(record, events)
+    )
+
+
+def unanswered_finding_ids(
+    state: ProjectionState, records: Iterable[LedgerRecord]
+) -> frozenset[FindingId]:
+    """Findings that still need a response: no recorded response and not a disclosed limitation.
+
+    Any recorded response answers the finding, whatever its stance: a rejection, waiver, or
+    provenance dispute answers the finding on the record, and its own quality surfaces as a later
+    finding. An observation-authored, non-actionable finding (``is_observation_limitation``) is a
+    disclosed coverage limitation that needs no response, so it is never response work. Neither
+    rule sets the receipt's ``resolved`` field, which remains false for every response disposition.
+    """
+
+    limitations = observation_limitation_finding_ids(state, records)
+    return frozenset(
+        key for key in state.findings if key not in state.responses and key not in limitations
+    )
+
+
+def unanswered_finding_count(state: ProjectionState, records: Iterable[LedgerRecord]) -> int:
+    """Count ``unanswered_finding_ids``; ``records`` are the accepted records ``state`` replays."""
+
+    return len(unanswered_finding_ids(state, records))
 
 
 def _record_snapshot(record: _ProjectionRecordLike) -> dict[str, JsonValue]:

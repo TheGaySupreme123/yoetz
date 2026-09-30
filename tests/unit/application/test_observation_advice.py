@@ -887,6 +887,28 @@ def test_hook_advice_context_maps_refresh_observation_to_observe_status() -> Non
     assert "Next: refresh_observation" not in text
     assert item.evidence_refs[0] in text
     assert len(text) <= 512
+    # Issue #911: a standing host-profile gap (Codex `unpaired_event`) never recovers in-session,
+    # so the clause must not ask the agent to wait for it, answer it, or recheck for it.
+    assert "wait for drain to recover" not in text
+    assert "wait only while it reports lag or a drain backlog" in text
+    assert "standing limitation: it needs no response or recheck" in text
+    assert "never blocks the receipt" in text
+    # A production-length hook reference still fits the bounded context whole.
+    long_refs = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=tuple(
+                _envelope(f"hook:{index:064x}", {"tool_name": "Read"}, pos=index)
+                for index in range(1, 4)
+            ),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=("source_lag",),
+            has_real_observation=True,
+        )
+    )
+    assert long_refs is not None
+    long_text = hook_advice_context(long_refs)
+    assert long_text.endswith(f"Evidence: {long_refs.ranked_items[0].evidence_refs[0]}.")
+    assert len(long_text) <= 512
 
 
 def test_hook_advice_context_keeps_work_next_action_tokens() -> None:

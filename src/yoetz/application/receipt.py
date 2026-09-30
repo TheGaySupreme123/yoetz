@@ -48,7 +48,7 @@ from yoetz.domain.values import (
 from yoetz.kernel.deterministic_checks import CaseGap, build_deterministic_case, case_coverage
 from yoetz.kernel.finding_resolution import finding_is_resolved
 from yoetz.kernel.lineage import evaluate_recorded_lineage
-from yoetz.kernel.projections import ProjectionState
+from yoetz.kernel.projections import ProjectionState, observation_limitation_finding_ids
 from yoetz.kernel.receipt_builder import (
     CheckSuffixClass,
     ReceiptBuildContext,
@@ -463,11 +463,15 @@ def _context(
             if record.event_id == latest.source_check_event_id:
                 check_record = record
                 break
+    limitations = observation_limitation_finding_ids(projection, records)
     if latest is None:
         gaps.append(CaseGap("check_not_recorded", "check_not_recorded", ()))
     elif check_record is not None and any(
         invalidates_recorded_check(
-            record, check_record.ledger.ingestion_sequence, latest.returned_finding_ids
+            record,
+            check_record.ledger.ingestion_sequence,
+            latest.returned_finding_ids,
+            limitation_finding_ids=limitations,
         )
         for record in records
     ):
@@ -475,7 +479,8 @@ def _context(
         # this receipt when no material-family event superseded it. Its own events (returned
         # findings plus check_recorded) land atomically right after the tested frontier, so
         # anything later is genuinely newer work, except a response answering a finding the
-        # check itself returned, which reports on that check rather than replacing what it read.
+        # check itself returned, which reports on that check rather than replacing what it read,
+        # and an acknowledgement of an observation-authored limitation no check returns (#911).
         gaps.append(CaseGap("check_not_applicable", "check_not_applicable", ()))
     elif check_record is not None and type(check_record.payload) is CheckRecordedPayload:
         applicable = check_record.payload

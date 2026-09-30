@@ -160,20 +160,24 @@ operations and does not add a composer or a new protocol field:
    Do not fabricate success or infer completion scope from the prompt. A feedback obligation is in
    effective scope only after a supported `plan_revised` event or an exact next-version
    `plan_published` restatement includes it; a stored or resolved obligation alone is insufficient.
-3. Disposition older outstanding findings before the final check. Use each finding's recorded
-   `finding_frontier` and the current expected frontier; a response is a disposition, not proof of
-   repair. The response frontier is the result frontier of the check that returned that finding.
+3. Before the final check, read `status view=findings` and disposition each finding with
+   `disposition: none`, with the current expected frontier and a `finding_frontier` at or after the
+   finding's own record: the item's `finding_frontier` when status carries one, otherwise the
+   current status frontier. No historical frontier search is needed. A response is a disposition,
+   not proof of repair. Observation-authored non-actionable findings need no response.
 4. Run the final check deliberately. Select `semantic_required` when the user, effective policy, or
    named acceptance criterion requires AI-powered review. If relying on the configured default, omit
    `mode`; use `semantic_if_configured` only when review is known to be optional. Reserve
    `deterministic_only` for explicitly local/structural work or a deliberate no-egress choice, and
    disclose an unmet required review.
-5. Respond to findings returned by that check using its result frontier, then read
+5. Respond only to findings returned by that check, then read
    `status view=findings` with `filter.include_resolved: true` and actual `resolved` state. “Not
    returned” is not “resolved”: call a
-   finding resolved only when a later qualifying check recorded it. If a response to an older finding
-   or any other material record follows the check, run another check before requesting a receipt.
-6. Request `receipt` last. Read `closure_readiness.unanswered_finding_count` and
+   finding resolved only when a later qualifying check recorded it. Those responses, acknowledging
+   an observation-authored non-actionable finding, and `work_closed` need no recheck. If a recorded
+   repair, a response to another older finding, or any other material record follows the check,
+   run another check before requesting a receipt.
+6. Request `receipt`, then publish `work_closed` when the work is complete. Read `closure_readiness.unanswered_finding_count` and
    `closure_readiness.receipt_blocking_finding_count`, then report those actual counts alongside the
    receipt's checked frontier, AI-powered review status/reason, and material coverage limits. After
    one current-state recheck still fails to qualify, stop repeating an unchanged check, continue any

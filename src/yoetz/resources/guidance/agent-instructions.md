@@ -25,7 +25,7 @@ Read the named document before the operation it governs; use the operation schem
 - `publish_work` — one bounded batch per material transition, usually one to eight events; keep a transition together. Read `yoetz://guidance/publication-policy.md` first.
 - `status` — after resume, compaction, or delegate handoff, and before a completion claim; use it when uncertain about recorded state.
 - `check` — after publishing the completion claim and evidence, and after a material edit or new evidence. Read `yoetz://guidance/coverage-and-receipts.md` first.
-- `respond` — once per finding at the result frontier of the check that returned it.
+- `respond` — once per finding; `finding_frontier` may be the current status frontier.
 - `receipt` — once at the end, and again only after material state changes.
 - `read_guidance` — reads one registered URI when resource text or schema metadata is missing.
 
@@ -45,9 +45,9 @@ and gaps. `respond` records a disposition; only a qualifying check clears the fi
 
 # Completion and findings
 
-Publish the material completion claim and current evidence, call `check`, disposition findings with `respond`, then call `receipt`. A claim is an assertion, not the output of a check and not a conclusion; keep the final answer no stronger than the receipt's weakest coverage and limitation.
+Publish the material completion claim and current evidence, answer unanswered findings, call `check`, answer only its findings, then `receipt` and `work_closed`.
 
-`respond` records a disposition; it never erases or resolves a finding. A readable response removes unanswered work but only a later qualifying check of the repaired record resolves a receipt-blocking finding. `waived` is for an authorized local-CLI human. Publish an exact `attempted_items` entry on `action_recorded` for every requested item attempted, never on a claim. Read `yoetz://guidance/coverage-and-receipts.md` for the full finding and receipt rules.
+A readable response removes unanswered work but only a later qualifying check of the repaired record resolves a receipt-blocking finding. `waived` is for an authorized local-CLI human. Publish an exact `attempted_items` entry on `action_recorded` for every requested item attempted, never on a claim. Read `yoetz://guidance/coverage-and-receipts.md` for the full finding and receipt rules.
 
 # Choosing and authorizing semantic review
 
@@ -166,14 +166,15 @@ Load only the resource needed for the current operation; retain it across calls 
 # Repair then finish
 
 Read current status and evidence first. Publish the real repair results, corrected claim/evidence,
-and any required plan revision. Resolve older finding responses before the final check. Choose
-`semantic_required` for an explicit requirement, otherwise omit `mode` when relying on the
-configured default. After the check, read `status view=findings` with `filter.include_resolved:
-true` and actual `resolved` state; “not returned” is not “resolved.” If a response to an older
-finding or other material record follows the check, check again before the receipt. Request
-`receipt` last and report its actual actionable unresolved count, checked frontier, AI-powered
-review status/reason, and coverage limits. Stop repeating an unchanged check when proof still cannot
-qualify, and disclose the blocker.
+and any required plan revision. Answer each unanswered finding in `status view=findings` before the
+final check. Choose `semantic_required` for an explicit requirement, otherwise omit `mode` for the
+configured default. After it, answer only its findings and read `status view=findings` with
+`filter.include_resolved: true` and actual `resolved` state; “not returned” is not “resolved.” Only
+a repair or other material record needs a recheck; those answers and `work_closed` do not. Then
+request `receipt` and publish `work_closed`; report its actual actionable unresolved count, checked
+frontier, AI-powered review status/reason, and coverage limits. Stop repeating an unchanged check
+when proof still cannot qualify, and disclose the blocker. Priority-3 observation findings need no
+answer.
 
 
 ### Repair missing review content
@@ -192,4 +193,5 @@ unattempted. If authority or an unavailable dependency prevents the attempt, rec
 blocker instead of widening disclosure, credentials or runtime authority. Only then report the
 remaining limitation or narrow the claim. An acknowledgement or “limitation accepted” is not a
 repair, a verification result, or a finding resolution. Recheck after a material repair, and
-avoid another identical check when the same content is still unavailable.
+avoid another identical check when the same content is still unavailable; otherwise go to the
+receipt, never a `deterministic_only` fallback.

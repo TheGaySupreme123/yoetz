@@ -153,7 +153,7 @@ def test_no_disposition_marks_a_finding_resolved(disposition: ResponseDispositio
     assert [state.resolved for state in states] == [False], (
         f"{disposition.value} resolved the finding; the agent guidance promises it does not"
     )
-    assert unanswered_finding_count(projection) == 0
+    assert unanswered_finding_count(projection, ()) == 0
     assert receipt_blocking_finding_count(projection) == 1
 
 
@@ -163,8 +163,10 @@ def test_an_unanswered_finding_is_also_unresolved() -> None:
 
 
 def test_non_actionable_finding_is_unanswered_but_does_not_block_a_clean_receipt() -> None:
+    # No accepted record says the observation service authored this row, so it is ordinary
+    # response work; only an observation-authored limitation leaves the counter (issue #911).
     projection = _projection(None, FindingKind.LEDGER_STALE_OR_INCOMPLETE)
-    assert unanswered_finding_count(projection) == 1
+    assert unanswered_finding_count(projection, ()) == 1
     assert receipt_blocking_finding_count(projection) == 0
 
 
@@ -190,7 +192,7 @@ def test_a_later_qualifying_check_resolves_whatever_the_disposition(
     projection = _projection(None if disposition is None else _response(disposition), resolved=True)
     assert [state.resolved for state in _finding_states(projection)] == [True]
     assert receipt_blocking_finding_count(projection) == 0
-    assert unanswered_finding_count(projection) == (1 if disposition is None else 0)
+    assert unanswered_finding_count(projection, ()) == (1 if disposition is None else 0)
 
 
 def test_provenance_dispute_pins_the_row_unresolved_on_the_released_wire() -> None:

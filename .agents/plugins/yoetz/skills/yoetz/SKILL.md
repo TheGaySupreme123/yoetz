@@ -197,17 +197,24 @@ For a material repair, follow the shared ledger sequence:
 2. Publish actual repair results, corrected evidence/claim, and any needed plan revision. A feedback
    obligation is in effective scope only after a supported plan revision or exact next-version
    restatement includes it. Do not infer scope or success from the prompt.
-3. Disposition older findings before the final check. Then run `semantic_required` for an explicit
+3. Before the final check, answer each finding `status view=findings` lists with
+   `disposition: none`; any frontier at or after the finding's record works as `finding_frontier`,
+   such as the current status frontier, so never search historical frontiers. Observation-authored
+   non-actionable findings need no answer. Then run `semantic_required` for an explicit
    AI-powered review requirement, or omit `mode` when relying on the configured default.
-4. Respond to findings returned by that check at its result frontier, then read
+4. Respond only to findings returned by that check, then read
    `status view=findings` with `filter.include_resolved: true` and actual `resolved` state. “Not
    returned” is not “resolved”; a response
-   records disposition but does not prove repair.
-5. Request `receipt` last. Read `closure_readiness.unanswered_finding_count` and
+   records disposition but does not prove repair. Those responses, acknowledging an
+   observation-authored non-actionable finding, and `work_closed` need no recheck.
+5. Request `receipt`, then publish `work_closed` when the work is complete. Read
+   `closure_readiness.unanswered_finding_count` and
    `closure_readiness.receipt_blocking_finding_count`, and report those actual counts plus the
-   checked frontier, AI-powered review status/reason, and coverage limits. If a response to an older
-   finding or any other material record follows the check, recheck before the receipt. Stop
-   repeating an unchanged check when proof still cannot qualify and disclose the blocker.
+   checked frontier, AI-powered review status/reason, and coverage limits. If a recorded repair, a
+   response to another older finding, or any other material record follows the check, recheck
+   before the receipt. After `insufficient_packet`, go to the receipt unless you publish a material
+   repair; never run a `deterministic_only` fallback for it. Stop repeating an unchanged check when
+   proof still cannot qualify and disclose the blocker.
 
 ## Compatibility
 

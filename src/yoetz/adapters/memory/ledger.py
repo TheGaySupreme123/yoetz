@@ -100,8 +100,9 @@ from yoetz.kernel.projections import (
     PROJECTION_VERSION,
     ProjectionState,
     empty_projection_state,
+    observation_limitation_finding_ids,
     projection_digest,
-    unanswered_finding_count,
+    unanswered_finding_ids,
 )
 from yoetz.kernel.receipt_capacity import (
     ReceiptCoverageCapacityExceeded,
@@ -1093,9 +1094,13 @@ def compact_status_coverage(
     )
     if check_record is None or type(check_record.payload) is not CheckRecordedPayload:
         return baseline
+    limitations = observation_limitation_finding_ids(projection, records)
     if any(
         invalidates_recorded_check(
-            record, check_record.ledger.ingestion_sequence, latest.returned_finding_ids
+            record,
+            check_record.ledger.ingestion_sequence,
+            latest.returned_finding_ids,
+            limitation_finding_ids=limitations,
         )
         for record in records
     ):
@@ -1407,6 +1412,10 @@ def _projection_items(
             )
         )
         proof_state_cache: dict[tuple[int, int, str], ProjectionState | None] = {}
+        # Observation-authored, non-actionable rows are disclosed limitations, not response work
+        # (issue #911): they stay in view=findings and on the receipt but leave this preview and
+        # its counter, which is also what closure_readiness reads for findings_unanswered.
+        unanswered_ids = unanswered_finding_ids(projection, records)
         unanswered_findings = tuple(
             StatusCompactFindingModel(
                 finding_id=finding.finding_id,
@@ -1427,12 +1436,12 @@ def _projection_items(
                 (
                     value.payload
                     for key, value in projection.findings.items()
-                    if value.payload is not None and key not in projection.responses
+                    if value.payload is not None and key in unanswered_ids
                 ),
                 key=rank_key,
             )
         )
-        unanswered_count = unanswered_finding_count(projection)
+        unanswered_count = len(unanswered_ids)
         receipt_blocking_count = receipt_blocking_finding_count(projection)
         declared_count = (
             None
