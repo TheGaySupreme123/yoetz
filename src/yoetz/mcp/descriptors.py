@@ -54,10 +54,10 @@ _HOST_PROFILES: Final[frozenset[str]] = frozenset({"generic", "codex", "claude",
 
 _SCHEMA_VERSION: Final = "1.0.0"
 _TOOL_INPUT_SCHEMA_VERSIONS: Final = MappingProxyType(
-    {"start": "1.1.0", "publish_work": "1.2.0", "check": "1.1.0", "status": "1.3.0"}
+    {"start": "1.1.0", "publish_work": "1.2.0", "check": "1.1.0", "status": "1.2.0"}
 )
 _TOOL_OUTPUT_SCHEMA_VERSIONS: Final = MappingProxyType(
-    {"start": "1.1.0", "check": "1.3.0", "status": "1.5.0", "receipt": "1.3.0"}
+    {"start": "1.1.0", "check": "1.3.0", "status": "1.4.0", "receipt": "1.3.0"}
 )
 
 
@@ -1920,7 +1920,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "publish_work": "sha256:a8dd06954e2f2ff65d3fb269a143b13745342e973e270179dc8b952fde7df115",
                 "check": "sha256:9befe13b257acf10535009c1dd69d9a933f3d94f5cd2aaac1655d4867596f89e",
                 "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
-                "status": "sha256:39b17f2ae39ae8f5440e7e5aa349674d629da7c121b5698db2302ac0e373f141",
+                "status": "sha256:7cef5cbbccb7145b525da0458985c41328647246ba3089e7624838aa90797e86",
                 "receipt": "sha256:c7676e1ca9afd96d9d7e74503edd5b31a758a05d7e7e1cf0d62c763611ffcecb",
                 "read_guidance": "sha256:4198e5fd133f7b37cc25c0c1a63161657c5d4396a1718f1f4f1f3db7c302a13d",
             }
@@ -1931,7 +1931,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "publish_work": "sha256:a8dd06954e2f2ff65d3fb269a143b13745342e973e270179dc8b952fde7df115",
                 "check": "sha256:2bd9947abc7b60564474840a73d99a80bfa528b98af1a725d11fdfde5dac9795",
                 "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
-                "status": "sha256:39b17f2ae39ae8f5440e7e5aa349674d629da7c121b5698db2302ac0e373f141",
+                "status": "sha256:7cef5cbbccb7145b525da0458985c41328647246ba3089e7624838aa90797e86",
                 "receipt": "sha256:c7676e1ca9afd96d9d7e74503edd5b31a758a05d7e7e1cf0d62c763611ffcecb",
                 "read_guidance": "sha256:4198e5fd133f7b37cc25c0c1a63161657c5d4396a1718f1f4f1f3db7c302a13d",
             }
@@ -1940,8 +1940,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:86109b46d3013c1e4cb69cb5b73ae42a3003ea66e4354d5849884777fb02dbfa",
-        "strict": "sha256:bd8cd1d96cac6fbd289907b3175d20cba8a2cb7d66f16b9a2694218e05517f02",
+        "policy": "sha256:211f377a77edda21006ad36d0a598bc905f6c87082aa47a09dc49134c731b269",
+        "strict": "sha256:7a169079c175ca481f7d6213daaf27cd2066c2101865813bf8e78b68bad6a306",
     }
 )
 

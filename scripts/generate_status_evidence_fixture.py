@@ -1,9 +1,10 @@
 """Own the CAN-013 evidence read-back golden vector and its manifest entry (issue #914).
 
-The vector freezes one agent-context ``status view=evidence`` exchange at status request 1.3.0 and
-status result 1.5.0: a ``filter.author=mine`` request, the page it returns (the requester's own
-rows readable), an unfiltered page mixing the requester's rows with a host-observed capture whose
-prose stays omitted, and the text and MCP renderings that must agree with both.
+The vector freezes one agent-context ``status view=evidence`` exchange at status request 1.2.0 and
+status result 1.4.0, both unreleased on the 0.3 line and extended in place: a
+``filter.author=mine`` request, the page it returns (the requester's own rows readable), an
+unfiltered page mixing the requester's rows with a host-observed capture whose prose stays
+omitted, and the text and MCP renderings that must agree with both.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from yoetz.mcp.summaries import render_safe_compact_summary
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.models import StatusRequestModel, StatusResultModel, StatusSuccessModel
 
-_PATH: Final = "canonical/status-evidence-author-1.5.0.case.json"
+_PATH: Final = "canonical/status-evidence-author-1.4.0.case.json"
 _FIXTURE_ID: Final = "CAN-013"
 _HEAD: Final = {
     "head_digest": "sha256:4f1d8a02c3a2b8a4a9e1f7c1d5a6b3e2c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5",
@@ -192,8 +193,8 @@ def build_fixture() -> dict[str, JsonValue]:
         "minimum_versions": {
             "engine": "0.1.0",
             "protocol": "0.1",
-            "status_request_schema": "1.3.0",
-            "status_result_schema": "1.5.0",
+            "status_request_schema": "1.2.0",
+            "status_result_schema": "1.4.0",
         },
         "purpose": (
             "Freeze the evidence author filter, the per-row publication channel, the requester's "

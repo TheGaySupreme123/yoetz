@@ -297,8 +297,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:86109b46d3013c1e4cb69cb5b73ae42a3003ea66e4354d5849884777fb02dbfa",
-        "strict": "sha256:bd8cd1d96cac6fbd289907b3175d20cba8a2cb7d66f16b9a2694218e05517f02",
+        "policy": "sha256:211f377a77edda21006ad36d0a598bc905f6c87082aa47a09dc49134c731b269",
+        "strict": "sha256:7a169079c175ca481f7d6213daaf27cd2066c2101865813bf8e78b68bad6a306",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -346,8 +346,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     check_descriptor = descriptor_for("check")
     assert check_descriptor.output_schema_ref.endswith("check-result-1.3.0.schema.json")
     status_descriptor = descriptor_for("status")
-    assert status_descriptor.input_schema_ref.endswith("status-request-1.3.0.schema.json")
-    assert status_descriptor.output_schema_ref.endswith("status-result-1.5.0.schema.json")
+    assert status_descriptor.input_schema_ref.endswith("status-request-1.2.0.schema.json")
+    assert status_descriptor.output_schema_ref.endswith("status-result-1.4.0.schema.json")
     receipt_descriptor = descriptor_for("receipt")
     assert receipt_descriptor.output_schema_ref.endswith("receipt-result-1.3.0.schema.json")
     for descriptors in TOOL_DESCRIPTORS.values():

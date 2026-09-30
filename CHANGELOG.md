@@ -11,8 +11,8 @@ reverse-chronological released versions.
 - `status view=evidence` accepts `filter.author=mine`, which lists exactly the evidence the
   requesting writer published in its current session (decided by the service from ledger
   authorship, never a caller flag), and every evidence row now names its service-stamped
-  `publication_channel`. Wire: status request 1.3.0, status result 1.5.0, local control 2.10.0;
-  both peers must run the 2.10.0 manifest. The CLI human status and the MCP text summary show the
+  `publication_channel`. Both are optional additions made in place to the unreleased 0.3 status
+  request 1.2.0 and status result 1.4.0. The CLI human status and the MCP text summary show the
   channel. Dogfood evidence per host remains tracked in #914.
 
 - Codex, Claude Code and Cursor session-start context can show a fresh repository-grant snapshot

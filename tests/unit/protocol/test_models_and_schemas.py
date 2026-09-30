@@ -239,7 +239,7 @@ _REQUEST_MODEL_SPECS: tuple[tuple[str, str], ...] = (
     ("PublishWorkRequestModel", "operations/publish-work-request-1.1.0.schema.json"),
     ("CheckRequestModel", "operations/check-request-1.0.0.schema.json"),
     ("RespondRequestModel", "operations/respond-request-1.0.0.schema.json"),
-    ("StatusRequestModel", "operations/status-request-1.3.0.schema.json"),
+    ("StatusRequestModel", "operations/status-request-1.2.0.schema.json"),
     ("ReceiptRequestModel", "operations/receipt-request-1.0.0.schema.json"),
 )
 
@@ -256,7 +256,7 @@ _REQUEST_SUPPORT_MODEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "StatusEvidenceFilterModel",
-        "operations/status-request-1.3.0.schema.json",
+        "operations/status-request-1.2.0.schema.json",
         "evidence_filter",
     ),
     (
@@ -422,7 +422,7 @@ _RESULT_SUPPORT_MODEL_SPECS: tuple[tuple[str, str, str], ...] = (
         "compact_obligation",
     ),
     ("StatusCompactPageModel", "operations/status-result-1.1.0.schema.json", "compact_page"),
-    ("StatusEvidenceItemModel", "operations/status-result-1.5.0.schema.json", "evidence_item"),
+    ("StatusEvidenceItemModel", "operations/status-result-1.4.0.schema.json", "evidence_item"),
     ("StatusEvidencePageModel", "operations/status-result-1.1.0.schema.json", "evidence_page"),
     ("StatusFindingBasisModel", "operations/status-result-1.1.0.schema.json", "finding_basis"),
     ("StatusFindingItemModel", "operations/status-result-1.1.0.schema.json", "finding_item"),
@@ -2996,7 +2996,7 @@ def test_schema_catalog_reports_complete_registry() -> None:
     assert SCHEMA_NAMESPACE == "https://schemas.yoetz.dev/0.1/"
     assert SCHEMA_MANIFEST_SCHEMA == "yoetz.schema-manifest/1.0.0"
     assert SCHEMA_MANIFEST_VERSION == "1.0.0"
-    assert SCHEMA_MEMBER_COUNT == 213
+    assert SCHEMA_MEMBER_COUNT == 207
     assert len(catalog.documents) == SCHEMA_MEMBER_COUNT
 
     paths = tuple(document.relative_path for document in catalog.documents)
@@ -3080,7 +3080,7 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     root = resources.files("yoetz").joinpath("resources", "schemas")
     manifest_bytes = root.joinpath("manifest.json").read_bytes()
     assert catalog.manifest_digest == f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
-    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 7_311
+    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 6_783
 
 
 def test_schema_name_derivation_and_version_maps_are_exact() -> None:
@@ -3099,9 +3099,9 @@ def test_schema_name_derivation_and_version_maps_are_exact() -> None:
         "1.2.0",
         "1.3.0",
         "2.0.0",
-        "2.10.0",
+        "2.9.0",
         "7.0.0",
-        "1.5.0",
+        "1.4.0",
     }
     assert set(event_versions.values()) == {"1.0.0", "1.1.0", "1.2.0", "1.3.0"}
     assert event_versions["action_recorded"] == "1.0.0"

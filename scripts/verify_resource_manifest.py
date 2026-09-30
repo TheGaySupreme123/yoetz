@@ -299,7 +299,7 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
-        "fixtures/canonical/status-evidence-author-1.5.0.case.json",
+        "fixtures/canonical/status-evidence-author-1.4.0.case.json",
         "canonical_vector",
         "application/json",
         True,
@@ -948,18 +948,6 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
-        "schemas/operations/status-request-1.3.0.schema.json",
-        "json_schema",
-        "application/schema+json",
-        True,
-    ),
-    (
-        "schemas/operations/status-result-1.5.0.schema.json",
-        "json_schema",
-        "application/schema+json",
-        True,
-    ),
-    (
         "schemas/operations/status-result-1.3.0.schema.json",
         "json_schema",
         "application/schema+json",
@@ -1484,30 +1472,6 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/service/control-result-2.9.0.schema.json",
-        "json_schema",
-        "application/schema+json",
-        True,
-    ),
-    (
-        "schemas/service/control-hello-2.10.0.schema.json",
-        "json_schema",
-        "application/schema+json",
-        True,
-    ),
-    (
-        "schemas/service/control-hello-result-2.10.0.schema.json",
-        "json_schema",
-        "application/schema+json",
-        True,
-    ),
-    (
-        "schemas/service/control-request-2.10.0.schema.json",
-        "json_schema",
-        "application/schema+json",
-        True,
-    ),
-    (
-        "schemas/service/control-result-2.10.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,

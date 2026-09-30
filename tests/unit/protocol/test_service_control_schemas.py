@@ -1392,21 +1392,8 @@ def test_v29_changes_only_the_selection_runtime_and_keeps_frozen_v28() -> None:
         assert budget["properties"]["no_cap"]["properties"]["available"] == {"const": False}
 
 
-def test_v210_only_retargets_status_and_admits_the_evidence_author_filter() -> None:
-    """2.10 moves the frozen 2.9 envelopes onto status request 1.3.0 / result 1.5.0 (#914)."""
-
-    retarget = {
-        "operations/status-request-1.2.0.schema.json": "operations/status-request-1.3.0.schema.json",
-        "operations/status-result-1.4.0.schema.json": "operations/status-result-1.5.0.schema.json",
-    }
-    for name in ("control-hello", "control-hello-result", "control-request", "control-result"):
-        v29_bytes = (_ROOT / f"{name}-2.9.0.schema.json").read_bytes().decode()
-        v210_bytes = (_ROOT / f"{name}-2.10.0.schema.json").read_bytes()
-        expected = v29_bytes.replace(f"{name}-2.9.0.schema.json", f"{name}-2.10.0.schema.json")
-        for before, after in retarget.items():
-            expected = expected.replace(before, after)
-        assert v210_bytes.decode() == expected
-        assert v210_bytes == _PACKAGE_ROOT.joinpath(f"{name}-2.10.0.schema.json").read_bytes()
+def test_v29_admits_the_evidence_author_filter_in_place() -> None:
+    """Unreleased 0.3 status request 1.2.0 carries ``filter.author=mine`` in place (#914)."""
 
     request = cast(
         JsonValue,
@@ -1435,12 +1422,10 @@ def test_v210_only_retargets_status_and_admits_the_evidence_author_filter() -> N
             },
         },
     )
-    validate_schema_instance("control-request", "2.10.0", request)
-    with pytest.raises(ProtocolValueError):
-        validate_schema_instance("control-request", "2.9.0", request)
+    validate_schema_instance("control-request", "2.9.0", request)
     body = cast(dict[str, Any], request)["body"]
     for rejected in ("theirs", "all", True):
         invalid = deepcopy(request)
         cast(dict[str, Any], invalid)["body"]["filter"] = {**body["filter"], "author": rejected}
         with pytest.raises(ProtocolValueError):
-            validate_schema_instance("control-request", "2.10.0", invalid)
+            validate_schema_instance("control-request", "2.9.0", invalid)

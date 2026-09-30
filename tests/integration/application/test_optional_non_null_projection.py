@@ -72,6 +72,7 @@ from yoetz.protocol.models import (
     StartSuccessModel,
     StatusAdviceItemModel,
     StatusCompactObligationModel,
+    StatusEvidenceItemModel,
     StatusObligationItemModel,
     StatusOperationPageModel,
     StatusProjectDetectionModel,
@@ -156,6 +157,8 @@ _RESULT_OPTIONAL_NON_NULL: tuple[tuple[type[BaseModel], frozenset[str]], ...] = 
         frozenset({"remaining_ms", "terminal_outcome", "terminal_reason"}),
     ),
     (StatusProjectPageModel, frozenset({"title", "description", "title_ref", "description_ref"})),
+    # Issue #914: the service always fills it; optional so earlier 0.3 rows still validate.
+    (StatusEvidenceItemModel, frozenset({"publication_channel"})),
     (StatusStructuralSubjectStateModel, frozenset({"tree_digest", "diff_digest"})),
     (StatusVersionSliceModel, frozenset({"route_profile"})),
 )
@@ -1014,6 +1017,10 @@ def test_every_result_optional_non_null_field_has_an_unset_projection_case() -> 
         ),
         ("StatusObligationItemModel", "acceptance_criteria"): (
             "test_obligation_without_acceptance_criteria_projects"
+        ),
+        # Issue #914: tests/conformance/protocol/test_status_evidence_author_fixture.py
+        ("StatusEvidenceItemModel", "publication_channel"): (
+            "test_rows_from_earlier_03_builds_still_validate_without_a_channel"
         ),
         ("StatusStructuralSubjectStateModel", "diff_digest"): (
             "test_status_evidence_omits_unset_structural_digest"

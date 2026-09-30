@@ -1,4 +1,9 @@
-"""Manifest-bound golden vector for evidence read-back and the author filter (issue #914)."""
+"""Manifest-bound golden vector for evidence read-back and the author filter (issue #914).
+
+Status request 1.2.0 and status result 1.4.0 are unreleased on the 0.3 line, so the evidence
+``author`` selector and the row ``publication_channel`` were added to them in place; the channel is
+optional so rows written by earlier 0.3 builds still validate.
+"""
 
 from __future__ import annotations
 
@@ -22,7 +27,7 @@ from yoetz.protocol.models import (
 )
 from yoetz.protocol.schemas import SchemaInstanceInvalid, validate_schema_instance
 
-_PATH = "canonical/status-evidence-author-1.5.0.case.json"
+_PATH = "canonical/status-evidence-author-1.4.0.case.json"
 _CASES = ("mine", "unfiltered")
 _GENERATOR = Path(__file__).resolve().parents[3] / "scripts" / "generate_status_evidence_fixture.py"
 
@@ -46,9 +51,9 @@ def test_vector_validates_and_every_rendering_matches(case: str) -> None:
     result = cast(dict[str, Any], document["input"]["results"][case])
     expected = cast(dict[str, Any], document["expected"])
 
-    validate_schema_instance("status-request", "1.3.0", freeze_json(request))
+    validate_schema_instance("status-request", "1.2.0", freeze_json(request))
     StatusRequestModel.model_validate(request)
-    validate_schema_instance("status-result", "1.5.0", freeze_json(result))
+    validate_schema_instance("status-result", "1.4.0", freeze_json(result))
     wrapped = StatusResultModel.model_validate(result)
     assert public_model_to_wire(wrapped) == result
     success = wrapped.root
@@ -62,33 +67,34 @@ def test_vector_validates_and_every_rendering_matches(case: str) -> None:
         assert isinstance(rows[evidence_id].description, str)
 
 
-def test_older_schemas_reject_the_new_fields() -> None:
-    document = _document()
-    with pytest.raises(SchemaInstanceInvalid):
-        validate_schema_instance(
-            "status-request", "1.2.0", freeze_json(document["input"]["requests"]["mine"])
-        )
-    with pytest.raises(SchemaInstanceInvalid):
-        validate_schema_instance(
-            "status-result", "1.4.0", freeze_json(document["input"]["results"]["mine"])
-        )
+def test_rows_from_earlier_03_builds_still_validate_without_a_channel() -> None:
+    result = cast(dict[str, Any], _document()["input"]["results"]["unfiltered"])
+    items = [
+        {key: value for key, value in item.items() if key != "publication_channel"}
+        for item in result["page"]["items"]
+    ]
+    earlier = {**result, "page": {**result["page"], "items": items}}
+    validate_schema_instance("status-result", "1.4.0", freeze_json(earlier))
+    wrapped = StatusResultModel.model_validate(earlier)
+    success = wrapped.root
+    assert isinstance(success, StatusSuccessModel)
+    assert isinstance(success.page, StatusEvidencePageModel)
+    assert all(item.publication_channel is None for item in success.page.items)
+    assert public_model_to_wire(wrapped) == earlier
 
 
 @pytest.mark.parametrize("author", ("theirs", "", "MINE"))
 def test_author_admits_only_mine(author: str) -> None:
     request = {**_document()["input"]["requests"]["mine"], "filter": {"author": author}}
     with pytest.raises(SchemaInstanceInvalid):
-        validate_schema_instance("status-request", "1.3.0", freeze_json(request))
+        validate_schema_instance("status-request", "1.2.0", freeze_json(request))
 
 
-def test_every_row_must_name_a_closed_channel() -> None:
+@pytest.mark.parametrize("channel", ("caller_asserted", None, ""))
+def test_a_present_channel_must_be_closed(channel: object) -> None:
     result = cast(dict[str, Any], _document()["input"]["results"]["unfiltered"])
     items = [dict(item) for item in result["page"]["items"]]
-    del items[0]["publication_channel"]
-    missing = {**result, "page": {**result["page"], "items": items}}
-    with pytest.raises(SchemaInstanceInvalid):
-        validate_schema_instance("status-result", "1.5.0", freeze_json(missing))
-    items[0]["publication_channel"] = "caller_asserted"
+    items[0]["publication_channel"] = channel
     unknown = {**result, "page": {**result["page"], "items": items}}
     with pytest.raises(SchemaInstanceInvalid):
-        validate_schema_instance("status-result", "1.5.0", freeze_json(unknown))
+        validate_schema_instance("status-result", "1.4.0", freeze_json(unknown))

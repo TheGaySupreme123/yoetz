@@ -2365,6 +2365,10 @@ def _status_request_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         "pattern": r"^[A-Za-z0-9][A-Za-z0-9._:/+\-]*$",
         "type": "string",
     }
+    # Issue #914, unreleased in-place addition: the writer-relative evidence selector. A closed
+    # one-member enum, so the caller can ask for its own rows but never assert membership.
+    evidence_filter = cast(dict[str, JsonValue], definitions["evidence_filter"])
+    cast(dict[str, JsonValue], evidence_filter["properties"])["author"] = {"enum": ["mine"]}
     properties = cast(dict[str, JsonValue], document["properties"])
     properties.update(
         {
@@ -2415,49 +2419,6 @@ def _status_request_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     return document
 
 
-def _status_request_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
-    """Add the writer-relative ``author=mine`` selector to the evidence filter (#914).
-
-    The value is a closed one-member enum: the service decides which rows are the requester's own
-    from ledger authorship, so the caller can only ask for that set, never assert membership.
-    """
-
-    document = _load_versioned_template(
-        entry,
-        "operations/status-request-1.2.0.schema.json",
-    )
-    definitions = cast(dict[str, JsonValue], document["$defs"])
-    evidence_filter = cast(dict[str, JsonValue], definitions["evidence_filter"])
-    properties = cast(dict[str, JsonValue], evidence_filter["properties"])
-    properties["author"] = {"enum": ["mine"]}
-    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
-    document["title"] = f"Yoetz status request {entry.schema_version}"
-    return document
-
-
-def _status_result_v1_5_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
-    """Add each evidence row's service-stamped ``publication_channel`` (#914)."""
-
-    document = _load_versioned_template(
-        entry,
-        "operations/status-result-1.4.0.schema.json",
-    )
-    definitions = cast(dict[str, JsonValue], document["$defs"])
-    evidence_item = cast(dict[str, JsonValue], definitions["evidence_item"])
-    properties = cast(dict[str, JsonValue], evidence_item["properties"])
-    required = cast(list[JsonValue], evidence_item["required"])
-    history_item = cast(dict[str, JsonValue], definitions["history_item"])
-    history_properties = cast(dict[str, JsonValue], history_item["properties"])
-    properties["publication_channel"] = json.loads(
-        json.dumps(history_properties["publication_channel"])
-    )
-    if "publication_channel" not in required:
-        required.insert(required.index("evidence_id") + 1, "publication_channel")
-    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
-    document["title"] = f"Yoetz status result {entry.schema_version}"
-    return document
-
-
 def _status_result_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     """Add lineage and project pages while preserving every earlier status view."""
 
@@ -2503,6 +2464,14 @@ def _status_result_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         if "coordination" not in policy_values:
             policy_values.append("coordination")
             policy_values.sort(key=lambda item: str(item).encode("ascii"))
+    # Issue #914, unreleased in-place addition: each evidence row's service-stamped channel. It is
+    # optional so rows produced by earlier 0.3 builds still validate; the service always fills it.
+    evidence_properties = cast(
+        dict[str, JsonValue], cast(dict[str, JsonValue], definitions["evidence_item"])["properties"]
+    )
+    evidence_properties["publication_channel"] = json.loads(
+        json.dumps(history_properties["publication_channel"])
+    )
     frontier_ref = SCHEMA_NAMESPACE + "common/frontier-1.0.0.schema.json"
     definitions["project_id"] = {
         "pattern": r"^prj_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
@@ -4203,46 +4172,6 @@ def _control_v2_9_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         )
         required.extend(["selected_capacity_label", "effective_capacity_label", "effective_budget"])
         definitions["observation_effective_budget"] = _observation_effective_budget_schema(token)
-    return document
-
-
-def _control_v2_10_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
-    """Move the frozen 2.9 control envelopes onto status request 1.3.0 / result 1.5.0 (#914).
-
-    Only the operation references change: a status body carrying ``filter.author`` or an evidence
-    row's ``publication_channel`` must validate on the control channel, and the 2.9 envelopes
-    reference the closed 1.2.0/1.4.0 status schemas that reject both.
-    """
-
-    source = (
-        Path(__file__).resolve().parent.parent
-        / "schemas"
-        / entry.relative_path.replace("2.10.0", "2.9.0")
-    )
-    document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
-    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
-    replacements = {
-        SCHEMA_NAMESPACE + "operations/status-request-1.2.0.schema.json": SCHEMA_NAMESPACE
-        + "operations/status-request-1.3.0.schema.json",
-        SCHEMA_NAMESPACE + "operations/status-result-1.4.0.schema.json": SCHEMA_NAMESPACE
-        + "operations/status-result-1.5.0.schema.json",
-    }
-
-    def retarget(node: JsonValue) -> None:
-        if isinstance(node, dict):
-            for key, value in tuple(node.items()):
-                if type(value) is str:
-                    node[key] = replacements.get(value, value)
-                else:
-                    retarget(value)
-        elif isinstance(node, list):
-            for index, value in enumerate(node):
-                if type(value) is str:
-                    node[index] = replacements.get(value, value)
-                else:
-                    retarget(value)
-
-    retarget(document)
     return document
 
 
@@ -6424,26 +6353,6 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
-        "operations/status-request-1.3.0.schema.json",
-        "status-request",
-        "1.3.0",
-        "request_result",
-        "MCP input",
-        lambda: (
-            __import__("yoetz.protocol.models", fromlist=["StatusRequestModel"]).StatusRequestModel
-        ),
-    ),
-    _RegistryEntry(
-        "operations/status-result-1.5.0.schema.json",
-        "status-result",
-        "1.5.0",
-        "request_result",
-        "MCP output",
-        lambda: (
-            __import__("yoetz.protocol.models", fromlist=["StatusResultModel"]).StatusResultModel
-        ),
-    ),
-    _RegistryEntry(
         "privacy/egress-receipt-1.0.0.schema.json",
         "egress-receipt",
         "1.0.0",
@@ -6942,38 +6851,6 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         lambda: __import__("yoetz.ports.control", fromlist=["ControlResult"]).ControlResult,
     ),
     _RegistryEntry(
-        "service/control-hello-2.10.0.schema.json",
-        "control-hello",
-        "2.10.0",
-        "request_result",
-        "local-control",
-        lambda: __import__("yoetz.ports.control", fromlist=["ControlRequest"]).ControlRequest,
-    ),
-    _RegistryEntry(
-        "service/control-hello-result-2.10.0.schema.json",
-        "control-hello-result",
-        "2.10.0",
-        "request_result",
-        "local-control",
-        lambda: __import__("yoetz.ports.control", fromlist=["ControlResult"]).ControlResult,
-    ),
-    _RegistryEntry(
-        "service/control-request-2.10.0.schema.json",
-        "control-request",
-        "2.10.0",
-        "request_result",
-        "local-control",
-        lambda: __import__("yoetz.ports.control", fromlist=["ControlRequest"]).ControlRequest,
-    ),
-    _RegistryEntry(
-        "service/control-result-2.10.0.schema.json",
-        "control-result",
-        "2.10.0",
-        "request_result",
-        "local-control",
-        lambda: __import__("yoetz.ports.control", fromlist=["ControlResult"]).ControlResult,
-    ),
-    _RegistryEntry(
         "service/isolation-report-1.0.0.schema.json",
         "isolation-report",
         "1.0.0",
@@ -7110,8 +6987,6 @@ _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
         "operations/start-result-1.1.0.schema.json",
         "operations/status-request-1.2.0.schema.json",
         "operations/status-result-1.4.0.schema.json",
-        "operations/status-request-1.3.0.schema.json",
-        "operations/status-result-1.5.0.schema.json",
         "observations/routine-read-summary-1.0.0.schema.json",
         "receipts/receipt-document-1.3.0.schema.json",
         "findings/finding-1.3.0.schema.json",
@@ -7127,10 +7002,6 @@ _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
         "service/control-hello-result-2.9.0.schema.json",
         "service/control-request-2.9.0.schema.json",
         "service/control-result-2.9.0.schema.json",
-        "service/control-hello-2.10.0.schema.json",
-        "service/control-hello-result-2.10.0.schema.json",
-        "service/control-request-2.10.0.schema.json",
-        "service/control-result-2.10.0.schema.json",
     }
 )
 
@@ -7446,13 +7317,6 @@ def build_schema_documents(
             "service/control-result-2.9.0.schema.json",
         }:
             normalized = _control_v2_9_schema(entry)
-        elif entry.relative_path in {
-            "service/control-hello-2.10.0.schema.json",
-            "service/control-hello-result-2.10.0.schema.json",
-            "service/control-request-2.10.0.schema.json",
-            "service/control-result-2.10.0.schema.json",
-        }:
-            normalized = _control_v2_10_schema(entry)
         elif entry.relative_path == "operations/publish-work-request-1.1.0.schema.json":
             normalized = _publish_work_request_schema(entry)
         elif entry.relative_path == "operations/publish-work-request-1.2.0.schema.json":
@@ -7508,8 +7372,6 @@ def build_schema_documents(
             normalized = _status_request_schema(entry)
         elif entry.relative_path == "operations/status-request-1.2.0.schema.json":
             normalized = _status_request_v1_2_schema(entry)
-        elif entry.relative_path == "operations/status-request-1.3.0.schema.json":
-            normalized = _status_request_v1_3_schema(entry)
         elif entry.relative_path in {
             "operations/status-result-1.0.0.schema.json",
             "operations/status-result-1.1.0.schema.json",
@@ -7523,8 +7385,6 @@ def build_schema_documents(
             )
         elif entry.relative_path == "operations/status-result-1.4.0.schema.json":
             normalized = _status_result_v1_4_schema(entry)
-        elif entry.relative_path == "operations/status-result-1.5.0.schema.json":
-            normalized = _status_result_v1_5_schema(entry)
         elif entry.relative_path == "receipts/receipt-document-1.0.0.schema.json":
             normalized = _receipt_document_schema(entry)
         elif entry.relative_path == "receipts/receipt-document-1.1.0.schema.json":

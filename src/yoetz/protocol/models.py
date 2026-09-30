@@ -3020,16 +3020,22 @@ class StatusStructuralSubjectStateModel(_ClosedModel):
 
 
 class StatusEvidenceItemModel(_ClosedModel):
+    optional_non_null_fields = frozenset({"publication_channel"})
+
     evidence_id: EvidenceIdWire
-    # Service-stamped channel of the row's source event (structural, never caller-asserted).
-    publication_channel: Literal[
-        "codex_jsonl_import",
-        "cooperative_mcp",
-        "engine_derived",
-        "hook_observed",
-        "human_import",
-        "local_cli",
-    ]
+    # Service-stamped channel of the row's source event (structural, never caller-asserted). The
+    # service always fills it; it stays optional so rows from earlier 0.3 builds still parse.
+    publication_channel: (
+        Literal[
+            "codex_jsonl_import",
+            "cooperative_mcp",
+            "engine_derived",
+            "hook_observed",
+            "human_import",
+            "local_cli",
+        ]
+        | None
+    ) = None
     strength: Literal[
         "content_digest",
         "immutable_snapshot",
