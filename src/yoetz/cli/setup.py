@@ -367,20 +367,40 @@ def _append_next_step(next_steps: list[JsonValue], step: str) -> None:
 
 
 _ADVICE_UNREADABLE_NOTE: Final = "background_advice_unreadable"
-_ADVICE_UNREADABLE_TEXT: Final = (
-    "not demonstrated (the background-advice setting could not be read)"
-)
+_ADVICE_READY_NOTE: Final = "configured_and_composed; live_provider_dispatch_not_tested"
+_ADVICE_OFF_PREFIX: Final = "background_advice_off:"
+_ADVICE_NOT_DEMONSTRATED: Final = "not demonstrated"
+# Closed readiness note -> the fixed words the setup summary shows after "not demonstrated".
+# A note absent from this map renders "not demonstrated" alone, never itself (#888).
+_ADVICE_NOTE_REASON_TEXT: Final[Mapping[str, str]] = {
+    "semantic_configuration_incomplete": "the AI-powered review provider is not ready",
+    "deterministic_only_until_provider_ready": (
+        "local checks only until an AI-powered review provider is ready"
+    ),
+    _ADVICE_UNREADABLE_NOTE: "the background-advice setting could not be read",
+}
+
+
+def _background_advice_off_text(reason: str) -> str | None:
+    """Fixed text for a reason that says background advice is off; any other reason is ``None``."""
+
+    from yoetz.cli.provider_status import background_advice_human_line
+
+    # ``owner_enabled`` is the only reason for an on switch; under "off" it contradicts itself.
+    if reason == "owner_enabled":
+        return None
+    return background_advice_human_line({"reason": reason})
 
 
 def _semantic_advice_readiness(status: Mapping[str, object]) -> tuple[bool, str]:
     """Background-advice readiness and its closed note from a provider status report.
 
     Background advice is its own switch, off by default where explicit checks run (#888): a ready
-    provider alone is not ready background advice. An absent, malformed or unrecognized advice fact
-    (for example from a status that predates the switch) is unreadable, never a raw reason token.
+    provider alone is not ready background advice. A provider that is not ready is the
+    configuration-incomplete case whatever the advice fact says. Once it is ready, an absent,
+    malformed or unrecognized advice fact, or a reason that contradicts ``enabled``, is
+    unreadable, never a raw reason token.
     """
-
-    from yoetz.cli.provider_status import background_advice_human_line
 
     if status.get("semantic_ready") is not True:
         return False, "semantic_configuration_incomplete"
@@ -390,11 +410,23 @@ def _semantic_advice_readiness(status: Mapping[str, object]) -> tuple[bool, str]
     )
     enabled = facts.get("enabled")
     reason = facts.get("reason")
-    if enabled is True:
-        return True, "configured_and_composed; live_provider_dispatch_not_tested"
-    if enabled is False and type(reason) is str and background_advice_human_line(facts):
-        return False, "background_advice_off:" + reason
+    if enabled is True and reason == "owner_enabled":
+        return True, _ADVICE_READY_NOTE
+    if enabled is False and type(reason) is str and _background_advice_off_text(reason):
+        return False, _ADVICE_OFF_PREFIX + reason
     return False, _ADVICE_UNREADABLE_NOTE
+
+
+def _advice_readiness_text(note: object) -> str:
+    """Fixed words for a not-ready advice note; no note token ever renders raw (#888)."""
+
+    if type(note) is str and note.startswith(_ADVICE_OFF_PREFIX):
+        off_text = _background_advice_off_text(note.removeprefix(_ADVICE_OFF_PREFIX))
+        if off_text is not None:
+            return off_text
+        note = _ADVICE_UNREADABLE_NOTE
+    reason = _ADVICE_NOTE_REASON_TEXT.get(note) if type(note) is str else None
+    return _ADVICE_NOT_DEMONSTRATED if reason is None else f"{_ADVICE_NOT_DEMONSTRATED} ({reason})"
 
 
 def _semantic_status_next_steps(status: Mapping[str, object]) -> tuple[str, ...]:
@@ -3054,27 +3086,12 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
             "  Observation readiness: "
             + ("ready to observe" if readiness.get("observation_ready") else "not ready")
         )
-        advice_note = readiness.get("semantic_advice_note")
-        advice_text: str | None = None
-        if advice_note == _ADVICE_UNREADABLE_NOTE:
-            advice_text = _ADVICE_UNREADABLE_TEXT
-        elif type(advice_note) is str and advice_note.startswith("background_advice_off:"):
-            # Fixed text only; the closed reason token never renders raw, and a reason this
-            # client does not recognize renders as unreadable (#888).
-            from yoetz.cli.provider_status import background_advice_human_line
-
-            advice_text = (
-                background_advice_human_line(
-                    {"reason": advice_note.removeprefix("background_advice_off:")}
-                )
-                or _ADVICE_UNREADABLE_TEXT
-            )
         typer.echo(
             "  AI-powered advice readiness: "
             + (
                 "ready"
                 if readiness.get("semantic_advice_ready")
-                else advice_text or str(advice_note or "not demonstrated")
+                else _advice_readiness_text(readiness.get("semantic_advice_note"))
             )
         )
     if isinstance(provider, dict):

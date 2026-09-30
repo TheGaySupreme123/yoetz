@@ -786,10 +786,13 @@ this change carry an explicit `true` and keep advice on until that line is remov
 (`facts.background_advice`) and the terminal interface status layer show the effective state and
 reason with fixed text; setting `true` is the way back. The setup wizard reports
 `semantic_advice_ready` only when the provider is ready and background advice is on, and its
-human summary renders the same fixed text for `background_advice_off:<reason>` otherwise. A
-status whose advice fact is absent, malformed or carries a reason this client does not recognize
-is `background_advice_unreadable` and renders as not demonstrated because the setting could not be
-read, never as a raw token. While
+human summary renders the same fixed text for `background_advice_off:<reason>` otherwise. While
+the provider is not ready the note is the configuration-incomplete case whatever the advice fact
+says. Only once it is ready, a status whose advice fact is absent or malformed, carries a reason
+this client does not recognize, or carries a reason that contradicts `enabled` is
+`background_advice_unreadable` and renders as not demonstrated because the setting could not be
+read. The summary renders every readiness note in fixed words and never prints a note token.
+While
 the switch resolves off, the service still wires a closing dispatch: startup rediscovery closes a
 row an earlier service left `pending` as `cancelled` / `cancelled` with no provider identity and
 no route, authority or provider work, so it neither stays pending nor is replayed if the owner

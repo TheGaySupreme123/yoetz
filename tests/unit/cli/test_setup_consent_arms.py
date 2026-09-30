@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -15,6 +17,7 @@ from yoetz.domain.observation_profiles import (
     CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
     CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
 )
+from yoetz.protocol.canonical import JsonValue
 from yoetz.tui.models import LayerState
 from yoetz.tui.runtime import YoetzRuntime
 
@@ -273,6 +276,11 @@ def test_setup_summary_never_renders_an_unreadable_background_advice_token(
         {"enabled": False},
         {"enabled": False, "reason": 7},
         {"enabled": False, "reason": "a_reason_this_client_does_not_know"},
+        # A reason that contradicts ``enabled`` is unreadable, never rendered as its own text.
+        {"enabled": False, "reason": "owner_enabled"},
+        {"enabled": True, "reason": "owner_disabled"},
+        {"enabled": True, "reason": "explicit_checks_default"},
+        {"enabled": True},
     ],
 )
 def test_setup_readiness_marks_absent_or_malformed_background_advice_unreadable(
@@ -306,3 +314,55 @@ def test_setup_readiness_keeps_known_background_advice_reasons() -> None:
     assert setup._semantic_advice_readiness(  # pyright: ignore[reportPrivateUsage]
         {"semantic_ready": False}
     ) == (False, "semantic_configuration_incomplete")
+
+
+_INTERNAL_TOKEN = re.compile(r"[a-z]+_[a-z_]+")
+
+
+@pytest.mark.parametrize(
+    ("note", "reason_words"),
+    [
+        ("semantic_configuration_incomplete", "AI-powered review provider is not ready"),
+        (
+            "deterministic_only_until_provider_ready",
+            "local checks only until an AI-powered review provider is ready",
+        ),
+        ("configured_and_composed; live_provider_dispatch_not_tested", None),
+        ("background_advice_unreadable", "background-advice setting could not be read"),
+        ("background_advice_off:owner_enabled", "background-advice setting could not be read"),
+        ("a_note_this_client_does_not_know", None),
+        (None, None),
+        (7, None),
+    ],
+)
+def test_setup_summary_advice_line_never_renders_an_internal_token(
+    capsys: pytest.CaptureFixture[str], note: object, reason_words: str | None
+) -> None:
+    """Issue #888: every advice note renders fixed words; no ``_``-joined token reaches people."""
+
+    readiness: dict[str, object] = {"observation_ready": True, "semantic_advice_ready": False}
+    if note is not None:
+        readiness["semantic_advice_note"] = note
+    setup._emit_human_report(  # pyright: ignore[reportPrivateUsage]
+        cast(
+            dict[str, JsonValue],
+            {
+                "registration": {},
+                "service": {"reachable": True, "state": "ready"},
+                "provider": {},
+                "integration": {},
+                "readiness": readiness,
+                "next_steps": [],
+            },
+        )
+    )
+
+    line = next(
+        row for row in capsys.readouterr().out.splitlines() if "AI-powered advice readiness:" in row
+    )
+    assert _INTERNAL_TOKEN.search(line) is None, line
+    assert line.strip().startswith("AI-powered advice readiness: not demonstrated")
+    if reason_words is None:
+        assert line.strip() == "AI-powered advice readiness: not demonstrated"
+    else:
+        assert reason_words in line
