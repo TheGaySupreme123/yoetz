@@ -844,19 +844,28 @@ def apply_check_rulings(
     round: a local finding the check returned again over a later subject, or an AI-powered finding
     the reviewer ruled ``still_present``, ``answered_not_fixed`` or ``unassessable``. A
     ``withdrawn`` ruling on an AI-powered finding whose latest readable response is ``rejected``
-    latches ``rejection_accepted``; the reviewer accepted the agent's reasoned rejection. Resolved
-    and already-latched rows never change, and nothing here resolves or reopens a finding.
+    latches ``rejection_accepted``; the reviewer accepted the agent's reasoned rejection. Final
+    rows (resolved, ``rejection_accepted``, ``acknowledged_not_done``) never change, and nothing
+    here resolves or reopens a finding.
     """
 
     rulings = {item.finding_id: item.verdict for item in check.prior_finding_verdicts}
     touched = frozenset(check.returned_finding_ids) | frozenset(rulings)
     for current_id in sorted(touched, key=str.encode):
         record = findings.get(current_id)
+        latest = responses.get(current_id)
         if (
             record is None
             or record.payload is None
             or record.resolved_by_check_event_id is not None
             or record.rejection_accepted_by_check_event_id is not None
+            # ``acknowledged_not_done`` is final too: a later return of the same local issue, or a
+            # stray ruling, is not a new round on it.
+            or (
+                latest is not None
+                and latest.payload is not None
+                and latest.payload.disposition is ResponseDisposition.ACKNOWLEDGED_NOT_DONE
+            )
         ):
             continue
         finding = record.payload

@@ -5125,3 +5125,53 @@ async def test_the_check_carries_the_finding_checklist_on_both_ledgers(
     assert blocking <= {item.finding_id for item in checklist.items}
     assert checklist.counts.open == len(checklist.items)
     assert checklist.next == "work_open_findings"
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+async def test_a_final_local_finding_returned_again_gains_no_review_round(
+    ledger_backend: Literal["memory", "sqlite"],
+) -> None:
+    """Greptile P2 on #943 through the real respond, check, status and replay path.
+
+    A local finding answered ``acknowledged_not_done`` is final. The next check returns it again
+    over a later subject; its review rounds stay 0 in the adapter's projection and in a replay.
+    """
+
+    app, runtime, _ = _build_app(seed_offset=58, ledger_backend=ledger_backend)
+    started, checked, _obligation = await _bootstrap_finding(app, seed=5800)
+    finding = checked.findings[0]
+    responded = await app.respond(
+        RespondRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 5810)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(checked.result_frontier),
+                "finding_id": finding.finding_id,
+                "finding_frontier": _frontier(checked.result_frontier),
+                "disposition": "acknowledged_not_done",
+                "reason": "The obligation is deferred to a later milestone by the owner.",
+            }
+        )
+    )
+    rechecked = await app.check(
+        CheckRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 5811)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(responded.result_frontier),
+                "mode": "deterministic_only",
+                "max_findings": "3",
+            }
+        )
+    )
+    assert type(rechecked) is CheckCommitResult
+    assert finding.finding_id in {item.finding_id for item in rechecked.findings}
+
+    view = await _findings_view(app, started, 5812, include_resolved=True)
+    row = next(item for item in view.items if item.finding_id == finding.finding_id)
+    assert (row.todo_state, row.review_rounds) == ("acknowledged_not_done", "0")
+    ledger, _ = next(iter(runtime.resources.values()))
+    records = tuple([item async for item in ledger.load_events(started.session_id)])
+    assert replay(records).findings[finding.finding_id].review_rounds == 0

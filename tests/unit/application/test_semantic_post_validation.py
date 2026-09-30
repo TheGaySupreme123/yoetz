@@ -792,3 +792,49 @@ def test_a_ruling_on_a_final_item_never_raises_the_gap_that_blocks_its_siblings(
         expected_frontier=final.frontier,
     )
     assert (unknown.verdicts_unsupported, unknown.verdicts_set_aside) == (1, 0)
+
+
+def test_a_narrower_challenge_is_its_own_item_not_a_restatement() -> None:
+    """Greptile P1 on #943: a challenge about one subject of a broader recorded finding is a
+    distinct issue (the receipt keys issues by their exact subject set). Suppressing it would
+    lose its discrepancy and requested next step, which a ``still_present`` ruling cannot carry.
+    """
+
+    from builders.policy_cases import obligation_record
+    from yoetz.domain.events import ObligationPublishedPayload, ObligationStatus
+
+    obligations = {
+        obl(number): obligation_record(
+            ObligationPublishedPayload(
+                obl(number), f"Obligation {number}", "criteria", ObligationStatus.OPEN
+            ),
+            2,
+        )
+        for number in (1, 2)
+    }
+    case = make_case(
+        obligations=obligations,
+        findings={
+            fnd(1): finding_record(_recorded_semantic_finding(1, str(obl(1)), str(obl(2))), 5)
+        },
+    )
+    narrower = validate_semantic_judgment(
+        case,
+        (),
+        SemanticJudgment("challenges_returned", (_obligation_challenge(str(obl(1))),)),
+        _provenance(),
+        expected_frontier=case.frontier,
+    )
+    assert len(narrower.candidates) == 1
+    assert narrower.candidates[0].subject_refs == (obl(1),)
+    assert narrower.restatements_suppressed == 0
+    assert narrower.verdicts == ()
+    # The exact same subject set is still a restatement.
+    same = validate_semantic_judgment(
+        case,
+        (),
+        SemanticJudgment("challenges_returned", (_obligation_challenge(str(obl(1)), str(obl(2))),)),
+        _provenance(),
+        expected_frontier=case.frontier,
+    )
+    assert (len(same.candidates), same.restatements_suppressed) == (0, 1)

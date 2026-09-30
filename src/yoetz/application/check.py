@@ -2375,10 +2375,13 @@ def _restated_finding(
 ) -> FindingId | None:
     """The recorded AI-powered finding a challenge restates, if any (issue #905).
 
-    The stable key is the finding kind and its subjects; the evidence fingerprint is what the
-    challenge rests on. A restatement has the same kind, subjects within the recorded finding's
-    subjects, and nothing among them recorded after that finding. A challenge with newer material
-    is a new, linked item, never a restatement. The newest match wins.
+    The stable key is the finding kind and its exact subject set, the same key the receipt uses
+    for an issue; the evidence fingerprint is what the challenge rests on. A restatement has the
+    same kind, exactly the recorded finding's subjects, and nothing among them recorded after that
+    finding. A narrower or wider challenge is a distinct issue: suppressing it would lose its
+    discrepancy and requested next step, which a ``still_present`` ruling cannot carry. A
+    challenge with newer material is a new, linked item, never a restatement. The newest match
+    wins.
 
     A ``verified_resolved`` row is never a target: done stays done, and the reviewer finding the
     problem again after that proof is a #458 successor, minted and blocking. Suppressing it would
@@ -2396,7 +2399,7 @@ def _restated_finding(
             or record.redacted
             or payload.origin is not FindingOrigin.SEMANTIC_MODEL_DERIVED
             or payload.kind is not kind
-            or not wanted <= frozenset(str(ref) for ref in payload.subject_refs)
+            or wanted != frozenset(str(ref) for ref in payload.subject_refs)
             or finding_todo_state(case.projection, key) is FindingTodoState.VERIFIED_RESOLVED
         ):
             continue

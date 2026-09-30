@@ -406,3 +406,24 @@ def test_the_resolution_explanation_names_terminal_states() -> None:
     )
     explanation = finding_resolution_explanation(accepted, fnd(1), ())
     assert explanation.startswith("Rejection accepted:") and str(evt(9)) in explanation
+
+
+def test_a_final_item_never_gains_review_rounds() -> None:
+    """Greptile P2 on #943: an ``acknowledged_not_done`` item is final; a later check that returns
+    it again, or a stray ruling on it, must not count a round."""
+
+    local = finding_record(_finding(1), 4)
+    ai = finding_record(_semantic(2), 4)
+    findings = {fnd(1): local, fnd(2): ai}
+    responses = {
+        fnd(1): _response(1, ResponseDisposition.ACKNOWLEDGED_NOT_DONE),
+        fnd(2): _response(2, ResponseDisposition.ACKNOWLEDGED_NOT_DONE),
+    }
+    check = _check(returned=(fnd(1),), rulings=((2, "still_present"),))
+    apply_check_rulings(findings, responses, check, evt(9))
+    assert findings[fnd(1)].review_rounds == 0
+    assert findings[fnd(2)].review_rounds == 0
+    # The same check still counts a round for an open item.
+    open_findings = {fnd(1): finding_record(_finding(1), 4)}
+    apply_check_rulings(open_findings, {}, check, evt(9))
+    assert open_findings[fnd(1)].review_rounds == 1

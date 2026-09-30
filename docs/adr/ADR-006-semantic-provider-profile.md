@@ -925,8 +925,8 @@ item's state and rounds, and a closed `next` token, for a checklist such as
 
 **Stable identity: seen again, suppressed.** An item's key is its origin, kind and subjects; its
 evidence fingerprint is what it rests on. A challenge with the kind of a recorded AI-powered finding,
-subjects within that finding's subjects, and nothing among them recorded after that finding restates
-it: no second row is minted and the check discloses `semantic_restatements_suppressed`, so three
+exactly that finding's subjects, and nothing among them recorded after that finding restates it (a
+narrower or wider challenge is a distinct issue, minted with its own discrepancy and next step): no second row is minted and the check discloses `semantic_restatements_suppressed`, so three
 identical re-raises remain one item with one state. Suppression must never read as absence, so on an
 open item the check records the restatement as a `still_present` ruling (a contradicting `fixed` or
 `withdrawn` becomes `unassessable`), which also counts a review round; an `acknowledged_not_done` or

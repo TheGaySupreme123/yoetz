@@ -7043,9 +7043,11 @@ Wire (all additive, unreleased versions changed in place):
   item, and is read from the adapter-owned projection at the result frontier, never from a status
   page or a replay; any failure reading it omits the list and records a
   `finding_checklist_read` diagnostic instead of failing the committed check.
-- Stable identity: a challenge whose kind matches a recorded AI-powered finding, whose subjects
-  lie within that finding's subjects, and none of whose subjects was recorded after that finding
-  (the evidence fingerprint) is a restatement. It is "seen again, suppressed": no second row is
+- Stable identity: a challenge whose kind matches a recorded AI-powered finding, whose subject
+  set is exactly that finding's (the receipt's issue key), and none of whose subjects was recorded
+  after that finding (the evidence fingerprint) is a restatement. A narrower or wider challenge is
+  a distinct issue and is minted as its own finding, keeping its discrepancy and requested next
+  step. It is "seen again, suppressed": no second row is
   minted, the check adds `semantic_restatements_suppressed` (tolerated by both proof classes, like
   the other dialogue disclosures), and the `semantic_review_accounting` diagnostic counts it as
   `semantic_restatements_suppressed` so returned = accepted + rejected + suppressed. Suppression
