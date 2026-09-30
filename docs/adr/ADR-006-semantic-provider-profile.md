@@ -918,20 +918,21 @@ is a policy choice and adds no gap.
 #905 rulings, and discloses `semantic_missing_items_rejected`. Yoetz fences targets to the packet's
 `citable_refs`, drops a request the reviewer repeats without citing what the agent published since
 for every target it names (only new material directly tied to that target counts: a result of the
-named action or another run of the same command, a diff at the target's own file path or at a path a
-hook-captured edit records, evidence naming the target, or a correction of a named claim citing
-material tied to its support, or any new material when the claim cited nothing Yoetz can relate;
-paths and commands compare normalized but exact, and nothing is tied through shared obligations or
-other newer records; only an untargeted item matches by record family; hook-captured tool output
-never counts as supplied, and a result supplies verification output only when it carries output),
-classifies each item as `agent_suppliable` or `structurally_unavailable_on_this_host`, records the
-structural items as the optional `missing_for_assessment` field of the unreleased `check_recorded`
-1.3.0 (extended in place, only beside `insufficient_packet`) and shows the prior request with
-`supplied_since` refs to the next reviewer; an `insufficient_packet` that recorded no item leaves
-that request standing. Items are check limitations with their own coverage gaps;
-`semantic_packet_insufficient` is unchanged and the outcome still blocks absence proof. Command
-identity for captured output waits on #910, an exact check-time diff on #883, and the task-statement
-section on #908.
+named action or another run of the same command; content diffs at the target's own file paths or the
+paths a hook-captured edit records, together covering every such path; evidence naming the target's
+id; or a correction of a named claim citing material tied to its support, or any new material when
+the claim cited nothing Yoetz can relate; paths and commands compare normalized but exact, an
+absolute path only inside the session's workspace root, an artifact a command wrote only through
+that command's runs, and nothing is tied through shared obligations or other newer records; only an
+untargeted item matches by record family; hook-captured tool output never counts as supplied, and a
+result supplies verification output only when it carries output), classifies each item as
+`agent_suppliable` or `structurally_unavailable_on_this_host`, records the structural items as the
+optional `missing_for_assessment` field of the unreleased `check_recorded` 1.3.0 (extended in place,
+only beside `insufficient_packet`) and shows the prior request with `supplied_since` refs to the
+next reviewer; an `insufficient_packet` that recorded no item leaves that request standing. Items
+are check limitations with their own coverage gaps; `semantic_packet_insufficient` is unchanged and
+the outcome still blocks absence proof. Command identity for captured output waits on #910, an exact
+check-time diff on #883, and the task-statement section on #908.
 
 Both review changes share one version of each contract: the new `provider-judgment` 1.1.0
 carries `prior_finding_verdicts` (#905) and `missing_for_assessment`, and the unreleased

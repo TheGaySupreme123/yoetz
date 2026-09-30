@@ -1000,6 +1000,9 @@ class FinalSemanticEvaluation:
     # evidence ref. In process only, to bind a fresh diff to a repeated missing-item request;
     # never recorded, logged or sent. ``None`` when the evaluator did not resolve captures.
     case_captured_edit_paths: Mapping[str, frozenset[str]] | None = None
+    # Issue #907: the absolute workspace root the session opened with, anchoring absolute paths
+    # an agent names; in process only, never recorded. ``None`` when it was not resolved.
+    case_workspace_root: str | None = None
     # Set only on the nonterminal awaiting_human branch: what the caller must do to resume this
     # exact request. Every terminal outcome leaves it None. A one-use disclosure wait keeps its
     # job and attempt open; a missing standing repository grant stops before either exists.
@@ -2657,6 +2660,7 @@ async def execute_check_commit(
                 unsuppliable_kinds=frozenset(semantic_result.unsuppliable_missing_kinds),
                 citable_refs=semantic_result.case_citable_refs,
                 captured_edit_paths=semantic_result.case_captured_edit_paths,
+                workspace_root=semantic_result.case_workspace_root,
             )
             declared_gaps |= missing.gaps
         if (

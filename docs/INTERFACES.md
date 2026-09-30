@@ -6881,16 +6881,25 @@ only when the earlier request named every one of its targets and each has new ag
 material directly tied to it. For an action, result or evidence target that is a result of the named
 action or of another run of the same command (text compared with whitespace collapsed; a hook run's
 `omitted:<digest>` matches only the same digest, `omitted:structural` nothing) and the new evidence
-that result cites; a `git diff` run naming one of the target's paths and the evidence its result
-cites; or new evidence whose `reference` is the target's id or one of its paths. A target's paths
-are its own `reference` when that is a file path (it contains `/` or a file extension, so `stdout`
-is not), the workspace-relative paths a hook-captured edit's authenticated bytes record (compared in
-process, never recorded or sent), and the paths of a `git diff` behind it; paths compare normalized
-but exact (`./`, `.` segments, repeated and trailing slashes dropped; case kept; an absolute path
-meets the workspace-relative path it ends with at a path boundary). Re-citing the old target, a
-shared obligation, or a record that only cites other new material ties nothing. A claim is answered
-by material tied to what it cites, and by a correction that supersedes or disputes it together with
-the new material the correction cites when that material is tied to the claim's support, or when the
+that result cites; content `git diff` runs and new evidence at the target's paths, when together
+they cover every path the target records (a diff of one file never answers an edit of two); or new
+evidence whose `reference` is the target's id, which always ties it. A target's paths are the
+workspace-relative paths a hook-captured edit's authenticated bytes record, the pathspecs of a `git
+diff` behind it, and its own `reference` unless a command other than `git diff` wrote it (an
+artifact such as `reports/junit.xml` is answered only through that command's runs). Paths compare
+normalized but exact: `./`, `.` segments, repeated and trailing slashes are dropped, case is kept,
+`..` is not resolved. An absolute path counts only inside the workspace root the session opened with
+(tried as given and through `realpath`), as the path relative to it; outside it, or when the root is
+unknown, it matches nothing, and a basename alone never matches. A single segment without a slash
+(`Makefile`, `.gitignore`, but also `stdout`) is a path only when the other side is certainly one
+(`./Makefile`, a captured path, a `git diff` argument). A content `git diff` is `git [--no-pager]
+[-C <workspace root>] diff [options] [revisions] [--] [paths]`; no path (or `.`) is the whole tree,
+and a directory covers the files beneath it; summary forms (`--stat`, `--name-only`, `--numstat` and
+the like) and `-C` naming another directory do not count. The workspace root and the captured paths
+are compared in process and never recorded, logged or sent. Re-citing the old target, a shared
+obligation, or a record that only cites other new material ties nothing. A claim is answered by
+material tied to what it cites, and by a correction that supersedes or disputes it together with the
+new material the correction cites when that material is tied to the claim's support, or when the
 claim cited nothing Yoetz can relate (the request was for the claim itself). A finding is answered
 by a response to it and what that cites, a plan by the version superseding it, an obligation by new
 actions, results, claims and plans naming it. A record related to the target only through another

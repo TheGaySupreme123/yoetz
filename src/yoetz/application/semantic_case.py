@@ -2164,6 +2164,7 @@ def build_semantic_case(
     captured_content_scope: CapturedContentScope | None = None,
     captured_content_gaps: Sequence[str] = (),
     prepared_byte_ceiling: int | None = None,
+    workspace_root: str | None = None,
 ) -> SemanticCase:
     """Build one pre-egress AI-powered review case from frozen authority only.
 
@@ -2174,6 +2175,8 @@ def build_semantic_case(
     measured the way the gateway measures them). An over-plan case is rebuilt with a smaller
     excerpt budget; the dropped excerpts are ordinary ``not_selected`` omissions with
     ``content_unselected``. The gateway still enforces the owner's ceiling on every dispatch.
+    ``workspace_root`` anchors absolute paths when the prior missing-item request's answers are
+    matched (issue #907); it is compared in process and never enters the case.
     """
 
     if prepared_byte_ceiling is not None and (
@@ -2201,6 +2204,7 @@ def build_semantic_case(
             captured_content_scope=captured_content_scope,
             captured_content_gaps=captured_content_gaps,
             excerpt_byte_budget=excerpt_byte_budget,
+            workspace_root=workspace_root,
         )
 
     def fits(candidate: SemanticCase) -> bool | None:
@@ -2248,6 +2252,7 @@ def _build_semantic_case_once(
     captured_content_scope: CapturedContentScope | None,
     captured_content_gaps: Sequence[str],
     excerpt_byte_budget: int | None,
+    workspace_root: str | None = None,
 ) -> SemanticCase:
     if type(frozen_case) is not DeterministicCase:
         raise TypeError("deterministic_case_invalid")
@@ -2778,6 +2783,7 @@ def _build_semantic_case_once(
             frozenset(allowed),
             frozenset(str(item) for item in frozen_case.observation_event_ids),
             _edit_paths_by_ref(captured_groups),
+            workspace_root,
         )
         check_ref = str(pending_missing.source_check_event_id)
         prior_missing_item = _content_item(

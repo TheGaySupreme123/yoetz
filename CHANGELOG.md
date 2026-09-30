@@ -16,9 +16,10 @@ reverse-chronological released versions.
   review must now name what it needed. The check result lists each item and whether you can supply
   it, as a coverage limitation, never a finding. A repeated request stops being listed only after
   you publish new material directly tied to the ref it names: output of the named run or a rerun of
-  the same command, a diff of the same file path, or a claim correction citing such material.
-  Material related only to another file, run or claim does not count. The excerpt count and the
-  privacy policy are unchanged (#907).
+  the same command, a diff covering every file the named edit changed (paths inside your workspace),
+  evidence whose reference is the named ref, or a claim correction citing such material. Material
+  related only to another file, run or claim does not count. The excerpt count and the privacy
+  policy are unchanged (#907).
 
 - Codex, Claude Code and Cursor session-start context can show a fresh repository-grant snapshot
   and name the owner's missing admission command. The notice leaves route and host approval

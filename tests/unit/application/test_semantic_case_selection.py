@@ -941,9 +941,9 @@ def test_a_fresh_git_diff_of_a_captured_path_is_supplied_for_that_capture(host: 
     helper_paths = captured_edit_paths(ledger.case, ledger.captured, ledger.scope)
     assert helper_paths[str(target)] == frozenset({_PATHS[0]})
 
-    def supplied_for(diff_path: str) -> list[str]:
+    def supplied_for(diff_path: str, workspace_root: str | None = None) -> list[str]:
         action = ActionRecordedPayload(
-            act(95), ActionKind.COMMAND, "Show the diff", command=f"git diff -- ./{diff_path}"
+            act(95), ActionKind.COMMAND, "Show the diff", command=f"git diff -- {diff_path}"
         )
         output = EvidenceRecordedPayload(
             evd(96),
@@ -981,10 +981,20 @@ def test_a_fresh_git_diff_of_a_captured_path_is_supplied_for_that_capture(host: 
                 **{ref: ledger.case.coverage_by_ref[target] for ref in added},
             },
         )
-        rows = {
-            cast(str, row["item_id"]): row
-            for row in _prepared_items(_build(replace(ledger, case=case)))
-        }
+        semantic = build_semantic_case(
+            case_id="cas_10000000-0000-4000-8000-000000000001",
+            frozen_case=case,
+            dependency_digest="sha256:" + "b" * 64,
+            findings=(),
+            review_context_profile=ReviewContextProfile.EXPANDED,
+            review_selection=ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED),
+            policy_id="pvy_10000000-0000-4000-8000-000000000001",
+            policy_version="1",
+            captured_content=ledger.captured,
+            captured_content_scope=ledger.scope,
+            workspace_root=workspace_root,
+        )
+        rows = {cast(str, row["item_id"]): row for row in _prepared_items(semantic)}
         body = strict_json_parse(
             cast(str, rows["prior-missing-for-assessment"]["content"]).encode("utf-8")
         )
@@ -992,8 +1002,12 @@ def test_a_fresh_git_diff_of_a_captured_path_is_supplied_for_that_capture(host: 
         (item,) = cast(list[dict[str, JsonValue]], body["items"])
         return cast(list[str], item["supplied_since"])
 
-    assert supplied_for(_PATHS[0]) == [str(evd(96))]
+    assert supplied_for(f"./{_PATHS[0]}") == [str(evd(96))]
     assert supplied_for(_PATHS[1]) == []
+    # An absolute path answers only inside the workspace root the review was given.
+    assert supplied_for(f"/work/repo/{_PATHS[0]}", "/work/repo") == [str(evd(96))]
+    assert supplied_for(f"/work/repo/{_PATHS[0]}") == []
+    assert supplied_for(f"/other/repo/{_PATHS[0]}", "/work/repo") == []
 
 
 def test_older_hunks_of_a_changed_path_are_not_starved_by_tool_output() -> None:

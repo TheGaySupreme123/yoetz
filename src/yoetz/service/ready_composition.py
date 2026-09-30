@@ -3717,6 +3717,25 @@ async def _recover_response_evaluation(
     return FinalSemanticEvaluation(status, reason, judgment=judgment, provenance=provenance)
 
 
+async def _workspace_root_for_runtime(runtime: TaskRuntime | None) -> str | None:
+    """The absolute workspace path the task's session opened with, or ``None``.
+
+    Issue #907: a repeated missing-item request anchors absolute paths the agent names to this
+    root. It is compared in process only, never recorded, logged or sent.
+    """
+
+    if runtime is None:
+        return None
+    try:
+        async for record in runtime.ledger.load_events(runtime.session_id):
+            if isinstance(record.payload, SessionOpenedPayload):
+                root = record.payload.workspace_ref
+                return root if root is not None and os.path.isabs(root) else None
+    except Exception:
+        return None
+    return None
+
+
 def _observation_workspace_for_runtime(runtime: TaskRuntime) -> str | None:
     """Resolve the task's observation workspace through its durable session route.
 
@@ -4378,6 +4397,7 @@ def _privacy_gated_semantic_evaluator(
                         )
                         captured_content_gaps = ("content_capture_unavailable",)
                         captured_local_fence_required = False
+            workspace_root = await _workspace_root_for_runtime(runtime)
             try:
                 semantic_case = build_semantic_case(
                     case_id=recovered_case_id or ids.new(IdKind.OUTBOUND_CASE),
@@ -4393,6 +4413,7 @@ def _privacy_gated_semantic_evaluator(
                     captured_content_scope=captured_content_scope,
                     captured_content_gaps=captured_content_gaps,
                     prepared_byte_ceiling=_semantic_prepared_byte_ceiling(policy),
+                    workspace_root=workspace_root,
                 )
             except LineageSemanticCapacityExceeded:
                 # Same pre-dispatch contract as an envelope that cannot be reduced: local
@@ -4535,6 +4556,7 @@ def _privacy_gated_semantic_evaluator(
                     case_prior_finding_refs=packet_prior_refs,
                     case_citable_refs=packet_citable_refs,
                     case_captured_edit_paths=packet_edit_paths,
+                    case_workspace_root=workspace_root,
                 )
 
             # Build the packet before anything durable exists. A packet that cannot be built is a
@@ -4868,6 +4890,7 @@ def _privacy_gated_semantic_evaluator(
                     case_prior_finding_refs=packet_prior_refs,
                     case_citable_refs=packet_citable_refs,
                     case_captured_edit_paths=packet_edit_paths,
+                    case_workspace_root=workspace_root,
                     continuation=continuation,
                 )
 

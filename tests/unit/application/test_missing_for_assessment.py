@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
+
+import pytest
 
 from builders.policy_cases import (
     act,
@@ -31,17 +35,21 @@ from yoetz.domain.events import (
     ClaimKind,
     ClaimRecordedPayload,
     ClaimRecordedPayloadV1_1,
+    ClientKind,
     EvidenceContentAvailability,
     EvidenceDigestBinding,
     EvidenceDigestProvenance,
     EvidenceDigestSubject,
     EvidenceKind,
     EvidenceRecordedPayload,
+    IntegrationKind,
     MissingForAssessmentItem,
     ObligationPublishedPayload,
     ObligationStatus,
     ResultOutcome,
     ResultRecordedPayload,
+    RuntimeProfile,
+    SessionOpenedPayload,
 )
 from yoetz.domain.privacy import (
     EgressChannel,
@@ -68,6 +76,7 @@ from yoetz.kernel.projections import (
     ProjectionRecord,
 )
 from yoetz.mcp.summaries import summary_for_check
+from yoetz.ports.runtime import TaskRuntime
 from yoetz.ports.semantic import (
     MissingForAssessment,
     MissingForAssessmentKind,
@@ -518,23 +527,24 @@ def _dropped(
     *,
     observed: frozenset[str] = frozenset(),
     captured_edit_paths: Mapping[str, frozenset[str]] | None = None,
+    workspace_root: str | None = None,
 ) -> bool:
     """Whether a repeat of the pending request for ``target`` is dropped as already supplied."""
 
     case = _pending(case, MissingForAssessmentItem(kind, (target,), "agent_suppliable"))
     case = replace(case, observation_event_ids=frozenset(event_id(item) for item in observed))
-    review = (
-        review_missing_for_assessment(
-            case, (), _repeat(kind, target), unsuppliable_kinds=frozenset()
-        )
-        if captured_edit_paths is None
-        else review_missing_for_assessment(
-            case,
-            (),
-            _repeat(kind, target),
-            unsuppliable_kinds=frozenset(),
-            captured_edit_paths=captured_edit_paths,
-        )
+    # Only the options a test sets are passed, so a test fails on a missing rule, not a keyword.
+    options: dict[str, object] = {}
+    if captured_edit_paths is not None:
+        options["captured_edit_paths"] = captured_edit_paths
+    if workspace_root is not None:
+        options["workspace_root"] = workspace_root
+    review = review_missing_for_assessment(
+        case,
+        (),
+        _repeat(kind, target),
+        unsuppliable_kinds=frozenset(),
+        **options,  # pyright: ignore[reportArgumentType]
     )
     if review.items == ():
         assert "semantic_missing_already_supplied" in review.gaps
@@ -682,7 +692,7 @@ def test_a_claim_correction_answers_only_with_material_tied_to_the_claims_suppor
 
 
 def test_paths_and_commands_compare_normalized_but_exact() -> None:
-    for reference in ("./src//a.py", "src/./a.py", "/work/repo/src/a.py", "src/a.py/"):
+    for reference in ("./src//a.py", "src/./a.py", "src/a.py/"):
         case = _cases(
             evidence={
                 evd(1): evidence_record(_diff(1, "src/a.py"), 10),
@@ -690,6 +700,9 @@ def test_paths_and_commands_compare_normalized_but_exact() -> None:
             }
         )
         assert _dropped(case, "current_diff_for_path", str(evd(1))), reference
+    # An absolute path is anchored to the workspace root (see the root tests below).
+    absolute = _reference_case("src/a.py", "/work/repo/src/a.py")
+    assert _dropped(absolute, "current_diff_for_path", str(evd(1)), workspace_root="/work/repo")
     for reference in ("src/A.py", "src/a.pyc", "lib/src/a.py.bak"):
         case = _cases(
             evidence={
@@ -782,3 +795,212 @@ def test_a_fresh_git_diff_of_the_captured_path_answers_a_hook_captured_edit() ->
     )
     # Without the capture's paths (a recovered review), the request stays named.
     assert not _dropped(case_with("src/a.py"), "current_diff_for_path", str(evd(1)))
+
+
+# --- R940-01 second follow-up: workspace-anchored paths, git diff forms, full coverage -----------
+
+
+def _reference_case(target_reference: str, *references: str) -> DeterministicCase:
+    return _cases(
+        evidence={
+            evd(1): evidence_record(_diff(1, target_reference), 10),
+            **{
+                evd(70 + index): evidence_record(_diff(70 + index, reference), 70 + index)
+                for index, reference in enumerate(references)
+            },
+        }
+    )
+
+
+def _diff_run_case(*commands: str) -> DeterministicCase:
+    """A hook-captured edit (evd 1) and one agent ``git diff`` run with output per command."""
+
+    evidence: dict[EvidenceId, EvidenceProjectionRecord] = {
+        evd(1): evidence_record(_captured(1), 10)
+    }
+    actions: dict[ActionId, ProjectionRecord[ActionRecordedPayload]] = {}
+    results: dict[ResultId, ProjectionRecord[ResultRecordedPayload]] = {}
+    for index, command in enumerate(commands):
+        number = 60 + index * 3
+        actions[act(number)] = record(_run(number, command), number)
+        evidence[evd(number + 1)] = evidence_record(
+            EvidenceRecordedPayload(
+                evd(number + 1),
+                EvidenceKind.COMMAND_OUTPUT,
+                EvidenceImmutability.METADATA_ONLY,
+                timestamp_from_string("2026-09-27T00:00:00.000Z"),
+                description="diff --git a/x b/x",
+            ),
+            number + 1,
+        )
+        results[res(number + 2)] = record(
+            ResultRecordedPayload(
+                res(number + 2),
+                act(number),
+                ResultOutcome.SUCCESS,
+                evidence_refs=(evd(number + 1),),
+            ),
+            number + 2,
+        )
+    return _cases(evidence=evidence, actions=actions, results=results)
+
+
+def _answers_capture(
+    paths: frozenset[str], *commands: str, workspace_root: str | None = None
+) -> bool:
+    return _dropped(
+        _diff_run_case(*commands),
+        "current_diff_for_path",
+        str(evd(1)),
+        captured_edit_paths={str(evd(1)): paths},
+        workspace_root=workspace_root,
+    )
+
+
+def test_an_absolute_path_answers_only_inside_the_workspace_root() -> None:
+    for target, reference in (
+        ("src/a.py", "/other/repo/src/a.py"),
+        ("a.py", "/x/pkg/a.py"),
+        ("README.md", "/repo/docs/README.md"),
+    ):
+        # Without a workspace root, and with a different one, an absolute path never matches.
+        for root in (None, "/work/repo"):
+            case = _reference_case(target, reference)
+            assert not _dropped(case, "current_diff_for_path", str(evd(1)), workspace_root=root), (
+                target,
+                reference,
+                root,
+            )
+    assert not _answers_capture(frozenset({"src/a.py"}), "git diff /other/repo/src/a.py")
+    inside = _reference_case("src/a.py", "/work/repo/src/a.py")
+    assert _dropped(inside, "current_diff_for_path", str(evd(1)), workspace_root="/work/repo")
+    assert not _dropped(inside, "current_diff_for_path", str(evd(1)), workspace_root="/work")
+    assert _answers_capture(
+        frozenset({"src/a.py"}), "git diff /work/repo/src/a.py", workspace_root="/work/repo"
+    )
+
+
+def test_an_aliased_workspace_root_resolves_to_the_same_files(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    for root, written in ((link, real), (real, link)):
+        case = _reference_case("src/a.py", f"{written}/src/a.py")
+        assert _dropped(case, "current_diff_for_path", str(evd(1)), workspace_root=str(root))
+
+
+def test_a_bare_or_dot_file_name_is_a_path_when_the_other_side_is_one() -> None:
+    for name in ("Makefile", "Dockerfile", ".gitignore", ".env"):
+        assert _dropped(_reference_case(name, f"./{name}"), "current_diff_for_path", str(evd(1)))
+        assert _dropped(
+            _reference_case(name, f"/work/repo/{name}"),
+            "current_diff_for_path",
+            str(evd(1)),
+            workspace_root="/work/repo",
+        )
+        # Two bare words are never assumed to be the same file.
+        assert not _dropped(_reference_case(name, name), "current_diff_for_path", str(evd(1)))
+        assert _answers_capture(frozenset({name}), f"git diff -- {name}")
+    # Naming the target's id is always an explicit tie.
+    assert _dropped(_reference_case("Makefile", str(evd(1))), "current_diff_for_path", str(evd(1)))
+
+
+def test_every_content_form_of_git_diff_answers_and_summary_forms_do_not() -> None:
+    target = frozenset({"src/a.py"})
+    for command in (
+        "git --no-pager diff src/a.py",
+        "git diff src/",
+        "git diff src",
+        "git diff",
+        "git diff HEAD",
+        "git diff --cached",
+        "git -C . diff src/a.py",
+    ):
+        assert _answers_capture(target, command), command
+    assert _answers_capture(target, "git -C /work/repo diff src/a.py", workspace_root="/work/repo")
+    for command in (
+        "git -C /elsewhere diff src/a.py",
+        "git diff lib/",
+        "git diff --stat src/a.py",
+        "git diff --name-only",
+        "git diff --numstat -- src/a.py",
+        "git diff src/a.pyc",
+    ):
+        assert not _answers_capture(target, command, workspace_root="/work/repo"), command
+
+
+def test_a_multi_path_capture_needs_every_path_it_records() -> None:
+    both = frozenset({"src/a.py", "src/b.py"})
+    assert not _answers_capture(both, "git diff src/a.py")
+    assert _answers_capture(both, "git diff src/a.py src/b.py")
+    assert _answers_capture(both, "git diff src/a.py", "git diff -- src/b.py")
+    assert _answers_capture(both, "git diff")
+
+
+def test_an_artifact_a_command_wrote_is_answered_only_by_that_commands_runs() -> None:
+    """``reports/junit.xml`` from another command is not the named run's output."""
+
+    def case_with(command: str, cited: bool) -> DeterministicCase:
+        junit = EvidenceRecordedPayload(
+            evd(3),
+            EvidenceKind.TEST_RESULT,
+            EvidenceImmutability.METADATA_ONLY,
+            timestamp_from_string("2026-09-27T00:00:00.000Z"),
+            reference="reports/junit.xml",
+            description="junit",
+        )
+        later = replace(junit, evidence_id=evd(72))
+        return _cases(
+            actions={
+                act(1): record(_run(1, "pytest tests/a"), 8),
+                act(70): record(_run(70, command), 70),
+            },
+            evidence={evd(3): evidence_record(junit, 9), evd(72): evidence_record(later, 72)},
+            results={
+                res(2): record(
+                    ResultRecordedPayload(
+                        res(2), act(1), ResultOutcome.SUCCESS, evidence_refs=(evd(3),)
+                    ),
+                    10,
+                ),
+                res(71): record(
+                    ResultRecordedPayload(
+                        res(71),
+                        act(70),
+                        ResultOutcome.SUCCESS,
+                        evidence_refs=(evd(72),) if cited else (),
+                    ),
+                    71,
+                ),
+            },
+        )
+
+    assert not _dropped(case_with("pytest tests/b", True), "verification_output", str(evd(3)))
+    assert not _dropped(case_with("pytest tests/b", False), "verification_output", str(evd(3)))
+    assert _dropped(case_with("pytest tests/a", True), "verification_output", str(evd(3)))
+
+
+class _OpenedLedger:
+    def __init__(self, workspace_ref: str | None) -> None:
+        self._payload = SessionOpenedPayload(
+            task_title="Repair lookups",
+            client_kind=ClientKind.TEST_CLIENT,
+            client_version="0.1.0",
+            integration=IntegrationKind.LOCAL_CLI,
+            profile=RuntimeProfile.TEST_FAKE,
+            workspace_ref=workspace_ref,
+        )
+
+    async def load_events(self, session_id: str) -> AsyncIterator[object]:
+        del session_id
+        yield SimpleNamespace(payload=self._payload)
+
+
+@pytest.mark.anyio
+async def test_the_review_reads_the_workspace_root_the_session_opened_with() -> None:
+    root_of = ready_composition._workspace_root_for_runtime  # pyright: ignore[reportPrivateUsage]
+    for workspace_ref, expected in (("/work/repo", "/work/repo"), ("repo", None), (None, None)):
+        runtime = SimpleNamespace(ledger=_OpenedLedger(workspace_ref), session_id="ses")
+        assert await root_of(cast(TaskRuntime, runtime)) == expected
+    assert await root_of(None) is None

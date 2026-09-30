@@ -14,12 +14,15 @@ Pure: reads only the frozen projection and the frozen review selection.
 
 from __future__ import annotations
 
+import os
+import re
 import shlex
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Final, Protocol, cast
 
 from yoetz.domain.events import (
+    ActionKind,
     ActionRecordedPayload,
     ClaimRecordedPayload,
     ClaimRecordedPayloadV1_1,
@@ -136,6 +139,7 @@ def supplied_since(
     allowed: frozenset[str],
     observation_event_ids: frozenset[str] = frozenset(),
     captured_edit_paths: Mapping[str, frozenset[str]] | None = None,
+    workspace_root: str | None = None,
 ) -> tuple[tuple[str, ...], ...]:
     """For each pending item, the case refs of answering material recorded after the request.
 
@@ -148,7 +152,7 @@ def supplied_since(
 
     answered: list[tuple[str, ...]] = []
     for per_target in _answers_by_target(
-        projection, pending, allowed, observation_event_ids, captured_edit_paths
+        projection, pending, allowed, observation_event_ids, captured_edit_paths, workspace_root
     ):
         newest = sorted(
             {entry for entries in per_target.values() for entry in entries},
@@ -166,6 +170,7 @@ def _answers_by_target(
     allowed: frozenset[str],
     observation_event_ids: frozenset[str],
     captured_edit_paths: Mapping[str, frozenset[str]] | None = None,
+    workspace_root: str | None = None,
 ) -> tuple[dict[str | None, tuple[tuple[int, str], ...]], ...]:
     """Per pending item and target, the answering material recorded since, as ``(order, ref)``.
 
@@ -195,7 +200,9 @@ def _answers_by_target(
     for row in projection.responses.values():
         if row.source_frontier > after and row.payload is not None and not row.redacted:
             recorded["responses"].append((row.source_frontier, str(row.source_event_id)))
-    links = _Links.of(projection, after, observation_event_ids, captured_edit_paths or {})
+    links = _Links.of(
+        projection, after, observation_event_ids, captured_edit_paths or {}, workspace_root
+    )
     answers: list[dict[str | None, tuple[tuple[int, str], ...]]] = []
     for item in pending.items:
         candidates = tuple(
@@ -220,13 +227,20 @@ def _answers_by_target(
 type _RunKey = tuple[str, str]
 
 
+# A workspace-relative path, normalized, and whether it is certainly a path (``False`` for a
+# bare single-segment reference such as ``Makefile`` or ``stdout``, which may be a path or a word).
+type _Path = tuple[str, bool]
+# The whole working tree (a bare ``git diff``) or the pathspecs a ``git diff`` names.
+_WHOLE_TREE: Final = "."
+
+
 @dataclass(frozen=True, slots=True)
 class _Subject:
     """What a target names: its runs (actions and exact-command keys) and its file paths."""
 
     actions: frozenset[str]
     keys: frozenset[_RunKey]
-    paths: frozenset[str]
+    paths: frozenset[_Path]
 
     def __or__(self, other: _Subject) -> _Subject:
         return _Subject(
@@ -264,7 +278,8 @@ class _Links:
 
     projection: ProjectionState
     after: int
-    captured: Mapping[str, frozenset[str]]
+    roots: frozenset[str]
+    captured: Mapping[str, frozenset[_Path]]
     new_actions: Mapping[str, ActionRecordedPayload]
     new_results: Mapping[str, ResultRecordedPayload]
     new_evidence: Mapping[str, EvidenceRecordedPayload]
@@ -280,6 +295,7 @@ class _Links:
         after: int,
         observation_event_ids: frozenset[str],
         captured_edit_paths: Mapping[str, frozenset[str]],
+        workspace_root: str | None,
     ) -> _Links:
         def newer(row: _Row) -> bool:
             return (
@@ -295,15 +311,20 @@ class _Links:
             key = _run_key(row.payload)
             if key is not None:
                 by_key.setdefault(key, set()).add(str(ref))
+        roots = _workspace_roots(workspace_root)
         captured = {
             ref: frozenset(
-                path for raw in paths if (path := _normal_path(raw, known_path=True)) is not None
+                path
+                for raw in paths
+                if (path := _normal_path(raw, roots, known_path=True)) is not None
+                and path[0] != _WHOLE_TREE
             )
             for ref, paths in captured_edit_paths.items()
         }
         return cls(
             projection=projection,
             after=after,
+            roots=roots,
             captured=captured,
             new_actions={
                 str(ref): row.payload
@@ -380,22 +401,41 @@ class _Links:
             if str(ref) in self.new_evidence or str(ref) in self.new_results
         }
 
-    def _evidence_paths(self, ref: str) -> frozenset[str]:
+    def _action(self, ref: str) -> ActionRecordedPayload | None:
+        row = next((item for key, item in self.projection.actions.items() if str(key) == ref), None)
+        return None if row is None else row.payload
+
+    def _wrote_artifact(self, action_ref: str) -> bool:
+        """Whether the action is a command other than a ``git diff`` (its files are artifacts)."""
+
+        action = self._action(action_ref)
+        return (
+            action is not None
+            and action.action_kind is ActionKind.COMMAND
+            and _diff_scope(action.command, self.roots) is None
+        )
+
+    def _evidence_paths(self, ref: str, *, artifact: bool) -> frozenset[_Path]:
+        """A hook capture's recorded paths, and its ``reference`` unless a command wrote it."""
+
+        paths = set(self.captured.get(ref, frozenset()))
         row = next(
             (item for key, item in self.projection.evidence.items() if str(key) == ref), None
         )
-        paths = set(self.captured.get(ref, frozenset()))
-        if row is not None and row.payload is not None and row.payload.reference is not None:
-            path = _normal_path(row.payload.reference)
-            if path is not None:
+        if not artifact and row is not None and row.payload is not None:
+            reference = row.payload.reference
+            path = None if reference is None else _normal_path(reference, self.roots)
+            if path is not None and path[0] != _WHOLE_TREE:
                 paths.add(path)
         return frozenset(paths)
 
     def _action_subject(self, ref: str) -> _Subject:
-        row = next((item for key, item in self.projection.actions.items() if str(key) == ref), None)
-        payload = None if row is None else row.payload
+        payload = self._action(ref)
         key = _run_key(payload)
-        paths: frozenset[str] = frozenset() if payload is None else _diff_paths(payload.command)
+        scope = None if payload is None else _diff_scope(payload.command, self.roots)
+        paths: frozenset[_Path] = frozenset(
+            (path, True) for path in (scope or ()) if path != _WHOLE_TREE
+        )
         return _Subject(frozenset({ref}), frozenset() if key is None else frozenset({key}), paths)
 
     def _subject(self, target: str) -> _Subject:
@@ -405,6 +445,7 @@ class _Links:
         subject = _NO_SUBJECT
         if any(str(ref) == target for ref in projection.actions):
             subject = self._action_subject(target)
+            artifact = self._wrote_artifact(target)
             for row in projection.results.values():
                 if (
                     row.payload is not None
@@ -413,52 +454,77 @@ class _Links:
                 ):
                     for evidence_ref in row.payload.evidence_refs:
                         subject = subject | _Subject(
-                            frozenset(), frozenset(), self._evidence_paths(str(evidence_ref))
+                            frozenset(),
+                            frozenset(),
+                            self._evidence_paths(str(evidence_ref), artifact=artifact),
                         )
             return subject
         result = next((row for ref, row in projection.results.items() if str(ref) == target), None)
         if result is not None:
             if result.payload is None:
                 return subject
-            subject = self._action_subject(str(result.payload.action_id))
+            action = str(result.payload.action_id)
+            subject = self._action_subject(action)
+            artifact = self._wrote_artifact(action)
             for evidence_ref in result.payload.evidence_refs:
                 subject = subject | _Subject(
-                    frozenset(), frozenset(), self._evidence_paths(str(evidence_ref))
+                    frozenset(),
+                    frozenset(),
+                    self._evidence_paths(str(evidence_ref), artifact=artifact),
                 )
             return subject
         if any(str(ref) == target for ref in projection.evidence):
-            subject = _Subject(frozenset(), frozenset(), self._evidence_paths(target))
+            artifact = False
             for row in projection.results.values():
                 if (
                     row.payload is not None
                     and row.source_frontier <= self.after
                     and any(str(item) == target for item in row.payload.evidence_refs)
                 ):
-                    subject = subject | self._action_subject(str(row.payload.action_id))
+                    action = str(row.payload.action_id)
+                    subject = subject | self._action_subject(action)
+                    artifact = artifact or self._wrote_artifact(action)
+            subject = subject | _Subject(
+                frozenset(), frozenset(), self._evidence_paths(target, artifact=artifact)
+            )
         return subject
 
     def _material(self, subject: _Subject) -> set[str]:
-        """New actions, results and evidence tied to a subject's runs or paths."""
+        """New actions, results and evidence tied to a subject's runs or paths.
+
+        Path material answers only when, together, it covers every path the subject names: a
+        diff of one file does not answer an edit that changed two.
+        """
 
         if not subject:
             return set()
         runs = set(subject.actions)
         for key in subject.keys:
             runs.update(self.actions_by_key.get(key, frozenset()))
-        runs.update(
-            ref
-            for ref, action in self.new_actions.items()
-            if _paths_meet(_diff_paths(action.command), subject.paths)
-        )
-        found = {ref for ref in self.new_actions if ref in runs}
-        by_path = {
-            ref
-            for ref, evidence in self.new_evidence.items()
-            if evidence.reference is not None
-            and (path := _normal_path(evidence.reference)) is not None
-            and _paths_meet(frozenset({path}), subject.paths)
-        }
-        found |= by_path
+        wanted = {path for path, _certain in subject.paths}
+        covering: dict[str, set[str]] = {}
+        for ref, action in self.new_actions.items():
+            scope = _diff_scope(action.command, self.roots)
+            if scope is not None:
+                covered = {path for path in wanted if any(_under(path, spec) for spec in scope)}
+                if covered:
+                    covering[ref] = covered
+        for ref, evidence in self.new_evidence.items():
+            reference = evidence.reference
+            path = None if reference is None else _normal_path(reference, self.roots)
+            if path is not None:
+                covered = {
+                    wanted_path
+                    for wanted_path, certain in subject.paths
+                    if wanted_path == path[0] and (certain or path[1])
+                }
+                if covered:
+                    covering[ref] = covered
+        by_path: set[str] = set()
+        if wanted and set().union(*covering.values()) >= wanted:
+            runs.update(ref for ref in covering if ref in self.new_actions)
+            by_path = {ref for ref in covering if ref in self.new_evidence}
+        found = {ref for ref in self.new_actions if ref in runs} | by_path
         for ref, result in self.new_results.items():
             cited = {str(item) for item in result.evidence_refs if str(item) in self.new_evidence}
             if str(result.action_id) in runs:
@@ -564,70 +630,132 @@ def _run_key(payload: ActionRecordedPayload | None) -> _RunKey | None:
     return ("command", command) if command else None
 
 
-def _normal_path(text: str, *, known_path: bool = False) -> str | None:
-    """A file path, normalized but exact; ``None`` for anything that is not a path.
+def _workspace_roots(workspace_root: str | None) -> frozenset[str]:
+    """The workspace root as given and as ``realpath`` resolves it (``/tmp``, ``/private/tmp``)."""
+
+    if workspace_root is None or not os.path.isabs(workspace_root):
+        return frozenset()
+    return frozenset({os.path.normpath(workspace_root), os.path.realpath(workspace_root)} - {"/"})
+
+
+def _normal_path(text: str, roots: frozenset[str], *, known_path: bool = False) -> _Path | None:
+    """A workspace-relative path, normalized but exact; ``None`` when it is not one.
 
     Surrounding whitespace, ``./`` and ``.`` segments, repeated and trailing slashes are dropped;
-    case and every other character are kept. A free-form evidence ``reference`` is a path only
-    when it contains a slash or a file extension, so a generic reference such as ``stdout`` or a
-    URL is never a path; ``known_path`` text (a captured edit's path, a ``git diff`` argument)
-    needs neither.
+    case and every other character are kept, and ``..`` is never resolved. An absolute path counts
+    only inside the workspace root (tried as written, then through ``realpath``), as the path
+    relative to it; the root itself is the whole tree (``.``). A single segment with no slash is
+    not certainly a path (``Makefile`` or ``stdout``) unless ``known_path`` says so (a captured
+    edit's path, a ``git diff`` argument); it then matches only a certain path.
     """
 
     text = text.strip()
     if not text or any(char.isspace() for char in text) or "://" in text:
         return None
-    absolute = text.startswith("/")
+    if text.startswith("/"):
+        relative = _inside(os.path.normpath(text), roots)
+        if relative is None and roots:
+            relative = _inside(os.path.realpath(text), roots)
+        return None if relative is None else (relative, True)
     parts = [part for part in text.split("/") if part not in {"", "."}]
-    if not parts or not (known_path or "/" in text or "." in parts[-1][1:]):
-        return None
-    return ("/" if absolute else "") + "/".join(parts)
+    if not parts:
+        return (_WHOLE_TREE, True)
+    name = parts[-1]
+    certain = (
+        known_path
+        or "/" in text
+        or len(parts) > 1
+        or (not name.startswith(".") and "." in name[1:])
+    )
+    return ("/".join(parts), certain)
 
 
-def _paths_meet(left: frozenset[str], right: frozenset[str]) -> bool:
-    """Whether two path sets share a path; an absolute path meets the relative path it ends with.
+def _inside(path: str, roots: frozenset[str]) -> str | None:
+    for root in roots:
+        if path == root:
+            return _WHOLE_TREE
+        if path.startswith(root + "/"):
+            return path.removeprefix(root + "/")
+    return None
 
-    Yoetz does not know the workspace root here, so ``/work/repo/src/a.py`` meets ``src/a.py`` at
-    a path boundary and never ``a.py`` inside another name.
+
+def _under(path: str, spec: str) -> bool:
+    """Whether a ``git diff`` pathspec covers a path: the whole tree, the path, or a parent."""
+
+    return spec == _WHOLE_TREE or path == spec or path.startswith(spec + "/")
+
+
+# ``git diff`` options that print no file content, so the run cannot answer a content request.
+_SUMMARY_DIFF_OPTIONS: Final = frozenset(
+    {
+        "--name-only",
+        "--name-status",
+        "--numstat",
+        "--shortstat",
+        "--summary",
+        "--quiet",
+        "--raw",
+        "--no-patch",
+        "-s",
+        "--check",
+    }
+)
+_REVISION: Final = re.compile(
+    r"(?:HEAD|FETCH_HEAD|ORIG_HEAD|MERGE_HEAD|@)(?:[~^][0-9]*)*|[0-9a-f]{7,40}|.*\.\..*"
+)
+
+
+def _diff_scope(command: str | None, roots: frozenset[str]) -> frozenset[str] | None:
+    """The workspace-relative pathspecs a content ``git diff`` covers; ``None`` for anything else.
+
+    Recognized: ``git [--no-pager] [-C <workspace root>] diff [options] [revisions] [--]
+    [paths]``. No path, or ``.``, is the whole tree (``.``). A summary form (``--stat``,
+    ``--name-only``, ``--numstat`` and the like) prints no content and is not recognized, nor is
+    ``-C`` naming any other directory. Revisions are ``HEAD``-style names, commit ids and
+    ``a..b`` ranges; any other word before ``--`` is read as a path.
     """
 
-    for one in left:
-        for other in right:
-            if one == other:
-                return True
-            if one.startswith("/") != other.startswith("/"):
-                absolute, relative = (one, other) if one.startswith("/") else (other, one)
-                if absolute.endswith("/" + relative):
-                    return True
-    return False
-
-
-def _diff_paths(command: str | None) -> frozenset[str]:
-    """The paths a ``git diff`` command names; empty for any other command."""
-
     if command is None:
-        return frozenset()
+        return None
     try:
         tokens = shlex.split(command)
     except ValueError:
-        return frozenset()
-    paths: set[str] = set()
-    for index in range(len(tokens) - 1):
-        if tokens[index] != "git" or tokens[index + 1] != "diff":
+        return None
+    if len(tokens) < 2 or tokens[0] != "git":
+        return None
+    index = 1
+    while index < len(tokens) and tokens[index] != "diff":
+        token = tokens[index]
+        if token == "--no-pager":
+            index += 1
+        elif token == "-C" and index + 1 < len(tokens):
+            directory = _normal_path(tokens[index + 1], roots, known_path=True)
+            if directory is None or directory[0] != _WHOLE_TREE:
+                return None
+            index += 2
+        else:
+            return None
+    if index >= len(tokens):
+        return None
+    specs: set[str] = set()
+    literal = False
+    for token in tokens[index + 1 :]:
+        if token in {"&&", "||", "|", ";", ">", ">>"}:
+            break
+        if not literal and token == "--":
+            literal = True
             continue
-        literal = False
-        for token in tokens[index + 2 :]:
-            if token in {"&&", "||", "|", ";"}:
-                break
-            if token == "--":
-                literal = True
-                continue
-            if not literal and token.startswith("-"):
-                continue
-            path = _normal_path(token, known_path=True)
-            if path is not None:
-                paths.add(path)
-    return frozenset(paths)
+        if not literal and token.startswith("-"):
+            if token in _SUMMARY_DIFF_OPTIONS or token.startswith(("--stat", "--dirstat")):
+                return None
+            continue
+        if not literal and _REVISION.fullmatch(token):
+            continue
+        path = _normal_path(token, roots, known_path=True)
+        if path is None:
+            return None
+        specs.add(path[0])
+    return frozenset(specs or {_WHOLE_TREE})
 
 
 def _carries_output(payload: ResultRecordedPayload) -> bool:
@@ -668,6 +796,7 @@ def review_missing_for_assessment(
     unsuppliable_kinds: frozenset[str],
     citable_refs: frozenset[str] | None = None,
     captured_edit_paths: Mapping[str, frozenset[str]] | None = None,
+    workspace_root: str | None = None,
 ) -> MissingItemsReview:
     """Fence what the reviewer named to the packet it was shown and classify who can supply it.
 
@@ -698,7 +827,9 @@ def review_missing_for_assessment(
     answered = (
         ()
         if pending is None
-        else _answers_by_target(projection, pending, allowed, observed, captured_edit_paths)
+        else _answers_by_target(
+            projection, pending, allowed, observed, captured_edit_paths, workspace_root
+        )
     )
     redacted = _redacted_refs(projection)
     shown = allowed if citable_refs is None else allowed & citable_refs

@@ -1592,7 +1592,9 @@ async def test_hook_captured_output_since_the_request_is_not_an_answer_to_it() -
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("diff_path", ["src/a.py", "src/b.py"])
+@pytest.mark.parametrize(
+    "diff_path", ["src/a.py", "src/b.py", "/work/repo/src/a.py", "/other/repo/src/a.py"]
+)
 async def test_a_fresh_diff_answers_a_captured_edit_only_for_the_path_it_records(
     diff_path: str,
 ) -> None:
@@ -1661,10 +1663,11 @@ async def test_a_fresh_diff_answers_a_captured_edit_only_for_the_path_it_records
             )
         ),
         case_captured_edit_paths={str(evd(1)): frozenset({"src/a.py"})},
+        case_workspace_root="/work/repo",
     )
     checked = await execute_check_commit(app, _request("semantic_required"))
     gaps = set(checked.coverage.known_gaps)
-    if diff_path == "src/a.py":
+    if diff_path in {"src/a.py", "/work/repo/src/a.py"}:
         assert checked.missing_for_assessment == ()
         assert "semantic_missing_already_supplied" in gaps
     else:

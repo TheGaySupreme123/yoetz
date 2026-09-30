@@ -503,15 +503,19 @@ The check result lists what the reviewer needed in `missing_for_assessment`: eac
 refs, and whether it is `agent_suppliable` or `structurally_unavailable_on_this_host` (gaps
 `semantic_missing_agent_suppliable`, `semantic_missing_structurally_unavailable`). Recheck only
 after supplying a named `agent_suppliable` item, such as the named verification output with the
-action and result that produced it. Tie it directly to the named ref, with new records: a result
-(with output) of the named action or of a rerun of the same command, cited evidence included; for a
-diff, evidence whose `reference` is the named file's path, or a `git diff <path>` run and its
-result; or a `claim_recorded/1.1.0` correction superseding the named claim that cites such output.
-Paths compare normalized but exact (`./src//a.py` is `src/a.py`; case counts; a bare name needs
-`./`), commands with whitespace collapsed (`uv run pytest` is not `pytest`), and a run a hook
-observed (recorded as `omitted:<digest>`) matches another hook run with the same digest. Re-citing
-the old ref, a shared obligation, or material for another path, run or claim does not answer the
-item. If no item is suppliable, the reviewer named none (`semantic_missing_items_rejected`), or
+action and result that produced it. Tie it directly to the named ref, with new records. For a
+verification-output, command, diff or `other` item, evidence whose `reference` is the named ref's id
+always answers it; a plan or claim item needs a new plan version or a `claim_recorded/1.1.0`
+correction superseding the named claim. Otherwise: a result (with output) of the named action or of
+a rerun of the same command, cited evidence included; for a diff, a `git diff` run and its result,
+or evidence whose `reference` is the file's path, covering every file the named edit changed (`git
+diff` with no path covers all). Paths compare normalized but exact: `./src//a.py` is `src/a.py`,
+case counts, an absolute path counts only inside your workspace, and a bare name such as `Makefile`
+needs `./Makefile` on your side. Commands compare with whitespace collapsed (`uv run pytest` is not
+`pytest`); a run a hook observed (recorded as `omitted:<digest>`) matches another hook run with the
+same digest. `--stat` or `--name-only` diffs, an artifact another command wrote, re-citing the old
+ref, a shared obligation, or material for another path, run or claim do not answer the item. If no
+item is suppliable, the reviewer named none (`semantic_missing_items_rejected`), or
 `semantic_missing_already_supplied` says it repeated a request after you published material for it,
 report the named limitation instead. Hook-captured tool output never counts as supplied. A named
 item is a check limitation, never a finding.
