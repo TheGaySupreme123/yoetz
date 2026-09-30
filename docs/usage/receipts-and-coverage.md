@@ -145,8 +145,8 @@ claim, dispute with evidence, or state an unresolved limitation. Then recheck af
 A response never deletes the original challenge. That is the point — the record keeps the
 disagreement visible.
 
-No disposition resolves a finding. Agents can record `acknowledged`, `provenance_disputed`, or
-`rejected`; `waived` is reserved for an authorized local-CLI human. Each records what was decided
+No disposition resolves a finding. Agents can record `acknowledged`, `acknowledged_not_done`,
+`provenance_disputed`, or `rejected`; `waived` is reserved for an authorized local-CLI human. Each records what was decided
 and what evidence was attached; none clears the finding for receipt purposes. A readable response
 does clear the status surface's `unanswered_finding_count`, while the actionable finding remains in
 `receipt_blocking_finding_count`.
@@ -176,6 +176,22 @@ says how many earlier findings were resolved by a later qualifying check, apart 
 that are still current and from any coverage limitations. One exception is fixed by the released
 status wire: a finding whose latest response is `provenance_disputed` stays current even after such
 a check.
+
+Findings are a to-do list that ends. Each one is `open` or in a final state:
+`verified_resolved` (proved absent as above), `acknowledged_not_done` (the agent said, with a
+required reason, that it will not do it), or `rejection_accepted` (the agent rejected an AI-powered
+finding with a reason and a later review withdrew it). A final item never changes again and is not
+reviewed again; a later `respond` to it records nothing and answers `finding_terminal`. New
+evidence about the same problem comes back as a new finding. `acknowledged_not_done` is an honest
+"not done": it keeps the receipt from reading clean and appears in its own "Acknowledged, not done"
+section. `rejection_accepted` no longer blocks the receipt's conclusion but is listed in its own
+"Rejection accepted" section. Both sections name finding ids only.
+
+The check result's `finding_checklist` and `status` with the `findings` view show each item's state
+and how many later reviews left it open, against the owner's budget
+(`verification.finding_attempt_budget`, default 5), for example `[ ] F-3 open (2/5)`. At the budget
+Yoetz asks for a decision: repair with new evidence, or respond `acknowledged_not_done` with the
+reason. It never limits checks and never closes or acknowledges anything on anyone's behalf.
 
 Repairing the record is therefore the way back to a stronger receipt: repair, recheck, and read the
 finding's `resolved` state rather than assuming that absence alone qualified. If the issue re-fires,

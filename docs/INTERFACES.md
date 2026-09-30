@@ -6963,3 +6963,58 @@ present only when at least one ruling was admitted, so a check without rulings k
 over changed state resolves it) and never lifts the veto; `still_present`, `answered_not_fixed` and
 `unassessable` add the blocker `reviewer_verdict_<verdict>`. The resolution explanation names a
 resolution that came from a `fixed` ruling.
+
+#### Finding to-do states and `acknowledged_not_done` (issue #905)
+
+`acknowledged_not_done` is a `respond` disposition: the agent states, with a required non-empty
+`reason` (at most 4096 bytes), that it will not do what the finding asks. It accepts no waiver
+fields. A missing `reason` fails the request schema; a whitespace-only one is refused with
+`INVALID_REQUEST`, reason code `response_fields_invalid`, field `/reason`. It is carried only by
+`respond-request` `1.1.0`, `respond-result` `1.1.0` and the `response_recorded` `1.1.0` event, all
+new because their 1.0.0 predecessors are released; every other disposition is still recorded as
+`response_recorded` `1.0.0`, so the event version is a pure function of the payload. Control
+`2.9.0` (unreleased, changed in place) references the respond 1.1.0 pair; control `2.8.0` keeps
+1.0.0, so an older service refuses the disposition at its schema boundary. `status-request`
+`1.2.0`, `status-result` `1.4.0` and `receipt-document` `1.3.0` admit the value in place.
+
+Every recorded finding has one to-do state (`kernel/finding_todo.py`): `open`,
+`verified_resolved` (the shared `finding_is_resolved` rule), `acknowledged_not_done` (latest
+readable response has that disposition; never reads as resolved), or `rejection_accepted` (a later
+check recorded a `withdrawn` ruling on an AI-powered finding whose latest readable response was
+`rejected`; the projection records the check as `rejection_accepted_by_check_event_id`). The last
+three are terminal: `respond` on a terminal finding appends nothing and fails with
+`INVALID_REQUEST`, reason code `finding_terminal`, field `/finding_id` (no continuation: there is
+nothing to do); a latched row is never resolved later; redacting the latching check clears the
+latch. Terminal items are left out of the prior-findings section and rulings on them are not
+admitted. `receipt_blocking_finding_count` counts `acknowledged_not_done` rows and no longer counts
+`rejection_accepted` rows.
+
+`review_rounds` counts later recorded checks that assessed a finding and left it open: a check that
+returned a local finding again over a later subject, or a recorded `still_present`,
+`answered_not_fixed` or `unassessable` ruling. Projection snapshots emit `review_rounds` and
+`rejection_accepted_by_check_event_id` only when set, so earlier snapshots keep their bytes. The
+owner's `verification.finding_attempt_budget` (`yoetz-config` `1.3.0`, integer 1–50, default 5;
+`YOETZ_VERIFICATION_FINDING_ATTEMPT_BUDGET`; written to the file only when not the default) is the
+round count at which an open item asks for a decision. It never throttles `check` and never
+changes state.
+
+Wire (all additive, unreleased versions changed in place):
+
+- `check-result` `1.3.0` success: optional `finding_checklist` `{attempt_budget, items[],
+  next}`. `attempt_budget` is a canonical string `1`–`50`; each item is `{finding_id, todo_state,
+  review_rounds}` (at most 100, the task's findings in rank order, resolved rows included);
+  `next` is `decide_at_budget` (an open item reached the budget: repair with new evidence or
+  respond `acknowledged_not_done`), `work_open_findings`, or `request_receipt`. It is current
+  projection context attached after the commit, like advisory notes, and is omitted when that read
+  is unavailable; it is never part of the check event.
+- `status-result` `1.4.0` findings view: each row carries `todo_state` and `review_rounds`
+  (canonical uint string); the page carries `attempt_budget`.
+- `receipt-document` `1.3.0`: optional `acknowledged_not_done_finding_ids` and
+  `rejection_accepted_finding_ids` (sorted, 1–100, each a carried finding; absent when empty). The
+  markdown and text renderings add "Acknowledged, not done" and "Rejection accepted" sections that
+  name finding ids only. The redacted-share profile drops `acknowledged_not_done` responses like
+  other reasoned dispositions and counts the redaction.
+- MCP text summaries count items by state with closed tokens only (`to-do: open N (M at budget
+  B), verified V, not done A, rejection accepted R; next: <token>`); the CLI renders
+  `[ ] F-1 fnd_… open (2/5)`, `[x]` verified, `[~]` not done, `[-]` rejection accepted, and one
+  closed "Next:" sentence. The TUI keeps its counts and does not render per-item states yet.

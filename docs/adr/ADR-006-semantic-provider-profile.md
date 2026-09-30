@@ -881,3 +881,43 @@ re-raise resolves over changed state, and never lifts the whole-packet veto. `st
 `answered_not_fixed` and `unassessable` block only their own finding by name
 (`reviewer_verdict_<verdict>`). Without a ruling the earlier rules are unchanged; silence is never
 read as `fixed`.
+
+**Terminal states: findings as a to-do list that ends.** Every recorded finding is in exactly one
+to-do state, read from replayed projection facts only (`kernel/finding_todo.py`, transition table
+kept as data): `open`, or one of three terminal states. `verified_resolved` is the existing
+proof-based resolution. `acknowledged_not_done` is a new `respond` disposition, defined here for
+the whole issue set: the agent states that it will not do what the finding asks, with a required
+non-empty reason. `rejection_accepted` latches when a later review rules `withdrawn` on an
+AI-powered finding whose latest readable response is a reasoned `rejected`. The optional
+`superseded` state is not introduced: a successor row (#458) already starts `open` beside the
+resolved row it follows.
+
+Terminal is final. There is no reopen and no upgrade: `respond` records nothing on a terminal item
+and refuses with the typed reason `finding_terminal` (an exact replay of an earlier respond is still
+the idempotent stored answer); a latched `rejection_accepted` never later becomes resolved; an
+`acknowledged_not_done` row never reads as resolved, even if a later check proves the issue absent.
+New evidence about the same problem becomes a new finding. The only thing that clears a latch is
+redaction of the event that set it, because unreadable proof is no proof. A terminal item is never
+re-reviewed: it leaves the prior-findings section, and a ruling on it is not admitted.
+
+On the receipt, `acknowledged_not_done` keeps counting as receipt-blocking, so it can never read as
+clean, and has its own section ("Acknowledged, not done"). `rejection_accepted` stops blocking but
+stays disclosed in its own section ("Rejection accepted"). Both are named by finding id only; how
+the receipt conclusion names them is owned by issue #913. Using `acknowledged_not_done` to shorten
+a receipt is therefore impossible by construction.
+
+**Review rounds and the owner's budget.** Each later recorded check that assessed an item and left it
+open adds one review round: a local check that returned the same finding over a later subject, or a
+review that ruled it `still_present`, `answered_not_fixed` or `unassessable`. The owner's
+`verification.finding_attempt_budget` (default 5, 1–50; maintainer decision 2026-09-30) only
+changes what Yoetz asks next: at the budget it asks for a repair with new evidence or an explicit
+`acknowledged_not_done`. It never throttles `check`, never closes, and never acknowledges on the
+agent's behalf. The check result's `finding_checklist` and the status findings view carry each
+item's state and rounds, and a closed `next` token, for a checklist such as
+`[ ] F-3 open (2/5) | [x] F-1 verified_resolved | [~] F-2 acknowledged_not_done`.
+
+**Compatibility.** `response_recorded` 1.0.0 and `respond-request`/`respond-result` 1.0.0 are
+released, so the new disposition rides new 1.1.0 versions (every other disposition keeps 1.0.0
+bytes). Control 2.9.0 (unreleased) moves to the respond 1.1.0 pair in place; the released control
+2.8.0 keeps 1.0.0, so an older service refuses the new disposition at its own schema boundary. Old
+ledgers replay unchanged: nothing they contain is `acknowledged_not_done` or `withdrawn`.
