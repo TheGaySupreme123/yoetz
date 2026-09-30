@@ -86,17 +86,23 @@ const g = await tools.mcp__yoetz__read_guidance({ uri: "yoetz://guidance/workflo
 text(g.structuredContent.text);
 ```
 
-The sandbox may have no `crypto`, so `crypto.randomUUID()` can throw. Every `request_id`, and every
-id you author in an event draft (`evt_`, `act_`, `res_`, `evd_`, `clm_`, `obl_`), is still a
-lowercase UUIDv4 behind its prefix. Include this helper in each cell that mints ids; never
-hand-roll a shorter or non-v4 id, which the schemas reject:
+The sandbox may have no `crypto`, so a bare `crypto.randomUUID()` can throw. Every `request_id`,
+and every id you author in an event draft (`evt_`, `act_`, `res_`, `evd_`, `clm_`, `obl_`), is
+still a lowercase UUIDv4 behind its prefix. Include this helper in each cell that mints ids; never
+hand-roll a shorter or non-v4 id, which the schemas reject. It uses the strongest source the cell
+has: `crypto.randomUUID()`, then `crypto.getRandomValues()`, and only when neither exists
+`Math.random()`, which is not cryptographic and is a last resort for a sandbox without `crypto`:
 
 ```js
 const uuid4 = () => {
-  const b = Array.from({ length: 16 }, () => Math.floor(Math.random() * 256));
-  b[6] = (b[6] & 0x0f) | 0x40;
-  b[8] = (b[8] & 0x3f) | 0x80;
-  const h = b.map((x) => x.toString(16).padStart(2, "0")).join("");
+  const c = globalThis.crypto;
+  if (typeof c?.randomUUID === "function") return c.randomUUID().toLowerCase();
+  const b = new Uint8Array(16);
+  if (typeof c?.getRandomValues === "function") c.getRandomValues(b);
+  else for (let i = 0; i < 16; i++) b[i] = Math.floor(Math.random() * 256); // fallback: not cryptographic
+  b[6] = (b[6] & 0x0f) | 0x40; // version 4
+  b[8] = (b[8] & 0x3f) | 0x80; // RFC 4122 variant
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 };
 const newId = (prefix) => `${prefix}_${uuid4()}`;

@@ -28,7 +28,9 @@ reverse-chronological released versions.
   every Yoetz tool description. The body keeps when to call `start`, the no-false-activation,
   consent, disclosure and coverage-wording rules, and tells the agent to read the full safety
   floor with `read_guidance` before the first `start`. The Codex skill gains a code-mode section:
-  declaration-only tool discovery, a UUIDv4 helper that needs no `crypto`, and a `yield_time_ms`
+  declaration-only tool discovery, a UUIDv4 helper that uses `crypto.randomUUID()` or
+  `crypto.getRandomValues()` when present and falls back to a labelled non-cryptographic
+  `Math.random()` source only without `crypto`, and a `yield_time_ms`
   sized to each Yoetz call's deadline. On Codex only, `read_guidance` returns its document once,
   in `structuredContent.text`. Claude Code and the generic host are unchanged. Codex dogfood
   acceptance is pending (#918).

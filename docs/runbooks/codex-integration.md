@@ -282,13 +282,19 @@ ceremony step and makes each one cheaper:
   body.
 - **Code-mode section in the skill.** `skills/codex/yoetz/SKILL.md` shows a declaration-only
   `ALL_TOOLS` discovery helper, reading guidance from `structuredContent.text`, a UUIDv4 helper
-  that needs no `crypto`, and `yield_time_ms` sized to the bridge deadline of the Yoetz call in
+  that works without `crypto`, and `yield_time_ms` sized to the bridge deadline of the Yoetz call in
   that cell (`check` 300,000 ms; `respond` and `receipt` 50,000 ms; `start`, `publish_work` and
   `status` 30,000 ms; see [response and receipt timeout recovery](#response-and-receipt-timeout-recovery)).
-  The yield guidance is scoped to Yoetz cells; builds and tests keep their own cells. The helper is
-  tested by running its exact snippet 10,000 times per id prefix under Node, both in a fresh
-  context with no `crypto` and as an ES module with `crypto` removed, against the `req_`, `evt_`,
-  `act_`, `res_`, `evd_`, `clm_` and `obl_` patterns in `schemas/`; the patterns stay strict.
+  The yield guidance is scoped to Yoetz cells; builds and tests keep their own cells. The helper
+  takes the strongest entropy the cell has: `crypto.randomUUID()`, then `crypto.getRandomValues()`
+  with the version-4 and RFC 4122 variant bits set, and only without `crypto` a `Math.random()`
+  fallback that the snippet labels as not cryptographic. A collision on that fallback can make two
+  requests share an idempotency identity, so native dogfood should record which source the code-mode
+  runtime provides; service-minted ids (#919) remain the stronger answer. The helper is tested by
+  running its exact snippet 10,000 times per id prefix under Node, in a fresh context and an ES
+  module without `crypto`, with only `getRandomValues`, and with `randomUUID` (the latter two with
+  `Math.random` disabled to prove the fallback is not used), against the `req_`, `evt_`, `act_`,
+  `res_`, `evd_`, `clm_` and `obl_` patterns in `schemas/`; the patterns stay strict.
 - **Single-copy guidance.** On this profile only, a `read_guidance` result's `content[0].text` is
   the bounded pointer `Guidance <uri>: <n> bytes; full text in structuredContent.text.`;
   `structuredContent` and the output schema are unchanged. Outside code mode, Codex hands the

@@ -3,9 +3,11 @@
 Codex code mode runs Yoetz calls from JavaScript cells. Its sandbox has no `crypto`, yet every
 `request_id` and event-draft id must be a strict prefixed UUIDv4: the DeepSWE v2 run recorded 45
 `crypto is not defined` failures and hand-rolled ids the `request_id` pattern rejected. These
-tests execute the skill's exact helper snippet in JavaScript runtimes without `crypto` and check
-its output against the id patterns in the packaged schemas. They also keep the section's yield
-guidance equal to the bridge's real call deadlines, so a semantic check returns in its own turn.
+tests execute the skill's exact helper snippet in JavaScript runtimes with and without `crypto`
+and check its output against the id patterns in the packaged schemas. The helper must prefer
+`crypto.randomUUID()`, then `crypto.getRandomValues()`, and fall back to `Math.random()` only when
+neither exists. They also keep the section's yield guidance equal to the bridge's real call
+deadlines, so a semantic check returns in its own turn.
 """
 
 from __future__ import annotations
@@ -100,34 +102,55 @@ def _run_node(tmp_path: Path, name: str, source: str) -> str:
 
 
 _GENERATE: Final = f"""
-if (typeof crypto !== "undefined" || typeof globalThis.crypto !== "undefined") {{
-  throw new Error("crypto is present");
-}}
 const minted = {{ req: [], {", ".join(f"{p}: []" for p in _DRAFT_PREFIXES)} }};
 for (let i = 0; i < {_SAMPLES}; i++) {{
   for (const prefix of Object.keys(minted)) minted[prefix].push(newId(prefix));
 }}
 """
+_NO_CRYPTO: Final = """
+if (typeof crypto !== "undefined" || typeof globalThis.crypto !== "undefined") {
+  throw new Error("crypto is present");
+}
+"""
+# Proves a stronger source was used: the non-cryptographic fallback must not run.
+_POISON_MATH_RANDOM: Final = 'Math.random = () => { throw new Error("Math.random used"); };\n'
+_POISON_GET_RANDOM_VALUES: Final = '() => { throw new Error("getRandomValues used"); }'
 
-
-def _vm_driver(snippet: str) -> str:
+# runtime -> (script name, context globals as JavaScript source or None, preamble inside the cell)
+_RUNTIMES: Final[dict[str, tuple[str, str | None, str]]] = {
     # A fresh V8 context holds only the JavaScript builtins: no `crypto`, `require` or `process`.
-    body = snippet + _GENERATE + "JSON.stringify(minted);\n"
+    "vm-no-crypto": ("vm.cjs", "{}", _NO_CRYPTO),
+    # Code-mode cells run as ES modules (strict mode); remove the Node global before the snippet.
+    "es-module-no-crypto": ("cell.mjs", None, "delete globalThis.crypto;\n" + _NO_CRYPTO),
+    "vm-get-random-values-only": (
+        "vm.cjs",
+        '{ crypto: { getRandomValues: (b) => require("node:crypto").getRandomValues(b) } }',
+        _POISON_MATH_RANDOM,
+    ),
+    "vm-random-uuid": (
+        "vm.cjs",
+        '{ crypto: { randomUUID: () => require("node:crypto").randomUUID(), '
+        f"getRandomValues: {_POISON_GET_RANDOM_VALUES} }} }}",
+        _POISON_MATH_RANDOM,
+    ),
+    "es-module-native-crypto": ("cell.mjs", None, _POISON_MATH_RANDOM),
+}
+
+
+def _vm_driver(context: str, body: str) -> str:
     return (
         'const vm = require("node:vm");\n'
-        f"const out = vm.runInContext({json.dumps(body)}, vm.createContext({{}}));\n"
+        f"const out = vm.runInContext({json.dumps(body)}, vm.createContext({context}));\n"
         "process.stdout.write(out);\n"
     )
 
 
-def _module_driver(snippet: str) -> str:
-    # Code-mode cells run as ES modules (strict mode); remove the Node global before the snippet.
-    return (
-        "delete globalThis.crypto;\n"
-        + snippet
-        + _GENERATE
-        + "process.stdout.write(JSON.stringify(minted));\n"
-    )
+def _driver(runtime: str, snippet: str, tail: str) -> tuple[str, str]:
+    name, context, preamble = _RUNTIMES[runtime]
+    if context is not None:
+        return name, _vm_driver(context, preamble + snippet + tail + "JSON.stringify(minted);\n")
+    source = preamble + snippet + tail + "process.stdout.write(JSON.stringify(minted));\n"
+    return name, source
 
 
 def test_the_packaged_skill_carries_the_same_section() -> None:
@@ -136,14 +159,10 @@ def test_the_packaged_skill_carries_the_same_section() -> None:
 
 
 @needs_node
-@pytest.mark.parametrize("runtime", ["vm-context", "es-module"])
-def test_the_uuid_helper_mints_schema_valid_unique_ids_without_crypto(
-    runtime: str, tmp_path: Path
-) -> None:
+@pytest.mark.parametrize("runtime", sorted(_RUNTIMES))
+def test_the_uuid_helper_mints_schema_valid_unique_ids(runtime: str, tmp_path: Path) -> None:
     snippet = _block_containing("const uuid4 =")
-    assert "crypto" not in snippet
-    driver = _vm_driver(snippet) if runtime == "vm-context" else _module_driver(snippet)
-    name = "cell.mjs" if runtime == "es-module" else "vm.cjs"
+    name, driver = _driver(runtime, snippet, _GENERATE)
     minted = cast(dict[str, list[str]], json.loads(_run_node(tmp_path, name, driver)))
     request_pattern = _defs_pattern("publish-work-request", "1.2.0", "request_id")
     event_pattern = _defs_pattern("event-draft", "1.2.0", "event_id")
@@ -161,6 +180,50 @@ def test_the_uuid_helper_mints_schema_valid_unique_ids_without_crypto(
     assert len(set(everything)) == len(everything)
     uuids = {value.split("_", 1)[1] for value in everything}
     assert len(uuids) == len(everything)
+
+
+@needs_node
+@pytest.mark.parametrize(
+    ("fill", "expected"),
+    [
+        (0x00, "00000000-0000-4000-8000-000000000000"),
+        (0xFF, "ffffffff-ffff-4fff-bfff-ffffffffffff"),
+    ],
+)
+def test_the_uuid_helper_sets_the_version_and_variant_bits(
+    fill: int, expected: str, tmp_path: Path
+) -> None:
+    # A getRandomValues that fills every byte with the same value pins the bit masks exactly.
+    snippet = _block_containing("const uuid4 =")
+    context = f"{{ crypto: {{ getRandomValues: (b) => {{ b.fill({fill}); return b; }} }} }}"
+    body = _POISON_MATH_RANDOM + snippet + "JSON.stringify([uuid4(), newId('req')]);\n"
+    printed = cast(
+        list[str], json.loads(_run_node(tmp_path, "bits.cjs", _vm_driver(context, body)))
+    )
+    assert printed == [expected, f"req_{expected}"]
+
+
+@needs_node
+def test_the_uuid_helper_prefers_random_uuid_and_lowercases_it(tmp_path: Path) -> None:
+    snippet = _block_containing("const uuid4 =")
+    context = (
+        '{ crypto: { randomUUID: () => "0A1B2C3D-4E5F-4A6B-8C7D-8E9FA0B1C2D3", '
+        f"getRandomValues: {_POISON_GET_RANDOM_VALUES} }} }}"
+    )
+    body = _POISON_MATH_RANDOM + snippet + "newId('req');\n"
+    printed = _run_node(tmp_path, "prefer.cjs", _vm_driver(context, body))
+    assert printed == "req_0a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3"
+
+
+def test_the_uuid_helper_labels_its_non_cryptographic_fallback() -> None:
+    snippet = _block_containing("const uuid4 =")
+    assert snippet.index("randomUUID") < snippet.index("getRandomValues")
+    assert snippet.index("getRandomValues") < snippet.index("Math.random")
+    fallback = next(line for line in snippet.splitlines() if "Math.random" in line)
+    assert "not cryptographic" in fallback
+    # A bare `crypto` reference throws ReferenceError in a sandbox without it.
+    assert re.search(r"(?<![.\w])crypto\b", snippet.replace("globalThis.crypto", "")) is None
+    assert "not cryptographic" in " ".join(_section().split())
 
 
 def test_the_request_id_pattern_still_rejects_the_hand_rolled_workaround() -> None:
