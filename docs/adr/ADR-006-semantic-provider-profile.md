@@ -873,12 +873,16 @@ are recorded on the check as the optional `prior_finding_verdicts` field of the 
 
 A `fixed` ruling lets that finding resolve on that check even when the packet as a whole concluded
 `insufficient_packet`: the whole-packet veto and its `semantic_packet_insufficient` marker no longer
-block a finding the reviewer judged on newer material. Every other rule still applies: completed
-review, the finding inside the tested frontier, no suppression, scope, readable freshness, the
-capture baseline, a material change after the finding, and the issue not returned again.
-`withdrawn` keeps the earlier rules, under which a reasoned rejection an assessable review does not
-re-raise resolves over changed state, and never lifts the whole-packet veto. `still_present`,
-`answered_not_fixed` and `unassessable` block only their own finding by name
+block a finding the reviewer judged on newer material. Since #907 it likewise tolerates
+`content_unselected` (excerpts the packet's count or byte budget cut, ledger or captured) on that
+finding: the reviewer affirmatively ruled the finding fixed, citing refs that are fenced to the
+packet's `citable_refs`, so it assessed the finding on material it was shown. Silence gets no such
+tolerance; a selection gap still blocks closing an AI-powered finding by not returning it. Every
+other rule still applies: completed review, the finding inside the tested frontier, no suppression,
+scope, readable freshness, the capture baseline, a material change after the finding, and the issue
+not returned again. `withdrawn` keeps the earlier rules, under which a reasoned rejection an
+assessable review does not re-raise resolves over changed state, and never lifts the whole-packet
+veto. `still_present`, `answered_not_fixed` and `unassessable` block only their own finding by name
 (`reviewer_verdict_<verdict>`). Without a ruling the earlier rules are unchanged; silence is never
 read as `fixed`. Silence also proves nothing when the finding may never have been assessed: on a
 check whose packet left prior findings out (`semantic_prior_findings_over_limit`, including a
@@ -904,7 +908,10 @@ keeps head and tail, oversized structured prose is clipped rather than digest-re
 selection plans on the exact prepared document below the effective channel ceiling (the schema
 maximum narrowed by the policy's own `max_bytes` / `max_tokens`). One excerpt holds one recorded
 source or one part of one capture; the 16-slot count and the privacy-policy schema are unchanged
-(Phase 1b lifts the count).
+(Phase 1b lifts the count). Every candidate the count or byte budget cuts (ledger evidence, exact
+commands and failed-result summaries as well as captured content) is a `not_selected` omission and
+adds `content_unselected`, the only trace once the omission list is capped; a relevance exclusion
+is a policy choice and adds no gap.
 
 `insufficient_packet` must name what was missing (`provider-judgment` 1.1.0,
 `missing_for_assessment`); a reply that names nothing is read backward, keeping its conclusion and

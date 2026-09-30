@@ -1353,3 +1353,82 @@ def test_an_unruled_finding_still_follows_the_ordinary_rules_on_a_complete_revie
     check = _ruled(_check(semantic=_SEMANTIC_OK), conclusion="no_material_discrepancy")
     state = _changed_state(check)
     assert resolution_blockers(finding, 4, check, frozenset(), proof_state=state) == ()
+
+
+# --- Issue #907: excerpts the packet budget cut (``content_unselected``) --------------------------
+
+
+def test_a_cited_fixed_ruling_resolves_despite_excerpts_the_budget_cut() -> None:
+    """The reviewer ruled the finding fixed on cited, packet-fenced material it was shown.
+
+    The finding was raised before the task crossed the excerpt cap, so its own coverage has no
+    ``content_unselected`` baseline; the repair check does. The explicit ruling still closes it.
+    """
+
+    from yoetz.kernel.finding_resolution import resolution_blockers
+
+    finding = _finding(1, origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
+    assert "content_unselected" not in finding.coverage.known_gaps
+    for conclusion in ("no_material_discrepancy", "insufficient_packet"):
+        cut = _coverage(
+            gaps=("content_unselected", "semantic_packet_insufficient")
+            if conclusion == "insufficient_packet"
+            else ("content_unselected",),
+            semantic=True,
+        )
+        check = _ruled(
+            _check(semantic=_SEMANTIC_OK, coverage=cut), (1, "fixed"), conclusion=conclusion
+        )
+        state = _changed_state(check)
+        assert resolution_blockers(finding, 4, check, frozenset(), proof_state=state) == ()
+        assert _resolves(finding, check) is True
+    # Beside a disclosed partial dialogue view the ruled finding is still ruled, so
+    # ``reviewer_assessment_incomplete`` (issue #905) does not apply to it.
+    partial = _coverage(
+        gaps=("content_unselected", "semantic_prior_findings_over_limit"), semantic=True
+    )
+    ruled = _ruled(
+        _check(semantic=_SEMANTIC_OK, coverage=partial),
+        (1, "fixed"),
+        conclusion="no_material_discrepancy",
+    )
+    assert (
+        resolution_blockers(finding, 4, ruled, frozenset(), proof_state=_changed_state(ruled)) == ()
+    )
+
+
+def test_silence_never_closes_an_ai_finding_over_excerpts_the_budget_cut() -> None:
+    """Intentional (#904 classification): without a ruling, a selection gap blocks AI proof.
+
+    Only the explicit ``fixed`` ruling tolerates ``content_unselected``; silence, ``withdrawn``,
+    ``still_present`` and ``unassessable`` keep it blocking, and a local finding is unaffected.
+    """
+
+    from yoetz.kernel.finding_resolution import resolution_blockers
+
+    finding = _finding(1, origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
+    cut = _coverage(gaps=("content_unselected",), semantic=True)
+    silent = _ruled(
+        _check(semantic=_SEMANTIC_OK, coverage=cut), conclusion="no_material_discrepancy"
+    )
+    state = _changed_state(silent)
+    assert resolution_blockers(finding, 4, silent, frozenset(), proof_state=state) == (
+        "coverage:content_unselected",
+    )
+    assert _resolves(finding, silent) is False
+    for verdict, extra in (
+        ("withdrawn", ()),
+        ("still_present", ("reviewer_verdict_still_present",)),
+        ("unassessable", ("reviewer_verdict_unassessable",)),
+    ):
+        check = _ruled(
+            _check(semantic=_SEMANTIC_OK, coverage=cut),
+            (1, verdict),
+            conclusion="no_material_discrepancy",
+        )
+        blockers = resolution_blockers(
+            finding, 4, check, frozenset(), proof_state=_changed_state(check)
+        )
+        assert blockers == (*extra, "coverage:content_unselected")
+    # Local proof never depended on the reviewer or on what the packet carried.
+    assert _resolves(_finding(), silent) is True

@@ -1768,7 +1768,8 @@ finding's original coverage to contain only the pre-existing AI-powered review, 
 host-observation tolerances and to have freshness outside
 `stale_after_material_change|redacted_gap|unknown`. For `semantic_model_derived` rows only the
 evidence-strength codes, `semantic_prior_findings_over_limit` and
-`semantic_prior_verdicts_unsupported` are tolerated, and the check must also record
+`semantic_prior_verdicts_unsupported` are tolerated (plus, for a row the check records a `fixed`
+ruling for, the insufficient-packet codes and `content_unselected`), and the check must also record
 `succeeded/semantic_completed`. Outside the narrow command-gap partition described below, any
 other gap — redacted or unavailable payloads, redacted objects,
 missing refs, unknown events, completion scope, import range, or a code not in the list — blocks
@@ -6859,7 +6860,12 @@ clipped at `max_excerpt_bytes` is named by `truncated_payload`. The builder meas
 prepared document and drops lowest-ranked excerpts (`not_selected`, `content_unselected`) to stay
 below the effective channel ceiling: the schema maximum, narrowed by the effective policy's own
 `llm_inference` `max_bytes` and `max_tokens` (at the gateway's four bytes per token), so a narrower
-owner ceiling drops excerpts instead of denying the whole review.
+owner ceiling drops excerpts instead of denying the whole review. Every candidate the excerpt count
+or byte budget cuts (ledger evidence, exact commands and failed-result summaries as well as captured
+content; all compete in one admission loop) is a `not_selected` omission and adds
+`content_unselected`; past the omission list's own cap the gap is the trace. Items the
+selection's relevance rule excludes (Assisted's `linked_subjects_only`) are policy exclusions, not
+budget cuts: their `not_selected` omission rows state them and they add no gap.
 
 `provider-judgment` 1.1.0 requires `missing_for_assessment` (1–8 items of `kind`, up to four
 `target_refs` from `citable_refs`, and a short `reason`) on `insufficient_packet` and forbids it
@@ -7029,7 +7035,11 @@ seen it (section limit, envelope trimming, or a selection without the assessment
 also adds `semantic_prior_findings_over_limit`) or its ruling may have been dropped. Such a row
 never resolves by silence on that check. For a
 `semantic_model_derived` row, a recorded `fixed` ruling on that row lifts the
-`insufficient_packet` veto and tolerates `semantic_packet_insufficient` for that row only;
+`insufficient_packet` veto and tolerates `semantic_packet_insufficient`, the named-missing-item
+codes and `content_unselected` (excerpts the packet's count or byte budget cut, ledger or captured;
+issue #907) for that row only: the reviewer affirmatively ruled the finding fixed, citing refs that
+are fenced to the packet's `citable_refs`, so it assessed the finding on material it was shown.
+Silence gets no such tolerance, so a selection gap still blocks closing a row by not returning it;
 `withdrawn` keeps the ordinary rules (an assessable review that does not re-raise a rejected finding
 over changed state resolves it) and never lifts the veto; `still_present`, `answered_not_fixed` and
 `unassessable` add the blocker `reviewer_verdict_<verdict>`. The resolution explanation names a

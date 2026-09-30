@@ -775,7 +775,9 @@ def test_authenticated_capture_is_selected_before_opaque_metadata_rows() -> None
     assert len(metadata_rows) == 15
     assert all(row.content_visibility == "available" for row in metadata_rows)
     assert all(row.digest_provenance is None for row in metadata_rows)
-    assert "content_unselected" not in semantic.packet.coverage.known_gaps
+    # Sixteen metadata rows compete for fifteen remaining slots: the one the count cuts is an
+    # omission and, since issue #907, also discloses ``content_unselected`` like a captured cut.
+    assert "content_unselected" in semantic.packet.coverage.known_gaps
 
 
 def test_captured_multipart_group_is_one_deterministic_excerpt() -> None:

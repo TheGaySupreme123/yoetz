@@ -1238,7 +1238,6 @@ class _ExcerptCandidate:
     clipped: bool
     linked: tuple[str, ...]
     occurred_order: int
-    captured: bool
     content_visibility: Literal["available", "not_recorded"]
     digest_provenance: ExcerptDigestProvenance | None
     identity_refs: frozenset[str]
@@ -1566,7 +1565,6 @@ def _evidence_candidates(
                 clipped=clipped,
                 linked=linked,
                 occurred_order=record.source_frontier,
-                captured=captured_group is not None,
                 content_visibility=(
                     "available"
                     if captured_group is not None or payload.captured_object_id is None
@@ -1683,7 +1681,6 @@ def _select_targeted_excerpts(
                     clipped=clipped,
                     linked=linked,
                     occurred_order=record.source_frontier,
-                    captured=False,
                     content_visibility="available",
                     digest_provenance=None,
                     identity_refs=frozenset({ref, str(record.source_event_id)}),
@@ -1733,7 +1730,6 @@ def _select_targeted_excerpts(
                     clipped=clipped,
                     linked=linked,
                     occurred_order=record.source_frontier,
-                    captured=False,
                     content_visibility="available",
                     digest_provenance=None,
                     identity_refs=frozenset(
@@ -1863,8 +1859,10 @@ def _select_targeted_excerpts(
                 or excerpt_bytes_used + part_bytes > excerpt_byte_budget
             ):
                 truncated = True
-                if candidate.captured:
-                    gaps.add("content_unselected")
+                # Issue #907: every candidate the count or byte budget cuts is disclosed, ledger
+                # evidence as well as captured content. The omission row below may be capped away
+                # with the omission list; the coverage gap is then the only trace.
+                gaps.add("content_unselected")
                 omissions.append(
                     _omit(
                         candidate.source_ref,

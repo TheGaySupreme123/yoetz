@@ -1057,3 +1057,153 @@ def test_full_excerpts_never_crowd_the_prior_findings_section_out() -> None:
     carried = {item.source_ref for item in semantic.items if item.section == "prior_finding"}
     assert carried == {str(ref) for ref in open_findings}
     assert SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP not in semantic.packet.coverage.known_gaps
+
+
+def _ledger_evidence_case(count: int) -> tuple[DeterministicCase, tuple[EvidenceId, ...]]:
+    """``count`` small ledger-evidence rows (never captured content), all supporting one claim."""
+
+    refs = tuple(evd(number) for number in range(1, count + 1))
+    evidence = {
+        ref: evidence_record(
+            EvidenceRecordedPayload(
+                ref,
+                EvidenceKind.TEST_RESULT,
+                EvidenceImmutability.METADATA_ONLY,
+                timestamp_from_string("2026-09-27T00:00:00.000Z"),
+                description=f"run {number}: 12 passed",
+            ),
+            number,
+        )
+        for number, ref in enumerate(refs, start=1)
+    }
+    claim = record(ClaimRecordedPayload(clm(1), ClaimKind.COMPLETION, "Lookups repaired", refs), 99)
+    return make_case(evidence=evidence, claims={clm(1): claim}, extra_refs=(clm(1),)), refs
+
+
+def _build_case(
+    case: DeterministicCase, profile: ReviewContextProfile, selection: ReviewSelectionPolicy
+) -> SemanticCase:
+    return build_semantic_case(
+        case_id="cas_10000000-0000-4000-8000-000000000001",
+        frozen_case=case,
+        dependency_digest="sha256:" + "b" * 64,
+        findings=(),
+        review_context_profile=profile,
+        review_selection=selection,
+        policy_id="pvy_10000000-0000-4000-8000-000000000001",
+        policy_version="1",
+    )
+
+
+@pytest.mark.parametrize("profile", [ReviewContextProfile.ASSISTED, ReviewContextProfile.EXPANDED])
+def test_ledger_excerpts_the_count_cap_cuts_are_disclosed(profile: ReviewContextProfile) -> None:
+    """Every ledger excerpt the 16-slot count cuts is an omission and discloses the gap."""
+
+    case, refs = _ledger_evidence_case(40)
+    semantic = _build_case(case, profile, ReviewSelectionPolicy.for_profile(profile))
+    shown = {item.source_ref for item in semantic.items if item.section == "excerpt"}
+    assert len(shown) == 16
+    cut = {
+        omission.subject_ref
+        for omission in semantic.packet.omissions
+        if omission.reason == "not_selected" and omission.subject_ref.startswith("evd_")
+    }
+    assert len(cut) == 24
+    assert cut | shown == {str(ref) for ref in refs}
+    assert "content_unselected" in semantic.packet.coverage.known_gaps
+
+
+def test_past_the_omission_cap_the_gap_is_the_trace() -> None:
+    case, _refs = _ledger_evidence_case(40)
+    selection = replace(
+        ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED), max_omissions=4
+    )
+    semantic = _build_case(case, ReviewContextProfile.CUSTOM, selection)
+    assert len(semantic.packet.omissions) <= 4
+    assert "content_unselected" in semantic.packet.coverage.known_gaps
+
+
+def test_relevance_exclusion_is_a_policy_choice_not_a_budget_cut() -> None:
+    """Assisted carries linked subjects only: unlinked ledger evidence is ``not_selected`` by
+    policy, which the omission rows state, and is not a budget cut (no ``content_unselected``)."""
+
+    refs = tuple(evd(number) for number in range(1, 5))
+    evidence = {
+        ref: evidence_record(
+            EvidenceRecordedPayload(
+                ref,
+                EvidenceKind.TEST_RESULT,
+                EvidenceImmutability.METADATA_ONLY,
+                timestamp_from_string("2026-09-27T00:00:00.000Z"),
+                description="12 passed",
+            ),
+            number,
+        )
+        for number, ref in enumerate(refs, start=1)
+    }
+    profile = ReviewContextProfile.ASSISTED
+    semantic = _build_case(
+        make_case(evidence=evidence), profile, ReviewSelectionPolicy.for_profile(profile)
+    )
+    assert not [item for item in semantic.items if item.section == "excerpt"]
+    assert {o.subject_ref for o in semantic.packet.omissions if o.reason == "not_selected"} >= {
+        str(ref) for ref in refs
+    }
+    assert "content_unselected" not in semantic.packet.coverage.known_gaps
+
+
+def _assert_count_cut_disclosed(semantic: SemanticCase, refs: tuple[str, ...]) -> None:
+    shown = {item.source_ref for item in semantic.items if item.section == "excerpt"}
+    assert len(shown) == 16
+    cut = {
+        omission.subject_ref
+        for omission in semantic.packet.omissions
+        if omission.reason == "not_selected" and omission.subject_ref in refs
+    }
+    assert len(cut) == 24
+    assert cut | shown == set(refs)
+    assert "content_unselected" in semantic.packet.coverage.known_gaps
+
+
+def test_command_excerpts_the_count_cap_cuts_are_disclosed() -> None:
+    """The exact-command candidates compete in the same admission loop and disclose their cut."""
+
+    actions = {
+        act(number): record(
+            ActionRecordedPayload(
+                act(number), ActionKind.COMMAND, f"run {number}", command=f"pytest -k case_{number}"
+            ),
+            number,
+        )
+        for number in range(1, 41)
+    }
+    profile = ReviewContextProfile.EXPANDED
+    semantic = _build_case(
+        make_case(actions=actions), profile, ReviewSelectionPolicy.for_profile(profile)
+    )
+    _assert_count_cut_disclosed(semantic, tuple(str(ref) for ref in actions))
+
+
+def test_failure_excerpts_the_count_cap_cuts_are_disclosed() -> None:
+    """Failed-result summaries compete in the same admission loop and disclose their cut."""
+
+    actions = {
+        act(number): record(ActionRecordedPayload(act(number), ActionKind.EDIT, "edit"), number)
+        for number in range(1, 41)
+    }
+    results = {
+        res(number): record(
+            ResultRecordedPayload(
+                res(number), act(number), ResultOutcome.FAILURE, summary=f"case {number} failed"
+            ),
+            40 + number,
+        )
+        for number in range(1, 41)
+    }
+    profile = ReviewContextProfile.EXPANDED
+    semantic = _build_case(
+        make_case(actions=actions, results=results),
+        profile,
+        ReviewSelectionPolicy.for_profile(profile),
+    )
+    _assert_count_cut_disclosed(semantic, tuple(str(ref) for ref in results))

@@ -403,13 +403,23 @@ def prior_finding_verdict(check: CheckRecordedPayload, finding: Finding) -> str 
     return None
 
 
+# What an explicit, cited ``fixed`` ruling tolerates on its own finding (issues #905, #907). The
+# reviewer affirmatively ruled the finding fixed, citing refs fenced to the packet's
+# ``citable_refs``, so it assessed the finding on material it was shown: neither the whole-packet
+# ``insufficient_packet`` answer nor excerpts the count or byte budget cut (``content_unselected``,
+# ledger or captured) weaken that ruling. Silence never gets this tolerance, so a selection gap
+# still blocks closing an AI-powered finding by not returning it.
+_FIXED_RULING_TOLERATED_GAPS: Final = _INSUFFICIENT_PACKET_GAPS | frozenset({"content_unselected"})
+
+
 def _prior_verdict_effect(
     finding: Finding, check: CheckRecordedPayload
 ) -> tuple[bool, tuple[str, ...], frozenset[str]]:
     """How an explicit per-finding ruling bears on this finding's absence proof (issue #905).
 
     ``fixed`` is the reviewer judging this finding on material recorded after it, so a
-    whole-packet ``insufficient_packet`` (and its coverage marker) no longer vetoes it; every
+    whole-packet ``insufficient_packet`` (and its coverage marker) and excerpts the packet's
+    budget cut (``content_unselected``, issue #907) no longer veto it; every
     other rule still applies, including freshness, material change and the issue not being
     returned again. ``withdrawn`` (the reviewer accepting the agent's rejection) keeps the
     ordinary rules, under which an assessable review that does not re-raise a rejected finding
@@ -424,7 +434,7 @@ def _prior_verdict_effect(
     if verdict is None or verdict == "withdrawn":
         return False, (), frozenset()
     if verdict == "fixed":
-        return True, (), _INSUFFICIENT_PACKET_GAPS
+        return True, (), _FIXED_RULING_TOLERATED_GAPS
     return False, (f"reviewer_verdict_{verdict}",), frozenset()
 
 
