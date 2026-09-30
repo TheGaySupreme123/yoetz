@@ -1098,9 +1098,11 @@ selection. A reduced reference scope reports `semantic_reference_scope_reduced`;
 AI-powered review coverage, and check, status and receipts keep saying so. It does not stop a
 repaired local finding from resolving. An AI-powered finding raised under the same bound can
 resolve after repair and a later completed review; a newly reduced scope or a `truncated_payload`
-gap still blocks it (#904). `failed/case_capacity_exceeded` and `semantic_case_capacity_exceeded`
-mean the required packet could not fit before any provider attempt. Select a smaller
-claim/obligation scope for a new check. Shorter prose alone need not fix structural capacity.
+gap still blocks it (#904). Cross-host dogfood of this resolution rule on macOS, Linux and WSL 2
+has not been run yet; owner #904. `failed/case_capacity_exceeded` and
+`semantic_case_capacity_exceeded` mean the required packet could not fit before any provider
+attempt. Select a smaller claim/obligation scope for a new check. Shorter prose alone need not fix
+structural capacity.
 
 For `coordinator_failure`, use the check's original request ID with
 `yoetz service diagnostics --request-id req_…` to read bounded failure stages. Dispatch entry can

@@ -1474,9 +1474,11 @@ def test_a_newly_appearing_real_limit_still_blocks_semantic_proof(gap: str) -> N
 def test_capture_failures_block_local_proof_too() -> None:
     """The interim tolerance is the selection code alone; truncation waits for its source test."""
 
-    for gap in ("content_redacted", "truncated_payload"):
+    from yoetz.kernel.finding_resolution import CAPTURE_FAILURE_GAPS
+
+    for gap in sorted(CAPTURE_FAILURE_GAPS):
         later = _review_check(*_LONG_SESSION_REVIEW_GAPS, gap)
-        assert _blockers(_finding(), later) == ("coverage:" + gap,)
+        assert _blockers(_finding(), later) == ("coverage:" + gap,), gap
 
 
 def test_selection_and_capture_failure_classes_are_disjoint_and_closed() -> None:

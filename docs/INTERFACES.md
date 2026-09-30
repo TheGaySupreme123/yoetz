@@ -1762,8 +1762,8 @@ packs judge structured event payloads and typed coverage, never captured-object 
 content matters to the rule, the completed pack re-fires the issue or returns its own coverage
 finding. The exception also requires the finding's original coverage to contain only the
 pre-existing AI-powered review, evidence, host-observation, and selection tolerances and to have
-freshness outside `stale_after_material_change|redacted_gap|unknown`. For `semantic_model_derived` rows only the
-evidence-strength codes are tolerated outright, and the check must also record
+freshness outside `stale_after_material_change|redacted_gap|unknown`. For `semantic_model_derived`
+rows only the evidence-strength codes are tolerated outright, and the check must also record
 `succeeded/semantic_completed`; the capture-baseline comparison below (#884, #904) may also
 tolerate codes already in the row's own recorded baseline. Outside the narrow command-gap
 partition described below, any other gap — redacted or unavailable payloads, redacted objects,
