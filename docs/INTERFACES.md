@@ -6949,7 +6949,8 @@ Responses and Chat Completions cells alike (the prompt-only Chat Completions sha
 A reply that omits the array (the 1.0.0 shape a local model or prompt-only host may still return)
 is read as carrying no rulings; a malformed or surplus ruling is dropped and counted instead of
 failing the judgment. Post-validation admits and bounds each ruling as ADR-006 describes, fenced to
-the prior-findings rows and `citable_refs` of the packet the reviewer was actually shown; admitted
+the prior-findings rows and `citable_refs` of the packet the reviewer was actually shown (a ruling
+on a readable open finding the packet did not carry is recorded as `unassessable`); admitted
 rulings are recorded as
 the optional `check_recorded` `1.3.0` field `prior_finding_verdicts` (`{finding_id, verdict,
 cited_refs}`, 1–8, ASCII-sorted by finding id, never the note; unreleased 1.3.0 extended in place),

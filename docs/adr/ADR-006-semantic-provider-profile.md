@@ -857,9 +857,10 @@ array (at most 8) to every conclusion branch: `{finding_id, verdict, cited_refs,
 The note is turn-local reasoning and is never recorded. A reply without the array reads as the 1.0.0
 shape with no rulings, so a local model or prompt-only host that has not adopted it still gets its
 challenges read, and a malformed or surplus ruling is dropped and counted rather than failing the
-review. Post-validation keeps a ruling only for a readable, unresolved AI-powered finding whose
-prior-findings row the packet actually carried, and trims its cited refs to the packet's
-`citable_refs`. What a ruling may claim is bounded by what it still cites: `fixed` must cite
+review. Post-validation keeps a ruling only for a readable, unresolved AI-powered finding inside
+the frozen fence, and trims its cited refs to the packet's `citable_refs`. A ruling on such a
+finding whose prior-findings row the packet did not carry (past the row cap, or removed by envelope
+bounding) is kept as `unassessable`, never dropped to silence. What a ruling may claim is bounded by what it still cites: `fixed` must cite
 evidence or a result recorded after the finding (a hallucinated `fixed` must not close a real
 defect); `still_present` and `answered_not_fixed` must cite material; `withdrawn` accepts only a
 readable `rejected` response. A ruling that loses a cited ref or fails its claim is kept as
