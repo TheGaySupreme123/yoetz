@@ -447,3 +447,20 @@ def test_the_packet_view_reports_prior_rows_bounding_removed(
     view = module.semantic_case_packet_view(case)
     assert view.prior_findings_trimmed is True
     assert view.prior_finding_refs == frozenset()
+
+
+def test_a_selection_without_the_assessments_section_discloses_unshown_prior_findings() -> None:
+    """With no section at all the reviewer sees no earlier finding: that is disclosed, so the
+    kernel treats every unruled open AI-powered finding as not assessed (Greptile P1, #905)."""
+
+    policy = ReviewSelectionPolicy.for_profile(ReviewContextProfile.GOAL_AWARE)
+    without = replace(
+        policy,
+        sections=tuple(item for item in policy.sections if item != "deterministic_assessments"),
+    )
+    case = _build(_numba_case(), selection=without)
+    assert not any(item.section == "prior_finding" for item in case.items)
+    assert SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP in case.packet.coverage.known_gaps
+    shown = _build(_numba_case())
+    assert any(item.section == "prior_finding" for item in shown.items)
+    assert SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP not in shown.packet.coverage.known_gaps

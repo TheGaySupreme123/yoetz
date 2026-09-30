@@ -857,9 +857,10 @@ array (at most 8) to every conclusion branch: `{finding_id, verdict, cited_refs,
 The note is turn-local reasoning and is never recorded. A reply without the array reads as the 1.0.0
 shape with no rulings, so a local model or prompt-only host that has not adopted it still gets its
 challenges read, and a malformed or surplus ruling is dropped and counted rather than failing the
-review. Post-validation keeps a ruling only for a readable, unresolved AI-powered finding whose
-prior-findings row the packet actually carried, and trims its cited refs to the packet's
-`citable_refs`. What a ruling may claim is bounded by what it still cites: `fixed` must cite
+review. Post-validation keeps a ruling only for a readable, unresolved AI-powered finding inside
+the frozen fence, and trims its cited refs to the packet's `citable_refs`. A ruling on such a
+finding whose prior-findings row the packet did not carry (past the row cap, or removed by envelope
+bounding) is kept as `unassessable`, never dropped to silence. What a ruling may claim is bounded by what it still cites: `fixed` must cite
 evidence or a result recorded after the finding (a hallucinated `fixed` must not close a real
 defect); `still_present` and `answered_not_fixed` must cite material; `withdrawn` accepts only a
 readable `rejected` response. A ruling that loses a cited ref or fails its claim is kept as
@@ -879,7 +880,12 @@ capture baseline, a material change after the finding, and the issue not returne
 re-raise resolves over changed state, and never lifts the whole-packet veto. `still_present`,
 `answered_not_fixed` and `unassessable` block only their own finding by name
 (`reviewer_verdict_<verdict>`). Without a ruling the earlier rules are unchanged; silence is never
-read as `fixed`.
+read as `fixed`. Silence also proves nothing when the finding may never have been assessed: on a
+check whose packet left prior findings out (`semantic_prior_findings_over_limit`, including a
+selection without the assessments section) or dropped a ruling
+(`semantic_prior_verdicts_unsupported`), every AI-powered finding the check recorded no ruling for
+is blocked as `reviewer_assessment_incomplete`. The codes stay disclosures, never vetoes on ruled
+findings.
 
 ### Most valuable review content and named missing items (2026-09-30, #907 Phase 1a)
 

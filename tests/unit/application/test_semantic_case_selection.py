@@ -23,6 +23,8 @@ from builders.policy_cases import (
     evd,
     evidence_record,
     evt,
+    finding_record,
+    fnd,
     make_case,
     obl,
     obligation_record,
@@ -33,6 +35,7 @@ from builders.policy_cases import (
 from yoetz.adapters.integrations.observation_local import session_commitment_from_codex_id
 from yoetz.application import semantic_case as semantic_case_module
 from yoetz.application.semantic_case import (
+    MAX_PRIOR_FINDINGS,
     CapturedContentScope,
     CapturedSemanticContent,
     build_semantic_case,
@@ -64,9 +67,11 @@ from yoetz.domain.observation import (
     ObservationSource,
 )
 from yoetz.domain.privacy import ReviewContextProfile, ReviewSelectionPolicy
+from yoetz.domain.receipts import SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP
 from yoetz.domain.values import (
     ActionId,
     EvidenceId,
+    FindingId,
     ResultId,
     object_id,
     timestamp_from_string,
@@ -74,6 +79,7 @@ from yoetz.domain.values import (
 from yoetz.kernel.deterministic_checks import DeterministicCase
 from yoetz.kernel.projections import (
     EvidenceProjectionRecord,
+    FindingProjectionRecord,
     PendingMissingForAssessment,
     ProjectionRecord,
 )
@@ -349,6 +355,7 @@ def _ledger(
     edits_per_path: int = 4,
     id_of: Callable[[int], EvidenceId] = evd,
     output_text: Callable[[int], str] | None = None,
+    findings: Mapping[FindingId, FindingProjectionRecord] | None = None,
 ) -> _Ledger:
     """20 edits over 5 paths, verification runs and captured tool output, in recorded order."""
 
@@ -467,6 +474,7 @@ def _ledger(
         actions=actions,
         results=results,
         evidence=evidence,
+        findings=findings,
         extra_refs=(clm(1), obl(1)),
     )
     scope = CapturedContentScope(
@@ -1018,3 +1026,34 @@ def test_excerpt_selection_plans_below_the_owner_channel_ceiling_when_it_is_narr
     assert not [item for item in starved.items if item.section == "excerpt"]
     with pytest.raises(ValueError, match="semantic_case_prepared_ceiling_invalid"):
         _build(ledger, prepared_byte_ceiling=0)
+
+
+def test_full_excerpts_never_crowd_the_prior_findings_section_out() -> None:
+    """#905 x #907: earlier AI findings take leftover case capacity after excerpts.
+
+    Excerpts now fill the approved 16 KiB per slot and planning trims them to fit the prepared
+    document, never the dialogue: every open AI finding the section can hold is still carried,
+    so no finding is left unassessed (``reviewer_assessment_incomplete``) by excerpt pressure.
+    """
+
+    from unit.application.test_semantic_case_prior_findings import (
+        _CHALLENGE,  # pyright: ignore[reportPrivateUsage]
+        _semantic,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    def large(index: int) -> str:
+        return f"output {index}\n" + "x" * 16_000 + "\nDONE"
+
+    open_findings = {
+        fnd(number): finding_record(_semantic(number, challenge=_CHALLENGE), 90 + number)
+        for number in range(1, MAX_PRIOR_FINDINGS + 1)
+    }
+    ledger = _ledger(
+        "codex", outputs=24, edits_per_path=1, output_text=large, findings=open_findings
+    )
+    semantic = _build(ledger)
+    excerpt_bytes = sum(item.content_bytes for item in semantic.items if item.section == "excerpt")
+    assert excerpt_bytes > 64 * 1024
+    carried = {item.source_ref for item in semantic.items if item.section == "prior_finding"}
+    assert carried == {str(ref) for ref in open_findings}
+    assert SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP not in semantic.packet.coverage.known_gaps

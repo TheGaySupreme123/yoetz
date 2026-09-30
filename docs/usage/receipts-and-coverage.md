@@ -168,7 +168,8 @@ A `fixed` ruling resolves that finding on that check even when the review could 
 of the case, but only if it cites evidence or a result recorded after the finding and every other
 rule above still holds. A `fixed` that cites nothing newer counts only as unassessable, any other
 ruling except `withdrawn`, which leaves the ordinary rules, keeps the finding current and names
-why, and a ruling is never inferred from silence.
+why, and a ruling is never inferred from silence. An earlier finding the review was not shown (the
+section was full or trimmed), or whose ruling was dropped as malformed, stays current on that check.
 
 A resolved finding is not erased. Status still lists it (`resolved: true`, shown when
 `include_resolved` is requested), the receipt still carries it as history, and the receipt wording

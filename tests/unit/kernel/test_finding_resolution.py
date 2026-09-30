@@ -1311,3 +1311,45 @@ def test_named_missing_items_weigh_like_the_insufficient_packet_they_ride_beside
         resolution_blockers(repaired, 4, check, frozenset(), proof_state=_changed_state(check))
         == ()
     )
+
+
+@pytest.mark.parametrize(
+    "gap", ["semantic_prior_findings_over_limit", "semantic_prior_verdicts_unsupported"]
+)
+def test_an_unruled_finding_the_review_may_not_have_assessed_never_resolves(gap: str) -> None:
+    """Greptile P1 on #905: silence about a finding left out of the packet, or whose ruling was
+    dropped, is not assessment. It blocks that finding; ruled siblings keep their own effect."""
+
+    from yoetz.kernel.finding_resolution import resolution_blockers
+
+    incomplete = _coverage(gaps=(gap,), semantic=True, freshness=LedgerFreshness.PARTIAL)
+    unruled = _finding(1, origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
+    ruled = _finding(2, origin=FindingOrigin.SEMANTIC_MODEL_DERIVED, subject_refs=(obl(2),))
+    local = _finding(3, subject_refs=(obl(3),))
+    check = _ruled(
+        _check(semantic=_SEMANTIC_OK, coverage=incomplete),
+        (2, "fixed"),
+        conclusion="no_material_discrepancy",
+    )
+    state = _changed_state(check)
+
+    assert resolution_blockers(unruled, 4, check, frozenset(), proof_state=state) == (
+        "reviewer_assessment_incomplete",
+    )
+    assert _resolves(unruled, check) is False
+    # The gap is a disclosure, not a veto: a finding the review did rule on still resolves.
+    assert resolution_blockers(ruled, 4, check, frozenset(), proof_state=state) == ()
+    assert _resolves(ruled, check) is True
+    # Local proof never depended on the reviewer.
+    assert "reviewer_assessment_incomplete" not in resolution_blockers(
+        local, 4, check, frozenset(), proof_state=state
+    )
+
+
+def test_an_unruled_finding_still_follows_the_ordinary_rules_on_a_complete_review() -> None:
+    from yoetz.kernel.finding_resolution import resolution_blockers
+
+    finding = _finding(1, origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
+    check = _ruled(_check(semantic=_SEMANTIC_OK), conclusion="no_material_discrepancy")
+    state = _changed_state(check)
+    assert resolution_blockers(finding, 4, check, frozenset(), proof_state=state) == ()
