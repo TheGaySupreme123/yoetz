@@ -35,6 +35,7 @@ from yoetz.domain.values import (
     validate_sha256_digest,
 )
 from yoetz.kernel.deterministic_checks import CaseAvailabilityFacts, DeterministicCase
+from yoetz.kernel.finding_todo import FindingTodoCounts
 from yoetz.kernel.lineage import LineageRollupState
 from yoetz.kernel.projections import ProjectionState
 from yoetz.ports.objects import ObjectKind, ObjectRef
@@ -746,9 +747,29 @@ class CheckFindingChecklist:
     attempt_budget: int
     items: tuple[CheckChecklistItem, ...]
     next: ChecklistNext
+    # Counted over every current actionable item, not only the listed ones.
+    counts: FindingTodoCounts
 
     def __post_init__(self) -> None:
         if type(self.attempt_budget) is not int or not 1 <= self.attempt_budget <= 50:
+            raise _invalid()
+        if type(self.counts) is not FindingTodoCounts:
+            raise _invalid()
+        for value in (
+            self.counts.open,
+            self.counts.verified_resolved,
+            self.counts.acknowledged_not_done,
+            self.counts.rejection_accepted,
+            self.counts.budget_reached,
+        ):
+            _uint(value)
+        total = (
+            self.counts.open
+            + self.counts.verified_resolved
+            + self.counts.acknowledged_not_done
+            + self.counts.rejection_accepted
+        )
+        if total < len(self.items) or self.counts.budget_reached > self.counts.open:
             raise _invalid()
         if type(self.items) is not tuple or len(self.items) > MAX_CHECKLIST_ITEMS:
             raise _invalid()

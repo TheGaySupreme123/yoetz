@@ -2689,10 +2689,19 @@ class CheckChecklistItemModel(_ClosedModel):
     review_rounds: CanonicalUInt64Wire
 
 
+class CheckChecklistCountsModel(_ClosedModel):
+    acknowledged_not_done: CanonicalUInt64Wire
+    open: CanonicalUInt64Wire
+    open_at_budget: CanonicalUInt64Wire
+    rejection_accepted: CanonicalUInt64Wire
+    verified_resolved: CanonicalUInt64Wire
+
+
 class CheckFindingChecklistModel(_ClosedModel):
     """The task's findings as a to-do list after this check (issue #905). Structural only."""
 
     attempt_budget: CanonicalPositiveUInt64Wire
+    counts: CheckChecklistCountsModel
     items: tuple[CheckChecklistItemModel, ...]
     next: Literal["decide_at_budget", "request_receipt", "work_open_findings"]
 
@@ -4530,6 +4539,11 @@ _CHECK_STRUCTURAL_POINTERS: Final = (
     + _prefix_leaf_patterns("/semantic_provenance", _SEMANTIC_PROVENANCE_LEAVES)
     + (
         "/finding_checklist/attempt_budget",
+        "/finding_checklist/counts/acknowledged_not_done",
+        "/finding_checklist/counts/open",
+        "/finding_checklist/counts/open_at_budget",
+        "/finding_checklist/counts/rejection_accepted",
+        "/finding_checklist/counts/verified_resolved",
         "/finding_checklist/items/*/finding_id",
         "/finding_checklist/items/*/review_rounds",
         "/finding_checklist/items/*/todo_state",
@@ -5321,7 +5335,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 1180:
+    if len(result) != 1185:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

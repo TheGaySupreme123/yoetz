@@ -927,12 +927,20 @@ subjects within that finding's subjects, and nothing among them recorded after t
 it: no second row is minted and the check discloses `semantic_restatements_suppressed`, so three
 identical re-raises remain one item with one state. Suppression must never read as absence, so on an
 open item the check records the restatement as a `still_present` ruling (a contradicting `fixed` or
-`withdrawn` becomes `unassessable`), which also counts a review round. A challenge that cites newer material is a new
-item, linked to the earlier one when it cites it. This is the ledger-side half of "no re-raise
+`withdrawn` becomes `unassessable`), which also counts a review round; an `acknowledged_not_done` or
+`rejection_accepted` item needs nothing recorded and stays disclosed. A `verified_resolved` row is
+never a restatement target: done stays done, and the problem raised again after that proof is a #458
+successor, minted and blocking. A challenge that cites newer material is a new item, linked to the
+earlier one when it cites it. This is the ledger-side half of "no re-raise
 without new material"; the prompt asks for the same.
 
 **Compatibility.** `response_recorded` 1.0.0 and `respond-request`/`respond-result` 1.0.0 are
 released, so the new disposition rides new 1.1.0 versions (every other disposition keeps 1.0.0
-bytes). Control 2.9.0 (unreleased) moves to the respond 1.1.0 pair in place; the released control
-2.8.0 keeps 1.0.0, so an older service refuses the new disposition at its own schema boundary. Old
-ledgers replay unchanged: nothing they contain is `acknowledged_not_done` or `withdrawn`.
+bytes). Control 2.9.0 (unreleased) moves to the respond 1.1.0 pair in place. Every earlier control
+version keeps the 1.0.0 pair (v0.2.5 ships control up to 2.6.1; 2.7.0 and 2.8.0 are earlier 0.3
+builds), so an older service refuses the new disposition at its own schema boundary. Old ledgers
+replay to the same resolution and receipt outcomes: nothing they contain is `acknowledged_not_done`
+or `withdrawn`, and no earlier check carries the #905 packet gaps. The projection does derive one
+new fact from them: `review_rounds` counts a local finding each later check returned again over a
+later subject, so an old ledger's projection snapshot can now carry `review_rounds`. It feeds only
+the checklist and the budget's `next` token.

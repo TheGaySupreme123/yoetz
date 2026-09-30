@@ -175,6 +175,41 @@ def _checklist_clause(rows: object, budget: object, next_step: object | None) ->
     return clause
 
 
+def _checklist_counts_clause(counts: object, budget: object, next_step: object) -> str:
+    """The check's to-do counts, taken from its whole-list ``counts`` object (issue #905)."""
+
+    if not isinstance(counts, Mapping):
+        return ""
+    source = cast(Mapping[str, JsonValue], counts)
+    values: dict[str, int] = {}
+    for key in (
+        "open",
+        "open_at_budget",
+        "verified_resolved",
+        "acknowledged_not_done",
+        "rejection_accepted",
+    ):
+        raw = source.get(key)
+        if type(raw) is not str or _ROUNDS.fullmatch(raw) is None:
+            return ""
+        values[key] = int(raw)
+    budget_text = budget if type(budget) is str and _BUDGET.fullmatch(budget) else None
+    clause = (
+        f"to-do: open {values['open']}"
+        + (
+            f" ({values['open_at_budget']} at budget {budget_text})"
+            if values["open_at_budget"] and budget_text is not None
+            else ""
+        )
+        + f", verified {values['verified_resolved']}"
+        + f", not done {values['acknowledged_not_done']}"
+        + f", rejection accepted {values['rejection_accepted']}; "
+    )
+    if type(next_step) is str and next_step in _CHECKLIST_NEXT:
+        clause += f"next: {next_step}; "
+    return clause
+
+
 # Room the fixed identity, frontier and recovery clauses still need after an optional clause.
 _OPTIONAL_CLAUSE_RESERVE: Final = 240
 
@@ -564,8 +599,8 @@ def summary_for_check(envelope: object) -> str:
         checklist_source = cast(Mapping[str, JsonValue], checklist)
         prefix = _with_room(
             prefix,
-            _checklist_clause(
-                checklist_source.get("items"),
+            _checklist_counts_clause(
+                checklist_source.get("counts"),
                 checklist_source.get("attempt_budget"),
                 checklist_source.get("next"),
             ),

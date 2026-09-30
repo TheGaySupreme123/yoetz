@@ -1384,11 +1384,14 @@ def build_receipt(
         cast(Finding, context.projection.findings[state.finding_id].payload)
         for state in context.finding_states
     )
+    # A ``rejection_accepted`` row stops blocking only on an artifact that also discloses it in its
+    # own section (issue #905); an older artifact has no such section, so there it still blocks.
+    settles_rejections = receipt_document_carries_terminal_sections(versions)
     unresolved_actionable = tuple(
         finding
         for finding in findings
         if not states_by_id[finding.finding_id].resolved
-        and not states_by_id[finding.finding_id].rejection_accepted
+        and not (settles_rejections and states_by_id[finding.finding_id].rejection_accepted)
         and FINDING_KIND_TRAITS[finding.kind][1]
     )
     conclusion = _conclusion(context, unresolved_actionable)
@@ -1485,7 +1488,7 @@ def build_receipt(
     suppressed_count = (
         0 if context.applicable_check is None else context.applicable_check.suppressed_count
     )
-    terminal_sections = receipt_document_carries_terminal_sections(versions)
+    terminal_sections = settles_rejections
     acknowledged_not_done_ids = tuple(
         sorted(
             (

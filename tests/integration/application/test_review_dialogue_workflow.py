@@ -701,3 +701,59 @@ async def test_three_restatements_become_one_item() -> None:
         for row in checks[1:]
     ] == [[(raised.finding_id, "still_present")]] * 2
     assert projection_snapshot(replay(_records(session.app))) == projection_snapshot(live)
+
+
+async def test_a_re_raise_after_verified_resolution_mints_a_successor() -> None:
+    """Done stays done; the problem found again after a cited ``fixed`` is a new item (D1).
+
+    Raise, repair, a cited ``fixed`` resolves it; the next review raises the same challenge on the
+    same unchanged obligation. The resolved row keeps its proof and a successor row is minted
+    and blocks, instead of the re-raise being swallowed as a restatement.
+    """
+
+    seed = 3400
+    reviewer = _Reviewer(
+        [
+            _challenge_obligation,
+            _rule_first_finding("fixed", cite_repair=True),
+            _challenge_obligation,
+        ]
+    )
+    session, frontier = await _session(reviewer, seed)
+    first = await _check(session, frontier, seed + 10)
+    raised = _semantic(first)
+    _result, repaired = await _repair(session, frontier_json(first.result_frontier), seed + 20)
+    second = await _check(session, repaired, seed + 40)
+    live = _live_projection(session.app)
+    assert finding_todo_state(live, raised.finding_id) is FindingTodoState.VERIFIED_RESOLVED
+    assert receipt_blocking_finding_count(live) == 0
+
+    third = await _check(session, frontier_json(second.result_frontier), seed + 60)
+    successor = _semantic(third)
+    assert successor.finding_id != raised.finding_id
+    assert "semantic_restatements_suppressed" not in third.coverage.known_gaps
+    live = _live_projection(session.app)
+    assert finding_todo_state(live, raised.finding_id) is FindingTodoState.VERIFIED_RESOLVED
+    assert finding_todo_state(live, successor.finding_id) is FindingTodoState.OPEN
+    assert receipt_blocking_finding_count(live) == 1
+    assert projection_snapshot(replay(_records(session.app))) == projection_snapshot(live)
+
+
+async def test_a_checklist_read_failure_never_strands_the_committed_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D2: the checklist is additive context; any failure reading it drops only the list."""
+
+    from yoetz.application import check as check_module
+
+    def broken(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("checklist read failed")
+
+    seed = 3500
+    reviewer = _Reviewer([_challenge_obligation])
+    session, frontier = await _session(reviewer, seed)
+    monkeypatch.setattr(check_module, "build_finding_checklist", broken)
+    checked = await _check(session, frontier, seed + 10)
+    assert checked.outcome == "committed"
+    assert checked.finding_checklist is None
+    assert _semantic(checked).finding_id in _live_projection(session.app).findings

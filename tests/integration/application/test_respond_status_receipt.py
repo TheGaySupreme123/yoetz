@@ -5107,3 +5107,21 @@ async def test_an_ai_finding_the_recheck_did_not_assess_never_resolves_by_silenc
 
 def _projected_detail(detail: object) -> str:
     return detail if type(detail) is str else ""
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+async def test_the_check_carries_the_finding_checklist_on_both_ledgers(
+    ledger_backend: Literal["memory", "sqlite"],
+) -> None:
+    """Issue #905: the list is read from the adapter-owned projection, never a status page."""
+
+    app, _runtime, _ = _build_app(seed_offset=57, ledger_backend=ledger_backend)
+    _started, checked, _obligation = await _bootstrap_finding(app, seed=5700)
+    checklist = checked.finding_checklist
+    assert checklist is not None
+    from yoetz.domain.findings import FINDING_KIND_TRAITS
+
+    blocking = {item.finding_id for item in checked.findings if FINDING_KIND_TRAITS[item.kind][1]}
+    assert blocking <= {item.finding_id for item in checklist.items}
+    assert checklist.counts.open == len(checklist.items)
+    assert checklist.next == "work_open_findings"

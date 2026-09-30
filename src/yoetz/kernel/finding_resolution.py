@@ -663,6 +663,27 @@ def finding_resolution_explanation(
     finding_record = state.findings.get(finding_id)
     if finding_record is None or finding_record.payload is None:
         return "Resolution explanation unavailable: original finding is unreadable."
+    # Terminal to-do states are named first (issue #905): they are final, never re-reviewed, and
+    # the blockers of a later check (``reviewer_assessment_incomplete`` included) do not apply.
+    response = state.responses.get(finding_id)
+    disposition = (
+        None if response is None or response.payload is None else response.payload.disposition
+    )
+    if disposition is ResponseDisposition.ACKNOWLEDGED_NOT_DONE:
+        return (
+            "Acknowledged, not done: the agent recorded with a reason that it will not do this. "
+            "The item is final, is not reviewed again, and keeps the receipt from reading clean."
+        )
+    if (
+        finding_record.rejection_accepted_by_check_event_id is not None
+        and disposition is ResponseDisposition.REJECTED
+        and not finding_is_resolved(state, finding_id)
+    ):
+        return (
+            "Rejection accepted: the agent rejected this AI-powered finding with a reason and "
+            f"check {finding_record.rejection_accepted_by_check_event_id} withdrew it. The item "
+            "is final and no longer blocks the receipt, which still lists it."
+        )
     superseded = _superseded_coordination_context(state, finding_record.payload)
     if finding_is_resolved(state, finding_id):
         resolving = finding_record.resolved_by_check_event_id

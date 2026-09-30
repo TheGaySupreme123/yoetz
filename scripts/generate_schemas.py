@@ -2471,6 +2471,27 @@ def _check_result_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         "additionalProperties": False,
         "properties": {
             "attempt_budget": _attempt_budget_schema(),
+            "counts": {
+                "additionalProperties": False,
+                "properties": {
+                    name: {"$ref": "#/$defs/canonical_uint"}
+                    for name in (
+                        "acknowledged_not_done",
+                        "open",
+                        "open_at_budget",
+                        "rejection_accepted",
+                        "verified_resolved",
+                    )
+                },
+                "required": [
+                    "acknowledged_not_done",
+                    "open",
+                    "open_at_budget",
+                    "rejection_accepted",
+                    "verified_resolved",
+                ],
+                "type": "object",
+            },
             "items": {
                 "items": {"$ref": "#/$defs/checklist_item"},
                 "maxItems": 100,
@@ -2482,7 +2503,7 @@ def _check_result_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
                 "type": "string",
             },
         },
-        "required": ["attempt_budget", "items", "next"],
+        "required": ["attempt_budget", "counts", "items", "next"],
         "type": "object",
     }
     properties["finding_checklist"] = {"$ref": "#/$defs/finding_checklist"}
@@ -4397,8 +4418,9 @@ def _control_v2_9_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
     document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
     # 2.9.0 is unreleased on the 0.3 line: it also carries the respond 1.1.0 pair that admits the
-    # terminal ``acknowledged_not_done`` disposition (#905).  2.8.0 keeps the frozen 1.0.0 pair,
-    # so an older service refuses the new disposition at its own schema boundary.
+    # terminal ``acknowledged_not_done`` disposition (#905).  Every earlier control version (the
+    # released ones through 2.6.1 and the unreleased 2.7.0/2.8.0) keeps the frozen 1.0.0 pair, so
+    # an older service refuses the new disposition at its own schema boundary.
     respond_replacements = {
         SCHEMA_NAMESPACE + "operations/respond-request-1.0.0.schema.json": SCHEMA_NAMESPACE
         + "operations/respond-request-1.1.0.schema.json",

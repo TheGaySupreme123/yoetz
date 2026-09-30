@@ -74,6 +74,13 @@ def test_check_renders_the_finding_checklist_with_structural_tokens_only() -> No
     checklist = CheckFindingChecklistModel.model_validate(
         {
             "attempt_budget": "2",
+            "counts": {
+                "acknowledged_not_done": "1",
+                "open": "1",
+                "open_at_budget": "1",
+                "rejection_accepted": "0",
+                "verified_resolved": "1",
+            },
             "next": "decide_at_budget",
             "items": [
                 {

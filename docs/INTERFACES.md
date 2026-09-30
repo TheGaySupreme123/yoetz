@@ -1341,8 +1341,11 @@ coverage.
 - `rank_findings(deterministic, semantic, context: RankingContext, max_findings) -> RankedFindings`
   (the exact stable `rank_key` is registered in §8; suppressed count, verdict, and the full
   weakest-material coverage baseline are retained with the ordered selection).
-- `ReceiptFindingState`, owned by `kernel/receipt_builder.py`, is exactly `(finding_id, resolved)`.
-  The ordered tuple contains one latest current row per issue key; its boolean is the one shared
+- `ReceiptFindingState`, owned by `kernel/receipt_builder.py`, is exactly `(finding_id, resolved,
+  acknowledged_not_done, rejection_accepted)`; at most one of the three booleans is true, and the
+  last two default to false (issue #905: `acknowledged_not_done` stays blocking, `rejection_accepted`
+  stops blocking on a receipt whose artifact carries the terminal sections).
+  The ordered tuple contains one latest current row per issue key; `resolved` is the one shared
   proof-based answer, `kernel/finding_resolution.finding_is_resolved`, read from the projection: a
   same-issue successor replaces the old row and starts unresolved, while only a later qualifying
   check resolves the current row (registered under the finding view below). A response disposition
@@ -5957,9 +5960,10 @@ Only consented accepted evidence earns coverage.
 ## 11. Application (`application/`)
 
 `Application` is a service-internal frozen dataclass wiring all use-case ports, `PrivacyCoordinator`,
-and `VerificationPolicy`. `VerificationPolicy(semantic, max_findings)` is the immutable
-application-safe snapshot of effective verification config: `semantic` is exactly
-`disabled|optional|required`, `max_findings` is an exact non-bool integer in `1..10`, and its
+and `VerificationPolicy`. `VerificationPolicy(semantic, max_findings, finding_attempt_budget)` is
+the immutable application-safe snapshot of effective verification config: `semantic` is exactly
+`disabled|optional|required`, `max_findings` is an exact non-bool integer in `1..10`,
+`finding_attempt_budget` is an exact non-bool integer in `1..50` (default 5; issue #905), and its
 derived default check mode is respectively
 `deterministic_only|semantic_if_configured|semantic_required`.
 
@@ -6980,8 +6984,10 @@ fields. A missing `reason` fails the request schema; a whitespace-only one is re
 `respond-request` `1.1.0`, `respond-result` `1.1.0` and the `response_recorded` `1.1.0` event, all
 new because their 1.0.0 predecessors are released; every other disposition is still recorded as
 `response_recorded` `1.0.0`, so the event version is a pure function of the payload. Control
-`2.9.0` (unreleased, changed in place) references the respond 1.1.0 pair; control `2.8.0` keeps
-1.0.0, so an older service refuses the disposition at its schema boundary. `status-request`
+`2.9.0` (unreleased, changed in place) references the respond 1.1.0 pair. Every earlier control
+version keeps the 1.0.0 pair: the released ones (v0.2.5 ships control up to `2.6.1`) and the
+unreleased `2.7.0` and `2.8.0` of earlier 0.3 builds, so an older service refuses the disposition
+at its schema boundary. `status-request`
 `1.2.0`, `status-result` `1.4.0` and `receipt-document` `1.3.0` admit the value in place.
 
 Every recorded finding has one to-do state (`kernel/finding_todo.py`): `open`,
@@ -6999,7 +7005,10 @@ admitted. `receipt_blocking_finding_count` counts `acknowledged_not_done` rows a
 `review_rounds` counts later recorded checks that assessed a finding and left it open: a check that
 returned a local finding again over a later subject, or a recorded `still_present`,
 `answered_not_fixed` or `unassessable` ruling. Projection snapshots emit `review_rounds` and
-`rejection_accepted_by_check_event_id` only when set, so earlier snapshots keep their bytes. The
+`rejection_accepted_by_check_event_id` only when set. A snapshot rebuilt from an old ledger keeps
+its bytes unless that ledger has a local finding a later check returned again over a later
+subject: replay now derives `review_rounds` for it. Resolution and receipt outcomes are unchanged,
+and the snapshot projection version is not bumped because the field is additive. The
 owner's `verification.finding_attempt_budget` (`yoetz-config` `1.3.0`, integer 1–50, default 5;
 `YOETZ_VERIFICATION_FINDING_ATTEMPT_BUDGET`; written to the file only when not the default) is the
 round count at which an open item asks for a decision. It never throttles `check` and never
@@ -7007,9 +7016,10 @@ changes state.
 
 Wire (all additive, unreleased versions changed in place):
 
-- `check-result` `1.3.0` success: optional `finding_checklist` `{attempt_budget, items[],
+- `check-result` `1.3.0` success: optional `finding_checklist` `{attempt_budget, counts, items[],
   next}`. `attempt_budget` is a canonical string `1`–`50`; each item is `{finding_id, todo_state,
-  review_rounds}` (at most 100, the task's findings in rank order, resolved rows included);
+  review_rounds}` (at most 100: the current actionable items, newest row per issue, in rank
+  order, final rows included; coverage limitations are not to-dos);
   `next` is `decide_at_budget` (an open item reached the budget: repair with new evidence or
   respond `acknowledged_not_done`), `work_open_findings`, or `request_receipt`. It is current
   projection context attached after the commit, like advisory notes, and is omitted when that read
@@ -7020,7 +7030,16 @@ Wire (all additive, unreleased versions changed in place):
   `rejection_accepted_finding_ids` (sorted, 1–100, each a carried finding; absent when empty). The
   markdown and text renderings add "Acknowledged, not done" and "Rejection accepted" sections that
   name finding ids only. The redacted-share profile drops `acknowledged_not_done` responses like
-  other reasoned dispositions and counts the redaction.
+  other reasoned dispositions and counts the redaction. Only an artifact that carries these
+  sections lets a `rejection_accepted` row stop blocking its conclusion; on an earlier artifact the
+  row still counts as unresolved and is listed as such. A child's terminal rows stay actionable
+  and unresolved in a parent's lineage rollup (the frozen child snapshot has only `actionable` and
+  `resolved`); the child's own receipt discloses them.
+- `check-result` `finding_checklist` also carries `counts` (`open`, `open_at_budget`,
+  `verified_resolved`, `acknowledged_not_done`, `rejection_accepted`) over every current actionable
+  item, and is read from the adapter-owned projection at the result frontier, never from a status
+  page or a replay; any failure reading it omits the list and records a
+  `finding_checklist_read` diagnostic instead of failing the committed check.
 - Stable identity: a challenge whose kind matches a recorded AI-powered finding, whose subjects
   lie within that finding's subjects, and none of whose subjects was recorded after that finding
   (the evidence fingerprint) is a restatement. It is "seen again, suppressed": no second row is
@@ -7029,10 +7048,12 @@ Wire (all additive, unreleased versions changed in place):
   `semantic_restatements_suppressed` so returned = accepted + rejected + suppressed. Suppression
   never reads as absence: on an open item the check records a `still_present` ruling citing the
   restated subjects (at most 16), an explicit `fixed` or `withdrawn` ruling on the same item
-  becomes `unassessable`, and a terminal item needs nothing recorded. When the check's 8-ruling
-  bound is already full, the restatement is minted as before instead. A challenge
-  that cites newer material is a new item, linked through `relates_to` when it cites the earlier
-  finding.
+  becomes `unassessable`, and an `acknowledged_not_done` or `rejection_accepted` item needs
+  nothing recorded (it stays disclosed on the receipt). A `verified_resolved` row is never a
+  restatement target: done stays done, and the problem raised again after that proof is a #458
+  successor row, minted and blocking. When the check's 8-ruling bound is already full, the
+  restatement is minted as before instead. A challenge that cites newer material is a new item,
+  linked through `relates_to` when it cites the earlier finding.
 - MCP text summaries count items by state with closed tokens only (`to-do: open N (M at budget
   B), verified V, not done A, rejection accepted R; next: <token>`); the CLI renders
   `[ ] F-1 fnd_… open (2/5)`, `[x]` verified, `[~]` not done, `[-]` rejection accepted, and one

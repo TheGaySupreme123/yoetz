@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final, Literal, Protocol, cast
 
-from yoetz.application.ledger_snapshot import projection_for_records
+from yoetz.application.ledger_snapshot import projection_for_records, trusted_projection_at
 from yoetz.domain.coordination import CoordinationError, CoordinationErrorCode
 from yoetz.domain.events import LedgerRecord
 from yoetz.domain.findings import (
@@ -74,7 +74,9 @@ from yoetz.kernel.finding_resolution import SEMANTIC_FINDING_CAPTURE_BASELINE_GA
 from yoetz.kernel.finding_todo import (
     DEFAULT_FINDING_ATTEMPT_BUDGET,
     FindingTodoState,
+    finding_todo,
     finding_todo_state,
+    todo_counts,
 )
 from yoetz.kernel.lineage import LineageEvaluation, evaluate_recorded_lineage
 from yoetz.kernel.policies.research_evidence import research_evidence_findings
@@ -85,6 +87,7 @@ from yoetz.kernel.policies.response_support import (
 from yoetz.kernel.policies.work_integrity import work_integrity_findings
 from yoetz.kernel.projections import PROJECTION_VERSION, ProjectionState
 from yoetz.kernel.ranking import CheckCompleteness, RankingContext, rank_findings
+from yoetz.kernel.receipt_capacity import current_receipt_findings
 from yoetz.observability.logging import (
     record_bounded_counts_without_raising,
     record_unexpected_exception_without_raising,
@@ -106,12 +109,10 @@ from yoetz.ports.ledger import (
     CheckPhase,
     CheckPolicyExecution,
     CheckVersionSlice,
-    FindingsProjectionFilter,
     FrozenCase,
     OperationLease,
     OperationRecord,
     OperationState,
-    ProjectionQuery,
     check_admission_refused,
     check_admission_stage,
 )
@@ -138,7 +139,6 @@ from yoetz.protocol.models import (
     CheckScopeModel,
     SemanticReason,
     SemanticStatus,
-    StatusFindingItemModel,
     validate_semantic_outcome,
     validate_semantic_provenance_binding,
 )
@@ -154,6 +154,7 @@ __all__ = [
     "SemanticJudgmentRejected",
     "SemanticJudgmentReview",
     "allocate_findings",
+    "build_finding_checklist",
     "carried_semantic_attempt_gaps",
     "case_coverage",
     "check_awaiting_human_json",
@@ -429,8 +430,16 @@ def check_internal_json(result: CheckCommitResult) -> dict[str, JsonValue]:
 
 
 def _checklist_json(checklist: CheckFindingChecklist) -> JsonValue:
+    counts = checklist.counts
     return {
         "attempt_budget": str(checklist.attempt_budget),
+        "counts": {
+            "acknowledged_not_done": str(counts.acknowledged_not_done),
+            "open": str(counts.open),
+            "open_at_budget": str(counts.budget_reached),
+            "rejection_accepted": str(counts.rejection_accepted),
+            "verified_resolved": str(counts.verified_resolved),
+        },
         "items": tuple(
             {
                 "finding_id": item.finding_id,
@@ -941,56 +950,77 @@ async def _current_project_advisory_notes(
     return tuple(notes)
 
 
+def build_finding_checklist(
+    projection: ProjectionState, *, attempt_budget: int
+) -> CheckFindingChecklist:
+    """The current actionable findings as a to-do list, with whole-list counts (issue #905).
+
+    Items are the newest row per issue in rank order, at most 100; the counts and ``next`` cover
+    every current actionable item, so a long list can never read as done. Coverage limitations
+    are not to-dos and never drive ``next``.
+    """
+
+    todos = tuple(
+        finding_todo(projection, finding.finding_id, attempt_budget=attempt_budget)
+        for finding in current_receipt_findings(projection)
+        if FINDING_KIND_TRAITS[finding.kind][1]
+    )
+    counts = todo_counts(
+        projection, (todo.finding_id for todo in todos), attempt_budget=attempt_budget
+    )
+    next_step: Literal["decide_at_budget", "request_receipt", "work_open_findings"] = (
+        "decide_at_budget"
+        if counts.budget_reached
+        else "work_open_findings"
+        if counts.open
+        else "request_receipt"
+    )
+    return CheckFindingChecklist(
+        attempt_budget,
+        tuple(
+            CheckChecklistItem(str(todo.finding_id), todo.state.value, todo.review_rounds)
+            for todo in todos[:MAX_CHECKLIST_ITEMS]
+        ),
+        next_step,
+        counts,
+    )
+
+
 async def _attach_finding_checklist(
     app: Application, runtime: TaskRuntime, result: CheckCommitResult
 ) -> CheckCommitResult:
     """Attach the task's findings as a to-do list after this check (issue #905).
 
     Like project advice this is current projection context beside the frozen check: it never
-    changes the recorded event or its verdict, and when the read is unavailable it is omitted.
-    The budget only chooses the ``next`` token; nothing here closes, acknowledges or throttles.
+    changes the recorded event or its verdict. It reads only the adapter-owned projection at the
+    result frontier (never a replay or a status page); when that is unavailable, or anything
+    fails, the check is returned without the list rather than stranded after its commit.
+
+    The list holds the current actionable items (the newest row per issue, in rank order, at most
+    100); the counts and the ``next`` token are computed over all of them. Coverage limitations
+    are not to-dos and never drive ``next``. The budget only chooses ``next``: nothing here
+    closes, acknowledges or throttles.
     """
 
     policy = getattr(app, "verification_policy", None)
     budget = getattr(policy, "finding_attempt_budget", DEFAULT_FINDING_ATTEMPT_BUDGET)
     if type(budget) is not int:
         budget = DEFAULT_FINDING_ATTEMPT_BUDGET
-    # A ledger seam without projection reads (a narrow test double) simply has no list to add.
-    query_projection = getattr(runtime.ledger, "query_projection", None)
-    if query_projection is None:
-        return result
     try:
-        page = await query_projection(
-            ProjectionQuery(
-                result.session_id,
-                "findings",
-                FindingsProjectionFilter(None, None, None, True),
-                result.result_frontier,
-                MAX_CHECKLIST_ITEMS,
-                None,
-                None,
-            )
+        projection = await trusted_projection_at(
+            runtime.ledger, result.session_id, result.result_frontier
         )
-    except PublicOperationError, ValueError:
+        if projection is None:
+            return result
+        checklist = build_finding_checklist(projection, attempt_budget=budget)
+    except Exception as exc:
+        record_unexpected_exception_without_raising(
+            exc,
+            component="check",
+            operation="finding_checklist_read",
+        )
         return result
-    items: list[CheckChecklistItem] = []
-    for item in page.items:
-        if (
-            type(item) is not StatusFindingItemModel
-            or item.todo_state is None
-            or item.review_rounds is None
-        ):
-            continue
-        items.append(CheckChecklistItem(item.finding_id, item.todo_state, int(item.review_rounds)))
-    open_rounds = [item.review_rounds for item in items if item.todo_state == "open"]
-    next_step: Literal["decide_at_budget", "request_receipt", "work_open_findings"] = (
-        "decide_at_budget"
-        if any(rounds >= budget for rounds in open_rounds)
-        else "work_open_findings"
-        if open_rounds
-        else "request_receipt"
-    )
-    return replace(result, finding_checklist=CheckFindingChecklist(budget, tuple(items), next_step))
+    return replace(result, finding_checklist=checklist)
 
 
 async def _attach_current_project_advisory_notes(
@@ -2168,6 +2198,11 @@ def validate_semantic_judgment(
                 rejections.get(SEMANTIC_REJECTED_SUBJECTS_OVER_LIMIT, 0) + 1
             )
             continue
+        if _claims_unchanged_over_hidden_source(case, challenge):
+            rejections[SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM] = (
+                rejections.get(SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM, 0) + 1
+            )
+            continue
         restated = _restated_finding(case, challenge.finding_kind, refs)
         if restated is not None:
             suppressed, reduced = _record_restatement(case, admitted, restated, refs)
@@ -2178,11 +2213,6 @@ def validate_semantic_judgment(
                 # check, and recorded on the open item so it can never close by silence.
                 restatements += 1
                 continue
-        if _claims_unchanged_over_hidden_source(case, challenge):
-            rejections[SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM] = (
-                rejections.get(SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM, 0) + 1
-            )
-            continue
         policy_id, policy_version = _policy_identity(challenge.finding_kind)
         priority, _actionable = FINDING_KIND_TRAITS[challenge.finding_kind]
         candidates.append(
@@ -2282,12 +2312,17 @@ def _record_restatement(
     Suppression must never read as absence: a restatement of an open item records that the
     reviewer still finds it (``still_present``, citing what the challenge cited), so the check
     cannot resolve it by silence. A restatement contradicts an explicit ``fixed`` or
-    ``withdrawn`` ruling on the same item, which becomes ``unassessable``. A terminal item is
-    final and needs nothing recorded. When no ruling can be recorded (the check's ruling bound
+    ``withdrawn`` ruling on the same item, which becomes ``unassessable``. An
+    ``acknowledged_not_done`` or ``rejection_accepted`` item is final, stays disclosed on the
+    receipt, and needs nothing recorded. (A ``verified_resolved`` item is never a restatement
+    target: see ``_restated_finding``.) When no ruling can be recorded (the check's ruling bound
     is full) the restatement is not suppressed and is minted as before.
     """
 
-    if finding_todo_state(case.projection, restated) is not FindingTodoState.OPEN:
+    if finding_todo_state(case.projection, restated) in {
+        FindingTodoState.ACKNOWLEDGED_NOT_DONE,
+        FindingTodoState.REJECTION_ACCEPTED,
+    }:
         return True, False
     key = str(restated)
     earlier = admitted.get(key)
@@ -2312,6 +2347,10 @@ def _restated_finding(
     challenge rests on. A restatement has the same kind, subjects within the recorded finding's
     subjects, and nothing among them recorded after that finding. A challenge with newer material
     is a new, linked item, never a restatement. The newest match wins.
+
+    A ``verified_resolved`` row is never a target: done stays done, and the reviewer finding the
+    problem again after that proof is a #458 successor, minted and blocking. Suppressing it would
+    hide a real re-raise behind a closed row.
     """
 
     wanted = frozenset(refs)
@@ -2326,6 +2365,7 @@ def _restated_finding(
             or payload.origin is not FindingOrigin.SEMANTIC_MODEL_DERIVED
             or payload.kind is not kind
             or not wanted <= frozenset(str(ref) for ref in payload.subject_refs)
+            or finding_todo_state(case.projection, key) is FindingTodoState.VERIFIED_RESOLVED
         ):
             continue
         if all(

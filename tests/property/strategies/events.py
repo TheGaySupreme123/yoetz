@@ -12,6 +12,7 @@ from hypothesis.strategies import SearchStrategy
 from builders.clock import format_utc_millis
 from yoetz.domain.events import (
     EVENT_FAMILIES,
+    RESPONSE_EVENT_SCHEMA_VERSION,
     SCHEMA_VERSION,
     ActionKind,
     ActionRecordedPayload,
@@ -108,6 +109,7 @@ from yoetz.protocol.models import (
 
 __all__ = [
     "strategy_event_sequences",
+    "event_schema_version_for",
     "strategy_invalid_event_payloads",
     "strategy_unknown_event_drafts",
     "strategy_valid_event_payloads",
@@ -470,6 +472,7 @@ def _response_recorded(draw: st.DrawFn) -> ResponseRecordedPayload:
     if disposition is ResponseDisposition.ACKNOWLEDGED:
         reason = draw(st.none() | _short_text(1, 32))
     elif disposition in {
+        ResponseDisposition.ACKNOWLEDGED_NOT_DONE,
         ResponseDisposition.PROVENANCE_DISPUTED,
         ResponseDisposition.REJECTED,
     }:
@@ -625,6 +628,21 @@ def _artifact_refs_for(family: str, payload: EventPayload) -> tuple[ObjectId, ..
     return ()
 
 
+def event_schema_version_for(payload: EventPayload) -> str:
+    """The version a drawn payload is recorded under.
+
+    ``acknowledged_not_done`` rides ``response_recorded`` 1.1.0 only (issue #905); every other
+    drawn payload uses the frozen 1.0.0 family.
+    """
+
+    if (
+        type(payload) is ResponseRecordedPayload
+        and payload.disposition is ResponseDisposition.ACKNOWLEDGED_NOT_DONE
+    ):
+        return RESPONSE_EVENT_SCHEMA_VERSION
+    return SCHEMA_VERSION
+
+
 @st.composite
 def _event_sequences(
     draw: st.DrawFn,
@@ -635,7 +653,7 @@ def _event_sequences(
     event_ids: list[EventId] = []
     for sequence in range(1, length + 1):
         family, payload = draw(_valid_event_payload())
-        schema = EventSchema(family, SCHEMA_VERSION)
+        schema = EventSchema(family, event_schema_version_for(payload))
         candidate_parents = (
             tuple(
                 sorted(

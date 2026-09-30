@@ -9,6 +9,7 @@ from builders.policy_cases import (
     FRONTIER,
     act,
     clm,
+    evt,
     finding_record,
     fnd,
     make_case,
@@ -582,7 +583,13 @@ def test_rulings_the_normalizer_dropped_are_disclosed_by_the_fence() -> None:
     assert review.verdicts_unsupported == 2
 
 
-def _restatement_case(obligation_recorded_at: int, *, repaired: bool = False) -> DeterministicCase:
+def _restatement_case(
+    obligation_recorded_at: int,
+    *,
+    repaired: bool = False,
+    resolved: bool = False,
+    hidden: bool = False,
+) -> DeterministicCase:
     """numba shape: one AI-powered finding on an obligation, recorded at sequence 5."""
 
     from builders.policy_cases import obligation_record
@@ -597,11 +604,38 @@ def _restatement_case(obligation_recorded_at: int, *, repaired: bool = False) ->
     repair = record(
         ResultRecordedPayload(res(2), act(2), ResultOutcome.SUCCESS, summary="regression"), 9
     )
+    withheld = replace(BASE_COVERAGE, known_gaps=("captured_object_unavailable",))
     return make_case(
         obligations={obl(1): obligation},
+        coverage_overrides={obl(1): withheld} if hidden else None,
         results={res(2): repair} if repaired else None,
-        findings={fnd(1): finding_record(_recorded_semantic_finding(1, str(obl(1))), 5)},
+        findings={
+            fnd(1): finding_record(
+                _recorded_semantic_finding(1, str(obl(1))),
+                5,
+                resolved_by_check_event_id=evt(8) if resolved else None,
+            )
+        },
     )
+
+
+def test_a_re_raise_of_a_verified_resolved_finding_is_a_new_item_not_a_restatement() -> None:
+    """Done stays done, and a re-raise after verified resolution is a #458 successor, minted.
+
+    Suppressing it would hide a problem the reviewer found again behind a closed row: the
+    receipt would read clean with nothing blocking (slice-4 verification D1)."""
+
+    case = _restatement_case(obligation_recorded_at=2, resolved=True)
+    review = validate_semantic_judgment(
+        case,
+        (),
+        SemanticJudgment("challenges_returned", (_obligation_challenge(str(obl(1))),)),
+        _provenance(),
+        expected_frontier=case.frontier,
+    )
+    assert len(review.candidates) == 1
+    assert review.restatements_suppressed == 0
+    assert review.verdicts == ()
 
 
 def _obligation_challenge(*refs: str) -> ReviewerChallenge:
@@ -694,3 +728,23 @@ def test_newer_material_or_another_kind_is_a_new_item_not_a_restatement() -> Non
         )
         assert len(review.candidates) == 1
         assert review.restatements_suppressed == 0
+
+
+def test_a_hidden_source_claim_is_rejected_before_any_restatement_is_recorded() -> None:
+    """D5: a challenge the fence rejects must not record ``still_present`` or a review round."""
+
+    case = _restatement_case(obligation_recorded_at=2, hidden=True)
+    hidden = replace(
+        _obligation_challenge(str(obl(1))),
+        discrepancy="The obligation is unchanged.",
+    )
+    review = validate_semantic_judgment(
+        case,
+        (),
+        SemanticJudgment("challenges_returned", (hidden,)),
+        _provenance(),
+        expected_frontier=case.frontier,
+    )
+    assert review.rejected_by_reason == ((SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM, 1),)
+    assert review.restatements_suppressed == 0
+    assert review.verdicts == ()

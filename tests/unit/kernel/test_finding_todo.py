@@ -330,3 +330,77 @@ def test_acknowledged_not_done_needs_a_reason_and_rides_only_response_recorded_1
         EventDraft(
             evt(1), EventSchema("response_recorded", "1.1.0"), at, (evt(2),), rejected, (), ()
         )
+
+
+def _kind_finding(number: int, kind: FindingKind) -> Finding:
+    base = _finding(number)
+    return Finding(
+        finding_id=base.finding_id,
+        kind=kind,
+        origin=base.origin,
+        priority=FINDING_KIND_TRAITS[kind][0],
+        summary=base.summary,
+        detail=base.detail,
+        subject_refs=base.subject_refs,
+        policy_id=base.policy_id,
+        policy_version=base.policy_version,
+        subject_frontier=base.subject_frontier,
+        coverage=base.coverage,
+        provenance=None,
+    )
+
+
+def test_a_coverage_limitation_never_drives_the_checklist_next_step() -> None:
+    """D3(a): an open non-actionable row is not a to-do, even past the budget."""
+
+    from yoetz.application.check import build_finding_checklist
+
+    limitation = replace(
+        finding_record(_kind_finding(1, FindingKind.LEDGER_STALE_OR_INCOMPLETE), 4),
+        review_rounds=9,
+    )
+    checklist = build_finding_checklist(_state({fnd(1): limitation}), attempt_budget=2)
+    assert checklist.items == ()
+    assert checklist.next == "request_receipt"
+    assert checklist.counts.open == 0
+
+
+def test_the_checklist_counts_and_next_cover_items_past_the_listed_hundred() -> None:
+    """D3(b): an open blocking item beyond the first 100 rows keeps ``next`` honest."""
+
+    from yoetz.application.check import build_finding_checklist
+
+    rows: dict[FindingId, FindingProjectionRecord] = {}
+    for number in range(1, 101):
+        rows[fnd(number)] = finding_record(_finding(number), 4, resolved_by_check_event_id=evt(9))
+    late = _kind_finding(101, FindingKind.ACTION_WITHOUT_RESULT)  # priority 3: ranked last
+    rows[fnd(101)] = finding_record(late, 4)
+    checklist = build_finding_checklist(_state(rows), attempt_budget=5)
+    assert len(checklist.items) == 100
+    assert fnd(101) not in {item.finding_id for item in checklist.items}
+    assert (checklist.counts.open, checklist.counts.verified_resolved) == (1, 100)
+    assert checklist.next == "work_open_findings"
+
+
+def test_the_resolution_explanation_names_terminal_states() -> None:
+    """D4: a final item explains itself as final, not as a disputed or unreadable response."""
+
+    from yoetz.kernel.finding_resolution import finding_resolution_explanation
+
+    not_done = _state(
+        {fnd(1): finding_record(_semantic(1), 4)},
+        {fnd(1): _response(1, ResponseDisposition.ACKNOWLEDGED_NOT_DONE)},
+    )
+    assert finding_resolution_explanation(not_done, fnd(1), ()).startswith(
+        "Acknowledged, not done:"
+    )
+    accepted = _state(
+        {
+            fnd(1): replace(
+                finding_record(_semantic(1), 4), rejection_accepted_by_check_event_id=evt(9)
+            )
+        },
+        {fnd(1): _response(1, ResponseDisposition.REJECTED)},
+    )
+    explanation = finding_resolution_explanation(accepted, fnd(1), ())
+    assert explanation.startswith("Rejection accepted:") and str(evt(9)) in explanation

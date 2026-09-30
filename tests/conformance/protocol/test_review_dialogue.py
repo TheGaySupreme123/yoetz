@@ -192,3 +192,38 @@ def test_acknowledged_not_done_needs_respond_1_1_0_and_an_old_service_refuses_it
     assert "respond-request-1.0.0" in control["2.8.0"]
     assert "respond-request-1.1.0" not in control["2.8.0"]
     assert "respond-request-1.1.0" in control["2.9.0"]
+
+
+def test_golden_responses_pin_acknowledged_not_done_on_1_1_0_only() -> None:
+    """D6: the terminal disposition's event and wire bytes, beside an unchanged 1.0.0 rejection."""
+
+    responses = [vector for vector in _vectors() if vector["family"] == "response_recorded"]
+    assert [(item["schema_version"], item["payload"]["disposition"]) for item in responses] == [
+        ("1.0.0", "rejected"),
+        ("1.1.0", "acknowledged_not_done"),
+    ]
+    for vector in responses:
+        version, wire = vector["schema_version"], vector["payload"]
+        validate_schema_instance("response-recorded", version, wire)
+        payload = decode_payload(EventSchema("response_recorded", version), freeze_json(wire))
+        encoded = encode_payload(payload)
+        assert canonical_encode(encoded).hex() == vector["canonical_hex"]
+        assert canonical_digest(encoded) == vector["digest"]
+    not_done = responses[1]["payload"]
+    with pytest.raises(SchemaInstanceInvalid):
+        validate_schema_instance("response-recorded", "1.0.0", not_done)
+    # The event pairing itself (acknowledged_not_done exactly on 1.1.0) is enforced where an
+    # event is drafted or accepted; tests/unit/kernel/test_finding_todo.py locks it.
+
+    path = (
+        Path(__file__).resolve().parents[3] / "fixtures/canonical/review-dialogue-1.3.0.case.json"
+    )
+    operations = json.loads(path.read_bytes())["input"]["operations"]
+    assert [(item["schema"], item["schema_version"]) for item in operations] == [
+        ("respond-request", "1.1.0"),
+        ("respond-result", "1.1.0"),
+    ]
+    for item in operations:
+        validate_schema_instance(item["schema"], item["schema_version"], item["payload"])
+        with pytest.raises(SchemaInstanceInvalid):
+            validate_schema_instance(item["schema"], "1.0.0", item["payload"])
