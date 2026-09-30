@@ -1205,8 +1205,12 @@ def repair_evidence_refs(projection: ProjectionState, allowed: frozenset[str]) -
 _RANK_CURRENT_DIFF: Final = 0
 _RANK_LATEST_VERIFICATION: Final = 1
 _RANK_PRIOR_FINDING_CONTEXT: Final = 2
-_RANK_UNRESERVED: Final = 3
-_RANK_SUPERSEDED: Final = 4
+# An older captured edit of a path that changed again. Captured edits are hunks, not whole files:
+# a later hunk elsewhere in the file leaves this one's lines in place, so it is still code under
+# review and keeps the #883 rule that a patch is never starved by tool output or file reads.
+_RANK_OLDER_EDIT: Final = 3
+_RANK_UNRESERVED: Final = 4
+_RANK_SUPERSEDED: Final = 5
 _OUTSIDE_WORKSPACE_PATH: Final = "<outside-workspace>"
 _MAX_EDIT_PATHS: Final = 64
 _PATCH_FILE_LINE: Final = re.compile(r"^\*\*\* (?:Update|Add|Delete) File: (.+?)[ \t]*$", re.M)
@@ -1241,6 +1245,7 @@ class _ExcerptCandidate:
     verification_identity: str | None = None
     verification_outcome: ResultOutcome | None = None
     verification_action: str | None = None
+    verification_run: str | None = None
     structural_only: bool = False
 
 
@@ -1297,7 +1302,9 @@ def _captured_edit_paths(content: bytes) -> tuple[bool, tuple[str, ...]]:
     return failed, ordered[:_MAX_EDIT_PATHS]
 
 
-type _VerificationRun = tuple[str, ResultOutcome, str]
+# ``(identity, outcome, action ref, result ref)``: the result ref names one run, so an output and
+# the failure summary of the same run are one run, never a newer run superseding its own output.
+type _VerificationRun = tuple[str, ResultOutcome, str, str]
 
 
 def _verification_identities(
@@ -1329,7 +1336,7 @@ def _verification_identities(
         ):
             continue
         identity = "command:" + hashlib.sha256(action.payload.command.encode("utf-8")).hexdigest()
-        run = (identity, payload.outcome, str(payload.action_id))
+        run = (identity, payload.outcome, str(payload.action_id), str(result_ref))
         by_result[str(result_ref)] = run
         for evidence_ref in payload.evidence_refs:
             by_evidence[str(evidence_ref)] = run
@@ -1569,6 +1576,7 @@ def _evidence_candidates(
                 verification_identity=None if verification is None else verification[0],
                 verification_outcome=None if verification is None else verification[1],
                 verification_action=None if verification is None else verification[2],
+                verification_run=None if verification is None else verification[3],
                 structural_only=(
                     captured_group is None
                     and payload.evidence_kind is EvidenceKind.OTHER
@@ -1596,8 +1604,9 @@ def _select_targeted_excerpts(
     Reserved room comes first, in the order issue #907 fixes: the newest captured edit of every
     changed path, then the latest output of every identified verification command (with the last
     failure kept beside a later pass). Evidence supplied to repair a finding (#898) follows, then
-    everything else by recency, then by link class; older hunks and runs of the same path or
-    command come last and are marked ``superseded_by``. Every excerpt still holds exactly one
+    older hunks of a changed path (still code under review), then everything else by recency,
+    then by link class; older runs of the same command come last. Older hunks and runs are marked
+    ``superseded_by``. Every excerpt still holds exactly one
     recorded source or one part of one capture.
     """
 
@@ -1731,6 +1740,7 @@ def _select_targeted_excerpts(
                     verification_identity=None if verification is None else verification[0],
                     verification_outcome=None if verification is None else verification[1],
                     verification_action=None if verification is None else verification[2],
+                    verification_run=None if verification is None else verification[3],
                 )
             )
 
@@ -1767,30 +1777,37 @@ def _select_targeted_excerpts(
                 sorted({candidates[other].source_ref for other in newer}, key=str.encode)
             )
 
-    # Latest verification output per command identity, keeping a failure beside a later pass.
-    runs: dict[str, list[int]] = {}
+    # Latest verification output per command identity, keeping a failure beside a later pass. A
+    # run is one recorded result: its captured output and its failure summary are the same run.
+    runs: dict[str, dict[str, list[int]]] = {}
     for index, candidate in enumerate(candidates):
-        if candidate.verification_identity is not None:
-            runs.setdefault(candidate.verification_identity, []).append(index)
-    for members in runs.values():
-        members.sort(key=recency, reverse=True)
-        latest = members[0]
-        reserved_runs.add(latest)
-        latest_for.setdefault(latest, "command")
-        if candidates[latest].verification_outcome is ResultOutcome.SUCCESS:
+        if candidate.verification_identity is not None and candidate.verification_run is not None:
+            runs.setdefault(candidate.verification_identity, {}).setdefault(
+                candidate.verification_run, []
+            ).append(index)
+    for by_run in runs.values():
+        ordered = sorted(
+            by_run.values(), key=lambda members: max(recency(i) for i in members), reverse=True
+        )
+        latest_run = ordered[0]
+        newest_refs = tuple(sorted({candidates[i].source_ref for i in latest_run}, key=str.encode))
+        for index in latest_run:
+            reserved_runs.add(index)
+            latest_for.setdefault(index, "command")
+        if candidates[latest_run[0]].verification_outcome is ResultOutcome.SUCCESS:
             prior_failure = next(
                 (
-                    index
-                    for index in members[1:]
-                    if candidates[index].verification_outcome is ResultOutcome.FAILURE
+                    members
+                    for members in ordered[1:]
+                    if candidates[members[0]].verification_outcome is ResultOutcome.FAILURE
                 ),
                 None,
             )
-            if prior_failure is not None:
-                reserved_runs.add(prior_failure)
-        for index in members[1:]:
-            if index not in current_diffs:
-                superseded_by.setdefault(index, (candidates[latest].source_ref,))
+            reserved_runs.update(prior_failure or ())
+        for members in ordered[1:]:
+            for index in members:
+                if index not in current_diffs:
+                    superseded_by.setdefault(index, newest_refs)
     # The exact command of a reserved run travels beside its output, so the reviewer can name
     # which verification it reads (Expanded selection only carries command text).
     reserved_actions = {
@@ -1812,7 +1829,7 @@ def _select_targeted_excerpts(
         elif candidate.identity_refs & repair_refs:
             klass = _RANK_PRIOR_FINDING_CONTEXT
         elif index in superseded_by:
-            klass = _RANK_SUPERSEDED
+            klass = _RANK_OLDER_EDIT if candidate.edit_paths is not None else _RANK_SUPERSEDED
         else:
             klass = _RANK_UNRESERVED
         # Unlinked observation metadata rows describe an event, not its content; they only fill
@@ -2110,15 +2127,28 @@ def build_semantic_case(
     captured_content: Sequence[CapturedSemanticContent] = (),
     captured_content_scope: CapturedContentScope | None = None,
     captured_content_gaps: Sequence[str] = (),
+    prepared_byte_ceiling: int | None = None,
 ) -> SemanticCase:
     """Build one pre-egress AI-powered review case from frozen authority only.
 
     Excerpts may now fill the approved per-excerpt bound, so the case plans its excerpts below
-    the channel byte ceiling's schema maximum as measured on the exact prepared document the
-    gateway will size (issue #907). An over-plan case is rebuilt with a smaller excerpt budget;
-    the dropped excerpts are ordinary ``not_selected`` omissions with ``content_unselected``. The
-    gateway still enforces the owner's own ceiling on every dispatch.
+    the channel byte ceiling as measured on the exact prepared document the gateway will size
+    (issue #907): the schema maximum, narrowed to ``prepared_byte_ceiling`` when the caller
+    passes the effective policy's own channel ceiling (its ``max_bytes`` and ``max_tokens``
+    measured the way the gateway measures them). An over-plan case is rebuilt with a smaller
+    excerpt budget; the dropped excerpts are ordinary ``not_selected`` omissions with
+    ``content_unselected``. The gateway still enforces the owner's ceiling on every dispatch.
     """
+
+    if prepared_byte_ceiling is not None and (
+        type(prepared_byte_ceiling) is not int or prepared_byte_ceiling < 1
+    ):
+        raise ValueError("semantic_case_prepared_ceiling_invalid")
+    planning_bytes = (
+        _PREPARED_PAYLOAD_PLANNING_BYTES
+        if prepared_byte_ceiling is None
+        else min(_PREPARED_PAYLOAD_PLANNING_BYTES, prepared_byte_ceiling)
+    )
 
     def build(excerpt_byte_budget: int | None) -> SemanticCase:
         return _build_semantic_case_once(
@@ -2146,7 +2176,7 @@ def build_semantic_case(
             # The structural envelope cannot be bounded at all; the coordinator maps that to
             # its own terminal capacity outcome. Excerpt planning cannot help it.
             return None
-        return len(prepared) <= _PREPARED_PAYLOAD_PLANNING_BYTES
+        return len(prepared) <= planning_bytes
 
     case = build(None)
     excerpt_bytes = sum(item.content_bytes for item in case.items if item.section == "excerpt")

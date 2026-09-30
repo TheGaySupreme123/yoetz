@@ -1379,7 +1379,10 @@ def _check_recorded_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         {
             "anyOf": [
                 {"not": {"required": ["missing_for_assessment"]}},
-                {"properties": {"semantic_conclusion": {"const": "insufficient_packet"}}},
+                {
+                    "properties": {"semantic_conclusion": {"const": "insufficient_packet"}},
+                    "required": ["semantic_conclusion"],
+                },
             ]
         }
     )

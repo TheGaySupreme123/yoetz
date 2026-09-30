@@ -176,12 +176,14 @@ SEMANTIC_REVIEW_INSTRUCTION: Final = (
     # group so the reviewer-role text above can change independently.
     " Items are listed in recorded order; occurred_order is that order. An excerpt with "
     "latest_for is the newest recorded edit of its path or run of its command; one with "
-    "superseded_by was followed by the named newer source, so judge current code and results "
-    "from the newest and do not challenge superseded lines the newest no longer shows. With "
-    "insufficient_packet, list each item you needed in missing_for_assessment: its kind, the "
-    "packet refs it concerns (only from citable_refs), and a short reason. An item listed in a "
-    "prior_missing_for_assessment timeline item with supplied_since refs was supplied since; "
-    "list it again only if you cite one of those refs and say why it is still insufficient."
+    "superseded_by has a newer recorded edit of the same path or run of the same command (the "
+    "named source). Judge results from the newest run, and code the newer edit changes from the "
+    "newer edit; an edit is a hunk, so lines of an older edit that the newer one does not touch "
+    "may still be current. With insufficient_packet, list each item you needed in "
+    "missing_for_assessment: its kind, the packet refs it concerns (only from citable_refs), and "
+    "a short reason. An item in a prior_missing_for_assessment timeline item lists in "
+    "supplied_since the material of that kind the agent recorded since; list it again only if "
+    "you cite one of those refs and say why it is still insufficient."
 )
 _SYSTEM_INSTRUCTION: Final = SEMANTIC_REVIEW_INSTRUCTION
 
@@ -948,8 +950,28 @@ def normalize_judgment(parsed: JsonValue) -> SemanticJudgment:
         cast(dict[str, JsonValue], parsed)["judgment"] if envelope else cast(JsonValue, parsed)
     )
     kept, dropped = _separate_prior_verdicts(body)
+    unnamed = False
     if type(body) is dict:
-        body = {**cast(dict[str, JsonValue], body), "prior_finding_verdicts": kept}
+        fields: dict[str, JsonValue] = {
+            **cast(dict[str, JsonValue], body),
+            "prior_finding_verdicts": kept,
+        }
+        named = fields.get("missing_for_assessment")
+        if named is None or named == []:
+            # Backward read, like the rulings above (issue #907): a local model or prompt-only
+            # host may answer in the 1.0.0 shape. An empty list beside another conclusion is the
+            # absent list. An ``insufficient_packet`` that names nothing keeps its conclusion and
+            # its rulings; it is read through the same-shape no-discrepancy branch and the check
+            # discloses the unnamed request (``semantic_missing_items_rejected``).
+            fields.pop("missing_for_assessment", None)
+            if fields.get("conclusion") == "insufficient_packet":
+                fields["conclusion"] = "no_material_discrepancy"
+                unnamed = True
+        body = fields
+        if unnamed:
+            # Classify a rejection against the shape actually validated, so the absent list
+            # itself is never reported as the failure.
+            source = {**cast(dict[str, JsonValue], parsed), "judgment": body} if envelope else body
     if envelope:
         try:
             model = _PROVIDER_JUDGMENT_ENVELOPE_ADAPTER.validate_python(
@@ -970,7 +992,11 @@ def normalize_judgment(parsed: JsonValue) -> SemanticJudgment:
         else ()
     )
     return SemanticJudgment(
-        model.conclusion, challenges, verdicts, dropped, missing_for_assessment=missing
+        "insufficient_packet" if unnamed else model.conclusion,
+        challenges,
+        verdicts,
+        dropped,
+        missing_for_assessment=missing,
     )
 
 

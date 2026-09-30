@@ -503,7 +503,12 @@ def _captured_refs(
     )
 
 
-def _build(ledger: _Ledger, selection: ReviewSelectionPolicy | None = None) -> SemanticCase:
+def _build(
+    ledger: _Ledger,
+    selection: ReviewSelectionPolicy | None = None,
+    *,
+    prepared_byte_ceiling: int | None = None,
+) -> SemanticCase:
     return build_semantic_case(
         case_id="cas_10000000-0000-4000-8000-000000000001",
         frozen_case=ledger.case,
@@ -516,6 +521,7 @@ def _build(ledger: _Ledger, selection: ReviewSelectionPolicy | None = None) -> S
         policy_version="1",
         captured_content=ledger.captured,
         captured_content_scope=ledger.scope,
+        prepared_byte_ceiling=prepared_byte_ceiling,
     )
 
 
@@ -566,16 +572,15 @@ def test_reserved_room_carries_newest_hunk_per_path_and_latest_run_per_command(
         # Expanded carries exact command text; a reserved run's command travels beside it.
         *(str(ledger.run_actions[ref]) for ref in reserved_runs),
     }
-    # Reserved room comes before any unlinked tool output.
-    first_output = min(
-        index
-        for index, ref in enumerate(selected_sources)
-        if ref in {str(r) for r in ledger.outputs}
-    )
-    assert set(selected_sources[:first_output]) == reserved
-    # The rest of the slots go to the newest captured output, never to an older duplicate run.
-    newest_outputs = {str(ref) for ref in ledger.outputs[-(16 - len(reserved)) :]}
-    assert set(selected_sources[first_output:]) == newest_outputs
+    # Reserved room comes first.
+    assert set(selected_sources[: len(reserved)]) == reserved
+    # Older hunks of a changed path are still code under review (a later hunk elsewhere in the
+    # file leaves them in place): they follow the reserved room, marked, ahead of tool output.
+    newest_edits = {str(ref) for ref in ledger.newest_edit_for_path.values()}
+    older_hunks = {str(ref) for ref in ledger.edit_path} - newest_edits
+    rest = selected_sources[len(reserved) :]
+    assert rest and set(rest) <= older_hunks
+    assert all(items[f"excerpt-{ref}"].superseded_by for ref in rest)
     # One item per slot: every excerpt is one recorded source, never a concatenation.
     assert len(set(selected_sources)) == len(selected_sources)
 
@@ -909,3 +914,101 @@ def test_next_packet_shows_the_prior_request_and_carries_the_item_supplied_since
     # The supplied run itself travels in the reserved room, marked as the latest of its command.
     assert rows[f"excerpt-{latest_run}"]["latest_for"] == "command"
     assert "prior-missing-for-assessment" in semantic.packet.timeline_item_ids
+
+
+def test_older_hunks_of_a_changed_path_are_not_starved_by_tool_output() -> None:
+    """Captured edits are hunks: an older Edit of a file stays code under review (#883 rule)."""
+
+    for host in ("codex", "claude", "cursor"):
+        ledger = _ledger(host, outputs=20, edits_per_path=2)
+        semantic = _build(ledger)
+        items = {item.item_id: item for item in semantic.items}
+        diffs = [
+            items[row.excerpt_item_id]
+            for row in semantic.packet.targeted_excerpts
+            if items[row.excerpt_item_id].source_kind == "diff"
+        ]
+        assert len(diffs) == len(ledger.edit_path), host
+
+
+def test_a_runs_own_output_is_never_superseded_by_its_own_failure_summary() -> None:
+    evidence_ref, result_ref, action_ref = evd(11), res(12), act(10)
+    case = make_case(
+        claims={clm(1): record(ClaimRecordedPayload(clm(1), ClaimKind.COMPLETION, "done", ()), 3)},
+        actions={
+            action_ref: record(
+                ActionRecordedPayload(action_ref, ActionKind.COMMAND, "Run", command="pytest -q"),
+                10,
+            )
+        },
+        evidence={
+            evidence_ref: evidence_record(
+                EvidenceRecordedPayload(
+                    evidence_ref,
+                    EvidenceKind.TEST_RESULT,
+                    EvidenceImmutability.METADATA_ONLY,
+                    timestamp_from_string("2026-09-27T00:00:00.000Z"),
+                    description="E KeyError\n1 failed in 0.2s",
+                ),
+                11,
+            )
+        },
+        results={
+            result_ref: record(
+                ResultRecordedPayload(
+                    result_ref,
+                    action_ref,
+                    ResultOutcome.FAILURE,
+                    1,
+                    evidence_refs=(evidence_ref,),
+                    summary="pytest failed: KeyError",
+                ),
+                12,
+            )
+        },
+        extra_refs=(clm(1),),
+    )
+    semantic = build_semantic_case(
+        case_id="cas_10000000-0000-4000-8000-000000000001",
+        frozen_case=case,
+        dependency_digest="sha256:" + "b" * 64,
+        findings=(),
+        review_context_profile=ReviewContextProfile.EXPANDED,
+        review_selection=ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED),
+        policy_id="pvy_10000000-0000-4000-8000-000000000001",
+        policy_version="1",
+    )
+    items = {item.item_id: item for item in semantic.items}
+    assert items[f"excerpt-{evidence_ref}"].superseded_by == ()
+    assert items[f"excerpt-{evidence_ref}"].latest_for == "command"
+    assert items[f"excerpt-fail-{result_ref}"].latest_for == "command"
+
+
+def test_excerpt_selection_plans_below_the_owner_channel_ceiling_when_it_is_narrower() -> None:
+    """An owner byte or token ceiling below the schema maximum drops excerpts, not the review.
+
+    The gateway blocks a prepared packet over the policy's own ``max_bytes`` (or ``max_tokens``
+    at four bytes per token); planning against the narrower ceiling keeps the reserved room and
+    discloses the rest as ``content_unselected`` instead of a whole-review policy denial.
+    """
+
+    def large(index: int) -> str:
+        return f"out {index}\n" + "x" * 6_000
+
+    ledger = _ledger("codex", outputs=8, edits_per_path=1, output_text=large)
+    wide = _build(ledger)
+    wide_bytes = len(semantic_case_to_prepared_payload(wide, {item.item_id for item in wide.items}))
+    ceiling = wide_bytes - 3 * 6_000
+    narrow = _build(ledger, prepared_byte_ceiling=ceiling)
+    prepared = semantic_case_to_prepared_payload(narrow, {item.item_id for item in narrow.items})
+    assert len(prepared) <= ceiling
+    assert "content_unselected" in narrow.packet.coverage.known_gaps
+
+    def excerpt_bytes(case: SemanticCase) -> int:
+        return sum(item.content_bytes for item in case.items if item.section == "excerpt")
+
+    assert excerpt_bytes(narrow) < excerpt_bytes(wide)
+    selected = {item.source_ref for item in narrow.items if item.section == "excerpt"}
+    assert {str(ref) for ref in ledger.newest_edit_for_path.values()} <= selected
+    with pytest.raises(ValueError, match="semantic_case_prepared_ceiling_invalid"):
+        _build(ledger, prepared_byte_ceiling=0)

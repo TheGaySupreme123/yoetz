@@ -29,6 +29,10 @@ from yoetz.domain.receipts import (
     SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
     SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
     SEMANTIC_CHALLENGES_REJECTED_GAP,
+    SEMANTIC_MISSING_AGENT_SUPPLIABLE_GAP,
+    SEMANTIC_MISSING_ALREADY_SUPPLIED_GAP,
+    SEMANTIC_MISSING_ITEMS_REJECTED_GAP,
+    SEMANTIC_MISSING_UNAVAILABLE_GAP,
     SEMANTIC_PACKET_INSUFFICIENT_GAP,
     SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
     SEMANTIC_PRIOR_VERDICTS_UNSUPPORTED_GAP,
@@ -58,6 +62,17 @@ __all__ = [
 
 IssueKey = tuple[object, ...]
 
+# ``insufficient_packet`` and the named-missing-item disclosures that only ever ride beside it
+# (issue #907). They describe one whole-packet answer, so they tolerate and veto together.
+_INSUFFICIENT_PACKET_GAPS: Final = frozenset(
+    {
+        SEMANTIC_PACKET_INSUFFICIENT_GAP,
+        SEMANTIC_MISSING_AGENT_SUPPLIABLE_GAP,
+        SEMANTIC_MISSING_ALREADY_SUPPLIED_GAP,
+        SEMANTIC_MISSING_ITEMS_REJECTED_GAP,
+        SEMANTIC_MISSING_UNAVAILABLE_GAP,
+    }
+)
 # Coverage gaps that describe only the AI-powered review's own absence or weakness. A
 # local finding is proven absent by the local pack that owns it, so these gaps
 # do not weaken that proof; for an AI-powered finding they do, because the AI-powered review is the
@@ -72,7 +87,7 @@ _SEMANTIC_ONLY_GAPS: Final = frozenset(
         OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
         OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP,
         SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP,
-        SEMANTIC_PACKET_INSUFFICIENT_GAP,
+        *_INSUFFICIENT_PACKET_GAPS,
         SEMANTIC_CHALLENGES_REJECTED_GAP,
         SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
         SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
@@ -401,7 +416,7 @@ def _prior_verdict_effect(
     if verdict is None or verdict == "withdrawn":
         return False, (), frozenset()
     if verdict == "fixed":
-        return True, (), frozenset({SEMANTIC_PACKET_INSUFFICIENT_GAP})
+        return True, (), _INSUFFICIENT_PACKET_GAPS
     return False, (f"reviewer_verdict_{verdict}",), frozenset()
 
 

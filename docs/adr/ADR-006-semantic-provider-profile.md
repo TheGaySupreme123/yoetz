@@ -885,18 +885,26 @@ read as `fixed`.
 
 Decision: within the owner-approved count and byte budget, the packet reserves room for the current
 diff (newest captured edit per changed path), then the latest output per identified verification
-command (keeping the last failure beside a later pass), then repair evidence; everything else
-follows by recency, then link class; superseded hunks and runs come last and are marked
-`superseded_by`. Items travel in recording order with `occurred_order` (`review-packet-case/2`).
-Excerpts honour the approved `max_excerpt_bytes` rather than the 4 KiB structural clip (open
-question 3); long output keeps head and tail, oversized structured prose is clipped rather than
-digest-replaced, and selection plans below the channel byte ceiling's schema maximum on the exact
-prepared document. One excerpt holds one recorded source or one part of one capture; the 16-slot
-count and the privacy-policy schema are unchanged (Phase 1b lifts the count).
+command (keeping the last failure beside a later pass), then repair evidence, then older hunks of a
+changed path; everything else follows by recency, then link class; superseded runs come last.
+Older hunks and runs are marked `superseded_by`. Deviation from the first Phase 1a cut, which
+ranked older hunks last: a captured edit is a hunk, so an older hunk of another region is often
+still current code, and ranking it below tool output would regress #883's diffs-first rule; the
+reviewer instruction says so rather than telling the reviewer to ignore superseded lines. A run is
+one recorded result, so its output and its failure summary never supersede each other. Items
+travel in recording order with `occurred_order` (`review-packet-case/2`). Excerpts honour the
+approved `max_excerpt_bytes` rather than the 4 KiB structural clip (open question 3); long output
+keeps head and tail, oversized structured prose is clipped rather than digest-replaced, and
+selection plans on the exact prepared document below the effective channel ceiling (the schema
+maximum narrowed by the policy's own `max_bytes` / `max_tokens`). One excerpt holds one recorded
+source or one part of one capture; the 16-slot count and the privacy-policy schema are unchanged
+(Phase 1b lifts the count).
 
 `insufficient_packet` must name what was missing (`provider-judgment` 1.1.0,
-`missing_for_assessment`). Yoetz fences targets to the case, drops an already-answered request the
-reviewer repeats without citing the new material, classifies each item as `agent_suppliable` or
+`missing_for_assessment`); a reply that names nothing is read backward, keeping its conclusion and
+#905 rulings, and discloses `semantic_missing_items_rejected`. Yoetz fences targets to the case,
+drops a request the reviewer repeats without citing what the agent published since (hook-captured
+tool output never counts as supplied), classifies each item as `agent_suppliable` or
 `structurally_unavailable_on_this_host`, records the structural items as the optional
 `missing_for_assessment` field of the unreleased `check_recorded` 1.3.0 (extended in place, only
 beside `insufficient_packet`) and shows the prior request with `supplied_since` refs to the next

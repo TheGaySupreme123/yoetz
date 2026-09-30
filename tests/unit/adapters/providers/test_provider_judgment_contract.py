@@ -609,16 +609,51 @@ def test_rejected_judgments_carry_one_closed_validation_stage(
 # --- Issue #907: an unassessable packet must name what was missing -----------------------------
 
 
-def test_insufficient_packet_without_missing_items_is_rejected_by_schema_and_consumer() -> None:
+def test_insufficient_packet_naming_nothing_is_read_backward_not_rejected() -> None:
+    """The request schema requires the list; a 1.0.0-shape reply still keeps its rulings.
+
+    A local model or prompt-only host may answer ``insufficient_packet`` without naming what was
+    missing. Rejecting the whole judgment would also discard #905's rulings, so the consumer reads
+    it with no items and the check discloses the unnamed request.
+    """
+
+    ruling: dict[str, JsonValue] = {
+        "finding_id": "fnd_866db2dd-0000-4000-8000-000000000001",
+        "verdict": "still_present",
+        "cited_refs": [_REF_C],
+        "note": "The failing lookup still has no regression result.",
+    }
     bare = _judgment("insufficient_packet")
     del bare["missing_for_assessment"]
-    empty = _judgment("insufficient_packet", missing=[])
+    bare["prior_finding_verdicts"] = [ruling]
+    empty = {**_judgment("insufficient_packet", missing=[]), "prior_finding_verdicts": [ruling]}
     for value in (bare, empty):
         assert not _provider_schema_accepts(cast(JsonValue, value))
-        with pytest.raises(JudgmentValidationError) as info:
-            normalize_judgment(cast(JsonValue, value))
-        assert info.value.stage == "conclusion_mismatch"
+        for parsed in (value, {"judgment": value}):
+            judgment = normalize_judgment(cast(JsonValue, parsed))
+            assert judgment.conclusion == "insufficient_packet"
+            assert judgment.missing_for_assessment == ()
+            assert [item.verdict for item in judgment.prior_finding_verdicts] == ["still_present"]
     assert _provider_schema_accepts(cast(JsonValue, _judgment("insufficient_packet")))
+    # Reading it backward never admits what the insufficient branch forbids.
+    with pytest.raises(JudgmentValidationError) as info:
+        normalize_judgment(
+            cast(JsonValue, {**bare, "reviewer_challenges": [cast(JsonValue, _challenge())]})
+        )
+    assert info.value.stage == "conclusion_mismatch"
+
+
+def test_an_empty_missing_list_beside_another_conclusion_is_the_absent_list() -> None:
+    for conclusion, challenges in (
+        ("no_material_discrepancy", []),
+        ("challenges_returned", [_challenge()]),
+    ):
+        judgment = normalize_judgment(
+            cast(JsonValue, _judgment(conclusion, challenges, missing=[]))
+        )
+        assert judgment.conclusion == conclusion
+        assert len(judgment.challenges) == len(challenges)
+        assert judgment.missing_for_assessment == ()
 
 
 def test_only_insufficient_packet_may_name_missing_items() -> None:

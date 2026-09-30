@@ -34,6 +34,7 @@ from yoetz.kernel.projections import ProjectionState, projection_snapshot
 from yoetz.kernel.reducers import replay
 from yoetz.ports.ledger import CheckCommitResult, FrozenCase
 from yoetz.ports.semantic import (
+    MissingForAssessment,
     PriorFindingVerdict,
     ReviewerChallenge,
     SamplingParams,
@@ -350,10 +351,14 @@ def _rule_first_finding(
         )
         newest = max(projection.results.items(), key=lambda pair: pair[1].source_frontier)[0]
         refs = (str(newest),) if cite_repair else ()
+        # provider-judgment 1.1.0 requires every insufficient_packet to name what was missing.
         return SemanticJudgment(
             "insufficient_packet",
             (),
             (PriorFindingVerdict(str(finding), verdict, refs),),  # type: ignore[arg-type]
+            missing_for_assessment=(
+                MissingForAssessment("verification_output", (str(newest),), "run output absent"),
+            ),
         )
 
     return answer

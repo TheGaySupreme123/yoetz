@@ -1269,3 +1269,45 @@ def test_a_withdrawn_ruling_accepts_a_rejection_without_lifting_the_packet_veto(
     assert "semantic_packet_insufficient" in resolution_blockers(
         finding, 4, unassessable, frozenset(), proof_state=_changed_state(unassessable)
     )
+
+
+_NAMED_MISSING_GAPS = (
+    "semantic_missing_agent_suppliable",
+    "semantic_missing_already_supplied",
+    "semantic_missing_items_rejected",
+    "semantic_missing_structurally_unavailable",
+)
+
+
+@pytest.mark.parametrize("gap", _NAMED_MISSING_GAPS)
+def test_named_missing_items_weigh_like_the_insufficient_packet_they_ride_beside(gap: str) -> None:
+    """Issue #907: every 1.1.0 ``insufficient_packet`` names items, adding one of these gaps.
+
+    They describe the same whole-packet answer, so a local issue is still proven absent and a
+    ``fixed`` ruling still resolves its own finding, exactly as without the named items.
+    """
+
+    from yoetz.kernel.finding_resolution import resolution_blockers
+
+    coverage = _coverage(gaps=("semantic_packet_insufficient", gap), semantic=True)
+    assert _resolves(_finding(), _check(semantic=_SEMANTIC_OK, coverage=coverage)) is True
+    assert (
+        _resolves(
+            _finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED),
+            _check(semantic=_SEMANTIC_OK, coverage=coverage),
+        )
+        is False
+    )
+    gapped = _coverage(
+        gaps=("semantic_packet_insufficient", gap), semantic=True, freshness=LedgerFreshness.PARTIAL
+    )
+    repaired = _finding(1, origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
+    check = _ruled(
+        _check(semantic=_SEMANTIC_OK, coverage=gapped),
+        (1, "fixed"),
+        conclusion="insufficient_packet",
+    )
+    assert (
+        resolution_blockers(repaired, 4, check, frozenset(), proof_state=_changed_state(check))
+        == ()
+    )

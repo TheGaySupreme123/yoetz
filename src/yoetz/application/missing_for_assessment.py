@@ -15,7 +15,13 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Final
 
-from yoetz.domain.events import MissingForAssessmentItem
+from yoetz.domain.events import (
+    ActionRecordedPayload,
+    EvidenceDigestProvenance,
+    EvidenceRecordedPayload,
+    MissingForAssessmentItem,
+    ResultRecordedPayload,
+)
 from yoetz.domain.findings import Finding
 from yoetz.domain.privacy import ReviewSelectionPolicy
 from yoetz.domain.receipts import (
@@ -125,6 +131,10 @@ def supplied_since(
     ):
         for ref, row in rows.items():
             if row.source_frontier > after and row.payload is not None and not row.redacted:
+                if _hook_observed(projection, row.payload):
+                    # Hook capture records every tool call; it is never the agent answering a
+                    # named request, so it must not turn a still-missing item into "supplied".
+                    continue
                 recorded[family].append((row.source_frontier, str(ref)))
     for row in projection.plans.values():
         if row.source_frontier > after and row.payload is not None and not row.redacted:
@@ -147,6 +157,35 @@ def supplied_since(
             tuple(sorted((ref for _order, ref in candidates[:_MAX_SUPPLIED_REFS]), key=str.encode))
         )
     return tuple(answered)
+
+
+def _hook_observed_action(payload: ActionRecordedPayload) -> bool:
+    # Hook materialization writes exactly this shape: an "Observed ..." description and no
+    # command bytes (none, or an ``omitted:`` digest placeholder). The projection keeps no
+    # authorship, so the payload shape is the structural marker.
+    return payload.description.startswith("Observed ") and (
+        payload.command is None or payload.command.startswith("omitted:")
+    )
+
+
+def _hook_observed(projection: ProjectionState, payload: object) -> bool:
+    """True for a record the harness hooks captured rather than one the agent published."""
+
+    if type(payload) is EvidenceRecordedPayload:
+        return (
+            payload.digest_binding is not None
+            and payload.digest_binding.provenance is EvidenceDigestProvenance.OBSERVATION_CAPTURED
+        )
+    if type(payload) is ActionRecordedPayload:
+        return _hook_observed_action(payload)
+    if type(payload) is ResultRecordedPayload:
+        action = projection.actions.get(payload.action_id)
+        return (
+            action is not None
+            and action.payload is not None
+            and _hook_observed_action(action.payload)
+        )
+    return False
 
 
 def _redacted_refs(projection: ProjectionState) -> frozenset[str]:
@@ -176,13 +215,18 @@ def review_missing_for_assessment(
 
     A target outside the case is dropped (``semantic_missing_items_rejected``); an item whose
     every target was outside is dropped whole, because the reviewer named nothing the packet held.
+    An ``insufficient_packet`` that named no item at all discloses the same gap.
     An item the prior review already requested and the agent answered since is dropped unless
     the reviewer cites that newer material (``semantic_missing_already_supplied``), so the same
     request cannot loop. Every kept item is recorded with Yoetz's own availability class.
     """
 
-    if judgment.conclusion != "insufficient_packet" or not judgment.missing_for_assessment:
+    if judgment.conclusion != "insufficient_packet":
         return MissingItemsReview((), frozenset())
+    if not judgment.missing_for_assessment:
+        # A reply in the 1.0.0 shape (a local model or prompt-only host) named nothing: the agent
+        # cannot tell what to supply, so the check says so instead of reading as a named request.
+        return MissingItemsReview((), frozenset({SEMANTIC_MISSING_ITEMS_REJECTED_GAP}))
     allowed = frozenset(str(ref) for ref in case.allowed_ids) | frozenset(
         str(item.finding_id) for item in deterministic
     )

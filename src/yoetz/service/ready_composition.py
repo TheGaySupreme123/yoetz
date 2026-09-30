@@ -40,7 +40,10 @@ from yoetz.adapters.integrations.observation_local import (
 from yoetz.adapters.objects.encrypted_files import EncryptedFilesObjectStore
 from yoetz.adapters.privacy.catalog import CatalogPrivacyAudit, CatalogPrivacyPolicyStore
 from yoetz.adapters.privacy.gateway import PolicyEnforcingOutboundGateway
-from yoetz.adapters.privacy.local_enforcer import LocalPrivacyEnforcer
+from yoetz.adapters.privacy.local_enforcer import (
+    EGRESS_BYTES_PER_TOKEN_ESTIMATE,
+    LocalPrivacyEnforcer,
+)
 from yoetz.adapters.providers.codex_app_server import (
     CodexAppServerProfile,
     codex_binding_from_config,
@@ -2476,6 +2479,29 @@ def _bootstrap_seed_digest(installation_id: str, *, revision: str | None) -> str
     return canonical_digest(payload)
 
 
+def _semantic_prepared_byte_ceiling(policy: PrivacyPolicy) -> int | None:
+    """The effective AI-powered review channel ceiling, in prepared-payload bytes (issue #907).
+
+    The gateway blocks a prepared review packet over the channel's ``max_bytes`` or over its
+    ``max_tokens`` estimated at four bytes per token; the case builder plans below the narrower
+    of the two so a narrower owner ceiling drops the lowest-ranked excerpts instead of the whole
+    review. ``None`` (zero means unset) leaves the schema maximum.
+    """
+
+    llm = next(
+        (item for item in policy.channel_policies if item.channel is EgressChannel.LLM_INFERENCE),
+        None,
+    )
+    if llm is None:
+        return None
+    limits = [
+        limit
+        for limit in (llm.max_bytes, llm.max_tokens * EGRESS_BYTES_PER_TOKEN_ESTIMATE)
+        if limit > 0
+    ]
+    return min(limits) if limits else None
+
+
 def _disabled_channel_row(channel: EgressChannel) -> ChannelPolicy:
     return ChannelPolicy(
         channel=channel,
@@ -4353,6 +4379,7 @@ def _privacy_gated_semantic_evaluator(
                     captured_content=captured_content,
                     captured_content_scope=captured_content_scope,
                     captured_content_gaps=captured_content_gaps,
+                    prepared_byte_ceiling=_semantic_prepared_byte_ceiling(policy),
                 )
             except LineageSemanticCapacityExceeded:
                 # Same pre-dispatch contract as an envelope that cannot be reduced: local

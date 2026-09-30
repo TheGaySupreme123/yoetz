@@ -1753,6 +1753,8 @@ AI-powered review absence/weakness codes
 semantic_relevance_review_not_run|optional_semantic_review_blocked_by_policy|
 optional_semantic_review_registration_drift|
 semantic_review_context_withheld|semantic_challenges_rejected|
+semantic_missing_agent_suppliable|semantic_missing_structurally_unavailable|
+semantic_missing_already_supplied|semantic_missing_items_rejected|
 semantic_case_content_over_item_limit|semantic_case_finding_refs_over_limit|
 semantic_prior_findings_over_limit|semantic_prior_verdicts_unsupported`) plus the evidence-strength
 codes
@@ -6841,38 +6843,51 @@ marks describe recording order only; they never claim what the working tree now 
 Excerpt selection stays inside the approved count and byte budget. Reserved room comes first: the
 current diff, then the latest output per identified verification command (with the last failure
 beside a later pass, and the reserved run's exact command when the selection carries command
-text), then prior-finding repair evidence (#898); everything else follows by recency, then link
-class, and superseded hunks and runs come last. A command identity is the digest of the command a
+text), then prior-finding repair evidence (#898), then older hunks of a changed path (a captured
+edit is a hunk, so an older one may still be current code; it is marked `superseded_by`);
+everything else follows by recency, then link class, and superseded runs come last. A run is one
+recorded result, so a run's output and its failure summary are never marked as superseding each
+other. A command identity is the digest of the command a
 recorded result answers; captured tool output is unidentified until #910. The task statement
 (#908) is its own section and never competes for an excerpt slot. Each excerpt holds one recorded
 source or one part of one capture. Excerpts honour the approved `max_excerpt_bytes` instead of the
 4 KiB structural item clip; long output keeps its head and tail with a marked elision; an
 oversized plan, obligation, claim or decision payload has its longest prose clipped the same way
 and falls back to `yoetz.bounded-content-omission/1` only when clipping cannot fit.
-`semantic_case_content_over_item_limit` still names every clip. The builder measures the exact
+A clipped structural payload is named by `semantic_case_content_over_item_limit`; an excerpt
+clipped at `max_excerpt_bytes` is named by `truncated_payload`. The builder measures the exact
 prepared document and drops lowest-ranked excerpts (`not_selected`, `content_unselected`) to stay
-below the channel byte ceiling's schema maximum.
+below the effective channel ceiling: the schema maximum, narrowed by the effective policy's own
+`llm_inference` `max_bytes` and `max_tokens` (at the gateway's four bytes per token), so a narrower
+owner ceiling drops excerpts instead of denying the whole review.
 
 `provider-judgment` 1.1.0 requires `missing_for_assessment` (1–8 items of `kind`, up to four
 `target_refs` from `citable_refs`, and a short `reason`) on `insufficient_packet` and forbids it
-elsewhere; 1.0.0 stays frozen. The check fence drops targets outside the frozen case
-(`semantic_missing_items_rejected`) and drops an item whose earlier request was answered by
-material recorded since unless the reviewer cites that material
-(`semantic_missing_already_supplied`). Yoetz classifies each kept item as `agent_suppliable` or
-`structurally_unavailable_on_this_host` (a kind the effective review selection or channel can
-never carry, or a redacted target), adding `semantic_missing_agent_suppliable` and
-`semantic_missing_structurally_unavailable`. These are check limitations, never findings.
+elsewhere; 1.0.0 stays frozen. Like the rulings, the list is read backward: a reply that omits it
+(or sends it empty) beside another conclusion reads as absent, and an `insufficient_packet` that
+names nothing (a local model or prompt-only host) keeps its conclusion and rulings with no items and
+discloses `semantic_missing_items_rejected`. A malformed item still rejects the reply. The check
+fence drops targets outside the frozen case (`semantic_missing_items_rejected`) and drops an item
+whose earlier request was answered by material recorded since unless the reviewer cites that
+material (`semantic_missing_already_supplied`; only agent-published material answers a request,
+never hook-captured tool output). Yoetz classifies each kept item as `agent_suppliable` or
+`structurally_unavailable_on_this_host` (a kind the effective review selection or channel can never
+carry, or a redacted target), adding `semantic_missing_agent_suppliable` and
+`semantic_missing_structurally_unavailable`. These are check limitations, never findings, and weigh
+on finding resolution exactly like the `semantic_packet_insufficient` they ride beside: a local
+issue is still proven absent, and a `fixed` ruling (#905) still resolves its own finding.
 
 The unreleased `check_recorded` 1.3.0 is extended in place with the optional
-`missing_for_assessment` (kind, target refs, availability; no reviewer prose; 1–8 items, only
-beside `insufficient_packet`), present only when at least one item survives, beside issue #905's
-optional `prior_finding_verdicts`; a check with neither keeps its bytes, and 1.0–1.2 keep their
-shapes. `provider-judgment` 1.1.0 likewise carries both lists. The projection keeps the latest request as `pending_missing_for_assessment` until an assessed
-review clears it; snapshots omit the key when absent. The next packet carries it as the timeline
-item `prior-missing-for-assessment` with `supplied_since` refs. The check result's optional
-`missing_for_assessment` (check-result 1.3.0, unreleased, additive) and the MCP and CLI check text
-list each item and its availability; status, TUI and receipts carry the gap codes. The reviewer's
-reason stays in the encrypted durable semantic response object.
+`missing_for_assessment` (kind, target refs, availability; no reviewer prose; 1–8 items, only beside
+`insufficient_packet`), present only when at least one item survives, beside issue #905's optional
+`prior_finding_verdicts`; a check with neither keeps its bytes, and 1.0–1.2 keep their shapes.
+`provider-judgment` 1.1.0 likewise carries both lists. The projection keeps the latest request as
+`pending_missing_for_assessment` until an assessed review clears it; snapshots omit the key when
+absent. The next packet carries it as the timeline item `prior-missing-for-assessment` with
+`supplied_since` refs. The check result's optional `missing_for_assessment` (check-result 1.3.0,
+unreleased, additive) and the MCP and CLI check text list each item and its availability; status,
+TUI and receipts carry the gap codes. The reviewer's reason stays in the encrypted durable semantic
+response object.
 
 `resolution_attempt_required` is the `respond` rejection for an `acknowledged` response to a
 `semantic_model_derived` finding whose `evidence_refs` cite no evidence or result recorded after
