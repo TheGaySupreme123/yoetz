@@ -669,10 +669,11 @@ into the unreleased privacy-policy wire 1.2.0 (the #908 version), so one re-appr
 - The policy stays authoritative at egress. A prepared review packet with more `excerpt` rows,
   more bytes in one excerpt, or more excerpt bytes in total than the effective policy approved is
   `blocked_by_policy` / `policy_denied` and is never trimmed to fit. An unreadable packet is refused
-  the same way. Resuming a stored proposal rechecks those limits and the channel `max_bytes`
-  against the policy in force at resume.
+  the same way. Resuming a stored proposal rechecks those limits and the channel `max_bytes` and
+  `max_tokens` against the policy in force at resume.
 - More excerpts must not turn a runnable review into a refused one. Before egress, the case is
-  planned below the channel ceiling (`max_bytes`, and `max_tokens` at the egress estimate). If
+  planned below the channel ceiling (`max_bytes`, `max_tokens` at the egress estimate, and never
+  above the 262,144-byte disclosure bound, even when a ceiling is unset). If
   its prepared packet would exceed it, the case is rebuilt with a smaller excerpt byte budget: a
   narrowing, so it needs no consent. The dropped excerpts are disclosed as `content_unselected`.
   There are at most four rebuilds, the result is deterministic so a recovered review keeps its

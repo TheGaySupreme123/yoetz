@@ -6993,14 +6993,16 @@ plan. Names and contracts:
 - The `semantic_case_built` counters add `semantic_excerpt_count_limit` and
   `semantic_excerpt_byte_limit` (the limits the case was built with) and
   `semantic_excerpt_ceiling_rounds`.
-- `service/semantic_ceiling.py`: `channel_prepared_limit(policy)` is the narrower of the LLM
-  channel's `max_bytes` and `max_tokens × 4` (zero is unset). `plan_under_channel_ceiling` rebuilds
+- `service/semantic_ceiling.py`: `channel_prepared_limit(policy)` is the narrowest of the LLM
+  channel's `max_bytes`, `max_tokens × 4` (zero is unset) and `MAX_MINIMIZED_DISCLOSURE_BYTES`
+  (`ports/privacy.py`, 262,144), so an unset or high ceiling still plans below what egress can
+  prepare. `plan_under_channel_ceiling` rebuilds
   an over-ceiling case with a smaller `max_total_excerpt_bytes` (and `max_excerpt_bytes`), or no
   excerpts. It stops after at most `MAX_CEILING_PLANNING_ROUNDS` (4) rebuilds, and every rebuild
   adds `content_unselected`. It is deterministic, so a recovered case keeps its digest.
-- Resume (`PrivacyCoordinator._resume_admitted`) denies a stored `semantic-review` proposal outside
-  the current policy's excerpt limits or LLM `max_bytes` with `blocked_by_policy` /
-  `policy_denied` before dispatch.
+- Resume (`PrivacyCoordinator._resume_admitted`) denies a stored `semantic-review` proposal,
+  external or local-model, outside the current policy's excerpt limits or LLM `max_bytes` /
+  `max_tokens` with `blocked_by_policy` / `policy_denied` before dispatch.
 - TUI: `PrivacyPosture.recipe_outdated` is true when the approved selection is an earlier version
   of its recipe. The privacy screen then offers the newer recipe instead of saying "already on the
   recommended privacy policy".
