@@ -60,8 +60,10 @@ from yoetz.domain.receipts import (
     CHECK_TIME_CHANGE_REDACTED_GAP,
     CHECK_TIME_CHANGE_TRUNCATED_GAP,
     CHECK_TIME_CHANGE_UNAVAILABLE_GAP,
+    CHECK_TIME_CHANGE_UNAVAILABLE_REASONS,
     SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
     SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
+    check_time_change_unavailable_reason_gap,
 )
 from yoetz.domain.values import (
     SubjectStateRelation,
@@ -1254,12 +1256,15 @@ def build_semantic_case(
     captured_content_gaps: Sequence[str] = (),
     check_time_change: CheckTimeChange | None = None,
     check_time_change_unavailable: bool = False,
+    check_time_change_unavailable_reason: str | None = None,
 ) -> SemanticCase:
     """Build one pre-egress AI-powered review case from frozen authority only.
 
     ``check_time_change`` is the service's own capture of the repository when this check ran
     (ADR-031); ``check_time_change_unavailable`` records that the recipe selected it but the
-    service could not capture it. Both are ignored when the recipe selects no diff excerpts.
+    service could not capture it, and ``check_time_change_unavailable_reason`` the closed code
+    for why, disclosed beside the generic gap. All are ignored when the recipe selects no diff
+    excerpts.
     """
 
     if type(frozen_case) is not DeterministicCase:
@@ -1299,6 +1304,11 @@ def build_semantic_case(
         check_time_change_unavailable and check_time_change is not None
     ):
         raise ValueError("semantic_case_check_change_invalid")
+    if check_time_change_unavailable_reason is not None and (
+        not check_time_change_unavailable
+        or check_time_change_unavailable_reason not in CHECK_TIME_CHANGE_UNAVAILABLE_REASONS
+    ):
+        raise ValueError("semantic_case_check_change_invalid")
     if review_context_profile is not ReviewContextProfile.CUSTOM:
         expected = ReviewSelectionPolicy.for_profile(review_context_profile)
         if review_selection != expected:
@@ -1319,6 +1329,7 @@ def build_semantic_case(
     if not check_change_selected:
         check_time_change = None
         check_time_change_unavailable = False
+        check_time_change_unavailable_reason = None
     frontier_refs = frozenset(str(ref) for ref in frozen_case.allowed_ids)
     local_check_refs = frozenset(str(item.finding_id) for item in findings)
     # A recheck re-derives a live recorded finding under its recorded id (issue #186), so the same
@@ -1871,6 +1882,10 @@ def build_semantic_case(
     check_change_admitted = 0
     if check_time_change_unavailable:
         capture_gap_set.add(CHECK_TIME_CHANGE_UNAVAILABLE_GAP)
+        if check_time_change_unavailable_reason is not None:
+            capture_gap_set.add(
+                check_time_change_unavailable_reason_gap(check_time_change_unavailable_reason)
+            )
     if check_time_change is not None:
         change = check_time_change.capture
         if change.base in {"head", "first_check"}:
@@ -2415,6 +2430,11 @@ def build_semantic_case(
             # Captured, but nothing reached the packet: no linkable subject, or a recipe budget
             # too small for one readable part.
             capture_gap_set.add(CHECK_TIME_CHANGE_UNAVAILABLE_GAP)
+            capture_gap_set.add(
+                check_time_change_unavailable_reason_gap(
+                    "no_linked_subject" if not check_change_links else "no_packet_room"
+                )
+            )
         elif check_change_admitted < len(check_change_parts):
             capture_gap_set.add(CHECK_TIME_CHANGE_TRUNCATED_GAP)
 
@@ -2706,7 +2726,14 @@ def build_semantic_case(
             "truncated": check_time_change.capture.truncated,
         }
     elif check_time_change_unavailable:
-        check_change_binding["check_time_change"] = {"unavailable": True}
+        check_change_binding["check_time_change"] = {
+            "unavailable": True,
+            **(
+                {}
+                if check_time_change_unavailable_reason is None
+                else {"reason": check_time_change_unavailable_reason}
+            ),
+        }
     # Bind assessments/omissions/packet lists into the digest so provenance covers the full case.
     case_digest = canonical_digest(
         cast(

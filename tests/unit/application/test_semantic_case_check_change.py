@@ -220,6 +220,9 @@ def test_change_without_a_linkable_subject_is_disclosed_unavailable() -> None:
     semantic = _build(make_case(), change=_change())
 
     assert CHECK_TIME_CHANGE_UNAVAILABLE_GAP in semantic.packet.coverage.known_gaps
+    assert "check_time_change_unavailable_no_linked_subject" in (
+        semantic.packet.coverage.known_gaps
+    )
     assert not _change_items(semantic)
 
 
@@ -508,3 +511,47 @@ def test_parts_carried_is_zero_when_the_channel_withholds_repository_excerpts() 
     assert (
         check_time_change_parts_carried(semantic, withheld_categories=("repository_excerpt",)) == 0
     )
+
+
+@pytest.mark.parametrize(
+    "reason", ("unsafe_root", "unsupported_repository", "changed_during_capture", "git_failed")
+)
+def test_unavailable_reason_is_disclosed_beside_the_generic_code_and_bound_to_the_case(
+    reason: str,
+) -> None:
+    case = _case_with_material()
+    generic = _build(case, unavailable=True)
+
+    semantic = build_semantic_case(
+        case_id="cas_10000000-0000-4000-8000-000000000001",
+        frozen_case=case,
+        dependency_digest="sha256:" + "b" * 64,
+        findings=(),
+        review_context_profile=ReviewContextProfile.EXPANDED,
+        review_selection=ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED),
+        policy_id="pvy_10000000-0000-4000-8000-000000000001",
+        policy_version="1",
+        check_time_change_unavailable=True,
+        check_time_change_unavailable_reason=reason,
+    )
+
+    gaps = set(semantic.packet.coverage.known_gaps)
+    assert {CHECK_TIME_CHANGE_UNAVAILABLE_GAP, f"check_time_change_unavailable_{reason}"} <= gaps
+    assert semantic.case_digest != generic.case_digest
+
+
+def test_every_adapter_reason_has_a_closed_sentence() -> None:
+    from yoetz.domain.receipts import (
+        CHECK_TIME_CHANGE_UNAVAILABLE_REASONS,
+        check_time_change_gap_sentence,
+        check_time_change_unavailable_reason_gap,
+    )
+    from yoetz.ports.change_capture import CHANGE_CAPTURE_UNAVAILABLE_REASONS
+
+    assert CHANGE_CAPTURE_UNAVAILABLE_REASONS <= set(CHECK_TIME_CHANGE_UNAVAILABLE_REASONS)
+    for reason in CHECK_TIME_CHANGE_UNAVAILABLE_REASONS:
+        sentence = check_time_change_gap_sentence(check_time_change_unavailable_reason_gap(reason))
+        assert sentence is not None and sentence.isascii() and sentence.endswith(".")
+    assert check_time_change_gap_sentence(CHECK_TIME_CHANGE_UNAVAILABLE_GAP) is None
+    with pytest.raises(ValueError):
+        check_time_change_unavailable_reason_gap("not_a_reason")

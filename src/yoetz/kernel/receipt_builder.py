@@ -53,6 +53,7 @@ from yoetz.domain.receipts import (
     ReceiptSection,
     ReceiptSectionKey,
     ReceiptVersionSlice,
+    check_time_change_gap_sentence,
 )
 from yoetz.domain.values import (
     ClaimId,
@@ -587,7 +588,7 @@ def _select_gaps(context: ReceiptBuildContext) -> tuple[ReceiptGap, ...]:
                 plan_scope.no_obligations_reason.value
                 if gap.code == COMPLETION_SCOPE_DECLARED_NONE_GAP
                 and plan_scope.no_obligations_reason is not None
-                else scope_detail(gap.code)
+                else scope_detail(gap.code) or check_time_change_gap_sentence(gap.code)
             ),
         )
         for gap in sorted(
@@ -1308,6 +1309,11 @@ def _sections(
                 "their individual content was not retained. Summary coverage does not "
                 "establish verification or selection for this check."
             )
+        # Why the check-time change was unavailable (ADR-031): one fixed sentence per closed code.
+        for code in gap_codes:
+            sentence = check_time_change_gap_sentence(code)
+            if sentence is not None:
+                gap_body += " " + sentence
         if "observation_input_loss" in gap_codes:
             gap_body += (
                 " Some native observation inputs could not be retained. This historical "

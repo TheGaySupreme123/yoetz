@@ -24,6 +24,7 @@ from yoetz.domain.events import (
     CheckChangeShownFiles,
 )
 from yoetz.domain.privacy import ReviewSelectionPolicy
+from yoetz.domain.receipts import CHECK_TIME_CHANGE_UNAVAILABLE_REASONS
 from yoetz.observability.logging import (
     record_bounded_event_without_raising,
     record_unexpected_exception_without_raising,
@@ -70,16 +71,22 @@ class CheckChangeOutcome:
 
     ``NOT_OFFERED`` (no change and not unavailable) means no trusted workspace source was bound,
     as for an embedded application without a control session; the case then carries neither the
-    change nor a gap, exactly as before ADR-031.
+    change nor a gap, exactly as before ADR-031. ``reason`` is the closed code for why an
+    unavailable change could not be captured (``None`` for a job frozen before reasons existed).
     """
 
     change: CheckTimeChange | None = None
     unavailable: bool = False
+    reason: str | None = None
 
     def __post_init__(self) -> None:
         if self.change is not None and type(self.change) is not CheckTimeChange:
             raise TypeError("check_change_outcome_invalid")
         if type(self.unavailable) is not bool or (self.unavailable and self.change is not None):
+            raise ValueError("check_change_outcome_invalid")
+        if self.reason is not None and (
+            not self.unavailable or self.reason not in CHECK_TIME_CHANGE_UNAVAILABLE_REASONS
+        ):
             raise ValueError("check_change_outcome_invalid")
 
     @property
@@ -102,6 +109,8 @@ class CheckChangeOutcome:
                 },
                 "schema": "yoetz.check-change-binding/1",
                 "unavailable": self.unavailable,
+                # Frozen with the job so a recovered job rebuilds the same disclosed reason.
+                **({} if self.reason is None else {"reason": self.reason}),
             },
         )
 
@@ -321,7 +330,7 @@ async def capture_check_time_change(
             reason="repository_mismatch",
             request_id=request_id,
         )
-        return CheckChangeOutcome(unavailable=True)
+        return CheckChangeOutcome(unavailable=True, reason="repository_mismatch")
     base = await _load_task_base(runtime, request_id)
     if base is None:
         base = await _pin_first_check_base(runtime, port, source.workspace, clock, request_id)
@@ -338,6 +347,7 @@ async def capture_check_time_change(
             reason=exc.reason,
             request_id=request_id,
         )
+        return CheckChangeOutcome(unavailable=True, reason=exc.reason)
     except Exception as exc:
         record_unexpected_exception_without_raising(
             exc,
@@ -345,7 +355,7 @@ async def capture_check_time_change(
             operation="check_time_change_capture_failed",
             request_id=request_id,
         )
-    return CheckChangeOutcome(unavailable=True)
+    return CheckChangeOutcome(unavailable=True, reason="capture_failed")
 
 
 async def recover_check_time_change(runtime: TaskRuntime, binding: object) -> CheckChangeOutcome:
@@ -354,16 +364,20 @@ async def recover_check_time_change(runtime: TaskRuntime, binding: object) -> Ch
     if type(binding) is not dict:
         raise ValueError("check_change_binding_invalid")
     source = cast(dict[str, object], binding)
-    if set(source) != {"object", "schema", "unavailable"} or (
+    if set(source) - {"reason"} != {"object", "schema", "unavailable"} or (
         source["schema"] != "yoetz.check-change-binding/1"
     ):
         raise ValueError("check_change_binding_invalid")
     unavailable = source["unavailable"]
     pointer = source["object"]
-    if type(unavailable) is not bool:
+    reason = source.get("reason")
+    if type(unavailable) is not bool or (
+        reason is not None
+        and (type(reason) is not str or reason not in CHECK_TIME_CHANGE_UNAVAILABLE_REASONS)
+    ):
         raise ValueError("check_change_binding_invalid")
     if pointer is None:
-        return CheckChangeOutcome(unavailable=unavailable)
+        return CheckChangeOutcome(unavailable=unavailable, reason=reason)
     if unavailable or type(pointer) is not dict:
         raise ValueError("check_change_binding_invalid")
     fields = cast(dict[str, object], pointer)

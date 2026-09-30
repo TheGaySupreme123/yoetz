@@ -4314,6 +4314,7 @@ def _privacy_gated_semantic_evaluator(
                     captured_content_gaps=captured_content_gaps,
                     check_time_change=check_change.change,
                     check_time_change_unavailable=check_change.unavailable,
+                    check_time_change_unavailable_reason=check_change.reason,
                 )
             except LineageSemanticCapacityExceeded:
                 # Same pre-dispatch contract as an envelope that cannot be reduced: local

@@ -9,6 +9,7 @@ from typing import Final, cast
 
 from pydantic import BaseModel
 
+from yoetz.domain.receipts import check_time_change_gap_sentence
 from yoetz.mcp.errors import VALIDATION_REASON_TOKENS
 from yoetz.protocol.canonical import JsonValue, ensure_canonical_value
 from yoetz.protocol.errors import PublicErrorCode, normalize_safe_details
@@ -514,6 +515,15 @@ def summary_for_check(envelope: object) -> str:
         if leftover > 8 and len(directive_text.encode("ascii")) + 1 <= leftover:
             extra += f" {directive_text}"
         suffix += extra
+    # Why the check-time change was unavailable (ADR-031): a fixed sentence per closed code,
+    # kept only when it fits the summary bound.
+    for code in _safe_gap_codes(source):
+        sentence = check_time_change_gap_sentence(code)
+        if sentence is not None:
+            extra = " " + sentence
+            if len((prefix + suffix + extra).encode("ascii")) <= _MAX_SUMMARY_BYTES:
+                suffix += extra
+            break
     clause = _finding_identity_clause(
         source,
         byte_budget=_MAX_SUMMARY_BYTES - len((prefix + suffix).encode("ascii")),

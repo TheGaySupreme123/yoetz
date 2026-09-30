@@ -32,6 +32,7 @@ from yoetz.domain.findings import Finding, FindingKind, FindingOrigin, ResponseD
 from yoetz.domain.receipts import (
     CHECK_TIME_CHANGE_GAPS,
     CHECK_TIME_CHANGE_UNAVAILABLE_GAP,
+    CHECK_TIME_CHANGE_UNAVAILABLE_REASON_GAPS,
     OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
     OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP,
     SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
@@ -737,7 +738,8 @@ def append_resolution_explanation(detail: str, explanation: str) -> str:
 # Codes that imply a check-time change reached the packet in part: without ``unavailable`` they
 # mean parts were carried.
 _CHECK_TIME_CHANGE_CARRIED_GAPS: Final = CHECK_TIME_CHANGE_GAPS - {
-    CHECK_TIME_CHANGE_UNAVAILABLE_GAP
+    CHECK_TIME_CHANGE_UNAVAILABLE_GAP,
+    *CHECK_TIME_CHANGE_UNAVAILABLE_REASON_GAPS,
 }
 
 

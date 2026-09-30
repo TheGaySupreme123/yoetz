@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from yoetz.adapters.privacy.local_enforcer import scan_exact_bytes
@@ -53,3 +55,24 @@ def test_change_that_cannot_be_fully_redacted_is_withheld(monkeypatch: pytest.Mo
     with pytest.raises(ChangeCaptureUnavailable) as caught:
         _redacted(_capture(b"+token = forever-matching\n"))
     assert caught.value.reason == "redaction_incomplete"
+
+
+@pytest.mark.anyio
+async def test_unavailable_reason_is_frozen_in_the_binding_and_recovered() -> None:
+    from yoetz.application.check_change import CheckChangeOutcome, recover_check_time_change
+
+    outcome = CheckChangeOutcome(unavailable=True, reason="changed_during_capture")
+    binding = outcome.binding_json()
+    assert isinstance(binding, dict) and binding["reason"] == "changed_during_capture"
+
+    recovered = await recover_check_time_change(cast(Any, None), dict(binding))
+
+    assert recovered == outcome
+    legacy = {key: value for key, value in binding.items() if key != "reason"}
+    assert await recover_check_time_change(cast(Any, None), legacy) == CheckChangeOutcome(
+        unavailable=True
+    )
+    with pytest.raises(ValueError):
+        await recover_check_time_change(cast(Any, None), {**binding, "reason": "free text"})
+    with pytest.raises(ValueError):
+        CheckChangeOutcome(unavailable=False, reason="git_failed")

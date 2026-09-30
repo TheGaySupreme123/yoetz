@@ -335,6 +335,8 @@ async def test_connection_for_another_repository_is_never_read(tmp_path: Path) -
         waiting = await _evaluator(privacy, runtime)(frozen, (), runtime)
 
     assert CHECK_TIME_CHANGE_UNAVAILABLE_GAP in waiting.case_content_gaps
+    # The typed reason reaches the check's coverage as a closed code, never as text.
+    assert "check_time_change_unavailable_repository_mismatch" in waiting.case_content_gaps
     candidate = privacy.candidates[0]
     assert not any(
         item.item_id.startswith(CHECK_TIME_CHANGE_ITEM_PREFIX) for item in candidate.items

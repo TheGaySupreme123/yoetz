@@ -6,6 +6,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
+from types import MappingProxyType
 from typing import Final, Literal, cast
 
 from yoetz.domain.findings import (
@@ -70,6 +71,8 @@ __all__ = [
     "CHECK_TIME_CHANGE_REDACTED_GAP",
     "CHECK_TIME_CHANGE_TRUNCATED_GAP",
     "CHECK_TIME_CHANGE_UNAVAILABLE_GAP",
+    "CHECK_TIME_CHANGE_UNAVAILABLE_REASONS",
+    "CHECK_TIME_CHANGE_UNAVAILABLE_REASON_GAPS",
     "COMPLETION_CLAIM_OUTSIDE_PLAN_GAP",
     "COMPLETION_PLAN_NOT_CLAIMED_GAP",
     "COMPLETION_SCOPE_DECLARED_NONE_GAP",
@@ -110,6 +113,8 @@ __all__ = [
     "resolved_finding_ids_for_render",
     "unresolved_findings_for_render",
     "semantic_coverage_gap_code",
+    "check_time_change_gap_sentence",
+    "check_time_change_unavailable_reason_gap",
 ]
 
 # Structural completion-scope gaps. These are case-coverage facts, not policy findings: an
@@ -174,14 +179,74 @@ CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP: Final = "check_time_change_base_unavaila
 CHECK_TIME_CHANGE_TRUNCATED_GAP: Final = "check_time_change_truncated"
 # Credential-like spans were replaced before the change was stored or offered for review.
 CHECK_TIME_CHANGE_REDACTED_GAP: Final = "check_time_change_redacted"
+# Why the change was unavailable, as one closed code beside ``check_time_change_unavailable``:
+# ``check_time_change_unavailable_<reason>``. Each maps to one fixed sentence; neither carries a
+# path, Git output or any other user-controlled text. A check recorded before reasons existed
+# carries only the generic code.
+CHECK_TIME_CHANGE_UNAVAILABLE_REASONS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "git_unavailable": "Git is not installed where the Yoetz service runs.",
+        "not_git": "the check's directory is not a Git repository.",
+        "unsafe_root": (
+            "the repository failed a safety check (a link, another owner, a working tree "
+            "redirected elsewhere, or a directory replaced while it was read)."
+        ),
+        "unsupported_repository": (
+            "the repository uses a setup the capture does not read (a Git filter or include, a "
+            "partial clone, a borrowed object store, or Git older than 2.26)."
+        ),
+        "git_failed": "a Git command failed or ran out of time.",
+        "changed_during_capture": (
+            "the working tree kept changing while it was read, through every attempt."
+        ),
+        "redaction_incomplete": (
+            "credential-like text remained after every redaction pass, so the change was "
+            "withheld whole."
+        ),
+        "repository_mismatch": (
+            "the check's connection named a different repository from the task's."
+        ),
+        "capture_failed": "the capture failed unexpectedly; service diagnostics record it.",
+        "no_linked_subject": (
+            "the review packet had no claim, obligation or plan to attach the change to."
+        ),
+        "no_packet_room": (
+            "the review recipe's excerpt budget is too small for any part of the change."
+        ),
+    }
+)
+_CHECK_TIME_CHANGE_REASON_PREFIX: Final = CHECK_TIME_CHANGE_UNAVAILABLE_GAP + "_"
+CHECK_TIME_CHANGE_UNAVAILABLE_REASON_GAPS: Final = frozenset(
+    _CHECK_TIME_CHANGE_REASON_PREFIX + reason for reason in CHECK_TIME_CHANGE_UNAVAILABLE_REASONS
+)
 CHECK_TIME_CHANGE_GAPS: Final = frozenset(
     {
         CHECK_TIME_CHANGE_UNAVAILABLE_GAP,
         CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP,
         CHECK_TIME_CHANGE_TRUNCATED_GAP,
         CHECK_TIME_CHANGE_REDACTED_GAP,
+        *CHECK_TIME_CHANGE_UNAVAILABLE_REASON_GAPS,
     }
 )
+
+
+def check_time_change_unavailable_reason_gap(reason: str) -> str:
+    """The closed gap code naming why the check-time change was unavailable."""
+
+    if reason not in CHECK_TIME_CHANGE_UNAVAILABLE_REASONS:
+        raise ValueError("check_time_change_reason_invalid")
+    return _CHECK_TIME_CHANGE_REASON_PREFIX + reason
+
+
+def check_time_change_gap_sentence(code: str) -> str | None:
+    """One plain sentence for a check-time unavailability reason code; ``None`` otherwise."""
+
+    if code not in CHECK_TIME_CHANGE_UNAVAILABLE_REASON_GAPS:
+        return None
+    text = CHECK_TIME_CHANGE_UNAVAILABLE_REASONS[code[len(_CHECK_TIME_CHANGE_REASON_PREFIX) :]]
+    return "The check-time change was unavailable: " + text
+
+
 OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP: Final = "optional_semantic_review_blocked_by_policy"
 # The strict route ceiling blocked this process, but the durable applied-route record says the
 # last install applied the policy route (issue #537). The disagreement is the whole claim: a
