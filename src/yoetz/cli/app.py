@@ -4465,23 +4465,49 @@ def privacy_pending(json_output: _JSON = False) -> None:
     _finish(run_async(lambda: _privacy_pending(json_output)))
 
 
+def _partial_receipt_page_lines(undecodable_count: int, receipt_ids: tuple[str, ...]) -> str:
+    """Say that a receipt page is partial, how partial, and which receipts to look at (#921).
+
+    Only the count and structural receipt ids are printed; nothing a skipped row stored is.
+    """
+
+    from yoetz.cli.render import render_recovery_directive_lines
+    from yoetz.protocol.recovery import continuation_for_reason, directive_for
+
+    named = f": {', '.join(receipt_ids)}" if receipt_ids else ""
+    lines = [
+        f"privacy_audit_unreadable: this page is partial; {undecodable_count} stored "
+        f"receipt(s) could not be read back and were skipped{named}"
+    ]
+    directive = directive_for(continuation_for_reason("privacy_audit_unreadable"))
+    if directive is not None:
+        lines.extend(render_recovery_directive_lines(directive))
+    return "\n".join(lines)
+
+
 async def _privacy_receipts_list(page_size: int, cursor: str | None, json_output: bool) -> int:
     from yoetz.service.client import ListPrivacyReceiptsRequest
 
     try:
+        request = ListPrivacyReceiptsRequest(page_size=page_size, cursor=cursor)
         client = await build_service_client()
         try:
-            result = await client.privacy_receipts_list(
-                ListPrivacyReceiptsRequest(page_size=page_size, cursor=cursor)
-            )
+            result = await client.privacy_receipts_list(request)
         finally:
             await client.close()
-        _human_or_json(result, json_output=json_output)
-        return 0
     except ProtocolValueError, ValueError:
         return _usage_failure()
     except ControlError as error:
-        return _control_failure(error)
+        return _control_failure(error, json_output=json_output)
+    _human_or_json(result, json_output=json_output)
+    if result.undecodable_count:
+        # A partial page is printed in full -- every receipt that could be read -- and then exits
+        # non-zero, so a script can never mistake it for a complete listing.
+        _stderr(
+            _partial_receipt_page_lines(result.undecodable_count, result.undecodable_receipt_ids)
+        )
+        return exit_code_for(PublicErrorCode.STORAGE_CORRUPT)
+    return 0
 
 
 @privacy_receipts_app.command("list")
@@ -4497,17 +4523,18 @@ async def _privacy_receipts_get(receipt_id: str, json_output: bool) -> int:
     from yoetz.service.client import GetPrivacyReceiptRequest
 
     try:
+        request = GetPrivacyReceiptRequest(receipt_id)
         client = await build_service_client()
         try:
-            result = await client.privacy_receipts_get(GetPrivacyReceiptRequest(receipt_id))
+            result = await client.privacy_receipts_get(request)
         finally:
             await client.close()
-        _human_or_json(result, json_output=json_output)
-        return 0
     except ProtocolValueError, ValueError:
         return _usage_failure()
     except ControlError as error:
-        return _control_failure(error)
+        return _control_failure(error, json_output=json_output)
+    _human_or_json(result, json_output=json_output)
+    return 0
 
 
 @privacy_receipts_app.command("get")

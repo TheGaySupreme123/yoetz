@@ -525,6 +525,18 @@ free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from code
   `MAX_ORDINARY_CONTROL_FRAME_BYTES = 1_048_576` for every frame except the exact closed
   `import_codex_jsonl` call. That one branch may exceed the ordinary cap only when its canonical
   base64 decodes to at most `MAX_IMPORT_SOURCE_BYTES`; no other method inherits the larger bound.
+  Both peers read a frame in chunks of at most `MAX_CONTROL_RECEIVE_CHUNK_BYTES = 65_536`, the
+  authenticated Unix stream's per-`receive` ceiling; the stream refuses a larger single receive.
+  Asking for a whole frame at once made every frame over 64 KiB unreadable as `frame_invalid`,
+  which a privacy receipt page of about 45 receipts reached (issue #921). A declared length above
+  `MAX_CONTROL_FRAME_BYTES` is refused as `frame_too_large` after the four-byte prefix, before any
+  body byte is read. Once a frame's first byte arrives, the whole frame must arrive within
+  `CONTROL_FRAME_READ_DEADLINE_SECONDS = 60`, whether or not the session has calls in flight;
+  waiting for a frame to begin stays governed by the handshake and inactive-session deadlines. A
+  frame that misses it fails as the internal `frame_read_timeout`. The service closes the stream
+  on either refusal without a reply and records an owner-only diagnostic
+  (`service.daemon`/`control_frame_read`); a client whose response frame stalls reports the
+  retryable `service_unavailable`. Neither reason is a new wire token.
 - Host hook ingress (`cli/hook_io.py`): `MAX_HOOK_STDIN_BYTES = 262_144` (256 KiB) is the trusted
   full-parse cap for every host's hook stdin body and is shared by `cli/hooks.py`. A body at or
   under that cap is parsed in full. Codex, Claude Code, and Cursor's pure
@@ -3165,9 +3177,33 @@ ready service answers them rather than `method_forbidden` (issue #730). Their bo
 optional `cursor` and answers `snapshot_generation`, `receipts`, and `next_cursor` only when
 another page exists. Each wrapper names its `kind` (`local_disclosure` or `network_egress`) and
 carries the receipt in the `privacy/egress-receipt-1.0.0` vocabulary: every counter and version
-is a decimal string, optional fields are absent rather than null. Unknown or malformed keys,
-filters, page sizes, cursors, and receipt IDs are `invalid_request`; a cursor minted for a
-different query is the same non-retryable rejection. Both audit adapters project stored network
+is a decimal string, optional fields are absent rather than null. `counts.final_bytes` is bounded by
+that vocabulary's 262,144 in the domain too (`MAX_RECEIPT_FINAL_BYTES`), not by the 512 KiB
+outbound-document bound, so the store can no longer hold a receipt the wire refuses. Unknown or
+malformed keys, filters, page sizes, cursors, and receipt IDs are `invalid_request`; a cursor minted
+for a different query is the same non-retryable rejection, and `invalid_request` is reserved for
+those caller mistakes (issue #921). Stored rows are read one at a time: a row that cannot be read
+back -- it does not decode, its receipt fails the domain bounds (for example a `final_bytes` above
+262,144 written by an older build), or its own bytes disagree with the indexed
+`receipt_id`/`receipt_finished_at` the page is ordered by -- is skipped, never allowed to fail the
+page. The skip is counted and named: the 2.9 result carries `undecodable_count` (decimal, 1-100) and
+`undecodable_receipt_ids` (the structural ids of the skipped rows whose id is intact) together and
+only on a partial page, so a complete page keeps its exact bytes; the first five skipped rows of a
+page also each leave an owner-only `privacy_receipts_list_row_skipped` diagnostic whose reason names
+the destination kind and whose `request_id` is the row's own, so a heavily corrupt audit listed
+repeatedly cannot evict unrelated records from the bounded diagnostics ring. The cursor carries the
+last listed row's `receipt_finished_at` and `receipt_id` text as stored and compares it as text, as
+the ordering does, so it advances past skipped rows and a corrupt row can end one page without
+stranding the pages behind it; paging neither repeats nor loses a row. A row whose stored finish
+time is not a canonical timestamp is kept in the listing and skipped as unreadable rather than
+falling outside the snapshot bound. A failure of the store itself -- an unreadable row fetched by
+`get`, an ordering or uniqueness violation among rows that did decode, an unavailable snapshot
+generation, a malformed cursor whose MAC and query digest verified (only this store could mint it)
+-- is the closed, non-retryable control reason `privacy_audit_unreadable` (public code
+`STORAGE_CORRUPT`, exit 40, continuation `privacy_audit_review`) with a correlation id the
+diagnostic sink resolves; the client reports a frame it validated but cannot decode into receipts
+the same way. The CLI prints a partial page in full and exits 40 with the count and ids on stderr.
+Both audit adapters project stored network
 egress receipts as well as local disclosure receipts, so a completed subscription review is
 retrievable by its recorded receipt ID and listable by `channel`, `provider_id`, or
 `endpoint_profile_id`.

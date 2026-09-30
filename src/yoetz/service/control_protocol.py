@@ -56,6 +56,7 @@ from yoetz.protocol.schemas import (
 )
 
 __all__ = [
+    "CONTROL_FRAME_READ_DEADLINE_SECONDS",
     "CONTROL_PROTOCOL_VERSION",
     "MAX_ACTIVE_REQUESTS_PER_SESSION",
     "MAX_CONTROL_FRAME_BYTES",
@@ -83,6 +84,20 @@ CONTROL_PROTOCOL_VERSION: Final = "1.0"
 MAX_CONTROL_FRAME_BYTES: Final = 6_291_456
 MAX_ORDINARY_CONTROL_FRAME_BYTES: Final = 1_048_576
 MAX_ACTIVE_REQUESTS_PER_SESSION: Final = 32
+# The largest single ``ControlStream.receive`` a frame reader requests. The authenticated Unix
+# stream refuses a larger request (``receive_size_invalid``), so a frame above it is read in
+# bounded chunks. Asking for the whole remaining frame at once made every frame over 64 KiB
+# unreadable: the refusal surfaced as ``frame_invalid``, and a privacy receipt page of about 45
+# receipts reached the operator as a caller's ``invalid_request`` (issue #921).
+MAX_CONTROL_RECEIVE_CHUNK_BYTES: Final = 65_536
+# Once the first byte of a frame arrives, the whole frame must arrive within this bound. Waiting
+# for a frame to *begin* stays the caller's policy (the daemon's inactive-session deadline, the
+# client's own call deadlines); a frame that has begun is never left open-ended. Chunked reads
+# made frames up to ``MAX_CONTROL_FRAME_BYTES`` readable, so without this bound a same-user peer
+# could declare a large frame and drip it while a call is active, holding the partial body and a
+# listener slot indefinitely. A local socket carries the largest frame in well under a second;
+# the bound only has to exceed that with a wide margin for a loaded machine.
+CONTROL_FRAME_READ_DEADLINE_SECONDS: Final = 60.0
 
 _CONTROL_SCHEMA_VERSION: Final = "2.9.0"
 # The 0.2.3 line split request/result (2.6.1) from hello (2.6.0); the 0.3 line carries
@@ -96,6 +111,7 @@ _ERROR_REASONS: Final = frozenset(
         "correlation_mismatch",
         "duplicate_rpc_id",
         "frame_invalid",
+        "frame_read_timeout",
         "frame_too_large",
         "handshake_rejected",
         "manifest_mismatch",
@@ -484,7 +500,12 @@ def decode_control_frame(frame: bytes) -> ControlFrame:
         _fail("frame_too_large")
     if len(frame) != declared + 4:
         _fail("frame_invalid")
-    payload = frame[4:]
+    return _decode_control_payload(frame[4:])
+
+
+def _decode_control_payload(payload: bytes) -> ControlFrame:
+    """Decode one frame body whose length prefix the caller has already checked."""
+
     try:
         parsed = strict_json_parse(payload)
         if canonical_encode(parsed) != payload or not isinstance(parsed, Mapping):
@@ -506,7 +527,7 @@ async def _read_exact(
     remaining = byte_count
     while remaining:
         try:
-            chunk = await stream.receive(remaining)
+            chunk = await stream.receive(min(remaining, MAX_CONTROL_RECEIVE_CHUNK_BYTES))
         except BaseException as exc:
             if isinstance(exc, asyncio.CancelledError):
                 raise
@@ -523,7 +544,10 @@ async def _read_exact(
 
 
 async def read_control_frame(
-    stream: ControlStream, *, eof_reason: str = "frame_invalid"
+    stream: ControlStream,
+    *,
+    eof_reason: str = "frame_invalid",
+    frame_deadline_seconds: float = CONTROL_FRAME_READ_DEADLINE_SECONDS,
 ) -> ControlFrame:
     """Read one frame without consuming bytes belonging to its successor.
 
@@ -531,16 +555,30 @@ async def read_control_frame(
     arrives. The client handshake uses it to tell "the listening service dropped my hello"
     (``handshake_rejected``: an incompatible peer that closed without answering) apart from a
     frame truncated mid-flight, which stays the generic ``frame_invalid``.
+
+    ``frame_deadline_seconds`` bounds the frame from its first byte to its last
+    (``frame_read_timeout``); a declared length above ``MAX_CONTROL_FRAME_BYTES`` is refused as
+    ``frame_too_large`` before any body byte is read.
     """
 
-    prefix = await _read_exact(stream, 4, eof_reason=eof_reason)
-    declared = struct.unpack(">I", prefix)[0]
-    if declared == 0:
-        _fail("frame_invalid")
-    if declared > MAX_CONTROL_FRAME_BYTES:
-        _fail("frame_too_large")
-    payload = await _read_exact(stream, declared)
-    return decode_control_frame(prefix + payload)
+    # Waiting for the first byte is unbounded here; everything after it shares one deadline, so a
+    # peer that begins a frame and stalls is cut off as ``frame_read_timeout`` instead of holding
+    # the partial body. A declared length above the ceiling is refused before any body is read.
+    first = await _read_exact(stream, 1, eof_reason=eof_reason)
+    try:
+        async with asyncio.timeout(frame_deadline_seconds):
+            prefix = first + await _read_exact(stream, 3)
+            declared = struct.unpack(">I", prefix)[0]
+            if declared == 0:
+                _fail("frame_invalid")
+            if declared > MAX_CONTROL_FRAME_BYTES:
+                _fail("frame_too_large")
+            payload = await _read_exact(stream, declared)
+    except TimeoutError:
+        raise ControlProtocolError("frame_read_timeout") from None
+    # Decoding the body directly avoids re-joining prefix and payload: two fewer frame-sized
+    # copies at peak for the largest frames.
+    return _decode_control_payload(payload)
 
 
 async def write_control_frame(stream: ControlStream, value: object) -> None:
@@ -951,6 +989,10 @@ def public_error_code_for_control_reason(reason: str) -> PublicErrorCode:
         return PublicErrorCode.SERVICE_UNAVAILABLE
     if reason == "privacy_projection_blocked":
         return PublicErrorCode.PRIVACY_AUTHORITY_REQUIRED
+    # The request was valid and reached the audit store; a stored receipt it holds cannot be read
+    # back. That is the store's condition, never the caller's INVALID_REQUEST (issue #921).
+    if reason == "privacy_audit_unreadable":
+        return PublicErrorCode.STORAGE_CORRUPT
     if reason == "vault_locked":
         return PublicErrorCode.VAULT_LOCKED
     if reason == "request_cancelled":

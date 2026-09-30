@@ -648,11 +648,39 @@ def _receipt_page_from_wire(value: JsonObject) -> PrivacyReceiptPage:
     if type(raw_receipts) is not tuple:
         raise ValueError("privacy_receipt_wire_invalid")
     receipt_members = cast(tuple[object, ...], raw_receipts)
+    raw_undecodable_ids = source.get("undecodable_receipt_ids", ())
+    if type(raw_undecodable_ids) is not tuple:
+        raise ValueError("privacy_receipt_wire_invalid")
     return PrivacyReceiptPage(
         snapshot_generation=_decimal(source["snapshot_generation"]),
         receipts=tuple(_receipt_view_from_wire(item) for item in receipt_members),
         next_cursor=cast(str | None, source.get("next_cursor")),
+        undecodable_count=(
+            0 if "undecodable_count" not in source else _decimal(source["undecodable_count"])
+        ),
+        undecodable_receipt_ids=tuple(
+            cast(str, item) for item in cast(tuple[object, ...], raw_undecodable_ids)
+        ),
     )
+
+
+async def _unreadable_receipt_frame(operation: str) -> ControlError:
+    """Name a receipt frame this client validated but cannot turn back into receipts.
+
+    The frame passed the result envelope, so it is neither malformed nor the caller's request:
+    what it carries is an audit record the domain refuses. Reporting ``frame_invalid`` here made
+    the operator see ``invalid_request`` for a store-side condition (issue #921). The client's own
+    diagnostic record makes the correlation id it hands back resolvable.
+    """
+
+    from yoetz.observability.logging import record_public_error_without_raising
+
+    correlation_id = record_public_error_without_raising(
+        component="service.client",
+        operation=operation,
+        reason="privacy_receipt_wire_undecodable",
+    )
+    return ControlError("privacy_audit_unreadable", correlation_id=correlation_id)
 
 
 def _receipt_get_from_wire(value: JsonObject) -> PrivacyReceiptGetResult:
@@ -1211,9 +1239,7 @@ class ServiceClient(ControlClientPort):
         try:
             return _receipt_page_from_wire(raw)
         except (KeyError, TypeError, ValueError) as exc:
-            error = ControlError("frame_invalid")
-            await self._fail_connection(error)
-            raise error from exc
+            raise await _unreadable_receipt_frame("privacy_receipts_list") from exc
 
     async def privacy_receipts_get(
         self,
@@ -1229,9 +1255,7 @@ class ServiceClient(ControlClientPort):
         try:
             return _receipt_get_from_wire(raw)
         except (KeyError, TypeError, ValueError) as exc:
-            error = ControlError("frame_invalid")
-            await self._fail_connection(error)
-            raise error from exc
+            raise await _unreadable_receipt_frame("privacy_receipts_get") from exc
 
     async def service_status(self) -> ServiceStatus:
         return cast(ServiceStatus, await self._invoke(ControlMethod.SERVICE_STATUS, JsonObject({})))

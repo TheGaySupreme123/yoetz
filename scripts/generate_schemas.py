@@ -4160,7 +4160,82 @@ def _control_v2_9_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         )
         required.extend(["selected_capacity_label", "effective_capacity_label", "effective_budget"])
         definitions["observation_effective_budget"] = _observation_effective_budget_schema(token)
+        _admit_privacy_audit_unreadable(entry, definitions)
     return document
+
+
+# The largest page ``privacy_receipts_list`` answers; a partial page cannot skip more rows than it
+# reads.
+_PRIVACY_RECEIPT_PAGE_MAX: Final = 100
+
+
+def _admit_privacy_audit_unreadable(
+    entry: _RegistryEntry, definitions: dict[str, JsonValue]
+) -> None:
+    """Let the active 2.9 result carry a partial receipt page and its store-side reason (#921).
+
+    ``privacy receipts list`` used to fail its whole page on one stored row that could not be
+    read back, and every store or decode failure reached the operator as the caller's
+    ``invalid_request``. 2.9 is the active, unreleased envelope, so it gains two optional page
+    fields -- ``undecodable_count`` and the structural ``undecodable_receipt_ids`` of the rows it
+    skipped, present together and only on a partial page -- and one closed, non-retryable error
+    code, ``privacy_audit_unreadable``. A complete page keeps its exact bytes, and every earlier
+    control-result artifact stays frozen.
+    """
+
+    list_body = definitions.get("privacy_receipts_list_body")
+    error_body = definitions.get("error_body")
+    if not isinstance(list_body, dict) or not isinstance(error_body, dict):
+        raise SchemaGenerationError(
+            "control_privacy_receipt_schema_template_invalid", entries=(entry.relative_path,)
+        )
+    list_properties = list_body.get("properties")
+    error_branches = error_body.get("oneOf")
+    if (
+        not isinstance(list_properties, dict)
+        or "receipts" not in list_properties
+        or not isinstance(error_branches, list)
+    ):
+        raise SchemaGenerationError(
+            "control_privacy_receipt_schema_template_invalid", entries=(entry.relative_path,)
+        )
+    list_properties["undecodable_count"] = {
+        "maxLength": 3,
+        "minLength": 1,
+        "pattern": "^(?:[1-9][0-9]?|100)$",
+        "type": "string",
+    }
+    list_properties["undecodable_receipt_ids"] = {
+        "items": {
+            "$ref": SCHEMA_NAMESPACE + "privacy/egress-receipt-1.0.0.schema.json#/$defs/receipt_id"
+        },
+        "maxItems": _PRIVACY_RECEIPT_PAGE_MAX,
+        "minItems": 0,
+        "type": "array",
+        "uniqueItems": True,
+    }
+    list_body["dependentRequired"] = {
+        "undecodable_count": ["undecodable_receipt_ids"],
+        "undecodable_receipt_ids": ["undecodable_count"],
+    }
+    template = next(
+        (
+            branch
+            for branch in error_branches
+            if isinstance(branch, dict)
+            and cast(dict[str, JsonValue], branch.get("properties", {})).get("code")
+            == {"const": "privacy_projection_blocked"}
+        ),
+        None,
+    )
+    if template is None:
+        raise SchemaGenerationError(
+            "control_privacy_receipt_schema_template_invalid", entries=(entry.relative_path,)
+        )
+    branch = cast(dict[str, JsonValue], json.loads(json.dumps(template)))
+    branch_properties = cast(dict[str, JsonValue], branch["properties"])
+    branch_properties["code"] = {"const": "privacy_audit_unreadable"}
+    error_branches.insert(error_branches.index(template) + 1, branch)
 
 
 # The local-disclosure purpose grammar owned by ``yoetz.domain.privacy``.  Mirrored here rather

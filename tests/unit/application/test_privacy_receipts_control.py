@@ -39,7 +39,9 @@ from yoetz.ports.control import ControlError, ControlMethod
 from yoetz.ports.privacy import (
     LocalDisclosureReceiptView,
     NetworkEgressReceiptView,
+    PrivacyAuditUnreadable,
     PrivacyReceiptAudience,
+    PrivacyReceiptCursorInvalid,
     PrivacyReceiptPage,
     PrivacyReceiptQuery,
     PrivacyReceiptView,
@@ -75,6 +77,8 @@ class _Audit:
         self.lookups: list[str] = []
         self.audiences: list[PrivacyReceiptAudience] = []
         self.next_cursor: str | None = None
+        self.failure: BaseException | None = None
+        self.undecodable: tuple[int, tuple[str, ...]] = (0, ())
 
     async def list_receipts(
         self, query: PrivacyReceiptQuery, audience: PrivacyReceiptAudience
@@ -82,14 +86,18 @@ class _Audit:
         self.queries.append(query)
         self.audiences.append(audience)
         if query.cursor == "mismatch":
-            raise ValueError("privacy_receipt_cursor_query_mismatch")
-        return PrivacyReceiptPage(11, self.views, self.next_cursor)
+            raise PrivacyReceiptCursorInvalid("privacy_receipt_cursor_query_mismatch")
+        if self.failure is not None:
+            raise self.failure
+        return PrivacyReceiptPage(11, self.views, self.next_cursor, *self.undecodable)
 
     async def get_receipt(
         self, receipt_id: str, audience: PrivacyReceiptAudience
     ) -> PrivacyReceiptView | None:
         self.lookups.append(receipt_id)
         self.audiences.append(audience)
+        if self.failure is not None:
+            raise self.failure
         return next((view for view in self.views if view.receipt.receipt_id == receipt_id), None)
 
 
@@ -351,6 +359,75 @@ async def test_a_cursor_from_another_query_is_a_caller_error_not_a_crash() -> No
 
     assert raised.value.reason == "invalid_request"
     assert raised.value.retryable is False
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "privacy_audit_page_invariant_violated",
+        "privacy_audit_generation_unavailable",
+        "privacy_audit_local_row_undecodable",
+    ],
+)
+async def test_a_store_failure_is_named_and_never_the_callers_invalid_request(
+    reason: str,
+) -> None:
+    """Issue #921: the store's fault used to reach the operator as ``invalid_request``."""
+
+    handlers, audit = _handlers(_local_view())
+    audit.failure = PrivacyAuditUnreadable(reason)
+
+    with pytest.raises(ControlError) as listed:
+        await handlers[ControlMethod.PRIVACY_RECEIPTS_LIST](
+            {"schema_version": "1.0.0", "filters": {}, "page_size": 100}
+        )
+    with pytest.raises(ControlError) as fetched:
+        await handlers[ControlMethod.PRIVACY_RECEIPTS_GET](
+            {"schema_version": "1.0.0", "receipt_id": _RECEIPT}
+        )
+
+    for raised in (listed, fetched):
+        assert raised.value.reason == "privacy_audit_unreadable"
+        assert raised.value.retryable is False
+        assert raised.value.correlation_id is not None
+
+
+async def test_an_unclassified_failure_is_not_folded_into_invalid_request() -> None:
+    """Only a caller's own mistake is ``invalid_request``; anything unexpected keeps its type so
+    the daemon records it as ``read_projection_failed`` with a diagnostic."""
+
+    handlers, audit = _handlers(_local_view())
+    audit.failure = ValueError("privacy_audit_something_unforeseen")
+
+    with pytest.raises(ValueError, match="privacy_audit_something_unforeseen"):
+        await handlers[ControlMethod.PRIVACY_RECEIPTS_LIST](
+            {"schema_version": "1.0.0", "filters": {}, "page_size": 100}
+        )
+
+
+async def test_a_partial_page_carries_its_count_and_ids_through_the_client() -> None:
+    skipped = "egr_70000000-0000-4000-8000-00000000000a"
+    handlers, audit = _handlers(_network_view(), _local_view())
+    audit.undecodable = (2, (skipped,))
+
+    body = await handlers[ControlMethod.PRIVACY_RECEIPTS_LIST](
+        {"schema_version": "1.0.0", "filters": {}, "page_size": 100}
+    )
+
+    assert body["undecodable_count"] == "2"
+    assert body["undecodable_receipt_ids"] == (skipped,)
+    page = _receipt_page_from_wire(_wire(body))
+    assert page == PrivacyReceiptPage(11, (_network_view(), _local_view()), None, 2, (skipped,))
+
+
+async def test_a_complete_page_keeps_its_exact_prior_shape() -> None:
+    handlers, _ = _handlers(_local_view())
+
+    body = await handlers[ControlMethod.PRIVACY_RECEIPTS_LIST](
+        {"schema_version": "1.0.0", "filters": {}, "page_size": 100}
+    )
+
+    assert set(body) == {"schema_version", "snapshot_generation", "receipts"}
 
 
 def test_optional_receipt_fields_are_absent_not_null() -> None:

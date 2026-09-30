@@ -253,6 +253,7 @@ payload_redaction_mismatch
 payload_too_large
 peer_untrusted
 plan_version_conflict
+privacy_audit_unreadable
 privacy_projection_unavailable
 privacy_receipt_not_durable
 project_dissolved
@@ -497,7 +498,7 @@ def test_public_error_code_membership() -> None:
 def test_protocol_reason_registry_is_exact_and_import_order_independent() -> None:
     source_values = cast(tuple[str, ...], getattr(errors_module, "_PROTOCOL_REASON_CODE_VALUES"))
     assert source_values == _EXPECTED_REASON_CODES
-    assert len(source_values) == 299
+    assert len(source_values) == 300
     assert source_values == tuple(sorted(source_values, key=str.encode))
     assert len(source_values) == len(set(source_values))
     assert PROTOCOL_REASON_CODES == frozenset(_EXPECTED_REASON_CODES)

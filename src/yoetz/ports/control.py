@@ -315,6 +315,7 @@ _TRANSPORT_CONTROL_ERROR_REASONS: Final[frozenset[str]] = frozenset(
         "privacy_projection_blocked",
         "response_projection_failed",
         "read_projection_failed",
+        "privacy_audit_unreadable",
         "service_generation_changed",
         "endpoint_unsafe",
     }
@@ -385,6 +386,10 @@ class ControlError(Exception):
         # same-request_id replay. It stays retryable because repeating the read is the fix.
         if reason == "read_projection_failed" and not retryable:
             raise ValueError("read_projection_error_must_be_retryable")
+        # A stored receipt that cannot be read back stays unreadable on the next attempt; calling
+        # it retryable would send the operator into a loop instead of to the named receipts.
+        if reason == "privacy_audit_unreadable" and retryable:
+            raise ValueError("privacy_audit_unreadable_must_not_be_retryable")
         if correlation_id is not None:
             try:
                 validate_id(IdKind.CORRELATION, correlation_id)
