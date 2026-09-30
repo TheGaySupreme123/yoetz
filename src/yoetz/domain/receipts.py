@@ -823,8 +823,15 @@ class ReceiptDocument:
             and self.suppressed_finding_count != 0
         ):
             raise ProtocolValueError(invalid)
+        # Resolved rows stay in ``findings`` as history, named by the summary section's items,
+        # but a later qualifying check proved each such issue absent, so only current rows bound
+        # the document coverage (issue #912). Documents that also folded resolved rows still
+        # satisfy this weaker requirement, so issued receipts stay readable as issued.
+        resolved = _summary_resolved_ids(cast(tuple[ReceiptSection, ...], sections))
         material_coverage = self.coverage
         for finding in cast(tuple[Finding, ...], findings):
+            if finding.finding_id in resolved:
+                continue
             material_coverage = weakest(material_coverage, finding.coverage)
         if material_coverage != self.coverage:
             raise ProtocolValueError("receipt_coverage_mismatch")
@@ -1361,14 +1368,30 @@ def receipt_document_to_json(document: ReceiptDocument) -> dict[str, object]:
 
 
 def receipt_weakest_coverage(document: ReceiptDocument) -> Coverage:
-    """Fold the document coverage with carried findings in stored order."""
+    """Fold the document coverage with its current (not resolved) findings in stored order.
+
+    Resolved history does not lower the conclusion (issue #912); see ``ReceiptDocument``.
+    """
 
     if type(document) is not ReceiptDocument:
         raise ProtocolValueError("invalid_receipt_document")
+    resolved = resolved_finding_ids_for_render(document)
     result = document.coverage
     for finding in document.findings:
+        if finding.finding_id in resolved:
+            continue
         result = weakest(result, finding.coverage)
     return result
+
+
+def _summary_resolved_ids(sections: tuple[ReceiptSection, ...]) -> frozenset[str]:
+    summary = next(
+        (section for section in sections if section.key is ReceiptSectionKey.SUMMARY),
+        None,
+    )
+    if summary is None:
+        return frozenset()
+    return frozenset(item for item in summary.items if item.startswith("fnd_"))
 
 
 def resolved_finding_ids_for_render(document: ReceiptDocument) -> frozenset[str]:
@@ -1378,13 +1401,7 @@ def resolved_finding_ids_for_render(document: ReceiptDocument) -> frozenset[str]
     resolved historical ids as the summary section's items, which every include level carries.
     """
 
-    summary = next(
-        (section for section in document.sections if section.key is ReceiptSectionKey.SUMMARY),
-        None,
-    )
-    if summary is None:
-        return frozenset()
-    return frozenset(item for item in summary.items if item.startswith("fnd_"))
+    return _summary_resolved_ids(document.sections)
 
 
 def unresolved_findings_for_render(document: ReceiptDocument) -> tuple[Finding, ...]:

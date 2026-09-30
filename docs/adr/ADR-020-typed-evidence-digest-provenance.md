@@ -4,9 +4,11 @@
 [issue #131](https://github.com/TheGaySupreme123/yoetz/issues/131). Decision 7 amended
 (2026-08-10) for [issue #176](https://github.com/TheGaySupreme123/yoetz/issues/176); decisions
 9–12 added (2026-08-30) for
-[issue #302](https://github.com/TheGaySupreme123/yoetz/issues/302).
+[issue #302](https://github.com/TheGaySupreme123/yoetz/issues/302). Decision 13 added (2026-09-30)
+for [issue #912](https://github.com/TheGaySupreme123/yoetz/issues/912).
 **Implemented by:** `src/yoetz/domain/events.py`, `src/yoetz/application/publish_work.py`,
 `src/yoetz/application/observation_coordinator.py`, `src/yoetz/kernel/deterministic_checks.py`,
+`src/yoetz/kernel/policies/work_integrity.py`, `src/yoetz/kernel/receipt_builder.py`,
 `src/yoetz/application/semantic_case.py`, and the public event schemas and guidance.
 **Relates to:** ADR-002 (canonical protocol), ADR-009 (data egress and privacy), ADR-010
 (harness integration port), and ADR-011 (structural subject-state capture).
@@ -126,12 +128,38 @@ ordinary cooperative publication cannot claim.
     redaction/truncation flags. Existing NULL rows stay weak history and are never upgraded by
     inference.
 
+13. **An unverified caller digest is a disclosed provenance label, not a finding.** The DeepSWE v2
+    benchmark showed decision 6's limitation doubling as an unclearable local finding: following
+    the "Making a change reviewable" recipe produced `caller_asserted` `digest_only` evidence, the
+    `ledger_stale_or_incomplete` finding it raised asked for "content-bearing evidence" that
+    ordinary publication cannot record, and each further excerpt grew the finding's subject set and
+    minted a new id. Every service producer records `captured` availability, so a cited
+    `digest_only` or `withheld` binding is always caller-asserted and nothing an agent can publish
+    changes it. Those two codes therefore stay exact case and ref coverage gaps (decision 6 is
+    unchanged: they still make the conclusion coverage-incomplete), but they are never subjects of
+    the work-integrity ledger finding. The receipt's limitations section names them once, with the
+    number of cited items, as caller-asserted digests Yoetz did not verify, and says no response or
+    recheck changes that. It keeps the two retention facts apart: a digest-only item's bytes were
+    not retained, while a withheld item records that the publisher withheld them, and a mixed
+    count names how many items are of each kind. `evidence_digest_subject_legacy_unknown` still raises the finding; its
+    text names only agent-performable actions (cite captured or typed evidence in a replacement
+    claim). When provenance is the finding's only gap it says no repair or recheck is needed and
+    one acknowledged response answers it; when other gaps remain it says an acknowledgement does
+    not resolve the finding, which stays current until a qualifying check proves those gaps absent.
+    Findings recorded under the old rule are not returned by the next check, so a qualifying check
+    resolves them as history. Relatedly, a resolved finding's
+    own coverage no longer folds into receipt coverage: it stays in the document as history, and
+    only current rows bound the conclusion. The owner-approved service-side binding of a caller
+    digest to a matching captured object or byte range (verified, not asserted, provenance) is not
+    implemented yet; until it is, every caller digest takes this fallback label on every host.
+
 ## Consequences
 
 Yoetz can reject a typed kind/subject contradiction at publication without pretending it inspected
-the bytes. Receipts and local findings retain exact limitations for digest-only, withheld,
-redacted, and legacy evidence. Capability-owned approved-check/import/observation provenance stays
-unavailable to cooperative callers.
+the bytes. Receipts retain exact limitations for digest-only, withheld, redacted, and legacy
+evidence; local findings retain them for legacy and redacted evidence, while an unverified caller
+digest is disclosed on the receipt as a counted provenance label (decision 13). Capability-owned
+approved-check/import/observation provenance stays unavailable to cooperative callers.
 
 The subject taxonomy is intentionally finite. Adding a new byte class requires a reviewed protocol
 change rather than a caller-defined string. Historical evidence may still be useful as weak context,

@@ -5,6 +5,7 @@ frozen frontier, all driven through the real ``Application`` facade and the memo
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -22,11 +23,15 @@ from builders.start_application import (
     start_composition,
     start_request,
 )
+from fixture_loader import load_fixture_json
 from yoetz.adapters.sqlite.migrations import initialize_bundle
 from yoetz.adapters.sqlite.repository import SqliteLedger
 from yoetz.application.check import FinalSemanticEvaluation
 from yoetz.application.egress import PrivacyCoordinator
-from yoetz.application.observation_materialize import observation_author
+from yoetz.application.observation_materialize import (
+    materialize_observation_envelope,
+    observation_author,
+)
 from yoetz.application.publish_work import PublishWorkInternalResult
 from yoetz.application.service import Application, VerificationPolicy
 from yoetz.application.start import StartInternalResult
@@ -55,6 +60,13 @@ from yoetz.domain.findings import (
     SemanticDispatchKind,
     SemanticProvenance,
 )
+from yoetz.domain.observation import (
+    ObservationContentKind,
+    ObservationContentManifest,
+    ObservationCursor,
+    ObservationEnvelope,
+    ObservationSource,
+)
 from yoetz.domain.privacy import (
     AuthorizationScope,
     AuthorizationScopeKind,
@@ -71,6 +83,7 @@ from yoetz.domain.privacy import (
 from yoetz.domain.receipts import PolicyVersionEntry, ReceiptVersionSlice, SchemaVersionEntry
 from yoetz.domain.values import (
     Frontier,
+    Timestamp,
     action_id,
     event_id,
     evidence_id,
@@ -80,6 +93,7 @@ from yoetz.domain.values import (
     session_id,
     timestamp_from_datetime,
 )
+from yoetz.domain.values import JsonObject as DomainJsonObject
 from yoetz.kernel.receipt_capacity import receipt_gap_codes
 from yoetz.kernel.reducers import replay
 from yoetz.mcp.summaries import summary_for_status
@@ -1224,14 +1238,19 @@ async def test_receipt_build_context_is_complete() -> None:
     assert text_receipt.conclusion == receipt.conclusion
 
 
-async def test_receipt_folds_retained_observation_finding_coverage_after_recovery() -> None:
-    """Regression for #259.
+@pytest.mark.parametrize("resolved", (False, True), ids=("current", "resolved"))
+async def test_receipt_folds_retained_observation_finding_coverage_after_recovery(
+    resolved: bool,
+) -> None:
+    """Regression for #259, narrowed by #912.
 
     Observation advice records its own finding coverage inside the finding payload while the
     accepted engine-derived envelope remains current. A later healthy check can therefore have
     stronger current coverage without erasing the historical ``cursor_stale`` limitation carried
-    by the retained finding. Receipt construction must weaken to that history, not classify the
-    valid state as ``STORAGE_CORRUPT``.
+    by a retained finding that is still current: receipt construction must weaken to that history,
+    not classify the valid state as ``STORAGE_CORRUPT``. Once a later qualifying check resolves the
+    retained row, it stays in the document as history but its coverage no longer lowers the
+    receipt, and no ``retained_finding_coverage`` gap is minted for it (issue #912).
     """
 
     app, runtime, _ = _build_app(seed_offset=16)
@@ -1322,13 +1341,32 @@ async def test_receipt_folds_retained_observation_finding_coverage_after_recover
         )
     )
 
+    check_frontier = appended.result_frontier
+    if not resolved:
+        # A provenance dispute pins the retained row current: the released status wire keeps it
+        # ``resolved=false`` even after a qualifying check, so its history still folds.
+        disputed = await app.respond(
+            RespondRequest.model_validate(
+                {
+                    **_request_base(protocol_id("req_", 2506)),
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": _frontier(appended.result_frontier),
+                    "finding_id": retained.finding_id,
+                    "finding_frontier": _frontier(appended.result_frontier),
+                    "disposition": "provenance_disputed",
+                    "reason": "The retained observation row is disputed for this regression.",
+                }
+            )
+        )
+        check_frontier = disputed.result_frontier
     checked = await app.check(
         CheckRequest.model_validate(
             {
                 **_request_base(protocol_id("req_", 2504)),
                 "session_id": started.session_id,
                 "writer_id": started.writer_id,
-                "expected_frontier": _frontier(appended.result_frontier),
+                "expected_frontier": _frontier(check_frontier),
                 "mode": "deterministic_only",
                 "max_findings": "3",
             }
@@ -1356,15 +1394,30 @@ async def test_receipt_folds_retained_observation_finding_coverage_after_recover
     assert FINDING_KIND_TRAITS[kind][1] is False
     assert receipt.conclusion == "insufficient_coverage"
     assert receipt.coverage.ledger_freshness is LedgerFreshness.PARTIAL
-    # The retained 63-code set plus semantic_review_not_requested exercises the exact public
-    # boundary through real receipt construction and JSON projection, not only admission math.
-    assert len(receipt.coverage.known_gaps) == 64
-    assert "cursor_stale" in receipt.coverage.known_gaps
     document = cast(Mapping[str, JsonValue], receipt.document)
     findings = cast(tuple[Mapping[str, JsonValue], ...], document["findings"])
     assert any(item["finding_id"] == retained.finding_id for item in findings)
     gaps = cast(tuple[Mapping[str, JsonValue], ...], document["gaps"])
+    sections = {
+        cast(Mapping[str, JsonValue], section)["key"]: cast(Mapping[str, JsonValue], section)
+        for section in cast(list[JsonValue], document["sections"])
+    }
+    all_records = tuple([record async for record in ledger.load_events(started.session_id)])
+    capacity = receipt_gap_codes(replay(all_records), all_records)
+    if resolved:
+        # History, not a limitation: listed as resolved and absent from the coverage fold.
+        assert sections["summary"]["items"] == [retained.finding_id]
+        assert receipt.coverage.known_gaps == ("semantic_review_not_requested",)
+        assert not any(item["code"] == "cursor_stale" for item in gaps)
+        assert "cursor_stale" not in capacity
+        return
+    assert sections["summary"]["items"] == []
+    # The retained 63-code set plus semantic_review_not_requested exercises the exact public
+    # boundary through real receipt construction and JSON projection, not only admission math.
+    assert len(receipt.coverage.known_gaps) == 64
+    assert "cursor_stale" in receipt.coverage.known_gaps
     assert sum(item["code"] == "cursor_stale" for item in gaps) == 1
+    assert "cursor_stale" in capacity
 
 
 async def test_legacy_receipt_coverage_overflow_is_not_invalid_request(
@@ -5299,3 +5352,685 @@ async def test_a_defect_the_review_still_finds_after_repair_stays_current() -> N
         if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED and item.kind is finding.kind
     ]
     assert refired and all(not by_id[item.finding_id].resolved for item in refired)
+
+
+# Issue #912: the publication recipe's caller digests are a disclosed provenance label, never an
+# unclearable finding. The drafts below follow `publication-policy.md` "Making a change reviewable"
+# verbatim: the hunk travels in ``description`` and its SHA-256 as a ``caller_asserted``
+# ``digest_only`` binding, exactly the shape the DeepSWE v2 agents published.
+_ISSUE_912_HUNKS: tuple[str, ...] = (
+    "@@ -41,6 +41,9 @@ export function serializeError(error: Error) {\n"
+    "   const result = { name: error.name, message: error.message };\n"
+    "+  if (error.stack !== undefined) {\n"
+    "+    result.stack = error.stack;\n"
+    "+  }\n"
+    "   return result;\n",
+    "@@ -88,4 +91,5 @@ export function deserializeError(value: SerializedError) {\n"
+    "   const error = new Error(value.message);\n"
+    "+  error.stack = value.stack;\n"
+    "   return error;\n",
+    "@@ -12,3 +12,8 @@ describe('error stack', () => {\n"
+    "+  it('round-trips the stack', () => {\n"
+    "+    const copy = deserialize(serialize(new Error('x')));\n"
+    "+    expect(copy.stack).toContain('Error: x');\n"
+    "+  });\n",
+    "@@ -3,2 +3,3 @@ import { registerCustom } from './registry';\n"
+    "+import { serializeError, deserializeError } from './error';\n",
+    "PASS  test/error-stack.test.ts\n  error stack\n    ✓ round-trips the stack (3 ms)\n",
+)
+_ISSUE_912_OPEN_OBLIGATION: dict[str, JsonValue] = {
+    "description": "Serialize and restore Error stack traces.",
+    "acceptance_criteria": "A deserialized error keeps the original stack text.",
+    "evidence_expectation": "The source change and a passing round-trip test.",
+    "status": "open",
+}
+
+
+def _caller_digest_excerpt_draft(
+    seed: int,
+    hunk: str,
+    *,
+    subject: str,
+    availability: Literal["digest_only", "withheld"] = "digest_only",
+) -> dict[str, JsonValue]:
+    data = hunk.encode("utf-8")
+    return {
+        "event_id": protocol_id("evt_", seed),
+        "schema": {"name": "evidence_recorded", "version": "1.1.0"},
+        "occurred_at": "2026-09-28T10:00:00.000Z",
+        "causal_parents": (),
+        "payload": {
+            "evidence_id": protocol_id("evd_", seed + 1),
+            "evidence_kind": "artifact",
+            "strength": "content_digest",
+            "content_digest": "sha256:" + hashlib.sha256(data).hexdigest(),
+            "observed_at": "2026-09-28T10:00:00.000Z",
+            "description": hunk,
+            "digest_binding": {
+                "subject": subject,
+                "content_availability": availability,
+                "byte_count": len(data),
+                "provenance": "caller_asserted",
+            },
+        },
+        "artifact_refs": (),
+        "evidence_refs": (),
+    }
+
+
+def _obligation_draft_912(
+    seed: int, obligation_id: str, *, resolved_by: tuple[str, ...] = ()
+) -> dict[str, JsonValue]:
+    payload: dict[str, JsonValue] = dict(_ISSUE_912_OPEN_OBLIGATION)
+    if resolved_by:
+        payload["status"] = "resolved"
+        payload["resolution_evidence_refs"] = tuple(sorted(resolved_by))
+    return {
+        "event_id": protocol_id("evt_", seed),
+        "schema": {"name": "obligation_published", "version": "1.0.0"},
+        "occurred_at": "2026-09-28T10:00:01.000Z",
+        "causal_parents": (),
+        "payload": {"obligation_id": obligation_id, **payload},
+        "artifact_refs": (),
+        "evidence_refs": tuple(sorted(resolved_by)),
+    }
+
+
+def _completion_claim_draft_912(
+    seed: int,
+    claim_id: str,
+    obligation_id: str,
+    supporting_refs: tuple[str, ...],
+    *,
+    supersedes: tuple[str, ...] = (),
+) -> dict[str, JsonValue]:
+    return {
+        "event_id": protocol_id("evt_", seed),
+        "schema": {"name": "claim_recorded", "version": "1.1.0"},
+        "occurred_at": "2026-09-28T10:00:02.000Z",
+        "causal_parents": (),
+        "payload": {
+            "claim_id": claim_id,
+            "claim_kind": "completion",
+            "statement": "Error stacks now survive serialization; the round-trip test passes.",
+            "supporting_refs": tuple(sorted((*supporting_refs, obligation_id))),
+            "obligation_refs": (obligation_id,),
+            "limitation_refs": (),
+            "supersedes_claim_refs": tuple(sorted(supersedes)),
+        },
+        "artifact_refs": (),
+        "evidence_refs": (),
+    }
+
+
+async def _publish_912(
+    app: Application,
+    started: StartInternalResult,
+    frontier: Frontier | FrontierModel,
+    seed: int,
+    drafts: tuple[dict[str, JsonValue], ...],
+) -> PublishWorkInternalResult:
+    result = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(frontier),
+                "event_drafts": drafts,
+            }
+        )
+    )
+    assert type(result) is PublishWorkInternalResult, f"unexpected publish outcome: {type(result)}"
+    return result
+
+
+async def _check_912(
+    app: Application, started: StartInternalResult, frontier: Frontier | FrontierModel, seed: int
+) -> CheckCommitResult:
+    checked = await app.check(
+        CheckRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(frontier),
+                "mode": "deterministic_only",
+                "max_findings": "8",
+            }
+        )
+    )
+    assert type(checked) is CheckCommitResult, f"unexpected nonterminal check: {type(checked)}"
+    return checked
+
+
+def _provenance_findings(findings: tuple[Finding, ...]) -> tuple[Finding, ...]:
+    """Findings that report, or send the agent after, a caller digest's provenance."""
+
+    return tuple(
+        finding
+        for finding in findings
+        if finding.kind is FindingKind.LEDGER_STALE_OR_INCOMPLETE
+        or "evidence_content_digest_only" in finding.detail
+        or "content-bearing" in finding.detail
+    )
+
+
+async def _receipt_912(
+    app: Application,
+    started: StartInternalResult,
+    frontier: Frontier | FrontierModel,
+    seed: int,
+    receipt_format: Literal["json", "markdown", "text"],
+):
+    return await app.receipt(
+        ReceiptRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed)),
+                "task_id": started.task_id,
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(frontier),
+                "format": receipt_format,
+                "include": "standard",
+                "redaction_profile": "full_local",
+            }
+        )
+    )
+
+
+async def _compact_912(app: Application, started: StartInternalResult, seed: int):
+    status = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "view": "compact",
+                "limit": "10",
+            }
+        )
+    )
+    return cast(StatusCompactPageModel, status.page).items[0], status.closure_readiness
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+async def test_growing_caller_digest_excerpts_mint_no_finding_and_one_receipt_label(
+    ledger_backend: Literal["memory", "sqlite"],
+) -> None:
+    """Issue #912, superjson C replay: five checks, five subject-set sizes, zero finding ids.
+
+    The agent resolves its obligation with a digest-only diff excerpt (the "permanent from birth"
+    shape: 28/32 attempts), then keeps publishing further bounded excerpts and a corrected claim
+    citing all of them, checking after each round. Before the fix every round minted a new
+    ``ledger_stale_or_incomplete`` id whose text asked for "content-bearing evidence". Now none is
+    raised, nothing is left to answer, and the receipt still discloses once, with the exact count,
+    that Yoetz did not verify those caller digests.
+    """
+
+    app, _runtime, _ = _build_app(seed_offset=40, ledger_backend=ledger_backend)
+    started = await app.start(start_request(9120, title="Digest-only evidence replay"))
+    obligation_id = protocol_id("obl_", 9121)
+    opened = await _publish_912(
+        app, started, started.frontier, 9122, (_obligation_draft_912(9123, obligation_id),)
+    )
+
+    first = _caller_digest_excerpt_draft(9130, _ISSUE_912_HUNKS[0], subject="source_diff")
+    evidence_refs = [cast(str, cast(dict[str, JsonValue], first["payload"])["evidence_id"])]
+    claim_id = protocol_id("clm_", 9133)
+    published = await _publish_912(
+        app,
+        started,
+        opened.result_frontier,
+        9134,
+        (
+            first,
+            _obligation_draft_912(9135, obligation_id, resolved_by=tuple(evidence_refs)),
+            _completion_claim_draft_912(9136, claim_id, obligation_id, tuple(evidence_refs)),
+        ),
+    )
+    checked = await _check_912(app, started, published.result_frontier, 9137)
+    returned: list[tuple[str, ...]] = [tuple(item.finding_id for item in checked.findings)]
+    assert _provenance_findings(checked.findings) == ()
+    assert "evidence_content_digest_only" in checked.coverage.known_gaps
+
+    for round_index, hunk in enumerate(_ISSUE_912_HUNKS[1:], start=1):
+        base = 9140 + round_index * 10
+        excerpt = _caller_digest_excerpt_draft(base, hunk, subject="bounded_excerpt")
+        evidence_refs.append(
+            cast(str, cast(dict[str, JsonValue], excerpt["payload"])["evidence_id"])
+        )
+        replacement = protocol_id("clm_", base + 2)
+        published = await _publish_912(
+            app,
+            started,
+            checked.result_frontier,
+            base + 3,
+            (
+                excerpt,
+                _completion_claim_draft_912(
+                    base + 4,
+                    replacement,
+                    obligation_id,
+                    tuple(evidence_refs),
+                    supersedes=(claim_id,),
+                ),
+            ),
+        )
+        claim_id = replacement
+        checked = await _check_912(app, started, published.result_frontier, base + 5)
+        assert _provenance_findings(checked.findings) == (), round_index
+        assert "evidence_content_digest_only" in checked.coverage.known_gaps
+        returned.append(tuple(item.finding_id for item in checked.findings))
+
+    # Following the recipe verbatim leaves nothing to clear: no finding in any of the five checks,
+    # where the unfixed service minted a fresh id each time the subject set grew.
+    assert returned == [()] * len(_ISSUE_912_HUNKS), returned
+    history = await _findings_view(app, started, 9200, include_resolved=True)
+    assert all(item.kind != FindingKind.LEDGER_STALE_OR_INCOMPLETE.value for item in history.items)
+    compact, readiness = await _compact_912(app, started, 9201)
+    assert compact.unanswered_finding_count == "0"
+    assert "findings_unanswered" not in readiness.blocking_conditions
+
+    receipt = await _receipt_912(app, started, checked.result_frontier, 9202, "json")
+    assert receipt.conclusion != "unresolved_findings_remain"
+    assert "evidence_content_digest_only" in receipt.coverage.known_gaps
+    body = _limitations_body(receipt.document)
+    assert body.count("caller-asserted digest") == 1
+    assert (
+        f"{len(_ISSUE_912_HUNKS)} cited evidence items carry caller-asserted digests that Yoetz "
+        "did not verify: the digest was recorded but the bytes were not retained."
+    ) in body
+    assert "withheld" not in body
+    document = cast(dict[str, JsonValue], receipt.document)
+    assert not any(
+        str(cast(dict[str, JsonValue], gap)["code"]).startswith("retained_finding_coverage")
+        for gap in cast(list[JsonValue], document["gaps"])
+    )
+    text = await _receipt_912(app, started, receipt.result_frontier, 9203, "text")
+    assert text.human_text is not None
+    assert "cited evidence items carry caller-asserted digests" in text.human_text
+    assert "content-bearing" not in text.human_text
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+async def test_receipt_label_keeps_digest_only_and_withheld_retention_apart(
+    ledger_backend: Literal["memory", "sqlite"],
+) -> None:
+    """Review finding PR925-F3: the count-bearing label must not merge two retention facts.
+
+    A ``digest_only`` item kept its digest but the bytes were never retained; a ``withheld`` item
+    records that the publisher withheld the bytes. One cited item of each kind yields one label
+    with a total and a per-kind breakdown, identically in the JSON, markdown and text receipts.
+    """
+
+    app, _runtime, _ = _build_app(seed_offset=41, ledger_backend=ledger_backend)
+    started = await app.start(start_request(9700, title="Mixed caller-digest retention"))
+    obligation_id = protocol_id("obl_", 9701)
+    opened = await _publish_912(
+        app, started, started.frontier, 9702, (_obligation_draft_912(9703, obligation_id),)
+    )
+    digest_only = _caller_digest_excerpt_draft(9710, _ISSUE_912_HUNKS[0], subject="source_diff")
+    withheld = _caller_digest_excerpt_draft(
+        9720, _ISSUE_912_HUNKS[1], subject="bounded_excerpt", availability="withheld"
+    )
+    refs = tuple(
+        cast(str, cast(dict[str, JsonValue], draft["payload"])["evidence_id"])
+        for draft in (digest_only, withheld)
+    )
+    published = await _publish_912(
+        app,
+        started,
+        opened.result_frontier,
+        9730,
+        (
+            digest_only,
+            withheld,
+            _obligation_draft_912(9731, obligation_id, resolved_by=refs),
+            _completion_claim_draft_912(9732, protocol_id("clm_", 9733), obligation_id, refs),
+        ),
+    )
+    checked = await _check_912(app, started, published.result_frontier, 9734)
+    assert _provenance_findings(checked.findings) == ()
+    assert {"evidence_content_digest_only", "evidence_content_withheld"} <= set(
+        checked.coverage.known_gaps
+    )
+
+    expected = (
+        "2 cited evidence items carry caller-asserted digests that Yoetz did not verify: "
+        "1 is digest-only (the digest was recorded but the bytes were not retained) and "
+        "1 is withheld (the publisher recorded the bytes as withheld)."
+    )
+    receipt = await _receipt_912(app, started, checked.result_frontier, 9740, "json")
+    body = _limitations_body(receipt.document)
+    assert body.count("caller-asserted digest") == 1
+    assert expected in body
+    frontier = receipt.result_frontier
+    human_formats: tuple[tuple[int, Literal["markdown", "text"]], ...] = (
+        (9741, "markdown"),
+        (9742, "text"),
+    )
+    for seed, receipt_format in human_formats:
+        rendered = await _receipt_912(app, started, frontier, seed, receipt_format)
+        assert rendered.human_text is not None
+        assert rendered.human_text.count("caller-asserted digest") == 1
+        assert expected in rendered.human_text
+        frontier = rendered.result_frontier
+
+
+async def _append_native_tool_output_capture(
+    app: Application,
+    runtime: _WorkflowRuntime,
+    started: StartInternalResult,
+    *,
+    seed: int,
+    expected_frontier: int,
+):
+    """Append the production materialization of one captured Codex tool output (OBS-001).
+
+    The envelope and manifest are the canonical fixture's recorded Codex ``PostToolUse`` shell
+    output; only the narrative message part is left out, so the capture adds no unrelated gap.
+    The captured bytes are stored, so the evidence is native ``observation_captured`` content.
+    """
+
+    fixture = cast(
+        dict[str, JsonValue], load_fixture_json("canonical/OBS-001-captured-evidence.case.json")
+    )
+    source = cast(dict[str, JsonValue], fixture["input"])
+    raw = cast(dict[str, JsonValue], source["envelope"])
+    cursor = cast(dict[str, JsonValue], raw["cursor"])
+    manifest = next(
+        cast(dict[str, JsonValue], item)
+        for item in cast(list[JsonValue], source["manifests"])
+        if cast(dict[str, JsonValue], item)["content_kind"] == "tool_output"
+    )
+    captured_id = cast(str, manifest["object_id"])
+    envelope = ObservationEnvelope(
+        session_commitment=cast(str, raw["session_commitment"]),
+        event_kind=cast(str, raw["event_kind"]),
+        source_identity=cast(str, raw["source_identity"]),
+        source=ObservationSource(cast(str, raw["source"])),
+        cursor=ObservationCursor(
+            cast(int, cursor["hook_seq"]),
+            cast(int, cursor["session_stream_pos"]),
+            cast(int, cursor["source_ordinal"]),
+            cast(str, cursor["last_commitment"]),
+            cast(str, cursor["mapping_version"]),
+        ),
+        receipt_time=Timestamp(cast(str, raw["receipt_time"])),
+        structural_payload=DomainJsonObject(cast(dict[str, JsonValue], raw["structural_payload"])),
+        content_object_refs=(captured_id,),
+        gap_codes=(),
+    )
+    batch = materialize_observation_envelope(
+        envelope,
+        task_id=started.task_id,
+        captured_content=(
+            ObservationContentManifest(
+                object_id=captured_id,
+                envelope_digest=cast(str, manifest["envelope_digest"]),
+                content_kind=ObservationContentKind(cast(str, manifest["content_kind"])),
+                part_index=cast(int, manifest["part_index"]),
+                part_count=cast(int, manifest["part_count"]),
+                redacted=cast(bool, manifest["redacted"]),
+                content_digest=cast(str, manifest["content_digest"]),
+                content_bytes=cast(int, manifest["content_bytes"]),
+            ),
+        ),
+    )
+    assert batch.skip_reason is None and batch.coverage.known_gaps == ()
+    ledger, objects = next(iter(runtime.resources.values()))
+    now = app.clock.now_utc()
+    output = b"3 passed, 0 failed\n\n"
+    captured = await objects.finalize(
+        await objects.stage(
+            ObjectSource(data=output, declared_size=len(output)),
+            ObjectMetadata(ObjectKind.CAPTURED_CONTENT, "text/plain", started.task_id, now),
+            object_id=captured_id,
+        )
+    )
+    entries: list[AppendEntry] = []
+    for item in batch.drafts:
+        metadata = ObjectMetadata(
+            ObjectKind.EVENT_PAYLOAD,
+            media_type_for(item.draft.schema.name),
+            started.task_id,
+            now,
+        )
+        payload_ref = await objects.finalize(
+            await objects.stage(
+                ObjectSource(data=item.payload_bytes, declared_size=len(item.payload_bytes)),
+                metadata,
+            )
+        )
+        entries.append(
+            AppendEntry(
+                item.draft,
+                observation_author(),
+                payload_ref,
+                payload_ref.commitment,
+                metadata.media_type,
+                payload_ref.plaintext_size,
+                batch.channel,
+                batch.coverage,
+                item.projection_status,
+            )
+        )
+    appended = await ledger.append_batch(
+        AppendCommand(
+            started.task_id,
+            started.session_id,
+            started.writer_id,
+            protocol_id("req_", seed),
+            OperationKind.PUBLISH_WORK,
+            _DIGEST,
+            expected_frontier,
+            tuple(entries),
+            None,
+            (captured,),
+        )
+    )
+    evidence = next(
+        cast(EvidenceRecordedPayload, item.draft.payload)
+        for item in batch.drafts
+        if item.draft.schema.name == "evidence_recorded"
+    )
+    assert evidence.digest_binding is not None
+    assert evidence.strength is EvidenceImmutability.IMMUTABLE_SNAPSHOT
+    return appended, str(evidence.evidence_id)
+
+
+async def test_resolved_obligation_digest_is_one_disclosed_label_beside_native_support() -> None:
+    """Issue #912, expr C replay: no permanence trap and no impossible instruction.
+
+    A digest-only diff excerpt is locked into a resolved obligation's resolution refs, which stay
+    in scope forever. The agent then switches to native captured evidence and corrects its claim
+    to cite only that. Before the fix the resolved obligation kept a finding alive that told the
+    agent to "record content-bearing evidence"; now no finding is raised, the native snapshot adds
+    no provenance gap, and the receipt carries exactly one disclosed label counting that one item.
+    """
+
+    app, runtime, _ = _build_app(seed_offset=41)
+    started = await app.start(start_request(9300, title="Resolved-obligation digest replay"))
+    obligation_id = protocol_id("obl_", 9301)
+    opened = await _publish_912(
+        app, started, started.frontier, 9302, (_obligation_draft_912(9303, obligation_id),)
+    )
+    excerpt = _caller_digest_excerpt_draft(9310, _ISSUE_912_HUNKS[0], subject="source_diff")
+    digest_ref = cast(str, cast(dict[str, JsonValue], excerpt["payload"])["evidence_id"])
+    first_claim = protocol_id("clm_", 9312)
+    published = await _publish_912(
+        app,
+        started,
+        opened.result_frontier,
+        9313,
+        (
+            excerpt,
+            _obligation_draft_912(9314, obligation_id, resolved_by=(digest_ref,)),
+            _completion_claim_draft_912(9315, first_claim, obligation_id, (digest_ref,)),
+        ),
+    )
+    checked = await _check_912(app, started, published.result_frontier, 9316)
+    assert _provenance_findings(checked.findings) == ()
+
+    captured, native_ref = await _append_native_tool_output_capture(
+        app,
+        runtime,
+        started,
+        seed=9320,
+        expected_frontier=checked.result_frontier.sequence,
+    )
+    corrected = await _publish_912(
+        app,
+        started,
+        captured.result_frontier,
+        9330,
+        (
+            _completion_claim_draft_912(
+                9331,
+                protocol_id("clm_", 9332),
+                obligation_id,
+                (native_ref,),
+                supersedes=(first_claim,),
+            ),
+        ),
+    )
+    rechecked = await _check_912(app, started, corrected.result_frontier, 9333)
+    assert _provenance_findings(rechecked.findings) == ()
+    assert "evidence_content_digest_only" in rechecked.coverage.known_gaps
+    assert "evidence_digest_subject_legacy_unknown" not in rechecked.coverage.known_gaps
+
+    receipt = await _receipt_912(app, started, rechecked.result_frontier, 9340, "json")
+    assert receipt.conclusion != "unresolved_findings_remain"
+    body = _limitations_body(receipt.document)
+    assert body.count("caller-asserted digest") == 1
+    assert "One cited evidence item carries a caller-asserted digest that Yoetz did not verify" in (
+        body
+    )
+    assert "content-bearing" not in body
+    document = cast(dict[str, JsonValue], receipt.document)
+    digest_gaps = [
+        cast(dict[str, JsonValue], gap)
+        for gap in cast(list[JsonValue], document["gaps"])
+        if cast(dict[str, JsonValue], gap)["code"] == "evidence_content_digest_only"
+    ]
+    # The only unverified caller digest is the one the resolved obligation still cites.
+    assert [gap["subject_refs"] for gap in digest_gaps] == [[protocol_id("evt_", 9310)]]
+
+
+async def test_pre_upgrade_digest_finding_resolves_as_history_without_a_replacement() -> None:
+    """Issue #912 lifecycle, geo C and koota-pair B replays on a ledger written before the fix.
+
+    The pre-upgrade service recorded a digest-only ``ledger_stale_or_incomplete`` finding and the
+    agent answered it. The first check after the upgrade neither returns it nor raises a
+    replacement id; it proves the issue absent, so the old row becomes resolved history. A further
+    identical recheck is a fixed point with nothing to answer, and the resolved row's coverage no
+    longer lowers the receipt, which names the caller digest once as a label.
+    """
+
+    app, runtime, _ = _build_app(seed_offset=42)
+    started = await app.start(start_request(9400, title="Pre-upgrade digest finding replay"))
+    obligation_id = protocol_id("obl_", 9401)
+    opened = await _publish_912(
+        app, started, started.frontier, 9402, (_obligation_draft_912(9403, obligation_id),)
+    )
+    excerpt = _caller_digest_excerpt_draft(9410, _ISSUE_912_HUNKS[1], subject="bounded_excerpt")
+    digest_ref = cast(str, cast(dict[str, JsonValue], excerpt["payload"])["evidence_id"])
+    published = await _publish_912(
+        app,
+        started,
+        opened.result_frontier,
+        9412,
+        (
+            excerpt,
+            _obligation_draft_912(9413, obligation_id, resolved_by=(digest_ref,)),
+            _completion_claim_draft_912(
+                9414, protocol_id("clm_", 9415), obligation_id, (digest_ref,)
+            ),
+        ),
+    )
+    frontier = Frontier(
+        int(published.result_frontier.sequence), published.result_frontier.head_digest
+    )
+    kind = FindingKind.LEDGER_STALE_OR_INCOMPLETE
+    old_coverage = replace(
+        coverage_for_channel(PublicationChannel.ENGINE_DERIVED),
+        check_types=(CheckType.DETERMINISTIC,),
+        ledger_freshness=LedgerFreshness.PARTIAL,
+        known_gaps=("evidence_content_digest_only", "semantic_review_not_requested"),
+    )
+    old = Finding(
+        finding_id(protocol_id("fnd_", 9420)),
+        kind,
+        FindingOrigin.DETERMINISTIC,
+        FINDING_KIND_TRAITS[kind][0],
+        "The ledger is too incomplete for a current conclusion.",
+        (
+            f"Subjects: {protocol_id('evt_', 9410)}. Gaps: evidence_content_digest_only. Main "
+            "agent: Treat the conclusion as coverage-limited. An evidence-provenance gap is not "
+            "resolved by a finding response: record content-bearing evidence or accept the gap "
+            "in the receipt."
+        ),
+        (event_id(protocol_id("evt_", 9410)),),
+        "work-integrity",
+        "0.1.0",
+        frontier,
+        old_coverage,
+        None,
+    )
+    recorded = await _drain_observation_record(
+        app,
+        runtime,
+        started,
+        seed=9421,
+        expected_frontier=frontier.sequence,
+        finding=old,
+    )
+    answered = await app.respond(
+        RespondRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 9430)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(recorded.result_frontier),
+                "finding_id": old.finding_id,
+                "finding_frontier": _frontier(recorded.result_frontier),
+                "disposition": "acknowledged",
+                "reason": "Caller-published excerpts remain digest-only provenance.",
+            }
+        )
+    )
+    checked = await _check_912(app, started, answered.result_frontier, 9431)
+    assert _provenance_findings(checked.findings) == ()
+    assert old.finding_id not in {item.finding_id for item in checked.findings}
+    history = await _findings_view(app, started, 9432, include_resolved=True)
+    by_id = {item.finding_id: item for item in history.items}
+    assert by_id[old.finding_id].resolved is True
+    assert [item.finding_id for item in history.items if item.kind == kind.value] == [
+        old.finding_id
+    ]
+
+    again = await _check_912(app, started, checked.result_frontier, 9433)
+    assert tuple(item.finding_id for item in again.findings) == tuple(
+        item.finding_id for item in checked.findings
+    )
+    assert again.verdict == checked.verdict
+    compact, readiness = await _compact_912(app, started, 9434)
+    assert compact.unanswered_finding_count == "0"
+    assert compact.receipt_blocking_finding_count == "0"
+    assert "findings_unanswered" not in readiness.blocking_conditions
+
+    receipt = await _receipt_912(app, started, again.result_frontier, 9435, "json")
+    document = cast(dict[str, JsonValue], receipt.document)
+    sections = {
+        cast(dict[str, JsonValue], section)["key"]: cast(dict[str, JsonValue], section)
+        for section in cast(list[JsonValue], document["sections"])
+    }
+    assert old.finding_id in cast(list[JsonValue], sections["summary"]["items"])
+    assert not any(
+        str(cast(dict[str, JsonValue], gap)["code"]).startswith("retained_finding_coverage")
+        for gap in cast(list[JsonValue], document["gaps"])
+    )
+    body = _limitations_body(receipt.document)
+    assert body.count("caller-asserted digest") == 1
+    assert "One cited evidence item carries a caller-asserted digest" in body

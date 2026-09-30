@@ -56,6 +56,7 @@ from yoetz.domain.values import (
 )
 from yoetz.kernel.deterministic_checks import (
     CaseGap,
+    render_deterministic_finding_text,
     run_deterministic_policies,
 )
 from yoetz.kernel.policies.work_integrity import WORK_INTEGRITY_POLICY_PACK
@@ -488,28 +489,101 @@ def test_ledger_stale_or_incomplete_requires_a_nonrootless_gap() -> None:
     assert FindingKind.LEDGER_STALE_OR_INCOMPLETE not in _kinds(make_case(gaps=(rootless,)))
 
 
-def test_ledger_stale_or_incomplete_names_the_gap_and_its_resolution_path() -> None:
-    gap = CaseGap(
-        f"evidence_content_digest_only:{evt(9)}",
-        "evidence_content_digest_only",
-        (evt(9),),
+@pytest.mark.parametrize("code", ("evidence_content_digest_only", "evidence_content_withheld"))
+def test_caller_digest_provenance_is_a_label_not_a_ledger_finding(code: str) -> None:
+    """Issue #912: an unverified caller digest raises no finding; the case keeps the gap.
+
+    Nothing an agent can publish turns ``caller_asserted`` bytes into captured content, so a
+    finding would only invite answers and further digest-only publications. The exact gap still
+    rides on the case and on every ref it roots, so the receipt keeps disclosing it.
+    """
+
+    gaps = tuple(CaseGap(f"{code}:{evt(n)}", code, (evt(n),)) for n in (9, 10, 11))
+    limited = replace(BASE_COVERAGE, known_gaps=(code,))
+    case = make_case(
+        gaps=gaps,
+        extra_refs=(evt(9), evt(10), evt(11)),
+        coverage_overrides={evt(9): limited, evt(10): limited, evt(11): limited},
     )
-    digest_only = replace(BASE_COVERAGE, known_gaps=("evidence_content_digest_only",))
-    trigger = make_case(
-        gaps=(gap,),
-        extra_refs=(evt(9),),
-        coverage_overrides={evt(9): digest_only},
+    assert FindingKind.LEDGER_STALE_OR_INCOMPLETE not in _kinds(case)
+    assert {gap.code for gap in case.gaps} == {code}
+    assert case.coverage_by_ref[evt(9)].known_gaps == (code,)
+
+    # A real ledger defect beside it still fires, and never names the caller digest roots.
+    unknown = CaseGap(f"unknown_event:{evt(12)}:future_event@2.0.0", "unknown_event", (evt(12),))
+    mixed = make_case(
+        gaps=(*gaps, unknown),
+        extra_refs=(evt(9), evt(10), evt(11), evt(12)),
+        coverage_overrides={evt(9): limited, evt(10): limited, evt(11): limited},
     )
+    result = run_deterministic_policies(mixed, WORK_INTEGRITY_POLICY_PACK)
+    ledger = [
+        item
+        for item in result.assessments
+        if item.candidate.kind is FindingKind.LEDGER_STALE_OR_INCOMPLETE
+    ]
+    assert len(ledger) == 1
+    assert ledger[0].candidate.subject_refs == (evt(12),)
+
+
+def test_legacy_digest_finding_names_only_actions_an_agent_can_take() -> None:
+    code = "evidence_digest_subject_legacy_unknown"
+    gap = CaseGap(f"{code}:{evt(9)}", code, (evt(9),))
+    legacy = replace(BASE_COVERAGE, known_gaps=(code,))
+    trigger = make_case(gaps=(gap,), extra_refs=(evt(9),), coverage_overrides={evt(9): legacy})
     result = run_deterministic_policies(trigger, WORK_INTEGRITY_POLICY_PACK)
     finding = next(
         item
         for item in result.assessments
         if item.candidate.kind is FindingKind.LEDGER_STALE_OR_INCOMPLETE
     )
+    detail = finding.candidate.detail
     # The detail names the concrete gap and says a response cannot resolve it, so an agent is
-    # never steered into acknowledging its way out of a coverage gap (issue #186).
-    assert "evidence_content_digest_only" in finding.candidate.detail
-    assert "not resolved by a finding response" in finding.candidate.detail
+    # never steered into acknowledging its way out of a coverage gap (issue #186) ...
+    assert code in detail
+    assert "no finding response, recheck, or further digest-only publication changes it" in detail
+    assert "it needs no repair or recheck; one acknowledged response answers it" in detail
+    # ... and it no longer promises a remedy ordinary publication cannot perform (issue #912).
+    assert "content-bearing" not in detail
+    assert "filter.strength immutable_snapshot" in detail
+    assert "typed digest_binding" in detail
+
+
+def test_mixed_legacy_digest_finding_does_not_claim_acknowledgement_resolves_it() -> None:
+    """Greptile P1 on #912: provenance advice must not cover a finding's other, current gaps.
+
+    A legacy digest beside an unknown event (or beside a rootless-coded subject such as a
+    command-attempt obligation) keeps the finding current after any acknowledgement, so the text
+    must say so instead of "one acknowledged response answers it".
+    """
+
+    code = "evidence_digest_subject_legacy_unknown"
+    legacy = replace(BASE_COVERAGE, known_gaps=(code,))
+    unknown = CaseGap(f"unknown_event:{evt(12)}:future_event@2.0.0", "unknown_event", (evt(12),))
+    mixed = make_case(
+        gaps=(CaseGap(f"{code}:{evt(9)}", code, (evt(9),)), unknown),
+        extra_refs=(evt(9), evt(12)),
+        coverage_overrides={evt(9): legacy},
+    )
+    result = run_deterministic_policies(mixed, WORK_INTEGRITY_POLICY_PACK)
+    detail = next(
+        item.candidate.detail
+        for item in result.assessments
+        if item.candidate.kind is FindingKind.LEDGER_STALE_OR_INCOMPLETE
+    )
+    assert "one acknowledged response answers it" not in detail
+    assert "needs no repair or recheck" not in detail
+    assert "an acknowledgement answers this finding but does not resolve it" in detail
+    assert "until a qualifying check proves those other gaps absent" in detail
+
+    # Same wording when the other subject is an obligation whose gap code is not listed.
+    _, rendered = render_deterministic_finding_text(
+        FindingKind.LEDGER_STALE_OR_INCOMPLETE,
+        (evt(9), obl(1)),
+        (code,),
+    )
+    assert "one acknowledged response answers it" not in rendered
+    assert "does not resolve it" in rendered
 
 
 def _recorded_finding() -> Finding:

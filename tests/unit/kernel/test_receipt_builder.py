@@ -55,6 +55,7 @@ from yoetz.domain.receipts import (
 )
 from yoetz.domain.values import (
     ActorType,
+    EventId,
     FindingId,
     Frontier,
     event_id,
@@ -374,6 +375,142 @@ def test_digest_provenance_limitation_is_retained_in_receipt() -> None:
     assert receipt.conclusion is ReceiptConclusion.INSUFFICIENT_COVERAGE
     assert receipt.coverage.known_gaps == (code,)
     assert tuple(item.code for item in receipt.gaps) == (code,)
+    limitations = next(
+        section.body
+        for section in receipt.sections
+        if section.key is ReceiptSectionKey.LIMITATIONS_AND_COVERAGE
+    )
+    assert "One cited evidence item carries a caller-asserted digest that Yoetz did not verify" in (
+        limitations
+    )
+
+
+_WITHHELD_EVENT_ID = event_id("evt_00000000-0000-4000-8000-000000000009")
+_SECOND_DIGEST_EVENT_ID = event_id("evt_00000000-0000-4000-8000-00000000000a")
+_DIGEST_ONLY_CLAUSE = "the digest was recorded but the bytes were not retained"
+_WITHHELD_CLAUSE = "the publisher recorded the bytes as withheld"
+
+
+def _digest_gap(code: str, root: EventId) -> CaseGap:
+    return CaseGap(f"{code}:{root}", code, (root,))
+
+
+@pytest.mark.parametrize(
+    ("gaps", "expected", "per_item", "absent"),
+    (
+        pytest.param(
+            (
+                _digest_gap("evidence_content_digest_only", _SOURCE_EVENT_ID),
+                _digest_gap("evidence_content_withheld", _WITHHELD_EVENT_ID),
+            ),
+            "2 cited evidence items carry caller-asserted digests that Yoetz did not verify: "
+            f"1 is digest-only ({_DIGEST_ONLY_CLAUSE}) and 1 is withheld ({_WITHHELD_CLAUSE}).",
+            True,
+            (),
+            id="mixed-retention",
+        ),
+        pytest.param(
+            (
+                _digest_gap("evidence_content_digest_only", _SOURCE_EVENT_ID),
+                _digest_gap("evidence_content_digest_only", _SECOND_DIGEST_EVENT_ID),
+            ),
+            "2 cited evidence items carry caller-asserted digests that Yoetz did not verify: "
+            f"{_DIGEST_ONLY_CLAUSE}.",
+            True,
+            (_WITHHELD_CLAUSE, "withheld"),
+            id="digest-only",
+        ),
+        pytest.param(
+            (_digest_gap("evidence_content_withheld", _WITHHELD_EVENT_ID),),
+            "One cited evidence item carries a caller-asserted digest that Yoetz did not "
+            f"verify: {_WITHHELD_CLAUSE}.",
+            True,
+            ("not retained", "digest-only"),
+            id="withheld-only",
+        ),
+        pytest.param(
+            (
+                CaseGap(
+                    "check_coverage:evidence_content_digest_only",
+                    "evidence_content_digest_only",
+                    (),
+                ),
+            ),
+            "Recorded check or finding coverage names caller-asserted digests that Yoetz did not "
+            "verify; no currently cited evidence item carries one.",
+            False,
+            (),
+            id="check-coverage-only",
+        ),
+    ),
+)
+def test_caller_digest_label_is_named_once_with_its_count(
+    gaps: tuple[CaseGap, ...], expected: str, per_item: bool, absent: tuple[str, ...]
+) -> None:
+    """Issue #912 fallback (a): the receipt, not a finding, discloses unverified caller digests.
+
+    Without a per-item gap root the code comes only from recorded check or finding coverage, so
+    the label describes that recorded limitation and never implies currently cited items or
+    permanence (a later check of the current record may drop it). Digest-only and withheld items
+    keep their distinct retention wording (review finding PR925-F3): a withheld item is never
+    described as merely not retained, nor a digest-only item as withheld. Every format carries
+    it.
+    """
+
+    codes = tuple(sorted({gap.code for gap in gaps}))
+    coverage = _coverage(gaps=codes)
+    ordered = tuple(sorted(gaps, key=lambda gap: gap.marker))
+    receipt = _build(
+        _context(
+            coverage=coverage,
+            gaps=ordered,
+            check=_check(CheckVerdict.NO_ISSUE_DETECTED, coverage),
+        )
+    )
+    limitations = next(
+        section.body
+        for section in receipt.sections
+        if section.key is ReceiptSectionKey.LIMITATIONS_AND_COVERAGE
+    )
+    assert expected in limitations
+    assert limitations.count("caller-asserted digest") == 1
+    assert ("no response or recheck changes it" in limitations) is per_item
+    if not per_item:
+        assert "cited evidence items carry" not in limitations
+        assert "Cited evidence carries" not in limitations
+    assert "content-bearing" not in limitations
+    wire = receipt_document_to_json(receipt)
+    assert any(
+        cast(dict[str, object], section)["body"] == limitations
+        for section in cast(list[object], wire["sections"])
+    )
+    for fragment in absent:
+        assert fragment not in limitations
+    for markdown in (True, False):
+        rendered = render_receipt_human(receipt, markdown=markdown)
+        assert expected in rendered
+        for fragment in absent:
+            assert fragment not in rendered
+
+
+def test_resolved_history_no_longer_lowers_receipt_coverage() -> None:
+    """Issue #912: a resolved row stays listed as history but its coverage is not folded."""
+
+    weaker = replace(_finding(), coverage=_coverage(gaps=("cursor_stale",)))
+    check = _check(CheckVerdict.NO_ISSUE_DETECTED, _coverage())
+    receipt = _build(_context(finding=weaker, resolved=True, check=check))
+    assert receipt.coverage == _coverage()
+    assert receipt.conclusion is ReceiptConclusion.NO_UNRESOLVED_DETERMINISTIC_FINDINGS
+    assert tuple(finding.finding_id for finding in receipt.findings) == (_FINDING_ID,)
+    summary = next(
+        section for section in receipt.sections if section.key is ReceiptSectionKey.SUMMARY
+    )
+    assert summary.items == (_FINDING_ID,)
+    assert "resolved by a later qualifying check" in summary.body
+
+    # A current row must still bound the coverage the application supplies.
+    with pytest.raises(ValueError, match="receipt_build_context_invalid"):
+        _context(finding=weaker, resolved=False, check=check)
 
 
 def test_suppressed_findings_block_clear_conclusion_until_fresh_check() -> None:

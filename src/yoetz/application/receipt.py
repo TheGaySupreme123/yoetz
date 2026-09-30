@@ -534,10 +534,14 @@ def _context(
         coverage = weakest(coverage, applicable.coverage)
     # Findings are historical material, not merely presentation rows. Observation advice can
     # retain a finding stamped while delivery was stale after the current projection and latest
-    # check have recovered. Fold every retained row before constructing the context so the
+    # check have recovered. Fold every current retained row before constructing the context so the
     # builder's corruption guard remains strict while the application supplies the honest weakest
-    # coverage the receipt document already promises.
+    # coverage the receipt document already promises. A resolved row stays in the document as
+    # history, but a later qualifying check proved its issue absent, so its coverage no longer
+    # lowers the conclusion or adds ``retained_finding_coverage`` gaps (issue #912).
     for state in finding_states:
+        if state.resolved:
+            continue
         record = projection.findings[state.finding_id]
         assert record.payload is not None
         coverage = weakest(coverage, record.payload.coverage)

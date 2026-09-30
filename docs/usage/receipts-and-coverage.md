@@ -131,7 +131,11 @@ Forbidden after a candidate read: "I checked and found nothing."
   observes nothing and changes no coverage.
 - Storing imported evidence. Imported evidence never gains cooperative authorship because Yoetz
   stored it.
-- A digest. It records identity, not content inspection.
+- A digest. It records identity, not content inspection. A digest your agent publishes stays
+  caller-asserted: it raises no finding, and the receipt's limitations say once, with a count,
+  how many cited evidence items carry caller-asserted digests Yoetz did not verify, keeping
+  digest-only items (the bytes were not retained) apart from withheld items (your agent recorded
+  the bytes as withheld). No response, recheck, or further publication changes that.
 - Constructing TOML, a path, or metadata. That is not proof of wire dispatch or AI-powered review.
 
 Only a capability-proven, consented observation arm with real observation evidence earns
@@ -166,9 +170,10 @@ failed pack still change nothing, and a check that reports the same issue again 
 A resolved finding is not erased. Status still lists it (`resolved: true`, shown when
 `include_resolved` is requested), the receipt still carries it as history, and the receipt wording
 says how many earlier findings were resolved by a later qualifying check, apart from any findings
-that are still current and from any coverage limitations. One exception is fixed by the released
-status wire: a finding whose latest response is `provenance_disputed` stays current even after such
-a check.
+that are still current and from any coverage limitations. Its own recorded coverage no longer lowers
+the receipt's coverage; current findings, the current record, and the applicable check still do. One
+exception is fixed by the released status wire: a finding whose latest response is
+`provenance_disputed` stays current even after such a check.
 
 Repairing the record is therefore the way back to a stronger receipt: repair, recheck, and read the
 finding's `resolved` state rather than assuming that absence alone qualified. If the issue re-fires,

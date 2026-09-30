@@ -60,7 +60,9 @@ cannot establish the relation, leave it unknown.
 Reuse suitable existing native evidence IDs directly in the claim's `supporting_refs` and relevant
 result evidence references. Do not replace matching observed bytes with a duplicate
 `caller_asserted` digest-only placeholder. Publish only genuinely missing bounded assertions;
-ordinary publication cannot mint `observation_captured` provenance.
+ordinary publication cannot mint `observation_captured` provenance. A published caller-asserted
+digest stays an unverified provenance label that the receipt discloses with a count; it raises no
+finding, and more digest-only items cannot upgrade it.
 
 Interpret limitations per item: `content_unselected` means a retained kind was not selected;
 `evidence_content_digest_only` retains identity without content; `content_capture_unavailable`
@@ -97,12 +99,21 @@ is caller-authored narrative and is never treated as the bytes identified by `co
 
 ### Making a change reviewable
 
-When AI-powered review is expected, one evidence record can carry both legibility and identity: put
-the smallest problem-local changed hunk or test slice in `description`, and publish the matching
-`content_digest` with its `digest_binding`. The review excerpt shown to the reviewer is the
-`description`; the digest identity facts travel alongside it as excerpt provenance. A digest-bound
-record without a `description` contributes only its bounded provenance facts, so the reviewer sees
-identity but no content.
+When AI-powered review is expected, first cite native captured evidence that already covers the
+change: `status view=evidence` with `filter.strength` set to `immutable_snapshot` narrows the
+inventory to captured records, and a matching native ID goes directly into the claim's
+`supporting_refs`. When no native record covers it, put the smallest problem-local changed hunk or
+test slice in the `description` of one evidence record. The review excerpt shown to the reviewer is
+that `description`.
+
+You may also publish the matching `content_digest` with its `digest_binding` for byte identity; the
+digest identity facts then travel alongside the excerpt as excerpt provenance. Ordinary publication
+records that binding as `caller_asserted` with `digest_only` availability: Yoetz did not capture or
+verify those bytes. This is a disclosed provenance label, not a finding. It raises no local finding,
+and the receipt names once, with a count, the cited evidence items whose caller-asserted digests
+Yoetz did not verify. No response, recheck, or further publication changes that label, so do not
+publish more excerpts or digests to clear it. A digest-bound record without a `description`
+contributes only its bounded provenance facts, so the reviewer sees identity but no content.
 
 The excerpt is truncated to at most 4,096 UTF-8 bytes, silently and possibly mid-content. Keep the
 slice within 4,096 UTF-8 bytes so the reviewer receives it intact; `description` itself accepts up

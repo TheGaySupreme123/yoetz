@@ -28,6 +28,7 @@ from yoetz.kernel.claims import (
     result_is_relevant_to_claim,
 )
 from yoetz.kernel.deterministic_checks import (
+    CALLER_DIGEST_PROVENANCE_GAPS,
     OBSERVED_FAILURE_LIVE_FACT,
     DeterministicAssessment,
     DeterministicCase,
@@ -540,6 +541,12 @@ def _ledger_finding(case: DeterministicCase) -> list[DeterministicAssessment]:
         "freshness_gap_present": set(),
     }
     for gap in case.gaps:
+        if gap.code in CALLER_DIGEST_PROVENANCE_GAPS:
+            # A caller-asserted digest the service did not verify is a disclosed provenance
+            # label, not a ledger defect: it stays in case coverage and the receipt names it once
+            # with a count, but no agent action can change it, so it never becomes a finding
+            # subject whose growth would mint a new issue on every publication (issue #912).
+            continue
         if gap.code == "unknown_event":
             fact_code = "unknown_event_present"
         elif gap.code in {
