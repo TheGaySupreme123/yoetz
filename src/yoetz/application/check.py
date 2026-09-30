@@ -24,6 +24,7 @@ from yoetz.domain.findings import (
     semantic_provenance_to_json,
 )
 from yoetz.domain.receipts import (
+    CHECK_TIME_CHANGE_GAPS,
     COMPLETION_SCOPE_DECLARED_NONE_GAP,
     COMPLETION_SCOPE_UNDECLARED_GAP,
     OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
@@ -969,6 +970,7 @@ class FinalSemanticEvaluation:
                 "content_unselected",
                 "content_redacted",
                 SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
+                *CHECK_TIME_CHANGE_GAPS,
             }
         ):
             raise _invalid("semantic_judgment_invalid")

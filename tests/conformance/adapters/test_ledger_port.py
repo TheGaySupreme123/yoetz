@@ -52,6 +52,11 @@ from yoetz.domain.values import (
 )
 from yoetz.kernel.projections import ProjectionState
 from yoetz.kernel.ranking import CheckCompleteness, RankingContext, rank_findings
+from yoetz.ports.change_capture import (
+    TASK_CHANGE_BASE_MEDIA_TYPE,
+    TaskChangeBase,
+    encode_task_change_base,
+)
 from yoetz.ports.ledger import (
     AppendCommand,
     AppendEntry,
@@ -3039,3 +3044,78 @@ async def test_semantic_progress_selected_attempt_terminates_as_succeeded() -> N
         assert progress.phase is SemanticProgressPhase.TERMINAL
         assert progress.terminal_outcome == "succeeded"
         assert progress.terminal_reason is SemanticReason.SEMANTIC_COMPLETED
+
+
+async def _task_change_base_ref(
+    adapter: MemoryLedgerAdapter | SqliteLedger, command: AppendCommand, commit: str
+) -> ObjectRef:
+    objects = adapter._objects  # pyright: ignore[reportPrivateUsage]
+    assert objects is not None
+    payload = encode_task_change_base(TaskChangeBase("sha1", commit))
+    staged = await objects.stage(
+        ObjectSource(data=payload, declared_size=len(payload)),
+        ObjectMetadata(
+            ObjectKind.CHANGE_CAPTURE,
+            TASK_CHANGE_BASE_MEDIA_TYPE,
+            command.task_id,
+            datetime(2026, 7, 19, 12, 0, tzinfo=UTC),
+        ),
+    )
+    return await objects.finalize(staged)
+
+
+@pytest.mark.anyio
+async def test_task_change_base_is_kept_once_with_adapter_parity(tmp_path: Path) -> None:
+    """ADR-031: the task-start base is one durable, inventoried root that a later call never moves."""
+
+    command = ledger_command(request_suffix="9")
+    database = tmp_path / "task-change-base.sqlite3"
+    db = apsw.Connection(str(database))
+    initialize_bundle(
+        db,
+        {
+            "task_id": command.task_id,
+            "owner_generation": "1",
+            "owner_nonce": "ledger-test-nonce",
+        },
+    )
+    sqlite_ids = _Ids()
+    sqlite_objects = _Objects(sqlite_ids)
+    sqlite = SqliteLedger(
+        db=db,
+        task_id=command.task_id,
+        ownership_fence=_fence(),
+        clock=_Clock(),
+        ids=sqlite_ids,
+        objects=sqlite_objects,
+    )
+    for adapter in (memory_ledger(command), sqlite):
+        await adapter.append_batch(command)
+        assert await adapter.load_task_change_base() is None
+        first = await _task_change_base_ref(adapter, command, "a" * 40)
+        later = await _task_change_base_ref(adapter, command, "b" * 40)
+        assert await adapter.record_task_change_base(first) is True
+        assert await adapter.record_task_change_base(later) is False
+        assert await adapter.load_task_change_base() == first
+        wrong_kind = replace(
+            later, metadata=replace(later.metadata, kind=ObjectKind.CAPTURED_CONTENT)
+        )
+        with pytest.raises(ValueError, match="task_change_base_invalid"):
+            await adapter.record_task_change_base(wrong_kind)
+
+    kept = await sqlite.load_task_change_base()
+    assert kept is not None
+    inventory = db.execute(
+        "SELECT kind, state FROM objects WHERE object_id=?", (kept.object_id,)
+    ).fetchall()
+    assert inventory == [("change_capture", "present")]
+    db.close()
+    restarted = SqliteLedger(
+        db=apsw.Connection(str(database)),
+        task_id=command.task_id,
+        ownership_fence=_fence(),
+        clock=_Clock(),
+        ids=sqlite_ids,
+        objects=sqlite_objects,
+    )
+    assert await restarted.load_task_change_base() == kept

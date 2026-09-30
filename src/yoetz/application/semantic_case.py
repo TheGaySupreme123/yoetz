@@ -56,6 +56,10 @@ from yoetz.domain.privacy import (
     ReviewSelectionPolicy,
 )
 from yoetz.domain.receipts import (
+    CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP,
+    CHECK_TIME_CHANGE_REDACTED_GAP,
+    CHECK_TIME_CHANGE_TRUNCATED_GAP,
+    CHECK_TIME_CHANGE_UNAVAILABLE_GAP,
     SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
     SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
 )
@@ -77,6 +81,7 @@ from yoetz.kernel.deterministic_checks import (
 )
 from yoetz.kernel.lineage import LineageEvaluation
 from yoetz.kernel.projections import EvidenceProjectionRecord, ProjectionState
+from yoetz.ports.change_capture import CHECK_CHANGE_MEDIA_TYPE, CheckChangeCapture
 from yoetz.ports.objects import ObjectKind, ObjectRef
 from yoetz.ports.semantic import (
     MAX_SEMANTIC_ITEM_SUBJECT_REFS,
@@ -107,8 +112,10 @@ from yoetz.protocol.models import (
 )
 
 __all__ = [
+    "CHECK_TIME_CHANGE_ITEM_PREFIX",
     "CapturedContentScope",
     "CapturedSemanticContent",
+    "CheckTimeChange",
     "MAX_CAPTURED_SEMANTIC_CONTENT_BYTES",
     "MAX_CAPTURED_SEMANTIC_CONTENT_PARTS",
     "MAX_CAPTURED_SEMANTIC_INPUT_BYTES",
@@ -349,6 +356,96 @@ class _CapturedGroup:
     source_kind: _ExcerptKind
     digest_provenance: ExcerptDigestProvenance
     capture_gaps: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CheckTimeChange:
+    """The one service-captured check-time change a case may carry (ADR-031).
+
+    The service read the task's repository when this check ran, redacted the rendered change, and
+    stored it as one encrypted object before building the case. The builder never reads Git or an
+    object: it verifies the frozen value, links it to the case's claims and obligations, and splits
+    its text into bounded excerpts ahead of every other excerpt.
+    """
+
+    object_ref: ObjectRef
+    capture: CheckChangeCapture
+
+    def __post_init__(self) -> None:
+        if type(self.object_ref) is not ObjectRef or type(self.capture) is not CheckChangeCapture:
+            raise ValueError("semantic_case_check_change_invalid")
+        if (
+            self.object_ref.metadata.kind is not ObjectKind.CHANGE_CAPTURE
+            or self.object_ref.metadata.media_type != CHECK_CHANGE_MEDIA_TYPE
+        ):
+            raise ValueError("semantic_case_check_change_invalid")
+
+
+# Item ids sort ahead of every other case item, so the provider document lists the change first.
+CHECK_TIME_CHANGE_ITEM_PREFIX: Final = "change-check-time-"
+_CHECK_TIME_CHANGE_SOURCE_REF: Final = "check-time-change"
+_CHECK_TIME_CHANGE_MARKER: Final = "[Yoetz check-time change, part {index} of {count}]\n"
+_CHECK_TIME_CHANGE_MIN_CHUNK: Final = 256
+
+
+def _check_time_change_reservation(selection: ReviewSelectionPolicy) -> tuple[int, int]:
+    """Excerpt slots and bytes held for the check-time change before any other excerpt (#883).
+
+    Half of the recipe's excerpt count and total bytes, and never less than one slot, are offered
+    to the service-captured change first. Room it does not use stays with the other excerpts; its
+    parts left over after every other excerpt backfill whatever the recipe still has free.
+    """
+
+    return max(1, selection.max_excerpts // 2), selection.max_total_excerpt_bytes // 2
+
+
+def _check_time_change_parts(text: bytes, part_limit: int) -> tuple[str, ...]:
+    """Split the rendered change into self-describing parts, preferring line boundaries."""
+
+    marker_room = len(_CHECK_TIME_CHANGE_MARKER.format(index=999, count=999).encode("ascii"))
+    chunk_limit = part_limit - marker_room
+    if chunk_limit < _CHECK_TIME_CHANGE_MIN_CHUNK:
+        return ()
+    chunks: list[bytes] = []
+    rest = text
+    while rest:
+        if len(rest) <= chunk_limit:
+            chunks.append(rest)
+            break
+        window = rest[:chunk_limit]
+        cut = window.rfind(b"\n") + 1
+        if cut < chunk_limit // 2:
+            # One very long line: cut on a UTF-8 boundary instead of a line boundary.
+            cut = len(window.decode("utf-8", errors="ignore").encode("utf-8"))
+        chunks.append(rest[:cut])
+        rest = rest[cut:]
+    count = len(chunks)
+    return tuple(
+        _CHECK_TIME_CHANGE_MARKER.format(index=index + 1, count=count) + chunk.decode("utf-8")
+        for index, chunk in enumerate(chunks)
+    )
+
+
+def _check_time_change_links(
+    projection: ProjectionState, allowed: frozenset[str]
+) -> tuple[str, ...]:
+    """The case subjects the change is the work product of: its claims, then its obligations."""
+
+    refs = {
+        str(claim_id)
+        for claim_id, record in effective_claim_items(projection)
+        if record.payload is not None and not record.redacted
+    }
+    refs.update(
+        str(obligation_id)
+        for obligation_id, record in projection.obligations.items()
+        if record.payload is not None and not record.redacted
+    )
+    linked = tuple(sorted(refs & allowed, key=str.encode))[:MAX_SEMANTIC_ITEM_SUBJECT_REFS]
+    if linked or not projection.plans:
+        return linked
+    plan_ref = str(projection.plans[max(projection.plans)].source_event_id)
+    return (plan_ref,) if plan_ref in allowed else ()
 
 
 _EVIDENCE_EXCERPT_KIND: Final[Mapping[EvidenceKind, _ExcerptKind]] = {
@@ -1053,8 +1150,15 @@ def build_semantic_case(
     captured_content: Sequence[CapturedSemanticContent] = (),
     captured_content_scope: CapturedContentScope | None = None,
     captured_content_gaps: Sequence[str] = (),
+    check_time_change: CheckTimeChange | None = None,
+    check_time_change_unavailable: bool = False,
 ) -> SemanticCase:
-    """Build one pre-egress AI-powered review case from frozen authority only."""
+    """Build one pre-egress AI-powered review case from frozen authority only.
+
+    ``check_time_change`` is the service's own capture of the repository when this check ran
+    (ADR-031); ``check_time_change_unavailable`` records that the recipe selected it but the
+    service could not capture it. Both are ignored when the recipe selects no diff excerpts.
+    """
 
     if type(frozen_case) is not DeterministicCase:
         raise TypeError("deterministic_case_invalid")
@@ -1087,6 +1191,12 @@ def build_semantic_case(
         # Content is an explicitly scoped disclosure. A bare byte sequence cannot enter a case,
         # even when it happens to match a durable evidence digest.
         raise ValueError("semantic_case_capture_scope_required")
+    if check_time_change is not None and type(check_time_change) is not CheckTimeChange:
+        raise TypeError("semantic_case_check_change_invalid")
+    if type(check_time_change_unavailable) is not bool or (
+        check_time_change_unavailable and check_time_change is not None
+    ):
+        raise ValueError("semantic_case_check_change_invalid")
     if review_context_profile is not ReviewContextProfile.CUSTOM:
         expected = ReviewSelectionPolicy.for_profile(review_context_profile)
         if review_selection != expected:
@@ -1097,6 +1207,16 @@ def build_semantic_case(
 
     selection = review_selection
     sections = frozenset(selection.sections)
+    # The check-time change is diff content: a recipe without diff excerpts never carries it and
+    # never reports its absence, exactly as it declines every other excerpt kind.
+    check_change_selected = (
+        "targeted_excerpts" in sections
+        and selection.max_excerpts > 0
+        and "diff" in selection.excerpt_kinds
+    )
+    if not check_change_selected:
+        check_time_change = None
+        check_time_change_unavailable = False
     frontier_refs = frozenset(str(ref) for ref in frozen_case.allowed_ids)
     local_check_refs = frozenset(str(item.finding_id) for item in findings)
     # A recheck re-derives a live recorded finding under its recorded id (issue #186), so the same
@@ -1644,7 +1764,75 @@ def build_semantic_case(
 
     # --- Targeted excerpts (recorded text only; never fetch objects) ---
     excerpt_bytes_used = 0
+    check_change_parts: tuple[str, ...] = ()
+    check_change_links: tuple[str, ...] = ()
+    check_change_admitted = 0
+    if check_time_change_unavailable:
+        capture_gap_set.add(CHECK_TIME_CHANGE_UNAVAILABLE_GAP)
+    if check_time_change is not None:
+        change = check_time_change.capture
+        if change.base == "head":
+            capture_gap_set.add(CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP)
+        if change.truncated:
+            capture_gap_set.add(CHECK_TIME_CHANGE_TRUNCATED_GAP)
+        if change.redacted:
+            capture_gap_set.add(CHECK_TIME_CHANGE_REDACTED_GAP)
+        check_change_links = _check_time_change_links(projection, allowed)
+        if check_change_links:
+            check_change_parts = _check_time_change_parts(
+                change.text,
+                min(selection.max_excerpt_bytes, MAX_REVIEW_TEXT_BYTES, MAX_SEMANTIC_ITEM_BYTES),
+            )
+
+    def admit_check_time_change(slot_limit: int, byte_limit: int) -> None:
+        """Admit the next check-time change parts within one budget share (ADR-031)."""
+
+        nonlocal excerpt_bytes_used, check_change_admitted
+        slots_used = 0
+        bytes_used = 0
+        while check_change_admitted < len(check_change_parts):
+            part = check_change_parts[check_change_admitted]
+            size = len(part.encode("utf-8"))
+            if (
+                slots_used >= slot_limit
+                or bytes_used + size > byte_limit
+                or len(targeted) >= selection.max_excerpts
+                or excerpt_bytes_used + size > selection.max_total_excerpt_bytes
+            ):
+                return
+            item = _content_item(
+                item_id=f"{CHECK_TIME_CHANGE_ITEM_PREFIX}{check_change_admitted + 1:03d}",
+                section="excerpt",
+                category=DataCategory.EVIDENCE_EXCERPT,
+                source_kind="diff",
+                source_ref=_CHECK_TIME_CHANGE_SOURCE_REF,
+                linked_subject_refs=check_change_links,
+                # Ordered ahead of every recorded excerpt: it is the change under review.
+                occurred_order=0,
+                text=part,
+                over_limit=over_limit,
+            )
+            items.append(item)
+            targeted.append(
+                TargetedExcerptRef(
+                    excerpt_item_id=item.item_id,
+                    source_kind="diff",
+                    linked_subject_refs=check_change_links,
+                    subject_state_relation=SubjectStateRelation.UNKNOWN,
+                    content_visibility="available",
+                    content_digest=item.content_digest,
+                    content_bytes=item.content_bytes,
+                )
+            )
+            excerpt_bytes_used += item.content_bytes
+            slots_used += 1
+            bytes_used += item.content_bytes
+            check_change_admitted += 1
+
     if "targeted_excerpts" in sections and selection.max_excerpts > 0:
+        # The service-captured change takes its reserved share first; see
+        # ``_check_time_change_reservation`` for how the rest of the budget is shared.
+        admit_check_time_change(*_check_time_change_reservation(selection))
         repair_refs = repair_evidence_refs(projection, frozenset(allowed))
         linked_subjects: set[str] = set(repair_refs)
         for finding in findings:
@@ -2110,6 +2298,17 @@ def build_semantic_case(
                 )
                 excerpt_bytes_used += item.content_bytes
 
+        # Parts the reservation could not hold backfill whatever budget the others left.
+        admit_check_time_change(selection.max_excerpts, selection.max_total_excerpt_bytes)
+
+    if check_time_change is not None:
+        if not check_change_admitted:
+            # Captured, but nothing reached the packet: no linkable subject, or a recipe budget
+            # too small for one readable part.
+            capture_gap_set.add(CHECK_TIME_CHANGE_UNAVAILABLE_GAP)
+        elif check_change_admitted < len(check_change_parts):
+            capture_gap_set.add(CHECK_TIME_CHANGE_TRUNCATED_GAP)
+
     lineage_items: tuple[SemanticCaseItem, ...] = ()
     if lineage_evaluation is not None:
         # Lineage is an independent C9 channel.  Keep every part in the provider packet even
@@ -2384,11 +2583,27 @@ def build_semantic_case(
         )
 
     selection_digest = review_selection_digest(selection)
+    # A case without a selected check-time change keeps its historical digest input exactly.
+    check_change_binding: dict[str, JsonValue] = {}
+    if check_time_change is not None:
+        check_change_binding["check_time_change"] = {
+            "base": check_time_change.capture.base,
+            "content_digest": "sha256:"
+            + hashlib.sha256(check_time_change.capture.text).hexdigest(),
+            "envelope_digest": check_time_change.object_ref.envelope_digest,
+            "object_id": check_time_change.object_ref.object_id,
+            "parts_admitted": check_change_admitted,
+            "redacted": check_time_change.capture.redacted,
+            "truncated": check_time_change.capture.truncated,
+        }
+    elif check_time_change_unavailable:
+        check_change_binding["check_time_change"] = {"unavailable": True}
     # Bind assessments/omissions/packet lists into the digest so provenance covers the full case.
     case_digest = canonical_digest(
         cast(
             JsonValue,
             {
+                **check_change_binding,
                 "dependency_digest": dependency_digest,
                 "frontier_refs": sorted(frontier_refs),
                 "omitted_reference_count": omitted_reference_count,

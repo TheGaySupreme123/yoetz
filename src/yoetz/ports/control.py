@@ -102,15 +102,25 @@ class WorkspaceLocator:
 
 @dataclass(frozen=True, slots=True)
 class RepositoryPrivacyContext:
-    """Opaque repository identity safe to retain after handshake completion."""
+    """Opaque repository identity safe to retain after handshake completion.
+
+    ``workspace_locator`` is the exact locator the commitment was derived from. It stays in
+    service memory for the life of the connection only, never in a result, log, or store, so the
+    check-time change capture (ADR-031) reads the same directory the connection proved it is in.
+    """
 
     commitment: str
     identity_kind: RepositoryIdentityKind
+    workspace_locator: WorkspaceLocator | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         validate_commitment(self.commitment)
         if self.identity_kind not in {"git_common_root", "directory"}:
             raise ValueError("repository_identity_kind_invalid")
+        if self.workspace_locator is not None and type(self.workspace_locator) is not (
+            WorkspaceLocator
+        ):
+            raise TypeError("workspace_locator_invalid")
 
 
 class ControlMethod(str, Enum):  # noqa: UP042 - exact wire enum base

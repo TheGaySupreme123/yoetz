@@ -13,6 +13,7 @@ from typing import Literal, Protocol, cast
 
 from pydantic import BaseModel
 
+from yoetz.application.check_change import record_task_change_base
 from yoetz.application.coordination import (
     CoordinationParticipant,
     coordination_generation_superseded,
@@ -82,7 +83,15 @@ from yoetz.domain.values import (
     JsonValue as DomainJsonValue,
 )
 from yoetz.kernel.lineage import LineageEvaluation
-from yoetz.observability.logging import record_classified_exception_without_raising
+from yoetz.observability.logging import (
+    record_classified_exception_without_raising,
+    record_unexpected_exception_without_raising,
+)
+from yoetz.ports.change_capture import (
+    ChangeCapturePort,
+    CheckWorkspaceSource,
+    check_workspace_source_scope,
+)
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.control import (
     ControlClientKind,
@@ -871,6 +880,9 @@ class Application:
     host_lineage_registry: HostLineageRegistryPort | None = field(
         default=None, repr=False, compare=False
     )
+    # Read-only repository access for the check-time change (ADR-031). ``None`` in embedded and
+    # test compositions: tasks then record no start base and checks bind no workspace source.
+    change_capture: ChangeCapturePort | None = field(default=None, repr=False, compare=False)
     _lineage_publish_lock: asyncio.Lock = field(init=False, repr=False, compare=False)
     # One ready service owns one runtime cache.  Serialize start admission so two concurrent
     # route rotations for the same bundle cannot race the runtime's single-writer lease while the
@@ -1020,7 +1032,58 @@ class Application:
                     ),
                 )
             await self._maybe_birth_implicit_repository_project(repository_privacy_context)
+            await self._record_task_change_base(result, repository_privacy_context)
             return result
+
+    async def _record_task_change_base(
+        self,
+        result: StartInternalResult,
+        repository_privacy_context: RepositoryPrivacyContext | None,
+    ) -> None:
+        """Keep HEAD as the new task's change base before its creator gets the result (ADR-031).
+
+        Only a start that created the task records a base, so the base is the repository state
+        before the task's first edit or commit. Attach and resume never record one: a base taken
+        later would silently hide the commits made in between. Best effort; a task without a base
+        still gets a check-time change, shown against HEAD with that limit disclosed.
+        """
+
+        port = self.change_capture
+        locator = (
+            None
+            if repository_privacy_context is None
+            else repository_privacy_context.workspace_locator
+        )
+        if port is None or locator is None or result.outcome not in {"created", "delegated"}:
+            return
+        try:
+            runtime = await self.runtime.route(
+                RouteCommand(
+                    result.session_id,
+                    result.writer_id,
+                    RouteAccess.WRITE,
+                    frozenset({RuntimeCapability.WRITE}),
+                )
+            )
+        except Exception as exc:
+            # The start itself succeeded; a missing base must never turn it into a failure.
+            record_unexpected_exception_without_raising(
+                exc,
+                component="start",
+                operation="task_change_base_route_failed",
+                request_id=result.request_id,
+            )
+            return
+        try:
+            await record_task_change_base(
+                runtime=runtime,
+                port=port,
+                workspace=locator.path,
+                clock=self.clock,
+                request_id=result.request_id,
+            )
+        finally:
+            await self.runtime.release(runtime)
 
     async def _maybe_birth_implicit_repository_project(
         self, repository_privacy_context: RepositoryPrivacyContext | None
@@ -2333,12 +2396,25 @@ class Application:
             request = request.model_copy(
                 update={"mode": self.verification_policy.default_check_mode}
             )
-        return await execute_check(
-            self,  # pyright: ignore[reportArgumentType]
-            request,
-            route_profile=route_profile,
-            host_profile=host_profile,
+        # The check-time change (ADR-031) may read only the directory this connection's own
+        # locator named; the composition still requires its commitment to equal the route's.
+        locator = (
+            None
+            if repository_privacy_context is None
+            else repository_privacy_context.workspace_locator
         )
+        source = (
+            None
+            if self.change_capture is None or locator is None or repository_privacy_context is None
+            else CheckWorkspaceSource(locator.path, repository_privacy_context.commitment)
+        )
+        with check_workspace_source_scope(source):
+            return await execute_check(
+                self,  # pyright: ignore[reportArgumentType]
+                request,
+                route_profile=route_profile,
+                host_profile=host_profile,
+            )
 
     async def respond(
         self,
@@ -2989,6 +3065,7 @@ class ServiceReadyContext:
     reconcile_observation_capture: Callable[[TaskRuntime], Awaitable[None]] | None = field(
         default=None, repr=False, compare=False
     )
+    change_capture: ChangeCapturePort | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if (
@@ -3093,6 +3170,7 @@ class ReadyApplicationFactory:
                 project_application=context.project_application,
                 host_lineage_registry=context.host_lineage_registry,
                 advice_semantic_supervisor=context.advice_semantic_supervisor,
+                change_capture=context.change_capture,
             )
             if context.reconcile_started_egress_attempts is not None:
                 # Before any supervisor can admit a new physical attempt, so a live in-flight

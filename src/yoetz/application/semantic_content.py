@@ -51,7 +51,7 @@ from yoetz.domain.observation_profiles import (
 )
 from yoetz.domain.values import validate_sha256_digest
 from yoetz.kernel.claims import effective_claim_items
-from yoetz.kernel.projections import EvidenceProjectionRecord
+from yoetz.kernel.projections import EvidenceProjectionRecord, ProjectionState
 from yoetz.ports.ledger import FrozenCase
 from yoetz.ports.objects import ObjectKind, ObjectRef
 from yoetz.ports.runtime import TaskRuntime
@@ -60,6 +60,7 @@ from yoetz.protocol.ids import IdKind
 
 __all__ = [
     "CapturedContentResolution",
+    "edit_capture_evidence_count",
     "resolve_captured_semantic_content",
 ]
 
@@ -522,6 +523,22 @@ def _is_edit_capture(payload: EvidenceRecordedPayload) -> bool:
     """Return the service-authored edit-kind hint of one materialized captured row."""
 
     return (payload.description or "").startswith(_EDIT_CAPTURE_DESCRIPTIONS)
+
+
+def edit_capture_evidence_count(projection: ProjectionState) -> int:
+    """Count evidence rows that materialized a native edit capture; a diagnostic integer only.
+
+    Compared with ``semantic_diff_parts_resolved``, it separates edits whose captures never reached
+    the ledger (zero here) from captures the resolver or selection then declined.
+    """
+
+    return sum(
+        1
+        for record in projection.evidence.values()
+        if record.payload is not None
+        and record.payload.captured_object_id is not None
+        and _is_edit_capture(record.payload)
+    )
 
 
 def _projected_candidates(

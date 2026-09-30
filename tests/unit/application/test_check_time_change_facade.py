@@ -1,0 +1,215 @@
+"""The service facade binds the check-time change only to the check's own connection (ADR-031)."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Literal, cast
+
+import pytest
+
+import yoetz.application.check as check_module
+from builders.ledger_adapters import FixedClock, MemoryObjects, append_command, memory_adapter
+from unit.application.test_service_facade import (
+    _SESSION,  # pyright: ignore[reportPrivateUsage]
+    _TASK,  # pyright: ignore[reportPrivateUsage]
+    _WRITER,  # pyright: ignore[reportPrivateUsage]
+    _application,  # pyright: ignore[reportPrivateUsage]
+    _Catalog,  # pyright: ignore[reportPrivateUsage]
+    _route,  # pyright: ignore[reportPrivateUsage]
+)
+from yoetz.adapters.git_change_capture import GitChangeCaptureAdapter
+from yoetz.adapters.memory.ledger import MemoryLedgerAdapter
+from yoetz.application.service import Application
+from yoetz.application.start import StartInternalResult
+from yoetz.ports.change_capture import (
+    TASK_CHANGE_BASE_MEDIA_TYPE,
+    CheckWorkspaceSource,
+    current_check_workspace_source,
+    decode_task_change_base,
+)
+from yoetz.ports.control import RepositoryPrivacyContext, WorkspaceLocator
+from yoetz.ports.diagnostics import RuntimeCapability
+from yoetz.ports.importer import ImporterPort
+from yoetz.ports.objects import ObjectKind, ObjectStorePort
+from yoetz.ports.runtime import BundleRuntimePort, RouteCommand, TaskRuntime
+from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
+from yoetz.protocol.models import CheckRequest
+
+_COMMITMENT = "hmac-sha256:" + "a" * 64
+
+
+class _Port:
+    def read_task_base(self, workspace: str) -> object:
+        raise AssertionError(f"not used: {workspace}")
+
+    def capture(self, workspace: str, base: object) -> object:
+        raise AssertionError(f"not used: {workspace} {base}")
+
+
+def _context(path: str | None) -> RepositoryPrivacyContext:
+    return RepositoryPrivacyContext(
+        _COMMITMENT,
+        "git_common_root",
+        None if path is None else WorkspaceLocator(path),
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("with_port", "path", "expected"),
+    (
+        (True, "/work/kea", CheckWorkspaceSource("/work/kea", _COMMITMENT)),
+        (False, "/work/kea", None),
+        (True, None, None),
+    ),
+)
+async def test_check_binds_its_own_connection_workspace_only_for_its_duration(
+    monkeypatch: pytest.MonkeyPatch,
+    with_port: bool,
+    path: str | None,
+    expected: CheckWorkspaceSource | None,
+) -> None:
+    seen: list[CheckWorkspaceSource | None] = []
+
+    async def execute_check(app: object, request: object, **kwargs: object) -> str:
+        del app, request, kwargs
+        seen.append(current_check_workspace_source())
+        return "checked"
+
+    monkeypatch.setattr(check_module, "execute_check", execute_check)
+    app = _application(
+        _Catalog(_route(repository_privacy_commitment=_COMMITMENT)),
+        enforce_repository_identity=True,
+    )
+    if with_port:
+        app = replace(app, change_capture=_Port())  # pyright: ignore[reportArgumentType]
+    request = CheckRequest.model_construct(
+        session_id=_SESSION, task_id=_TASK, writer_id=_WRITER, mode="deterministic_only"
+    )
+
+    result = await app.check(request, repository_privacy_context=_context(path))
+
+    assert result == "checked"
+    assert seen == [expected]
+    assert current_check_workspace_source() is None
+
+
+def test_repository_context_keeps_its_locator_out_of_equality_and_repr() -> None:
+    first = _context("/work/private-repository-name")
+    second = _context("/work/other")
+
+    assert first == second
+    assert "private-repository-name" not in repr(first)
+    assert first.workspace_locator == WorkspaceLocator("/work/private-repository-name")
+
+
+class _Router:
+    def __init__(self, runtime: TaskRuntime) -> None:
+        self.runtime = runtime
+        self.routes: list[RouteCommand] = []
+
+    async def route(self, command: RouteCommand) -> TaskRuntime:
+        self.routes.append(command)
+        return self.runtime
+
+    async def release(self, runtime: TaskRuntime) -> None:
+        assert runtime is self.runtime
+
+
+def _start_result(
+    outcome: Literal["attached", "created", "replayed", "delegated"], runtime: TaskRuntime
+) -> StartInternalResult:
+    # Only the fields the post-start hook reads; a full result needs frontier and view models.
+    return cast(
+        StartInternalResult,
+        SimpleNamespace(
+            outcome=outcome,
+            session_id=runtime.session_id,
+            writer_id=runtime.writer_id,
+            request_id="req_00000000-0000-4000-8000-000000000031",
+        ),
+    )
+
+
+def _runtime() -> tuple[TaskRuntime, MemoryLedgerAdapter]:
+    command = append_command()
+    adapter = memory_adapter(command)
+    runtime = TaskRuntime(
+        command.task_id,
+        command.session_id,
+        command.writer_id,
+        frozenset({RuntimeCapability.WRITE}),
+        adapter,
+        cast(ObjectStorePort, getattr(adapter, "_objects")),
+        cast(ImporterPort, object()),
+        "0.1.0",
+        "0.1.0",
+        "0.1",
+        "1.0.0",
+        getattr(adapter, "_fence"),
+    )
+    return runtime, adapter
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("outcome", "recorded"),
+    (("created", True), ("delegated", True), ("attached", False), ("replayed", False)),
+)
+async def test_only_a_creating_start_records_the_task_base(
+    tmp_path: Path,
+    outcome: Literal["attached", "created", "replayed", "delegated"],
+    recorded: bool,
+) -> None:
+    repository = tmp_path / "repo"
+    repository.mkdir(mode=0o700)
+    environment = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "PATH": os.defpath}
+    subprocess.run(("git", "init", "--quiet"), cwd=repository, check=True, env=environment)
+    runtime, adapter = _runtime()
+    router = _Router(runtime)
+    app = replace(
+        _application(_Catalog(_route())),
+        runtime=cast(BundleRuntimePort, router),
+        clock=FixedClock(),  # pyright: ignore[reportArgumentType]
+        change_capture=GitChangeCaptureAdapter(),
+    )
+    record = getattr(Application, "_record_task_change_base")
+
+    await record(app, _start_result(outcome, runtime), _context(os.fspath(repository)))
+
+    base = await adapter.load_task_change_base()
+    assert (base is not None) is recorded
+    assert len(router.routes) == (1 if recorded else 0)
+    if base is not None:
+        assert base.metadata.kind is ObjectKind.CHANGE_CAPTURE
+        assert base.metadata.media_type == TASK_CHANGE_BASE_MEDIA_TYPE
+        objects = cast(MemoryObjects, getattr(adapter, "_objects"))
+        data = b"".join([chunk async for chunk in objects.open_verified(base)])
+        # An empty repository starts from the empty tree.
+        assert decode_task_change_base(data).commit == "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+
+class _RefusingRouter:
+    async def route(self, command: RouteCommand) -> TaskRuntime:
+        del command
+        raise PublicOperationError(PublicErrorCode.BUNDLE_BUSY, "busy", True)
+
+
+@pytest.mark.anyio
+async def test_a_base_that_cannot_be_recorded_never_fails_the_start(tmp_path: Path) -> None:
+    runtime, adapter = _runtime()
+    app = replace(
+        _application(_Catalog(_route())),
+        runtime=cast(BundleRuntimePort, _RefusingRouter()),
+        clock=FixedClock(),  # pyright: ignore[reportArgumentType]
+        change_capture=GitChangeCaptureAdapter(),
+    )
+    record = getattr(Application, "_record_task_change_base")
+
+    await record(app, _start_result("created", runtime), _context(os.fspath(tmp_path)))
+
+    assert await adapter.load_task_change_base() is None

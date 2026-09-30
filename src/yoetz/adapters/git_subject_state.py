@@ -35,8 +35,11 @@ __all__ = [
     "GIT_SUBJECT_STATE_FORMAT",
     "GitStateComponents",
     "GitSubjectStateAdapter",
+    "discover_workspace_root",
     "list_changed_relative_paths",
+    "local_workspace_root",
     "open_local_workspace",
+    "run_read_only_git",
 ]
 
 GIT_SUBJECT_STATE_FORMAT: Final = "yoetz.git-subject-state/1"
@@ -309,6 +312,84 @@ def list_changed_relative_paths(
         raise ValueError(exc.limitation.value) from exc
     except (_GitProcessFailure, _OutputLimit) as exc:
         raise ValueError("not_git") from exc
+
+
+def discover_workspace_root(path: Path) -> Path:
+    """Return the Git top level containing ``path`` without opening any file.
+
+    A control connection may name a subdirectory of its repository. This resolves the root with
+    the same hardened, no-shell runner before ``open_local_workspace`` applies its full root and
+    metadata fences to the answer. Raises ``ValueError`` with a closed token on failure.
+    """
+
+    candidate = _lexically_safe_absolute(path)
+    try:
+        runner = _default_runner()
+        _, top = runner.run(
+            candidate,
+            ("rev-parse", "--path-format=absolute", "--show-toplevel"),
+            stdout_limit=4_096,
+        )
+    except (_GitProcessFailure, _OutputLimit) as exc:
+        raise ValueError("not_git") from exc
+    try:
+        root = Path(os.fsdecode(bytes(top).rstrip(b"\n")))
+    finally:
+        _overwrite(top)
+    if not root.is_absolute():
+        raise ValueError("unsafe_root")
+    return _lexically_safe_absolute(root)
+
+
+def local_workspace_root(workspace: LocalWorkspaceHandle) -> tuple[Path, int]:
+    """Return a validated handle's root path and its open no-follow directory descriptor.
+
+    The check-time change capture (ADR-031) reads untracked files relative to this descriptor so a
+    path component swapped for a symlink after validation cannot lead outside the root.
+    """
+
+    try:
+        payload = _workspace_payload(workspace)
+    except _CaptureFailure as exc:
+        raise ValueError(exc.limitation.value) from exc
+    return payload.root, payload.descriptor
+
+
+def run_read_only_git(
+    workspace: LocalWorkspaceHandle,
+    arguments: Sequence[str],
+    *,
+    stdout_limit: int,
+    timeout_seconds: float = _GIT_TIMEOUT_SECONDS,
+    accepted_returncodes: frozenset[int] = frozenset({0}),
+) -> tuple[int, bytes]:
+    """Run one hardened Git subcommand at a validated workspace root.
+
+    Shared with the check-time change capture (ADR-031) so both adapters run Git with the same
+    disabled global/system config, hooks, fsmonitor, external diff, textconv and credential
+    helpers. ``ValueError("git_output_limit")`` means stdout exceeded ``stdout_limit``; every
+    other failure is ``ValueError("git_failed")``. Neither carries Git output.
+    """
+
+    if type(stdout_limit) is not int or stdout_limit < 1:
+        raise ValueError("git_output_limit_invalid")
+    try:
+        payload = _workspace_payload(workspace)
+        runner = _default_runner(timeout_seconds)
+        returncode, output = runner.run(
+            payload.root,
+            arguments,
+            stdout_limit=stdout_limit,
+            accepted_returncodes=accepted_returncodes,
+        )
+    except _OutputLimit as exc:
+        raise ValueError("git_output_limit") from exc
+    except (_CaptureFailure, _GitProcessFailure) as exc:
+        raise ValueError("git_failed") from exc
+    try:
+        return returncode, bytes(output)
+    finally:
+        _overwrite(output)
 
 
 class GitSubjectStateAdapter:

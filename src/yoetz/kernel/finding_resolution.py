@@ -24,6 +24,7 @@ from yoetz.domain.coordination import CoordinationGapCode
 from yoetz.domain.events import CheckRecordedPayload, ClaimKind, LedgerRecord, RequestedItemKind
 from yoetz.domain.findings import Finding, FindingKind, FindingOrigin, ResponseDisposition
 from yoetz.domain.receipts import (
+    CHECK_TIME_CHANGE_GAPS,
     OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
     OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP,
     SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
@@ -73,6 +74,9 @@ _SEMANTIC_ONLY_GAPS: Final = frozenset(
         SEMANTIC_CHALLENGES_REJECTED_GAP,
         SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
         SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
+        # The check-time change is AI-powered review input only (ADR-031); local packs never
+        # read it, so its limits cannot weaken a local absence proof.
+        *CHECK_TIME_CHANGE_GAPS,
     }
 )
 # Evidence-strength gaps: the cited evidence was readable but its content was not captured or
@@ -119,7 +123,13 @@ _SEMANTIC_PROOF_TOLERATED_GAPS: Final = _EVIDENCE_STRENGTH_GAPS
 # tolerate a new limitation, hidden ledger payloads, withheld review categories, dropped
 # challenges, or an insufficient-packet answer.
 SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS: Final = _HOST_OBSERVATION_GAPS | frozenset(
-    {"content_capture_unavailable", SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP}
+    {
+        "content_capture_unavailable",
+        SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
+        # A check-time change limit (ADR-031) is a capture limit too: a repair check under the
+        # same limit as the review that raised the issue is no weaker than that review.
+        *CHECK_TIME_CHANGE_GAPS,
+    }
 )
 _SEMANTIC_BASELINE_CAPTURE_GAPS: Final = SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS
 _UNPROVEN_FRESHNESS: Final = frozenset(

@@ -65,6 +65,11 @@ from yoetz.protocol.recovery import continuation_for_semantic_outcome, directive
 
 __all__ = [
     "CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP",
+    "CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP",
+    "CHECK_TIME_CHANGE_GAPS",
+    "CHECK_TIME_CHANGE_REDACTED_GAP",
+    "CHECK_TIME_CHANGE_TRUNCATED_GAP",
+    "CHECK_TIME_CHANGE_UNAVAILABLE_GAP",
     "COMPLETION_CLAIM_OUTSIDE_PLAN_GAP",
     "COMPLETION_PLAN_NOT_CLAIMED_GAP",
     "COMPLETION_SCOPE_DECLARED_NONE_GAP",
@@ -152,6 +157,28 @@ SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP: Final = "semantic_case_content_over_i
 # beside the explicit `not_selected` omissions, instead of failing the whole review as a
 # generic coordinator failure (issue #858).
 SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP: Final = "semantic_case_finding_refs_over_limit"
+# The check-time change (ADR-031) is the service's own read of the task's repository when a check
+# runs. Each code names one limit on what that single object could show the reviewer. None of
+# them describes an input of a local policy pack, so they bound the review and the receipt only.
+# ``unavailable``: the review's recipe selected the change, but the service could carry none of
+# it (no trusted workspace, unsupported Git state, a failed capture, or no packet subject).
+CHECK_TIME_CHANGE_UNAVAILABLE_GAP: Final = "check_time_change_unavailable"
+# The commit recorded when the task started was absent or unresolvable, so the change is shown
+# against HEAD and commits made during the task may be missing from it.
+CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP: Final = "check_time_change_base_unavailable"
+# The capture, or its share of the packet, stopped early: the files and parts it names as not
+# shown never reached the reviewer.
+CHECK_TIME_CHANGE_TRUNCATED_GAP: Final = "check_time_change_truncated"
+# Credential-like spans were replaced before the change was stored or offered for review.
+CHECK_TIME_CHANGE_REDACTED_GAP: Final = "check_time_change_redacted"
+CHECK_TIME_CHANGE_GAPS: Final = frozenset(
+    {
+        CHECK_TIME_CHANGE_UNAVAILABLE_GAP,
+        CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP,
+        CHECK_TIME_CHANGE_TRUNCATED_GAP,
+        CHECK_TIME_CHANGE_REDACTED_GAP,
+    }
+)
 OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP: Final = "optional_semantic_review_blocked_by_policy"
 # The strict route ceiling blocked this process, but the durable applied-route record says the
 # last install applied the policy route (issue #537). The disagreement is the whole claim: a
