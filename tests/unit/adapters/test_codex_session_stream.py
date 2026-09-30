@@ -2931,5 +2931,28 @@ def test_parallel_same_command_items_wait_for_the_open_call() -> None:
         }
         # B's hook never fires: the turn's end delivers both rather than lose A's failure.
         assert _decisions(*rows, stop) == {"item-a": "carrier", "item-b": "carrier"}
-    # Without an owed call the turn's end leaves an unclaimed item local as a copy.
-    assert _decisions(pre_b, item_b, stop) == {"item-b": "copy"}
+    # The turn's end settles an unclaimed item as a copy only with a stored proof: without one
+    # (its post evicted, lost, or stored after Stop) it is delivered unpaired, never dropped.
+    assert _decisions(pre_b, item_b, stop) == {"item-b": "unpaired"}
+    twin = _decide_row(8, hook=False, identity="item-twin", call_id="exec-twin", exit_status=0)
+    assert _decisions(pre_b, post_b, item_b, twin, stop) == {
+        "item-b": "copy",
+        "item-twin": "copy",
+    }
+    assert _decisions(pre_b, post_b, item_a, stop) == {"item-a": "unpaired"}
+    # An MCP or patch item has no commitment: it stays local as its hooked call's copy.
+    mcp = _decide_row(9, hook=False, identity="item-mcp", call_id="exec-mcp", commitment=None)
+    assert _decisions(mcp, stop) == {"item-mcp": "copy"}
+
+
+def test_a_call_open_past_the_ring_still_owns_its_copy() -> None:
+    """#910: an evicted ``PreToolUse`` keeps its call open for the pairing replay."""
+
+    item_b = _decide_row(3, hook=False, identity="item-b", call_id="exec-b", exit_status=0)
+    post_a = _decide_row(5, hook=True, identity="post-a", call_id="call-a")
+    # Without the evicted call, A's outcome-less post would take B's item.
+    assert _decisions(item_b, post_a) == {"item-b": "carrier"}
+    kept_open = stream_module._rollout_item_decisions(  # pyright: ignore[reportPrivateUsage]
+        (item_b, post_a), _DECIDE_SESSION, ((_CMD, "call-a"), (_CMD, "call-b"))
+    )
+    assert kept_open == {"item-b": "pending"}

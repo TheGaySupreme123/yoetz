@@ -1005,25 +1005,39 @@ row decides it. A post with the item's own call id decides it directly: a stated
 that post's copy, and an outcome-less post makes it the call's only exit. A stated post of the
 same command commitment takes a pending item with the same exit as its copy. An outcome-less post
 of that commitment takes its pending items only once no other call of the same command is still
-open (its `PreToolUse` seen, its post not yet). With parallel runs of one command, an open call's
-post may still claim one of those items, so the reader waits for it instead of guessing by age.
+open (its `PreToolUse` seen, its post not yet). A call whose `PreToolUse` the local envelope ring
+evicted stays open until its post is seen, its post is evicted too, or the turn ends. With
+parallel runs of one command, an open call's post may still claim one of those items, so the
+reader waits for it instead of guessing by age.
 When more items remain than outcome-less calls, every one is delivered: a second record, judged by
 #909 as the later run, is disclosed, while a lost failure would not be. `Stop` or `SessionEnd`
-closes the turn. Outcome-less calls then take every pending item of their command, and any other
-pending item stays local as the copy of a call whose post stated its outcome or never fired. A
+closes the turn. Outcome-less calls then take every pending item of their command. Any other
+pending command item stays local only with a proof of copy still in the ring: a stated post with
+the item's call id, or with its command commitment and the same exit. Without that proof (the
+post was evicted, stored after `Stop`, or never fired) the item is delivered with
+`unpaired_event`. A
 carrier is delivered once on the next stream reconcile, with delivery and settlement committed
 together. It is stamped with the session's committed stream frontier at release time, so a later
 stream row already delivered cannot make the task refuse it as `cursor_stale`.
 
 The pending account keeps each item's structural record beside the local envelope ring (64
-items per workspace). An outcome is never dropped silently. A pending item that the ring evicts
-before it is paired, or that is the oldest past the 64-item bound, is delivered with
-`unpaired_event`. It becomes unpaired evidence that names its exit, not an attributed run, and the
-receipt carries the `unpaired_event` coverage limitation. Only past a hard bound of 256 items is
-the oldest dropped, recorded as a local `unpaired_event` gap for its session. Entries of an ended
-session are decided by the reconcile that its `Stop` or `SessionEnd` hook triggers; no separate
-end-of-session pruning exists. A session that never reconciles again is drained by the 64-item
-bound. A session whose tool hooks never fired delivers every item with its outcome, as the only
+items per workspace). An item leaves the account when a hook post or a proof of copy settles it,
+when it is delivered as a carrier, or when it is delivered with `unpaired_event`, which happens
+when:
+
+- the ring evicts it before it is paired;
+- the turn ends without a proof of copy;
+- it is the oldest past the 64-item bound;
+- it survives 8 reconciles of its workspace while its session stores no new tool hook or stream
+  row (a crashed session, or a call that never finishes).
+
+An item delivered this way becomes unpaired evidence that names its exit, not an attributed run,
+and the receipt carries the `unpaired_event` coverage limitation. Two cases leave no ledger
+record of the item itself. A command item proven a copy by a stored stated post has its outcome
+recorded by that post. Past a hard bound of 256 items the oldest is dropped, recorded only as a
+local `unpaired_event` gap for its session. Entries of an ended session are
+decided by the reconcile that its `Stop` or `SessionEnd` hook triggers; no separate
+end-of-session pruning exists. A session whose tool hooks never fired delivers every item with its outcome, as the only
 record of those calls. One hooked command with
 a stated outcome is therefore one action and one result, and a red-latest claim names it once. Like
 a retained cell, a retained item counts in `observed_count` without an admitted, summarized or
@@ -1031,7 +1045,8 @@ intentionally omitted bucket. A call in a hook-observed session whose own hook d
 unhooked tool or a lost hook) is not recorded from the rollout; this limit is owned by #910. An
 `McpToolCall` or `FileChange` item has no command commitment, so in a hook-observed session it
 pairs with a hook post only when its id equals the hook's call id. An item under a different id
-stays local, and its status is not delivered even when the hook post stated no outcome.
+is settled as its hooked call's copy when the turn ends and stays local by design, and its status
+is not delivered even when the hook post stated no outcome.
 Releasing such items at the end of a turn would record every hooked MCP or patch call twice,
 because the reader cannot tell a copy from an only carrier without a join key. This limit stays
 open on #910 until a native capture shows how Codex identifies those items.

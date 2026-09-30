@@ -1869,6 +1869,10 @@ def _hook_post_stated(structural: Mapping[str, JsonValue]) -> bool:
 _ITEM_CARRIER: Final = "carrier"
 _ITEM_COPY: Final = "copy"
 _ITEM_PENDING: Final = "pending"
+# Closed by the turn's end with no proof of which call it belongs to.
+_ITEM_UNPAIRED: Final = "unpaired"
+# Workspace reconciles an undecided item may survive while its session stays silent.
+PENDING_ROLLOUT_IDLE_RECONCILES: Final = 8
 # A turn's end: every tool call of the turn has fired whatever hooks it will fire.
 _PAIRING_CLOSE_EVENTS: Final = frozenset({"Stop", "SessionEnd"})
 
@@ -1884,6 +1888,7 @@ class _PendingRolloutItem:
 def _rollout_item_decisions(
     envelopes: tuple[ObservationEnvelope, ...],
     session_commitment: str,
+    evicted_open_calls: tuple[tuple[str, str], ...] = (),
 ) -> dict[str, str]:
     """Decide every rollout tool item of one session against its hook rows (#910).
 
@@ -1907,18 +1912,37 @@ def _rollout_item_decisions(
     taking the oldest or the newest would misattribute a pass and lose a failure. When several
     items remain for fewer owed calls, every one is delivered; a second record is disclosed as
     #909's later run, a lost failure would not be. ``Stop``/``SessionEnd`` close the turn: owed
-    calls take every pending item of their commitment, and any other pending item is a copy of a
-    call whose post stated its outcome or never fired. The replay is bounded by the local
-    envelope ring and forgets what it evicts.
+    calls take every pending item of their commitment. Any other pending command item is a copy
+    only when a stored stated post proves it (same call id, or same commitment and exit);
+    otherwise it is ``unpaired`` and delivered with ``unpaired_event`` rather than lost. The
+    replay is bounded by the local envelope ring. It starts with ``evicted_open_calls`` open:
+    calls whose ``PreToolUse`` the ring evicted before their post was evicted or the turn
+    ended, so a truncated window never makes a still-running parallel call look finished.
     """
 
     unstated_calls: dict[str, str | None] = {}
     owed: dict[str, int] = {}
     stated_exits: dict[str, list[int | None]] = {}
     stated_calls: set[str] = set()
+    seen_exits: dict[str, set[int | None]] = {}
     open_calls: dict[str, set[str]] = {}
+    for open_commitment, open_call in evicted_open_calls:
+        open_calls.setdefault(open_commitment, set()).add(open_call)
     pending: list[_PendingRolloutItem] = []
     decisions: dict[str, str] = {}
+
+    def proven_copy(item: _PendingRolloutItem) -> bool:
+        """A stored stated post names this item's call, or its command with the same exit.
+
+        An MCP or patch item has no command commitment and no join key beyond its id, so the
+        turn's end leaves it local as its hooked call's copy (a disclosed limit, #910).
+        """
+
+        if item.commitment is None:
+            return True
+        if item.call_id is not None and item.call_id in stated_calls:
+            return True
+        return item.exit_status in seen_exits.get(item.commitment, set())
 
     def decide(item: _PendingRolloutItem, decision: str) -> None:
         pending.remove(item)
@@ -1953,7 +1977,7 @@ def _rollout_item_decisions(
                 for owed_commitment in {item.commitment for item in pending}:
                     settle(owed_commitment, closing=True)
                 for item in tuple(pending):
-                    decide(item, _ITEM_COPY)
+                    decide(item, _ITEM_COPY if proven_copy(item) else _ITEM_UNPAIRED)
                 continue
             if kind != "PostToolUse":
                 continue
@@ -1981,6 +2005,8 @@ def _rollout_item_decisions(
                     owed[earlier] -= 1
             if call_id is not None:
                 stated_calls.add(call_id)
+            if commitment is not None:
+                seen_exits.setdefault(commitment, set()).add(exit_fact)
             if joined is None and commitment is not None:
                 joined = next(
                     (
@@ -2040,9 +2066,15 @@ def _session_rollout_decisions(
         if type(count) is not int or count <= 0:
             return None
         envelopes = cast(tuple[ObservationEnvelope, ...], lister(workspace_commitment))
+        evicted = getattr(store, "evicted_open_calls", None)
+        open_calls = (
+            cast(tuple[tuple[str, str], ...], evicted(workspace_commitment, session_commitment))
+            if callable(evicted)
+            else ()
+        )
     except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
         return None
-    return _rollout_item_decisions(envelopes, session_commitment)
+    return _rollout_item_decisions(envelopes, session_commitment, open_calls)
 
 
 def _hooked_tool_item_decision(
@@ -2140,20 +2172,36 @@ def _release_decided_rollout_items(
 ) -> bool:
     """Deliver, exactly once, each held rollout item a later hook row made a carrier (#910).
 
-    A pending item a later post or the turn's end made a copy is settled and stays local. One
-    the envelope ring no longer holds cannot be paired any more; rather than lose its outcome it
-    is delivered with ``unpaired_event``. Past ``MAX_PENDING_ROLLOUT_ITEMS`` the oldest items of
-    any session are delivered the same way, so the bounded account never drops an outcome
-    silently. Returns ``False`` when an admission could not commit; the item stays pending.
+    A pending item a later post, or the turn's end with a stored proof, made a copy is settled
+    and stays local. One the turn's end could not prove, one the envelope ring no longer holds,
+    one idle for ``PENDING_ROLLOUT_IDLE_RECONCILES`` workspace reconciles, and the oldest past
+    ``MAX_PENDING_ROLLOUT_ITEMS`` are delivered with ``unpaired_event`` rather than lost. Returns ``False`` when an admission could not commit; the item stays pending.
     """
 
     lister = getattr(store, "pending_rollout_items", None)
-    if not callable(lister):
+    ager = getattr(store, "age_pending_rollout_items", None)
+    if not callable(lister) or not callable(ager):
         return True
     try:
+        aged = cast(tuple[PendingRolloutItem, ...], ager(workspace_commitment))
         own = cast(tuple[PendingRolloutItem, ...], lister(workspace_commitment, session_commitment))
     except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
         return True
+    # A session that stopped storing rows (a crash, or a call that never finishes) cannot
+    # decide its items any more; after a bounded number of workspace reconciles they are
+    # delivered with ``unpaired_event`` instead of waiting for the account's size bound.
+    for item in aged:
+        if item.idle_reconciles < PENDING_ROLLOUT_IDLE_RECONCILES:
+            continue
+        if not _deliver_pending_rollout_item(store, workspace_commitment, item, unpaired=True):
+            return False
+    if aged:
+        stale = {
+            item.source_identity
+            for item in aged
+            if item.idle_reconciles >= PENDING_ROLLOUT_IDLE_RECONCILES
+        }
+        own = tuple(item for item in own if item.source_identity not in stale)
     decisions = (
         _session_rollout_decisions(store, workspace_commitment, session_commitment) if own else None
     )

@@ -1306,3 +1306,174 @@ async def test_pending_items_over_the_bound_are_delivered_unpaired(
     assert _unpaired_items(recorder) == [2]
     assert _unpaired_evidence(replay) == ["Unpaired observed tool result exit=2"]
     assert replay.store.pending_rollout_items(replay.commitment) == ()
+
+
+def _flood_until_items_are_oldest(cell: _Replay, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Evict the ring's oldest rows, one per new hook row, until a rollout item is the oldest."""
+
+    from yoetz.adapters.integrations import observation_local
+
+    capacity = observation_local._MAX_ENVELOPES
+    monkeypatch.setattr(observation_local, "_MAX_ENVELOPES", 1)
+    for index in range(64):
+        if cell.store.list_envelopes(cell.commitment)[0].event_kind == "item_completed":
+            # Later rows no longer evict anything.
+            monkeypatch.setattr(observation_local, "_MAX_ENVELOPES", capacity)
+            return
+        call = f"call_flood_{index // 2}"
+        if index % 2 == 0:
+            cell.hook(
+                "PreToolUse", tool_name="Bash", tool_use_id=call, tool_input={"command": "git log"}
+            )
+        else:
+            _post(cell, call, "git log", 0)
+    raise AssertionError("the ring never reached the rollout items")
+
+
+def _disclosed_failure(cell: _Replay, exit_status: int) -> bool:
+    """The failure reached the ledger, as a result or as unpaired evidence with its gap."""
+
+    results = [cast(ResultRecordedPayload, row.payload) for row in cell.rows("result_recorded")]
+    if any(
+        item.outcome is ResultOutcome.FAILURE and item.exit_status == exit_status
+        for item in results
+    ):
+        return True
+    return any(
+        cast(EvidenceRecordedPayload, row.payload).description
+        == f"Unpaired observed tool result exit={exit_status}"
+        and ObservationGapCode.UNPAIRED_EVENT.value in row.coverage.known_gaps
+        for row in cell.rows("evidence_recorded")
+    )
+
+
+def _hook_rows(cell: _Replay, event: str, call: str) -> list[ObservationEnvelope]:
+    return [
+        envelope
+        for envelope in cell.store.list_envelopes(cell.commitment)
+        if envelope.event_kind == event and envelope.structural_payload.get("tool_call_id") == call
+    ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("b_item_first", [True, False])
+async def test_item_whose_owed_post_left_the_ring_is_disclosed_not_dropped(
+    replay: _Replay, monkeypatch: pytest.MonkeyPatch, b_item_first: bool
+) -> None:
+    """#910: the turn's end settles an item as a copy only with a stored proof.
+
+    A's outcome-less post leaves the ring while A's exit-1 item waits behind the still-open B.
+    B's stated post then proves only B's item; A's item is delivered as unpaired evidence.
+    """
+
+    _session_start(replay)
+    command = {"command": "cargo test"}
+    replay.hook("PreToolUse", tool_name="Bash", tool_use_id="call_run_a", tool_input=command)
+    replay.hook("PreToolUse", tool_name="Bash", tool_use_id="call_run_b", tool_input=command)
+    _post(replay, "call_run_a", "cargo test", None)
+    item_a = _command_execution("exec-910-run-a", "cargo test", 1, "2026-09-29T18:00:20.000Z")
+    item_b = _command_execution("exec-910-run-b", "cargo test", 0, "2026-09-29T18:00:10.000Z")
+    replay.append(*((item_b, item_a) if b_item_first else (item_a, item_b)))
+    _interleaved_pre(replay)
+    assert len(replay.store.pending_rollout_items(replay.commitment, replay.session)) == 2
+    _flood_until_items_are_oldest(replay, monkeypatch)
+    assert _hook_rows(replay, "PostToolUse", "call_run_a") == []
+    _post(replay, "call_run_b", "cargo test", 0)
+    replay.hook("Stop", last_assistant_message="Tests pass.", stop_hook_active=False)
+    await _sweep_all(replay)
+    assert _disclosed_failure(replay, 1)
+    assert replay.store.pending_rollout_items(replay.commitment) == ()
+
+
+@pytest.mark.anyio
+async def test_item_whose_post_follows_the_turn_end_is_disclosed_not_dropped(
+    replay: _Replay,
+) -> None:
+    """#910: Stop stored before the call's post leaves no proof of copy; the exit is disclosed."""
+
+    _session_start(replay)
+    command = {"command": "cargo test"}
+    replay.hook("PreToolUse", tool_name="Bash", tool_use_id="call_late", tool_input=command)
+    replay.append(_command_execution("exec-910-late", "cargo test", 1, "2026-09-29T18:00:10.000Z"))
+    _interleaved_pre(replay)
+    replay.hook("Stop", last_assistant_message="Tests pass.", stop_hook_active=False)
+    _post(replay, "call_late", "cargo test", None)
+    await _sweep_all(replay)
+    assert _disclosed_failure(replay, 1)
+    assert replay.store.pending_rollout_items(replay.commitment) == ()
+
+
+@pytest.mark.anyio
+async def test_evicted_pre_of_a_parallel_run_keeps_it_open(
+    replay: _Replay, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#910: a parallel run whose ``PreToolUse`` left the ring is still open to the pairing.
+
+    B's exit-0 item is read first; both ``PreToolUse`` rows are then evicted. A's outcome-less
+    post must not take B's item as A's exit, and A's exit-1 item must reach the ledger.
+    """
+
+    _session_start(replay)
+    command = {"command": "cargo test"}
+    replay.hook("PreToolUse", tool_name="Bash", tool_use_id="call_run_a", tool_input=command)
+    replay.hook("PreToolUse", tool_name="Bash", tool_use_id="call_run_b", tool_input=command)
+    replay.append(_command_execution("exec-910-run-b", "cargo test", 0, "2026-09-29T18:00:10.000Z"))
+    _interleaved_pre(replay)
+    _flood_until_items_are_oldest(replay, monkeypatch)
+    assert _hook_rows(replay, "PreToolUse", "call_run_a") == []
+    assert _hook_rows(replay, "PreToolUse", "call_run_b") == []
+    _post(replay, "call_run_a", "cargo test", None)
+    replay.append(_command_execution("exec-910-run-a", "cargo test", 1, "2026-09-29T18:00:20.000Z"))
+    _post(replay, "call_run_b", "cargo test", 0)
+    replay.hook("Stop", last_assistant_message="Tests pass.", stop_hook_active=False)
+    recorder = await _sweep_all(replay)
+    assert _disclosed_failure(replay, 1)
+    delivered = [
+        envelope.structural_payload.get("exit_status")
+        for envelope in recorder.delivered
+        if envelope.event_kind == "item_completed"
+    ]
+    # B's item is B's copy; only A's exit is delivered.
+    assert delivered == [1]
+    assert replay.store.pending_rollout_items(replay.commitment) == ()
+    # The turn's end forgets the session's calls kept open past the ring.
+    assert replay.store.evicted_open_calls(replay.commitment, replay.session) == ()
+
+
+@pytest.mark.anyio
+async def test_item_of_a_silent_session_is_released_after_idle_reconciles(
+    replay: _Replay,
+) -> None:
+    """#910: a carrier waiting behind a call that never finishes is released by an age bound."""
+
+    from yoetz.adapters.integrations.codex_session_stream import (
+        PENDING_ROLLOUT_IDLE_RECONCILES,
+        CodexSessionStreamLocator,
+        reconcile_session_stream,
+    )
+
+    _session_start(replay)
+    command = {"command": "cargo test"}
+    replay.hook("PreToolUse", tool_name="Bash", tool_use_id="call_run_a", tool_input=command)
+    replay.hook("PreToolUse", tool_name="Bash", tool_use_id="call_run_b", tool_input=command)
+    replay.append(_command_execution("exec-910-run-a", "cargo test", 1, "2026-09-29T18:00:20.000Z"))
+    _post(replay, "call_run_a", "cargo test", None)
+    # B never finishes and the session stores nothing more: a crash.
+    assert len(replay.store.pending_rollout_items(replay.commitment)) == 1
+
+    def reconcile() -> None:
+        reconcile_session_stream(
+            replay.store,
+            workspace_commitment=replay.commitment,
+            session_commitment=replay.session,
+            codex_session_id=HOST,
+            locator=CodexSessionStreamLocator(replay.rollout.parents[4]),
+        )
+
+    for _ in range(PENDING_ROLLOUT_IDLE_RECONCILES):
+        reconcile()
+    assert len(replay.store.pending_rollout_items(replay.commitment)) == 1
+    reconcile()
+    assert replay.store.pending_rollout_items(replay.commitment) == ()
+    await _sweep_all(replay)
+    assert _disclosed_failure(replay, 1)

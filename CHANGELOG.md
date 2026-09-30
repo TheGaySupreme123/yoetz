@@ -47,8 +47,10 @@ reverse-chronological released versions.
   item is delivered with its outcome. This holds when the rollout item is read before its hook
   result arrives: the item waits locally until the hook results of that command settle it. With
   parallel runs of one command it waits until no other run of that command is still open, or
-  until the turn ends, so runs never trade outcomes. An item whose pairing is lost is delivered
-  with `unpaired_event` instead of being dropped (#910).
+  until the turn ends, so runs whose hook rows are still held locally do not trade outcomes. An
+  item that the turn's end cannot prove to be a stated hook result's copy is delivered with
+  `unpaired_event` instead of being dropped. So is an item whose pairing is lost to local
+  retention, to the pending bound, or to a session that stopped storing rows (#910).
 
 - Codex observation records each tool call once. A tool call's pre-event and its result now share
   one ledger action instead of two, and a code-mode `exec` cell no longer adds its own action next

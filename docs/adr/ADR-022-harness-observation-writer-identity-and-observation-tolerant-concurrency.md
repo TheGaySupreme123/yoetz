@@ -727,14 +727,18 @@ item read before any hook post it pairs with is pending, not a copy. A later pos
 id decides it directly, and a stated post of its command commitment takes it as the copy when
 the exits match. An outcome-less post of that commitment takes its pending items only once no
 other call of the same command is open, so parallel same-command runs never trade outcomes by
-arrival order. Surplus items are all delivered (a second record over a lost failure), and
-`Stop`/`SessionEnd` close the turn: owed calls take their command's pending items and the rest
-stay local as copies. A carrier is delivered once on the next stream reconcile, committed
-together with its settlement and stamped with the committed stream frontier at release time,
-since the task's per-source cursor refuses an older position. The pending account keeps each
-item's structural record; an item the envelope ring evicts before pairing, or the oldest past
-the account's bound, is delivered with `unpaired_event` as unpaired evidence, so the receipt
-discloses it instead of dropping it. A session without tool hooks
+arrival order. Surplus items are all delivered (a second record over a lost failure). A call whose
+`PreToolUse` left the envelope ring stays open until its post is seen or evicted or the turn
+ends. `Stop`/`SessionEnd` close the turn: owed calls take their command's pending items, and any
+other pending command item stays local only when a stored stated post proves it a copy (same
+call id, or same commitment and exit); MCP and patch items, which have no commitment, stay local
+as copies. A carrier is delivered once on the next stream reconcile, committed together with its
+settlement and stamped with the committed stream frontier at release time, since the task's
+per-source cursor refuses an older position. The pending account keeps each item's structural
+record. An item with no proof at the turn's end, one the ring evicts before pairing, the oldest
+past the account's bound, and one idle for 8 workspace reconciles while its session stores
+nothing are delivered with `unpaired_event` as unpaired evidence, so the receipt discloses them;
+only the account's hard bound drops an item, with a local gap. A session without tool hooks
 delivers every item, with its outcome, as the only record of the call. An `McpToolCall` item that names an `error` or a result `isError: true` fails whatever its
 `status`, and a `FileChange` item belongs to the edit family. The Codex outcome reader reads only
 Codex's own shell tools (`Bash`, `shell`, `exec_command`, `local_shell`), never a code-mode `exec`
