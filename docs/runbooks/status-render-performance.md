@@ -59,6 +59,14 @@ row of each failing branch to collect diagnostics. The leaf classification scann
 rules per leaf. The never-send scan (~18 ms profiled) and the receipt reserve/complete write
 (~43 ms profiled) were minor, so receipt granularity (issue item 3) does not need to change.
 
+The fast path reads private `jsonschema`/`referencing` resolver state and falls back to the stock
+validator when it cannot, which stays correct but silently loses the speedup.
+`test_the_pinned_dependencies_take_the_fast_path_for_valid_results`
+(`tests/unit/protocol/test_schema_validity_checker.py`) fails if, with the locked versions
+(`jsonschema` 4.26.0, `referencing` 0.37.0 at the time of writing), any valid workflow result,
+status page or control envelope needs the stock validator; a dependency upgrade that trips it must
+adapt the checker or accept the fallback on purpose.
+
 The change keeps every decision and every byte:
 
 - Valid instances are decided by a first-error validity checker: the same keywords, except that
@@ -80,4 +88,8 @@ The change keeps every decision and every byte:
 The change is in the shared service, control protocol and MCP bridge path, so it applies equally
 to Codex, Claude Code and Cursor. The numbers above come from the in-process harness on Linux
 only. Per-host dogfood timings on macOS, Linux and Windows through WSL 2, and a 2 vCPU runner, are
-not yet measured; issue #916 owns that follow-up.
+not yet measured; issue #916 owns that follow-up. Likewise unmeasured: first-page and
+cursor-page renders after an append, session reattach, projection rebuild, service restart or
+schema-resource reload on an installed service, and `closure-prepare --output` against a reader
+racing the replacement, a crash during the rename, or a filesystem that refuses a directory
+flush (the unit tests only simulate a refused or failed directory flush).

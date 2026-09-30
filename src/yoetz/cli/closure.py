@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import tempfile
@@ -45,7 +46,36 @@ PREPARATION_REMEDIATIONS = {
     "closure_obligation_content_unavailable": "The obligation's meaning fields are withheld; do not recreate them to resolve it.",
     "closure_claim_decision_required": "Supply the bounded completion assertion and explicitly select its obligations and support.",
     "closure_output_unwritable": "Nothing was saved. Choose a writable file path in an existing directory and prepare again.",
+    "closure_output_not_durable": "The file was replaced, but its directory could not be flushed to disk, so a crash may lose it. Prepare again, saving to a local disk.",
 }
+
+# Filesystems and platforms that cannot open or flush a directory report these; the rename is then
+# as durable as that filesystem makes it, which is all the command can promise there.
+_DIRECTORY_FSYNC_UNSUPPORTED = frozenset(
+    {errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EBADF, errno.EACCES, errno.EPERM}
+)
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Flush *directory* so a rename into it survives a crash (ADR-003's final durable step).
+
+    Skipped where the filesystem cannot open or flush a directory; any other failure raises.
+    """
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(directory, flags)
+    except OSError as error:
+        if error.errno in _DIRECTORY_FSYNC_UNSUPPORTED:
+            return
+        raise
+    try:
+        os.fsync(descriptor)
+    except OSError as error:
+        if error.errno not in _DIRECTORY_FSYNC_UNSUPPORTED:
+            raise
+    finally:
+        os.close(descriptor)
 
 
 class Selection(BaseModel):
@@ -73,8 +103,9 @@ def write_prepared_output(result: Mapping[str, JsonValue], path: Path) -> dict[s
 
     The file holds exactly the canonical JSON line the command prints without ``--output``, so an
     agent can query it repeatedly instead of re-reading every status page (issue #916). It is
-    written owner-only to a temporary file in the same directory and renamed into place: a reader
-    never sees a partial inventory, and preparing again replaces it whole.
+    written owner-only to a temporary file in the same directory, flushed, renamed into place, and
+    the directory flushed: a reader never sees a partial inventory, preparing again replaces it
+    whole, and a crash after the summary is printed does not lose the rename.
     """
 
     data = canonical_encode(cast(JsonValue, dict(result))) + b"\n"
@@ -98,6 +129,11 @@ def write_prepared_output(result: Mapping[str, JsonValue], path: Path) -> dict[s
         if isinstance(error, OSError):
             raise ValueError("closure_output_unwritable") from error
         raise
+    try:
+        _fsync_directory(target.parent)
+    except OSError as error:
+        # The new file is already in place; say so rather than claim nothing was saved.
+        raise ValueError("closure_output_not_durable") from error
     inventory = result.get("inventory")
     rows: dict[str, JsonValue] = (
         {

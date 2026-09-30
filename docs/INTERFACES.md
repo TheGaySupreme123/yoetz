@@ -6450,10 +6450,13 @@ selected results belong to claim limitations. The existing append validator rema
 for relevance, revisions, evidence admissibility and frontier conflicts. A timeout uses the emitted
 operation query and the same original request identity, never a newly composed write.
 `--output <path>` (issue #916) writes the exact canonical JSON line the command would print to that
-file instead, owner-only, through a same-directory temporary file renamed into place, and prints a
-bounded summary (`preparatory_only`, absolute `output` path, `bytes`, `sha256`, `frontier`,
-per-view `inventory_rows`, `operation`). An unwritable path fails as `closure_output_unwritable`
-with nothing saved. Each page it reads is still an ordinary privacy-projected `status` call with its
+file instead, owner-only, through a same-directory temporary file that is flushed, renamed into
+place, and followed by a flush of the containing directory (ADR-003's durable sequence; skipped
+only where the filesystem cannot open or flush a directory), and prints a bounded summary
+(`preparatory_only`, absolute `output` path, `bytes`, `sha256`, `frontier`, per-view
+`inventory_rows`, `operation`). An unwritable path fails as `closure_output_unwritable` with nothing
+saved. A directory flush that fails after the rename fails as `closure_output_not_durable`: the new
+file is in place but may not survive a crash, and no summary is printed. Each page it reads is still an ordinary privacy-projected `status` call with its
 own local-disclosure receipt; the file changes where the result goes, not what was disclosed.
 
 The obligations status row adds optional `command_attempts` (at most 64 rows). Each row contains

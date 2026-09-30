@@ -29,7 +29,9 @@ replaced whole each time you prepare again, so it never holds a mix of two front
 prints a short summary instead: the file's absolute path, size and SHA-256 digest, the frontier, and
 the row count of each inventory view. Read fields from the saved file rather than preparing again;
 prepare again only after a committed write moves the frontier. If the file cannot be written,
-`closure_output_unwritable` says so and nothing is saved.
+`closure_output_unwritable` says so and nothing is saved. The file is flushed to disk before the
+summary is printed; if the disk cannot confirm that, `closure_output_not_durable` says the file was
+replaced but may not survive a crash, and you should prepare again.
 
 Review the emitted request. Submit a publication as a dry run first, then replay that request ID
 with `dry_run=false` after a successful preview. Submit responses through `respond` and receipts

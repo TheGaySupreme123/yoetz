@@ -163,3 +163,79 @@ def test_an_interrupted_save_leaves_neither_a_partial_file_nor_a_temporary(
         closure.write_prepared_output(_RESULT, target)
     assert sorted(path.name for path in tmp_path.iterdir()) == ["closure.json"]
     assert target.read_bytes() == b"previous inventory"
+
+
+def _record_durability_steps(
+    monkeypatch: pytest.MonkeyPatch, directory_error: int | None = None
+) -> list[tuple[str, str]]:
+    """Record the save's fsync and rename order; optionally fail the directory flush."""
+
+    steps: list[tuple[str, str]] = []
+    real_fsync = closure.os.fsync
+    real_replace = closure.os.replace
+
+    def fsync(descriptor: int) -> None:
+        info = closure.os.fstat(descriptor)
+        if stat.S_ISDIR(info.st_mode):
+            steps.append(("fsync", f"directory:{info.st_ino}"))
+            if directory_error is not None:
+                raise OSError(directory_error, closure.os.strerror(directory_error))
+        else:
+            steps.append(("fsync", "file"))
+        real_fsync(descriptor)
+
+    def replace(source: object, destination: object) -> None:
+        steps.append(("replace", Path(cast(str, destination)).name))
+        real_replace(cast(str, source), cast(str, destination))
+
+    monkeypatch.setattr(closure.os, "fsync", fsync)
+    monkeypatch.setattr(closure.os, "replace", replace)
+    return steps
+
+
+def test_output_flushes_the_file_then_renames_then_flushes_its_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-003's durable sequence: a crash after the printed summary cannot lose the rename."""
+
+    target = tmp_path / "closure.json"
+    target.write_bytes(b"previous inventory")
+    steps = _record_durability_steps(monkeypatch)
+    closure.write_prepared_output(_RESULT, target)
+    assert steps == [
+        ("fsync", "file"),
+        ("replace", "closure.json"),
+        ("fsync", f"directory:{tmp_path.stat().st_ino}"),
+    ]
+    assert target.read_bytes() == canonical_encode(_RESULT) + b"\n"
+
+
+def test_a_filesystem_that_cannot_flush_a_directory_still_saves(
+    prepared: list[bool], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del prepared
+    target = tmp_path / "closure.json"
+    steps = _record_durability_steps(monkeypatch, directory_error=closure.errno.EINVAL)
+    code, stdout, _ = _invoke("--output", str(target))
+    assert code == 0
+    assert json.loads(stdout)["output"] == str(target)
+    assert target.read_bytes() == canonical_encode(_RESULT) + b"\n"
+    assert [step for step, _ in steps] == ["fsync", "replace", "fsync"]
+
+
+def test_a_failed_directory_flush_says_the_file_was_replaced_but_may_not_survive(
+    prepared: list[bool], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rename already happened, so the error must not claim that nothing was saved."""
+
+    del prepared
+    target = tmp_path / "closure.json"
+    _record_durability_steps(monkeypatch, directory_error=closure.errno.EIO)
+    code, stdout, stderr = _invoke("--output", str(target))
+    assert code == 2
+    assert stdout == b""
+    assert stderr.startswith("closure_output_not_durable: The file was replaced")
+    assert target.read_bytes() == canonical_encode(_RESULT) + b"\n"
+    assert sorted(path.name for path in tmp_path.iterdir() if path.name != "state") == [
+        "closure.json"
+    ]

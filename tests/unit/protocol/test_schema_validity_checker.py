@@ -278,3 +278,55 @@ async def test_a_checker_that_cannot_read_resolver_state_falls_back_to_stock(
             schemas.validate_schema_instance(identity.schema_name, identity.schema_version, mutated)
         checked += 1
     assert checked > 5
+
+
+async def test_the_pinned_dependencies_take_the_fast_path_for_valid_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Guard the ~8x speedup against a silent ``jsonschema``/``referencing`` regression.
+
+    The checker reads private resolver state (``_resolver``, ``_base_uri``, ``resolved.resolver``)
+    and falls back to the stock validator whenever it cannot, which keeps every verdict correct and
+    would therefore pass every correctness test while losing the speedup. With the locked
+    dependency versions, every valid workflow result, status page and control envelope must be
+    decided by the checker alone: the checker exists, its ``$ref`` keyword really runs, and
+    ``validate_schema_instance`` never builds a stock validator. An upgrade that breaks the private
+    state fails here and must be adapted, or the fallback accepted on purpose.
+    """
+
+    from importlib.metadata import version
+
+    installed = f"jsonschema {version('jsonschema')}, referencing {version('referencing')}"
+    documents = await _documents()
+    monkeypatch.setattr(schemas, "_validity_checker_slot", [])
+    checker = schemas._validity_checker()
+    assert checker is not None, f"no validity checker for the packaged catalog with {installed}"
+
+    references = 0
+    ref_keyword = checker.remembering_class.VALIDATORS["$ref"]
+
+    def counted_ref(*args: object) -> Iterator[object]:
+        nonlocal references
+        references += 1
+        return ref_keyword(*args)
+
+    for validator_class in (checker.remembering_class, checker.forgetful_class):
+        monkeypatch.setitem(validator_class.VALIDATORS, "$ref", counted_ref)
+
+    stock_constructions = 0
+    stock = schemas.Draft202012Validator
+
+    def counted_stock(*args: object, **kwargs: object) -> object:
+        nonlocal stock_constructions
+        stock_constructions += 1
+        return stock(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+
+    monkeypatch.setattr(schemas, "Draft202012Validator", counted_stock)
+    by_id = {document.schema_id: document for document in schemas.load_schema_catalog().documents}
+    for label, schema_id, document in documents:
+        identity = by_id[schema_id]
+        assert checker.is_valid(schema_id, document, None) is True, (label, installed)
+        schemas.validate_schema_instance(identity.schema_name, identity.schema_version, document)
+    assert schemas._validity_checker() is checker
+    assert references > len(documents), installed
+    assert stock_constructions == 0, installed
