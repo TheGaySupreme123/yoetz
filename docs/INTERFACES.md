@@ -520,7 +520,15 @@ free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from code
   Both peers read a frame in chunks of at most `MAX_CONTROL_RECEIVE_CHUNK_BYTES = 65_536`, the
   authenticated Unix stream's per-`receive` ceiling; the stream refuses a larger single receive.
   Asking for a whole frame at once made every frame over 64 KiB unreadable as `frame_invalid`,
-  which a privacy receipt page of about 45 receipts reached (issue #921).
+  which a privacy receipt page of about 45 receipts reached (issue #921). A declared length above
+  `MAX_CONTROL_FRAME_BYTES` is refused as `frame_too_large` after the four-byte prefix, before any
+  body byte is read. Once a frame's first byte arrives, the whole frame must arrive within
+  `CONTROL_FRAME_READ_DEADLINE_SECONDS = 60`, whether or not the session has calls in flight;
+  waiting for a frame to begin stays governed by the handshake and inactive-session deadlines. A
+  frame that misses it fails as the internal `frame_read_timeout`. The service closes the stream
+  on either refusal without a reply and records an owner-only diagnostic
+  (`service.daemon`/`control_frame_read`); a client whose response frame stalls reports the
+  retryable `service_unavailable`. Neither reason is a new wire token.
 - Host hook ingress (`cli/hook_io.py`): `MAX_HOOK_STDIN_BYTES = 262_144` (256 KiB) is the trusted
   full-parse cap for every host's hook stdin body and is shared by `cli/hooks.py`. A body at or
   under that cap is parsed in full. Codex, Claude Code, and Cursor's pure

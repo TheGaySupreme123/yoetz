@@ -177,6 +177,7 @@ from yoetz.service.confidential_protocol import (
     human_target_json,
 )
 from yoetz.service.control_protocol import (
+    CONTROL_FRAME_READ_DEADLINE_SECONDS,
     ControlFrame,
     ControlProtocolError,
     ControlSession,
@@ -220,6 +221,9 @@ _CONTROL_HANDSHAKE_DEADLINE_SECONDS: Final = 5.0
 # After handshake, a session with no active calls may stay silent for at most this long
 # before the stream is closed and the listener admission slot is released.
 _CONTROL_INACTIVE_SESSION_DEADLINE_SECONDS: Final = 300.0
+# Once a frame's first byte arrives, the whole frame must arrive within this window, whether or
+# not the session has calls in flight; a stalled partial frame closes the stream (issue #921).
+_CONTROL_FRAME_READ_DEADLINE_SECONDS: Final = CONTROL_FRAME_READ_DEADLINE_SECONDS
 _OBSERVATION_SWEEP_INTERVAL_SECONDS: Final = 60.0
 # Hard stop for one sweep. The sweeper yields on its own budget
 # (``DEFAULT_OBSERVATION_SWEEP_BUDGET_SECONDS``, composed in ready_composition) well
@@ -1504,6 +1508,16 @@ class ServiceDaemon:
                     frame = await self._read_control_frame_idle_aware(stream, calls)
                 except TimeoutError:
                     return
+                except ControlProtocolError as exc:
+                    # A peer that declared an oversized frame or stalled mid-frame is cut off
+                    # here and never sees a reply; the structural reason is the only trace.
+                    if exc.reason in {"frame_too_large", "frame_read_timeout"}:
+                        record_public_error_without_raising(
+                            component="service.daemon",
+                            operation="control_frame_read",
+                            reason=exc.reason,
+                        )
+                    return
                 request = parse_control_request(frame)
                 session.admit(request)
                 if not isinstance(request, ControlCallRequest):
@@ -1536,10 +1550,14 @@ class ServiceDaemon:
         The idle deadline starts immediately when the session has no in-flight calls, and only
         after the final call completes when the session is busy. It covers the complete frame so
         dripped partial bytes cannot retain a listener slot past the bound. Active long-running
-        calls are not cancelled merely because no additional frame arrives.
+        calls are not cancelled merely because no additional frame arrives. Independently, a frame
+        that has begun must finish within ``_CONTROL_FRAME_READ_DEADLINE_SECONDS`` even while calls
+        are active, so a partial body is never held open-ended (``frame_read_timeout``).
         """
 
-        read_task = asyncio.create_task(read_control_frame(stream))
+        read_task = asyncio.create_task(
+            read_control_frame(stream, frame_deadline_seconds=_CONTROL_FRAME_READ_DEADLINE_SECONDS)
+        )
         try:
             while True:
                 if calls:
