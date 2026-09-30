@@ -2000,11 +2000,13 @@ def _finish_hook_pass(
     *,
     monotonic: Callable[[], float],
     _state: Path | None,
+    ms: int | None = None,
 ) -> None:
     """Fold one host hook pass into its bounded timing aggregate (#915).
 
     Every pass counts, in budget or not, and none adds a row to the failure-reason file, so the
-    typical cost is measurable without evicting failure history. Never raises.
+    typical cost is measurable without evicting failure history. ``ms`` lets a caller that also
+    judges the pass against a cap use the very same measurement. Never raises.
     """
 
     with contextlib.suppress(BaseException):
@@ -2013,7 +2015,7 @@ def _finish_hook_pass(
             timing.event,
             timing.path,
             timing.outcome,
-            ms=_elapsed_ms(timing.started, monotonic()),
+            ms=_elapsed_ms(timing.started, monotonic()) if ms is None else ms,
             _state=_state,
         )
 
@@ -6426,10 +6428,14 @@ def handle_spool(
         timing.outcome = "failed"
         record_hook_diagnostic("observe", event, _state=_state)
     finally:
+        with contextlib.suppress(Exception):
+            hook_io.stdout_json({}, stdout)
+        # One measurement, taken after the host's stdout write (the point the
+        # host waits for), feeds the breach reason, its row and the aggregate,
+        # so they can never disagree about a pass. The p95 target is read from
+        # the aggregate over every pass; one leg is a hard breach only after
+        # the 500ms ceiling, and only a breach keeps its own row.
         total = _elapsed_ms(started, _monotonic())
-        # The p95 target is read from the aggregate over every pass; one
-        # individual leg is a hard breach only after the 500ms ceiling, and
-        # only a breach keeps its own row.
         if total > 500:
             record_hook_diagnostic("hook_slo_breached", event, _state=_state)
             record_hook_timing(
@@ -6439,7 +6445,5 @@ def handle_spool(
                 path="sync_fallback_spool",
                 _state=_state,
             )
-        with contextlib.suppress(Exception):
-            hook_io.stdout_json({}, stdout)
-        _finish_hook_pass(timing, monotonic=_monotonic, _state=_state)
+        _finish_hook_pass(timing, monotonic=_monotonic, _state=_state, ms=total)
     return 0

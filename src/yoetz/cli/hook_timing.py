@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -46,6 +47,15 @@ __all__ = [
 
 _FILE_NAME: Final = "hook-pass-timing.json"
 _LOCK_NAME: Final = ".hook-pass-timing.lock"
+# One byte per sample dropped under lock contention, appended without the lock (an O_APPEND write is
+# atomic), so counting a drop never waits on the holder it is reporting.
+_DROP_NAME: Final = ".hook-pass-timing.dropped"
+_MAX_DROP_BYTES: Final = 64 * 1024
+# A holder keeps the lock for one small in-place rewrite. One that stalls (suspended, or on a hung
+# filesystem) must not hold a hook past its 3, 5 or 10 s host timeout, so every acquisition is
+# bounded and a sample that cannot take the lock in time is dropped and counted instead.
+_LOCK_WAIT_SECONDS: Final = 0.1
+_LOCK_POLL_SECONDS: Final = 0.002
 _FORMAT: Final = "yoetz.hook-pass-timing/1"
 # One entry is well under 1 KiB, and the closed vocabularies keep a real install to a few dozen
 # entries, so the cap only guards a tampered or pathological file.
@@ -54,6 +64,9 @@ _MAX_ENTRIES: Final = 48
 _MAX_MS: Final = 3_600_000
 _MAX_SAFE: Final = 2**53 - 1
 _HOUR_MS: Final = 3_600_000
+# 9999-12-31T23:59:59.999Z, the last moment ``datetime`` can render. A larger stamp in the mutable
+# file would pass the integer checks and then fail rendering, so it is rejected as unreadable.
+_MAX_EPOCH_MS: Final = 253_402_300_799_999
 # Inclusive upper bounds. The bounds that carry a documented meaning are exact edges: 150 ms is the
 # Codex per-call goal (#915), 250 ms and 500 ms the legacy spool p95 target and hard cap (#362),
 # and 3, 5 and 10 s the rendered host timeouts. Everything above the last bound shares one bucket
@@ -183,6 +196,10 @@ def _is_count(value: object) -> bool:
     return type(value) is int and 0 <= value <= _MAX_SAFE
 
 
+def _is_moment(value: object) -> bool:
+    return type(value) is int and 0 <= value <= _MAX_EPOCH_MS
+
+
 def _valid_histogram(raw: object, keys: frozenset[str]) -> dict[str, object] | None:
     if type(raw) is not dict:
         return None
@@ -208,11 +225,13 @@ def _valid_histogram(raw: object, keys: frozenset[str]) -> dict[str, object] | N
     elif (
         type(maximum) is not int
         or not 0 <= maximum <= _MAX_MS
-        or not _is_count(moment)
+        or not _is_moment(moment)
         or _bucket(maximum) != max(i for i, item in enumerate(cast(list[int], buckets)) if item)
     ):
         return None
-    if "hour" in keys and not _is_count(histogram["hour"]):
+    if "hour" in keys and not (
+        _is_count(histogram["hour"]) and cast(int, histogram["hour"]) <= _MAX_EPOCH_MS // _HOUR_MS
+    ):
         return None
     return histogram
 
@@ -230,8 +249,8 @@ def _valid_entry(raw: object) -> dict[str, object] | None:
         entry["host"] not in _HOSTS
         or (entry["event"] not in _EVENTS and entry["event"] != _UNKNOWN_EVENT)
         or entry["path"] not in _PATHS
-        or not _is_count(entry["first_ms"])
-        or not _is_count(entry["last_ms"])
+        or not _is_moment(entry["first_ms"])
+        or not _is_moment(entry["last_ms"])
     ):
         return None
     total = _valid_histogram(entry["all"], _HISTOGRAM_KEYS)
@@ -264,7 +283,7 @@ def _valid_document(raw: object) -> dict[str, object] | None:
         return None
     entries = document["entries"]
     if (
-        not _is_count(document["since_ms"])
+        not _is_moment(document["since_ms"])
         or not _is_count(document["evicted_entry_count"])
         or type(entries) is not list
         or len(cast(list[object], entries)) > _MAX_ENTRIES
@@ -308,11 +327,94 @@ def _read_descriptor(descriptor: int) -> dict[str, object] | None:
     return _valid_document(parsed)
 
 
+def _acquire(descriptor: int, operation: int) -> bool:
+    """Take the file lock within ``_LOCK_WAIT_SECONDS``, or report that it is held."""
+
+    if fcntl is None:
+        return True
+    deadline = time.monotonic() + _LOCK_WAIT_SECONDS
+    while True:
+        try:
+            fcntl.flock(descriptor, operation | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(_LOCK_POLL_SECONDS)
+
+
+def _count_dropped_sample(directory: Path) -> None:
+    """Record one sample dropped under contention without taking the lock. Never raises."""
+
+    try:
+        descriptor = os.open(
+            directory / _DROP_NAME,
+            os.O_WRONLY
+            | os.O_APPEND
+            | os.O_CREAT
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+    except OSError:
+        return
+    try:
+        facts = os.fstat(descriptor)
+        if (
+            stat.S_ISREG(facts.st_mode)
+            and facts.st_uid == os.geteuid()
+            and facts.st_size < _MAX_DROP_BYTES
+        ):
+            os.write(descriptor, b".")
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
+def _reset_dropped_samples(directory: Path) -> None:
+    """Empty the drop count when the aggregate restarts; the caller holds the lock."""
+
+    try:
+        descriptor = os.open(
+            directory / _DROP_NAME,
+            os.O_WRONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError:
+        return
+    try:
+        if os.fstat(descriptor).st_uid == os.geteuid():
+            os.ftruncate(descriptor, 0)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
+def _dropped_sample_count(directory: Path) -> int:
+    """Samples dropped under contention since ``since``: a lower bound, saturating at 64 Ki."""
+
+    try:
+        descriptor = os.open(directory / _DROP_NAME, _open_flags(write=False))
+    except OSError:
+        return 0
+    try:
+        facts = os.fstat(descriptor)
+    except OSError:
+        return 0
+    finally:
+        os.close(descriptor)
+    if not stat.S_ISREG(facts.st_mode) or facts.st_uid != os.geteuid() or facts.st_mode & 0o077:
+        return 0
+    return min(facts.st_size, _MAX_DROP_BYTES)
+
+
 def _read_document(directory: Path) -> tuple[str, dict[str, object] | None]:
     """Return ``absent``, ``unreadable`` or ``retained`` plus the validated document.
 
-    Readers share the writers' lock, so a locked summary never observes a half-written update;
-    when the lock cannot be taken the read is unlocked, and a torn document fails validation.
+    Readers share the writers' lock, so a locked summary never observes a half-written update.
+    The shared lock is bounded like the writers'; when it cannot be taken in time the read is
+    unlocked, and a torn document fails validation.
     """
 
     try:
@@ -325,12 +427,12 @@ def _read_document(directory: Path) -> tuple[str, dict[str, object] | None]:
         lock_descriptor: int | None = None
         try:
             lock_descriptor = os.open(directory / _LOCK_NAME, _open_flags(write=True), 0o600)
-            if fcntl is not None:
-                fcntl.flock(lock_descriptor, fcntl.LOCK_SH)
+            locked = _acquire(lock_descriptor, fcntl.LOCK_SH) if fcntl is not None else True
         except OSError:
+            locked = False
+        if not locked and lock_descriptor is not None:
             # Unlocked is still safe to read: a torn update fails validation as unreadable.
-            if lock_descriptor is not None:
-                os.close(lock_descriptor)
+            os.close(lock_descriptor)
             lock_descriptor = None
         try:
             document = _read_descriptor(descriptor)
@@ -371,8 +473,10 @@ def record_hook_pass_timing(
 ) -> bool:
     """Fold one hook pass into its bounded ``(host, event, path)`` aggregate.
 
-    Never raises and never writes a diagnostics row. A document that fails validation is
-    replaced by a fresh one whose ``since`` names the restart, rather than being trusted.
+    Never raises, never writes a diagnostics row, and never waits longer than the bounded lock
+    acquisition: a sample that cannot take the lock in time is dropped and counted. A document
+    that fails validation is replaced by a fresh one whose ``since`` names the restart, rather than
+    being trusted.
     """
 
     if host not in _HOSTS or path not in _PATHS or outcome not in _OUTCOME_SET:
@@ -386,12 +490,16 @@ def record_hook_pass_timing(
         root = state_dir() if _state is None else _state
         directory = root / "observation"
         ensure_owner_only_dir(directory)
-        with _thread_lock:
+        if not _thread_lock.acquire(timeout=_LOCK_WAIT_SECONDS):
+            _count_dropped_sample(directory)
+            return False
+        try:
             lock_descriptor = os.open(directory / _LOCK_NAME, _open_flags(write=True), 0o600)
             try:
                 os.fchmod(lock_descriptor, 0o600)
-                if fcntl is not None:
-                    fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+                if fcntl is not None and not _acquire(lock_descriptor, fcntl.LOCK_EX):
+                    _count_dropped_sample(directory)
+                    return False
                 # O_NOFOLLOW refuses a symlinked aggregate outright; a file another user owns is
                 # never rewritten.
                 descriptor = os.open(directory / _FILE_NAME, _open_flags(write=True), 0o600)
@@ -399,11 +507,18 @@ def record_hook_pass_timing(
                     if os.fstat(descriptor).st_uid != os.geteuid():
                         return False
                     os.fchmod(descriptor, 0o600)
-                    _update(descriptor, host, event_token, path, outcome, sample, now_ms)
+                    restarted = _update(
+                        descriptor, host, event_token, path, outcome, sample, now_ms
+                    )
                 finally:
                     os.close(descriptor)
+                if restarted:
+                    # Drops are counted for the period ``since`` names; a restart starts both.
+                    _reset_dropped_samples(directory)
             finally:
                 os.close(lock_descriptor)
+        finally:
+            _thread_lock.release()
     except OSError, PathSafetyError, ValueError:
         return False
     return True
@@ -417,11 +532,15 @@ def _update(
     outcome: str,
     sample: int,
     now_ms: int,
-) -> None:
-    """Fold one sample into the document behind *descriptor*; the caller holds the lock."""
+) -> bool:
+    """Fold one sample into the document behind *descriptor*; the caller holds the lock.
+
+    Returns whether the aggregate restarted, so the caller can restart the drop count with it.
+    """
 
     hour = now_ms // _HOUR_MS
     document = _read_descriptor(descriptor)
+    restarted = document is None
     if document is None:
         fresh_entries: list[dict[str, object]] = []
         document = {
@@ -479,7 +598,7 @@ def _update(
     entry["slots"] = sorted(slots, key=lambda slot: cast(int, slot["hour"]))
     encoded = json.dumps(document, separators=(",", ":"), sort_keys=True).encode()
     if len(encoded) > _MAX_FILE_BYTES:
-        return
+        return False
     # Best-effort diagnostics: rewritten in place under the exclusive lock (readers take it
     # shared) and not fsynced, because a create-and-rename per pass would itself be a measurable
     # hook cost. A crash inside the write can at worst lose the aggregate: the next pass finds an
@@ -488,6 +607,7 @@ def _update(
     while written < len(encoded):
         written += os.pwrite(descriptor, encoded[written:], written)
     os.ftruncate(descriptor, len(encoded))
+    return restarted
 
 
 def _quantile_at_most(histogram: Mapping[str, object], numerator: int) -> int | None:
@@ -587,11 +707,13 @@ def hook_pass_timing_summary(
 
     status = "unreadable"
     document: dict[str, object] | None = None
+    dropped = 0
     try:
         root = state_dir() if _state is None else _state
         directory = root / "observation"
         ensure_owner_only_dir(directory)
         status, document = _read_document(directory)
+        dropped = _dropped_sample_count(directory)
     except OSError, PathSafetyError:
         status, document = "unreadable", None
     hour = _now_ms(_now) // _HOUR_MS
@@ -608,6 +730,8 @@ def hook_pass_timing_summary(
             "evicted_entry_count": 0
             if document is None
             else cast(int, document["evicted_entry_count"]),
+            # Passes that could not take the lock within the bounded wait: a lower bound.
+            "dropped_sample_count": dropped,
             "entries": tuple(
                 _entry_json(entry, hour=hour)
                 for entry in sorted(
@@ -628,8 +752,16 @@ def hook_pass_timing_text(summary: Mapping[str, JsonValue]) -> str:
 
     status = summary.get("status")
     entries = cast(tuple[Mapping[str, JsonValue], ...], summary.get("entries") or ())
+    dropped = summary.get("dropped_sample_count")
+    dropped_note = (
+        f"; {dropped} sample(s) dropped under lock contention"
+        if type(dropped) is int and dropped
+        else ""
+    )
     if status != "retained" or not entries:
-        return "none recorded" if status != "unreadable" else "unreadable; restarts on next hook"
+        return (
+            "none recorded" if status != "unreadable" else "unreadable; restarts on next hook"
+        ) + dropped_note
     parts: list[str] = []
     for entry in entries:
         recent = cast(Mapping[str, JsonValue], entry["recent"])
@@ -646,5 +778,5 @@ def hook_pass_timing_text(summary: Mapping[str, JsonValue]) -> str:
         parts.append(part)
     return (
         f"in-process from console entry since {summary.get('since')}; "
-        "percentiles are histogram bucket bounds; " + "; ".join(parts)
+        "percentiles are histogram bucket bounds; " + "; ".join(parts) + dropped_note
     )

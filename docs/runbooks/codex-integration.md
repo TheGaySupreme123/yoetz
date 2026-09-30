@@ -922,6 +922,9 @@ before quoting a number:
   `hooks user-prompt-submit` are not in the aggregate; none of them runs per tool call.
 - The aggregate spans every pass since `since`; a fresh test instance starts empty. It is local
   diagnostics: owner-only, fixed-size, and not fsynced, so a crash can restart it (`since` moves).
+- A hook waits at most 100 ms for the aggregate's lock. A pass that cannot take it is not in the
+  counts; it is tallied in `dropped_sample_count` instead, so a nonzero value means the counts
+  undercount that many passes.
 
 Registration decision on Codex (issue #915, recorded 2026-09-30): the `PostToolUse` observe
 handler stays synchronous for now. The DeepSWE v2 run inferred about 0.6–0.9 s per nested

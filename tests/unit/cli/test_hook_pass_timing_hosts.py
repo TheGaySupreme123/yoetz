@@ -419,6 +419,42 @@ def test_legacy_spool_counts_every_pass_and_keeps_rows_for_hard_cap_breaches_onl
     assert "hook_slo_breached" in cast(Mapping[str, object], summary["reasons"])
 
 
+def test_legacy_spool_breach_row_and_aggregate_share_one_endpoint(tmp_path: Path) -> None:
+    """A slow host pipe cannot make the aggregate report a breach the row history lacks."""
+
+    _consented(tmp_path)
+    clock = [0.0]
+
+    class _SlowPipe(io.BytesIO):
+        def write(self, data: bytes, /) -> int:  # type: ignore[override]
+            clock[0] += 0.03
+            return super().write(data)
+
+    assert (
+        observe_hooks.handle_spool(
+            event_name="PostToolUse",
+            stdin_bytes=_codex("PostToolUse", "exec_command", "call_6", {"cmd": "ls"}, tmp_path),
+            stdout=_SlowPipe(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            # 480 ms of work before the host's stdout write, 30 ms spent in the write itself.
+            _entry_monotonic=-0.48,
+            _monotonic=lambda: clock[0],
+        )
+        == 0
+    )
+
+    entry = _entries(tmp_path)[("codex", "PostToolUse", "sync_fallback_spool")]
+    assert entry["max_ms"] == 510
+    assert entry["hard_cap_breach_count"] == 1
+    summary = hook_diagnostic_summary(_state=tmp_path)
+    timings = cast(Mapping[str, object], summary["timings"])
+    assert timings["count"] == 1
+    assert timings["max_ms"] == 510
+    reasons = cast(Mapping[str, Mapping[str, object]], summary["reasons"])
+    assert reasons["hook_slo_breached"]["count"] == 1
+
+
 def _pending_observation_motion(
     store: LocalObservationStore, commitment: str, session: str
 ) -> None:

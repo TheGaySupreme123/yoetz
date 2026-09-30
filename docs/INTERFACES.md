@@ -4666,10 +4666,16 @@ the 3, 5 and 10 s host timeouts, and the same histogram for the current and prev
 (`recent`, dated by `since`). `p50_ms_at_most` and `p95_ms_at_most` are the bucket bound that the
 nearest-rank percentile falls at or below, never an interpolation. The document holds at most 48
 entries (evictions are counted) and 64 KiB, is rewritten in place under an exclusive lock that
-readers share, and is not fsynced; a document that fails validation reads as `unreadable` and
-restarts with a new `since`. Nested calls and the service's legacy-spool replay run the observe pass
-without a host entry and contribute no sample. `observe status --json` reports the aggregate as
-`hook_diagnostics.pass_timings`; the text form prints it on a `hook_pass_timing` line. A hook pass whose capture batch cannot take the lock
+readers share, and is not fsynced; a document that fails validation, including a timestamp past
+year 9999, reads as `unreadable` and restarts with a new `since`. Every acquisition of that lock is
+bounded to 100 ms, so a stalled holder cannot keep a hook past its host timeout: a writer that
+cannot take it drops its sample and appends one byte to a lock-free drop counter, reported as
+`dropped_sample_count` (a lower bound for the period `since` names), and a reader falls back to an
+unlocked read. Nested calls and the service's legacy-spool replay run the observe pass without a
+host entry and contribute no sample. `observe status --json` reports the aggregate as
+`hook_diagnostics.pass_timings`; the text form prints it on a `hook_pass_timing` line. The legacy
+spool judges its 500 ms hard cap and feeds the aggregate from one measurement taken after the
+host's stdout write. A hook pass whose capture batch cannot take the lock
 within its budget still exits 0 with its host's fail-open output, and reports
 `store_lock_timeout` instead of the generic `observe` or a false `workspace_unconsented`; that
 input is not retained. Serialization splices a cached canonical fragment for each immutable

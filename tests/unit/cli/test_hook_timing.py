@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import random
+import threading
+import time
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -378,6 +381,7 @@ def test_an_absent_aggregate_summarizes_to_an_empty_labelled_shape(tmp_path: Pat
         "since": None,
         "recent_window": "current_and_previous_clock_hour",
         "evicted_entry_count": 0,
+        "dropped_sample_count": 0,
         "entries": (),
     }
     assert hook_pass_timing_text(summary) == "none recorded"
@@ -407,3 +411,73 @@ def test_an_unresolvable_state_directory_is_a_lost_sample_not_a_fault(
 
     assert not record_hook_pass_timing("codex", "PostToolUse", "observe", "ingested", ms=5)
     assert hook_pass_timing_summary()["status"] == "unreadable"
+
+
+def test_a_held_timing_lock_drops_the_sample_promptly_and_counts_it(tmp_path: Path) -> None:
+    """A stalled holder must never hold a hook past its host timeout (#915 review)."""
+
+    assert record_hook_pass_timing(
+        "codex", "PostToolUse", "observe", "ingested", ms=10, _state=tmp_path
+    )
+    holder = os.open(tmp_path / "observation" / ".hook-pass-timing.lock", os.O_RDWR)
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    results: list[bool] = []
+    worker = threading.Thread(
+        target=lambda: results.append(
+            record_hook_pass_timing(
+                "codex", "PostToolUse", "observe", "ingested", ms=20, _state=tmp_path
+            )
+        ),
+        daemon=True,
+    )
+    try:
+        started = time.monotonic()
+        worker.start()
+        worker.join(timeout=5)
+        assert not worker.is_alive(), "the recorder waited on a held lock without a deadline"
+        assert time.monotonic() - started < 2
+        assert results == [False]
+        # The reader does not wait on the stalled holder either; the drop is counted.
+        summary = hook_pass_timing_summary(_state=tmp_path)
+        assert summary["status"] == "retained"
+        assert summary["dropped_sample_count"] == 1
+        assert [entry["count"] for entry in _entries(tmp_path, now=datetime.now(UTC))] == [1]
+    finally:
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        os.close(holder)
+        worker.join(timeout=5)
+
+    assert record_hook_pass_timing(
+        "codex", "PostToolUse", "observe", "ingested", ms=30, _state=tmp_path
+    )
+    summary = hook_pass_timing_summary(_state=tmp_path)
+    assert summary["dropped_sample_count"] == 1
+    assert [entry["count"] for entry in _entries(tmp_path, now=datetime.now(UTC))] == [2]
+    assert "1 sample(s) dropped under lock contention" in hook_pass_timing_text(summary)
+
+
+@pytest.mark.parametrize(
+    "field", ["since_ms", "first_ms", "last_ms", "max_at_ms", "slot_max_at_ms"]
+)
+def test_an_unrenderable_timestamp_reads_as_unreadable_not_a_fault(
+    tmp_path: Path, field: str
+) -> None:
+    record_hook_pass_timing("codex", "PostToolUse", "observe", "ingested", ms=12, _state=tmp_path)
+    target = tmp_path / "observation" / "hook-pass-timing.json"
+    document = cast(dict[str, Any], json.loads(target.read_text()))
+    entry = cast(list[dict[str, Any]], document["entries"])[0]
+    beyond_year_9999 = 2**53 - 1
+    if field == "since_ms":
+        document["since_ms"] = beyond_year_9999
+    elif field == "slot_max_at_ms":
+        entry["slots"][0]["max_at_ms"] = beyond_year_9999
+    elif field == "max_at_ms":
+        entry["all"]["max_at_ms"] = beyond_year_9999
+    else:
+        entry[field] = beyond_year_9999
+    target.write_text(json.dumps(document))
+
+    summary = hook_pass_timing_summary(_state=tmp_path)
+
+    assert summary["status"] == "unreadable"
+    assert summary["entries"] == ()
