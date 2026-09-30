@@ -114,28 +114,35 @@ content-returning read needed its own decision. This is that decision, for exact
 9. **AI-powered finding resolution compares the files each review was shown.** A completed review
    whose packet carried the change records, on its `check_recorded` 1.3.0 event, keyed commitments
    to the changed files it carried: `fully_shown` (the file's whole diff, unredacted and
-   untruncated) and `partially_shown` (the rest it carried any of), each with `shown_bytes`, the
-   length of the clean prefix of the file's diff section it carried (up to the packet's end or the
-   first redacted span). Each commitment is the task bundle's object commitment key over the
-   change's base commit and the file's `diff --git` line, so no path is recorded and the same file
-   under the task's fixed base commits the same way in every check of the task. Only shown files
-   count toward the 128-file bound; past it the record keeps the first 128 in change order and
-   says it is incomplete. Replay stamps the complete record of the review that raised an
-   AI-powered finding (R) onto the finding's projection row. A later repair review's
-   `check_time_change_truncated`, `_redacted`, `_base_unavailable` and `_unavailable` codes are
-   tolerated for that finding exactly when the repair saw at least what R saw: every file R saw
-   whole reached the repair whole, and every file R saw in part with n clean bytes reached the
-   repair whole or in part with at least n. The repair's record may be incomplete, since each entry
-   it holds is still true. An empty R (a raising review that carried no change, including every
-   review from before this decision) is always tolerated. R is unknown, which never tolerates, when
-   the raising record is incomplete or when the raising review carried parts without a readable
-   record (0.3 development builds). None of these codes is a capture baseline stamped on the
-   finding. Redacting the raising check makes R unknown and reopens a resolution that depended on
-   it; redacting the resolving check reopens it as before. The relation is a pure fold over
-   recorded checks, so the memory and SQLite ledgers replay it identically. Residual limit: the
-   byte rule compares prefix lengths, not content. If the repair's diff for a file moves the hunk
-   the finding was about past the m bytes the repair saw, a repair review that stays silent about
-   it could still clear the finding. Explicit `fixed` rulings (#905) are the long-term guard.
+   untruncated) and `partially_shown` (the rest it carried any of), each with `shown_bytes` (the
+   bytes of the file's diff section that reached the packet, redaction markers included) and
+   `redactions` (the redacted spans among them). Each commitment is the task bundle's object
+   commitment key over the change's base commit, the file's `diff --git` line and its change kind
+   (binary, deleted), so no path is recorded, the same file under the task's fixed base commits the
+   same way in every check of the task, and a file that turned binary or was deleted never stands
+   in for the text diff it replaced. Only shown files count toward the 128-file bound; past it the
+   record keeps the first 128 in change order and says it is incomplete. Replay folds, onto the
+   finding's projection row, the record of every completed review that raised or re-raised an
+   AI-powered finding (R): whole files are united, a file any of them saw whole must be seen whole,
+   and a file they saw in part keeps the largest length and the fewest redacted spans. A later
+   repair review's `check_time_change_truncated`, `_redacted`, `_base_unavailable` and
+   `_unavailable` codes are tolerated for that finding exactly when the repair saw at least what R
+   requires: every file R needs whole reached the repair whole, and every file R saw in part (n
+   bytes, k redacted spans) reached the repair whole or in part with at least n bytes and at most
+   k redacted spans. A persistent redaction therefore still covers, while a new redaction or a
+   shorter view blocks. The repair's record may be incomplete, since each entry it holds is still
+   true. An empty R (reviews that carried no change, including every review from before this
+   decision) is always tolerated. R is unknown, which never tolerates, when a raising record is
+   incomplete, when a raising review carried parts without a readable record (0.3 development
+   builds), or when the merged requirement outgrows one record. None of these codes is a capture
+   baseline stamped on the finding. Redacting any contributing check makes R unknown and reopens a
+   resolution that depended on it; redacting the resolving check reopens it as before. The
+   relation is a pure fold over recorded checks, so the memory and SQLite ledgers replay it
+   identically. Residual limits: the rule compares lengths and counts, not content. A repair diff
+   that moves the hunk the finding was about past the m bytes the repair saw, or that moves a
+   redacted span while keeping the same count, could let a repair review that stays silent about it
+   clear the finding; so could a file whose diff shrank while a redaction persisted, which instead
+   blocks when its length falls below n. Explicit `fixed` rulings (#905) are the long-term guard.
 
 ## Consequences
 
