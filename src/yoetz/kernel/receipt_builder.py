@@ -68,7 +68,11 @@ from yoetz.domain.values import (
     Timestamp,
     finding_id,
 )
-from yoetz.kernel.claims import effective_claim_items
+from yoetz.kernel.claims import (
+    claim_discloses_result,
+    effective_claim_items,
+    result_is_relevant_to_claim,
+)
 from yoetz.kernel.command_attempts import command_attempts
 from yoetz.kernel.completion_scope import (
     SCOPE_REPAIR,
@@ -77,6 +81,11 @@ from yoetz.kernel.completion_scope import (
 from yoetz.kernel.deterministic_checks import CaseAvailabilityFacts, CaseGap
 from yoetz.kernel.finding_resolution import finding_resolution_explanation
 from yoetz.kernel.lineage import LineageEvaluation, LineageRollupState
+from yoetz.kernel.observed_failures import (
+    ObservedFailureState,
+    observed_event_ids_from_records,
+    observed_failure_states,
+)
 from yoetz.kernel.plan_scope import CurrentPlanScope, current_plan_scope
 from yoetz.kernel.projections import ObligationProjectionRecord, ProjectionRecord, ProjectionState
 from yoetz.kernel.reducers import is_material_event_family
@@ -885,6 +894,96 @@ def _resolved_history_sentence(resolved_count: int) -> str:
     )
 
 
+_OBSERVED_HISTORY_LISTED: Final = 10
+
+
+def _listed_refs(refs: set[ResultId]) -> str:
+    ordered = sorted(refs, key=_ascii_key)
+    listed = ", ".join(ordered[:_OBSERVED_HISTORY_LISTED])
+    extra = len(ordered) - _OBSERVED_HISTORY_LISTED
+    return f"{listed} and {extra} more" if extra > 0 else listed
+
+
+def _observed_failure_history_sentence(context: ReceiptBuildContext) -> str:
+    """Disclose, once, the hook-observed failures a completion claim did not have to name (#909).
+
+    A failure a later passing run of the same command superseded, or that a completed observed
+    edit made historical, is not a finding, but it is never silent: the receipt counts and names
+    it here, beside the observed failures the claim disclosed through ``limitation_refs``. The
+    sentence reads the same shared predicate the policies and the replay invariant apply.
+    """
+
+    if not context.records:
+        return ""
+    observed = observed_event_ids_from_records(context.records)
+    if not observed:
+        return ""
+    superseded: set[ResultId] = set()
+    rerun: set[ResultId] = set()
+    historical: set[ResultId] = set()
+    disclosed: set[ResultId] = set()
+    for _claim_id, claim_record in effective_claim_items(context.projection):
+        claim = claim_record.payload
+        if claim is None or claim.claim_kind is not ClaimKind.COMPLETION:
+            continue
+        states = observed_failure_states(
+            context.projection, observed, through=claim_record.source_frontier
+        )
+        for ref, state in states.items():
+            if not result_is_relevant_to_claim(context.projection, claim_record, ref):
+                continue
+            if claim_discloses_result(claim, ref):
+                disclosed.add(ref)
+            elif state is ObservedFailureState.SUPERSEDED:
+                superseded.add(ref)
+            elif state is ObservedFailureState.RERUN:
+                rerun.add(ref)
+            elif state is ObservedFailureState.HISTORICAL:
+                historical.add(ref)
+    superseded -= disclosed
+    rerun -= disclosed | superseded
+    historical -= disclosed | superseded | rerun
+    parts: list[str] = []
+    if superseded or rerun or historical:
+        clauses: list[str] = []
+        if superseded:
+            verb = "was" if len(superseded) == 1 else "were"
+            clauses.append(
+                f"{len(superseded)} {verb} later passed by the same command "
+                f"({_listed_refs(superseded)})"
+            )
+        if rerun:
+            verb = "was" if len(rerun) == 1 else "were"
+            clauses.append(
+                f"{len(rerun)} {verb} rerun later by the same command, whose latest run is "
+                f"judged instead ({_listed_refs(rerun)})"
+            )
+        if historical:
+            clauses.append(
+                f"{len(historical)} preceded a later observed workspace edit "
+                f"({_listed_refs(historical)})"
+            )
+        total = len(superseded) + len(rerun) + len(historical)
+        noun = "run" if total == 1 else "runs"
+        parts.append(
+            f"Observed failure history: of the hook-observed failing {noun} before the "
+            f"completion claim, {', '.join(clauses[:-1]) + ' and ' if len(clauses) > 1 else ''}"
+            f"{clauses[-1]}. "
+            f"{'It is' if total == 1 else 'They are'} recorded history, not findings."
+        )
+    if disclosed:
+        disclosure = (
+            "run is disclosed as a limitation"
+            if len(disclosed) == 1
+            else "runs are disclosed as limitations"
+        )
+        parts.append(
+            f"{len(disclosed)} hook-observed failing {disclosure} by the completion claim "
+            f"({_listed_refs(disclosed)})."
+        )
+    return " ".join(parts)
+
+
 def _suffix_record_kinds(context: ReceiptBuildContext) -> tuple[str | None, bool]:
     """Return whether an attributable suffix contains service lineage and host observations.
 
@@ -1112,6 +1211,7 @@ def _sections(
     check_suffix: CheckSuffixClass | None = None,
     engine_derived_suffix: str | None = None,
     host_observation_suffix: bool = False,
+    observed_failure_sentence: str = "",
 ) -> tuple[ReceiptSection, ...]:
     gap_codes = coverage.known_gaps
     bodies: dict[ReceiptSectionKey, str] = {}
@@ -1326,6 +1426,8 @@ def _sections(
             "Coverage is bounded to the recorded evidence and is not proof of correctness."
         )
         items[ReceiptSectionKey.LIMITATIONS_AND_COVERAGE] = ()
+    if observed_failure_sentence:
+        bodies[ReceiptSectionKey.LIMITATIONS_AND_COVERAGE] += " " + observed_failure_sentence
 
     policy_rows = "; ".join(
         f"{entry.policy_id} {entry.policy_version}" for entry in versions.policy_versions
@@ -1467,6 +1569,7 @@ def build_receipt(
         check_suffix=context.check_suffix,
         engine_derived_suffix=engine_derived_suffix,
         host_observation_suffix=host_observation_suffix,
+        observed_failure_sentence=_observed_failure_history_sentence(context),
     )
     suppressed_count = (
         0 if context.applicable_check is None else context.applicable_check.suppressed_count

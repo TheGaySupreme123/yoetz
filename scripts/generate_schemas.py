@@ -2831,6 +2831,7 @@ def _status_result_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     )
     _add_status_semantic_progress(definitions)
     _add_status_operation_admission(definitions)
+    _add_status_observed_run(definitions)
     document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
     document["title"] = f"Yoetz status result {entry.schema_version}"
     return document
@@ -2910,6 +2911,47 @@ def _add_status_semantic_progress(definitions: dict[str, JsonValue]) -> None:
                 },
                 "required": ["operation_kind", "state"],
             },
+        }
+    )
+
+
+def _add_status_observed_run(definitions: dict[str, JsonValue]) -> None:
+    """Let a results row name its hook-observed run structurally (issue #909).
+
+    The optional ``observed_run`` carries the 1-based occurrence among hook-observed results, the
+    host tool name, the installation-keyed command commitment and the exit status. It never
+    carries command text; the unreleased 1.4.0 results view gains it additively.
+    """
+
+    definitions["observed_run"] = {
+        "additionalProperties": False,
+        "properties": {
+            "command_commitment": {
+                "maxLength": 76,
+                "minLength": 76,
+                "pattern": r"^hmac-sha256:[0-9a-f]{64}$",
+                "type": "string",
+            },
+            "exit_status": {"maximum": 2**31 - 1, "minimum": -(2**31), "type": "integer"},
+            "occurrence": {"$ref": "#/$defs/positive_uint"},
+            "tool_name": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$",
+                "type": "string",
+            },
+        },
+        "required": ["occurrence"],
+        "type": "object",
+    }
+    result_item = cast(dict[str, JsonValue], definitions["result_item"])
+    result_properties = cast(dict[str, JsonValue], result_item["properties"])
+    result_properties["observed_run"] = {"$ref": "#/$defs/observed_run"}
+    result_rules = cast(list[JsonValue], result_item.setdefault("allOf", []))
+    result_rules.append(
+        {
+            "if": {"required": ["observed_run"]},
+            "then": {"properties": {"payload_available": {"const": True}}},
         }
     )
 
@@ -4115,9 +4157,12 @@ def _observation_effective_budget_schema(
 def _control_v2_9_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     """Extend frozen 2.8 with custom finite capacity and the effective-budget record (#828).
 
-    Only ``control-result`` changes: ``observation_selection_runtime`` accepts any finite
-    structural-queue count in the supported range, names its capacity labels, and carries the
-    closed effective-budget record.  The other three documents only move to the 2.9.0 ``$id``.
+    ``control-result``: ``observation_selection_runtime`` accepts any finite structural-queue
+    count in the supported range, names its capacity labels, and carries the closed
+    effective-budget record.  ``control-request`` (unreleased 2.9.0, #909): an individual
+    observation envelope may carry the installation-keyed ``command_commitment`` its hook computed
+    from the command argument; it is an ``hmac-sha256:`` value, never command text.  The hello
+    documents only move to the 2.9.0 ``$id``.
     """
 
     source = (
@@ -4127,6 +4172,18 @@ def _control_v2_9_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     )
     document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
     document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    if entry.schema_name == "control-request":
+        definitions = cast(dict[str, JsonValue], document["$defs"])
+        envelope = _individual_observation_envelope(definitions)
+        properties = cast(dict[str, JsonValue], envelope["properties"])
+        structural = cast(dict[str, JsonValue], properties["structural_payload"])
+        fields = cast(dict[str, JsonValue], structural["properties"])
+        fields["command_commitment"] = {
+            "maxLength": 76,
+            "minLength": 76,
+            "pattern": _CONTROL_COMMITMENT_PATTERN,
+            "type": "string",
+        }
     if entry.schema_name == "control-result":
         definitions = cast(dict[str, JsonValue], document["$defs"])
         runtime = definitions.get("observation_selection_runtime")

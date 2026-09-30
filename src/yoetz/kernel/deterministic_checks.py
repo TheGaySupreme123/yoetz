@@ -105,6 +105,7 @@ __all__ = [
     "FrozenSourceAvailability",
     "MAX_FROZEN_HISTORY_BYTES",
     "MAX_FROZEN_HISTORY_EVENTS",
+    "OBSERVED_FAILURE_LIVE_FACT",
     "PolicyPack",
     "UnavailableCapturedObject",
     "build_deterministic_case",
@@ -125,6 +126,9 @@ type FindingBasisRef = (
 type PublicSubjectRef = EventId | ObligationId | ClaimId
 
 _MAX_SAFE_INTEGER: Final = 2**53 - 1
+# Work-integrity fact naming a hook-observed failure that is still live at the claim: the latest
+# observed run of its command identity failed and no successful observed edit followed it (#909).
+OBSERVED_FAILURE_LIVE_FACT: Final = "observed_failure_live"
 _CODE_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$", re.ASCII)
 _POLICY_PATTERN: Final = re.compile(r"^[a-z][a-z0-9-]{0,127}$", re.ASCII)
 _VERSION_PATTERN: Final = re.compile(
@@ -542,6 +546,25 @@ def render_deterministic_finding_text(
                 f"supersedes_claim_refs [{', '.join(claim_refs)}] and limitation_refs "
                 f"[{', '.join(failed_refs)}]; keep admissible support in supporting_refs."
             )
+        live_runs = tuple(
+            fact.subject_refs
+            for fact in observed_facts
+            if fact.fact_code == OBSERVED_FAILURE_LIVE_FACT
+        )
+        for run in live_runs:
+            run_results = ", ".join(ref for ref in run if ref.startswith("res_"))
+            run_actions = ", ".join(ref for ref in run if ref.startswith("act_"))
+            named = f"result {run_results}" + (f" of action {run_actions}" if run_actions else "")
+            detail = (
+                f"{detail} Observed run: {named} failed, and before the claim no later "
+                "hook-observed run of the same command identity followed it and no observed "
+                "workspace edit that reported success followed it. status view=results lists its "
+                "tool, occurrence, command commitment (when recorded) and exit status; command "
+                "text is never recorded. Either disclose it as above, or fix it and publish a "
+                "replacement claim once a later observed run of the same command passes or an "
+                "observed edit that reports success follows it (a run without a command "
+                "commitment is retired only by the edit)."
+            )
     if kind is FindingKind.CONTRADICTORY_CLAIMS_UNRESOLVED:
         claim_refs = tuple(ref for ref in refs if ref.startswith("clm_"))
         if claim_refs:
@@ -582,6 +605,15 @@ def _text_contract_corpus() -> tuple[JsonValue, ...]:
         "material_limitation_present",
         (event_id("evt_00000000-0000-4000-8000-000000000001"),),
     )
+    failed_claim = claim_id("clm_00000000-0000-4000-8000-000000000000")
+    failed_result = result_id("res_00000000-0000-4000-8000-000000000000")
+    failed_facts = (
+        FindingFact("failed_result_present", (failed_result,)),
+        FindingFact(
+            OBSERVED_FAILURE_LIVE_FACT,
+            (action_id("act_00000000-0000-4000-8000-000000000000"), failed_result),
+        ),
+    )
     branches: tuple[tuple[str, FindingKind, tuple[str, ...], tuple[FindingFact, ...]], ...] = (
         *(("template", kind, (), ()) for kind in FindingKind),
         ("stale_gap_listing", FindingKind.LEDGER_STALE_OR_INCOMPLETE, ("missing_ref",), ()),
@@ -594,9 +626,19 @@ def _text_contract_corpus() -> tuple[JsonValue, ...]:
         ("limitation_result", FindingKind.MATERIAL_LIMITATION_OMITTED, (), (limitation_result,)),
         ("limitation_record", FindingKind.MATERIAL_LIMITATION_OMITTED, (), (limitation_record,)),
     )
-    return tuple(
-        [label, kind.value, *render_deterministic_finding_text(kind, subject, gaps, facts)]
-        for label, kind, gaps, facts in branches
+    failed_subjects = (failed_claim, *subject)
+    return (
+        *(
+            [label, kind.value, *render_deterministic_finding_text(kind, subject, gaps, facts)]
+            for label, kind, gaps, facts in branches
+        ),
+        [
+            "failed_observed_run",
+            FindingKind.FAILED_WORK_OMITTED.value,
+            *render_deterministic_finding_text(
+                FindingKind.FAILED_WORK_OMITTED, failed_subjects, (), failed_facts
+            ),
+        ],
     )
 
 

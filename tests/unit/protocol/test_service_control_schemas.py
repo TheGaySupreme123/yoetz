@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from copy import deepcopy
 from importlib import resources
@@ -697,6 +698,8 @@ def test_v25_observation_wire_tracks_domain_structural_keys_without_rewriting_v2
             "lineage_child_session_id",
             "lineage_child_writer_id",
             "lineage_parent_task_id",
+            # The keyed command identity is additive on the unreleased 2.9 request wire (#909).
+            "command_commitment",
         }
     )
     assert set(v25_properties) == expected_observation_keys
@@ -1340,6 +1343,63 @@ def test_v29_custom_capacity_runtime_validates_only_on_29_wire() -> None:
         validate_schema_instance("control-result", "2.9.0", cast(JsonValue, profile))
 
 
+def _structural_properties(document: dict[str, Any]) -> dict[str, Any]:
+    envelope = document["$defs"]["observation_envelope"]["oneOf"][0]
+    return cast(dict[str, Any], envelope["properties"]["structural_payload"]["properties"])
+
+
+def _assert_v29_request_adds_only_command_commitment(
+    v28: dict[str, Any], v29: dict[str, Any]
+) -> None:
+    """The 2.9 request adds the keyed command identity and nothing else (#909)."""
+
+    v28_fields = _structural_properties(v28)
+    v29_fields = _structural_properties(v29)
+    assert set(v29_fields) - set(v28_fields) == {"command_commitment"}
+    assert v29_fields["command_commitment"] == {
+        "maxLength": 76,
+        "minLength": 76,
+        "pattern": "^hmac-sha256:[0-9a-f]{64}$",
+        "type": "string",
+    }
+    stripped = json.loads(json.dumps(v29))
+    del _structural_properties(stripped)["command_commitment"]
+    assert {k: v for k, v in v28.items() if k != "$id"} == {
+        k: v for k, v in stripped.items() if k != "$id"
+    }
+
+
+def test_v29_request_carries_keyed_command_commitment_never_command_text() -> None:
+    """The unreleased 2.9 request admits the hook's keyed command identity only (#909)."""
+
+    structural = {
+        "action": "claude_tool_failure",
+        "capability_profile_id": "claude-code-ordinary-observation-v1",
+        "command_commitment": "hmac-sha256:" + "a" * 64,
+        "correlation_kind": "tool_call_id",
+        "hook_name": "PostToolUse",
+        "pairing_mode": "post_only",
+        "success": False,
+        "tool_call_id": "tool-1",
+        "tool_name": "Bash",
+    }
+    frame = _current_cli_observation_frame(
+        source="claude_hook", codex_session_id="claude:session-1", structural=structural
+    )
+    validate_schema_instance("control-request", "2.9.0", cast(JsonValue, frame))
+    with pytest.raises(ProtocolValueError):
+        validate_schema_instance("control-request", "2.8.0", cast(JsonValue, frame))
+    for rejected in ("sha256:" + "a" * 64, "pytest -q tests/x.py"):
+        invalid = json.loads(json.dumps(frame))
+        invalid["body"]["envelope"]["structural_payload"]["command_commitment"] = rejected
+        with pytest.raises(ProtocolValueError):
+            validate_schema_instance("control-request", "2.9.0", cast(JsonValue, invalid))
+    invalid = json.loads(json.dumps(frame))
+    invalid["body"]["envelope"]["structural_payload"]["command"] = "pytest -q tests/x.py"
+    with pytest.raises(ProtocolValueError):
+        validate_schema_instance("control-request", "2.9.0", cast(JsonValue, invalid))
+
+
 def test_v29_changes_only_the_selection_runtime_and_keeps_frozen_v28() -> None:
     """2.9 derives from 2.8 by one runtime definition and the partial receipt page (#921).
 
@@ -1358,6 +1418,9 @@ def test_v29_changes_only_the_selection_runtime_and_keeps_frozen_v28() -> None:
         assert (_ROOT / f"{name}-2.9.0.schema.json").read_bytes() == _PACKAGE_ROOT.joinpath(
             f"{name}-2.9.0.schema.json"
         ).read_bytes()
+        if name == "control-request":
+            _assert_v29_request_adds_only_command_commitment(v28, v29)
+            continue
         if name != "control-result":
             assert {k: v for k, v in v28.items() if k != "$id"} == {
                 k: v for k, v in v29.items() if k != "$id"

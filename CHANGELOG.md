@@ -49,6 +49,18 @@ reverse-chronological released versions.
   1,000-event Codex ledger shows ~8x less CPU per page and `closure-prepare` in a few seconds
   (#916).
 
+- A later run of the same command (only its latest run is judged), or a later observed edit, now
+  retires an earlier hook-observed failure before a completion claim. Such a failure no longer
+  raises `failed_work_omitted`, `material_limitation_omitted` or `failed_command_unresolved` advice,
+  and a `claim_recorded/1.1.0` claim no longer has to list it in `limitation_refs`. The receipt's
+  limitations still name each such failure once as history. A claim made while the latest observed
+  run is red and undisclosed gets exactly one finding that names the run by its result and action.
+  Hooks commit to the command with an installation-keyed `hmac-sha256:` value and discard the text,
+  so no command text is stored, shown or sent. `status view=results` adds each observed run's tool,
+  occurrence, command commitment and exit status. Older ledgers without a command identity use the
+  observed-edit rule only. Cooperative results keep their disclosure duty. Codex outcomes are still
+  `unknown` until #910 lands (#909).
+
 - With the Codex subscription evaluator bound, the service no longer re-hashes the retained Codex
   runtime (about 359 MB on Linux) on the event loop for every observation advice cycle. Structural
   readiness is memoized by binding and file fingerprints and re-checked off the event loop only

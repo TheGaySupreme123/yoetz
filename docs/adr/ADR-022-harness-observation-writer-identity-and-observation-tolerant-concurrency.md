@@ -666,3 +666,45 @@ The exact-reference lookup remains workspace/session fenced and the resolver sti
 consent, manifests, objects, and ledger provenance. Evicted, redacted, revoked, or unavailable
 captures remain coverage gaps. Already-pruned envelopes cannot be repaired by upgrading. This
 shared SQLite behavior applies to Codex, Claude Code and Cursor on macOS, Linux and WSL 2.
+
+### Failed-command supersession and the keyed command identity (2026-09-30, #909)
+
+A rerun is a new host tool call, so keying "resolved" on the call id left every red -> green cycle
+unresolved. Observation-advice policy `0.1.6` makes `failed_command_unresolved` read the same kernel
+predicate the local packs and the ADR-025 claim invariant read (`kernel/observed_failures.py`): a
+failed command envelope is still reported only while no later post-event of the same *command
+identity* followed it (only the latest run of a command is judged), no later edit post-event that
+stated success followed it (a permission request or decision, a failed or denied edit, and a partial
+or outcome-less edit are not proof the workspace changed), and the same host call did not later
+succeed. A later failure of the same identity is a new condition; it never revives an earlier one.
+Cursor's ordinary shell tool `Shell` is a command tool for this rule.
+
+The edit clause is state-scoped, not causal. Any successful observed edit retires every earlier
+observed failure in the prefix, whatever path it touched, because the failed workspace state is no
+longer the current one; the rule does not relate the edit to the failed command. This is the plain
+form of option (a) that the maintainer chose on #909. Its stricter variant (an edit *and* a later
+passing verification) stays an open question on #909, to revisit if dogfood shows edits outside the
+failing area making real red runs historical. The receipt therefore says a failure "preceded a
+later observed workspace edit", never that the edit fixed it.
+
+This section computes the commitment on hook paths and the legacy spool only. A Codex call that
+reaches the ledger only through the session stream (`CommandExecution`) carries no commitment in
+this change, so it keeps `omitted:structural` and can be retired only by the edit clause, not by a
+later run of the same command. The stream commitment is #910's change; until it lands, Codex
+same-command supersession is active on the hook path only.
+
+The command identity is a new structural envelope field, `command_commitment`: an installation-keyed
+`hmac-sha256:` value (domain `yoetz/observation-command-commitment/v1`, the local observation
+store's key material) over the host command argument (`tool_input.cmd`, `command`, or `argv`) of a
+shell/exec tool after light, semantics-preserving normalization: unquoted runs of spaces and tabs
+collapse to one space, and a host shell wrapper (`/bin/bash -lc`, `bash -lc` including the WSL 2
+form, `sh -c`) is stripped when its argument is exact (an argv wrapper, or the canonical
+single-quoted string form). Quoting, expansions, escapes and line breaks are never rewritten, so
+commands with different shell meaning never share an identity. The hook process computes it and
+discards the text; the text is never persisted, displayed, or sent, with or without content consent.
+Edit tools (for example `apply_patch`, whose `command` argument is a patch) never carry one. The
+value crosses the unreleased control-request `2.9.0` wire, materializes as the command action's
+`omitted:<commitment>`, and the hook spool carries it for legacy replays. A plain `sha256` of a
+short command is dictionary-guessable and is never an identity. Legacy envelopes without the field
+still clear through the edit rule. The same predicate names only service-stamped observations, so a
+cooperative publication of a copied commitment proves nothing.

@@ -6,8 +6,14 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final, Literal
 
+from yoetz.domain.events import ResultOutcome
 from yoetz.domain.findings import FINDING_KIND_TRAITS, FindingKind
 from yoetz.domain.observation import ObservationEnvelope, ObservationGapCode, ObservationLifecycle
+from yoetz.kernel.observed_failures import (
+    ObservedFailureState,
+    ObservedRun,
+    classify_observed_runs,
+)
 from yoetz.protocol.canonical import JsonValue, canonical_digest
 
 __all__ = [
@@ -27,7 +33,7 @@ __all__ = [
 ]
 
 OBSERVATION_ADVICE_POLICY_ID: Final = "observation-advice"
-OBSERVATION_ADVICE_POLICY_VERSION: Final = "0.1.5"
+OBSERVATION_ADVICE_POLICY_VERSION: Final = "0.1.6"
 
 OBSERVATION_ADVICE_FACT_CODES: Final = frozenset(
     {
@@ -110,7 +116,8 @@ _VERIFICATION_TOOLS: Final = frozenset(
 )
 # Generic host shells.  A successful envelope here proves only that the host
 # tool returned; it never proves that a verification check ran.
-_SHELL_TOOLS: Final = frozenset({"shell", "Bash", "bash"})
+# Cursor's ordinary profile reports its shell tool as ``Shell`` (#909).
+_SHELL_TOOLS: Final = frozenset({"shell", "Shell", "Bash", "bash"})
 # Tools whose envelopes carry command outcomes at all, used by the failed and
 # unresolved-command rules, which reason about outcomes rather than checks.
 _COMMAND_TOOLS: Final = _VERIFICATION_TOOLS | _SHELL_TOOLS
@@ -247,6 +254,10 @@ _FIELD_MAPPING_HINT: Final = "mapping_hint"
 _FIELD_SUBAGENT_ID: Final = "subagent_id"
 _FIELD_ACTION: Final = "action"
 _FIELD_ATTEMPT: Final = "attempt"
+_FIELD_DENIED: Final = "denied"
+_FIELD_COMMAND_COMMITMENT: Final = "command_commitment"
+# The post-phase event kinds that report a completed tool call (Cursor's is mapped to the first).
+_POST_TOOL_EVENT_KINDS: Final = frozenset({"PostToolUse", "postToolUse"})
 # Read only as correlation keys.
 _FIELD_CORRELATION_ID: Final = "correlation_id"
 _FIELD_TOOL_CALL_ID: Final = "tool_call_id"
@@ -282,6 +293,15 @@ def _claim_kind(envelope: ObservationEnvelope) -> str | None:
 def _result_status(envelope: ObservationEnvelope) -> str | None:
     value = envelope.structural_payload.get(_FIELD_RESULT_STATUS)
     return value if type(value) is str else None
+
+
+def _denied(envelope: ObservationEnvelope) -> bool:
+    return envelope.structural_payload.get(_FIELD_DENIED) is True
+
+
+def _command_commitment(envelope: ObservationEnvelope) -> str | None:
+    value = envelope.structural_payload.get(_FIELD_COMMAND_COMMITMENT)
+    return value if type(value) is str and value.startswith("hmac-sha256:") else None
 
 
 def _changed_paths_digest(envelope: ObservationEnvelope) -> str | None:
@@ -411,25 +431,58 @@ def _candidate(
 
 
 def _failed_commands(envelopes: Sequence[ObservationEnvelope]) -> list[ObservationAdviceCandidate]:
+    """Report a failed command only while it is still live (#909).
+
+    A failure clears when the same host call later reports success (its correlation key), when a
+    later run of the same command identity follows it with any outcome (the keyed
+    ``command_commitment`` the hook computed, never command text; only the latest run of a
+    command is judged), or when an edit post-event with a stated success follows it. This is the shared
+    supersession rule the local packs and the claim-revision invariant apply, so the advice
+    cannot keep a failure the packs already treat as history. An envelope without a commitment
+    (every legacy envelope) is still cleared by a later successful edit, never kept forever.
+    """
+
     results: list[ObservationAdviceCandidate] = []
-    unresolved: dict[_ToolCorrelationKey, ObservationEnvelope] = {}
+    unresolved: dict[_ToolCorrelationKey, tuple[str, ObservationEnvelope]] = {}
+    runs: list[ObservedRun] = []
     originating_tools, fallback_tools = _tool_resolution(envelopes)
-    for envelope in envelopes:
+    for position, envelope in enumerate(envelopes):
         tool, key = _resolved_tool(envelope, originating_tools, fallback_tools)
         if key is None:
             continue
-        if tool is None or tool not in _COMMAND_TOOLS:
-            continue
-        if envelope.event_kind in {"PreToolUse"}:
+        if envelope.event_kind in {"PreToolUse", "preToolUse"}:
             continue
         exit_status = _exit_status(envelope)
         success = _success(envelope)
         failed = (exit_status is not None and exit_status != 0) or success is False
-        if failed:
-            unresolved[key] = envelope
-        elif exit_status == 0 or success is True:
-            unresolved.pop(key, None)
-    for key, envelope in unresolved.items():
+        passed = not failed and (exit_status == 0 or success is True)
+        ref = str(position)
+        if tool is not None and tool in _COMMAND_TOOLS:
+            identity = _command_commitment(envelope)
+            if failed:
+                unresolved[key] = (ref, envelope)
+                runs.append(ObservedRun(ref, position, ResultOutcome.FAILURE, identity))
+            elif passed:
+                unresolved.pop(key, None)
+                runs.append(ObservedRun(ref, position, ResultOutcome.SUCCESS, identity))
+            elif identity is not None and envelope.event_kind in _POST_TOOL_EVENT_KINDS:
+                # A later run of the same command without a stated outcome still replaces the
+                # earlier failure as the run that is judged; only the latest run can be live.
+                runs.append(ObservedRun(ref, position, ResultOutcome.UNKNOWN, identity))
+        elif (
+            envelope.event_kind in _POST_TOOL_EVENT_KINDS
+            and _is_edit_envelope(envelope, tool)
+            and passed
+            and not _denied(envelope)
+        ):
+            # Only a post-event with a stated success is a completed edit, exactly as the packs
+            # read the ledger result; a permission request, a denied or failed edit, and an edit
+            # whose outcome the host did not state are no proof the workspace changed.
+            runs.append(ObservedRun(ref, position, ResultOutcome.SUCCESS, edit=True))
+    states = classify_observed_runs(runs)
+    for key, (ref, envelope) in unresolved.items():
+        if states.get(ref) is not ObservedFailureState.LIVE:
+            continue
         cause_digest = canonical_digest(
             {
                 "correlation_key": key,

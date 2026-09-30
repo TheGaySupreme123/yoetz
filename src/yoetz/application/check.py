@@ -1420,6 +1420,44 @@ def _collapse_response_overlap(
     )
 
 
+def _fact_refs(
+    assessment: DeterministicAssessment,
+    fact_code: str,
+) -> tuple[FindingBasisRef, ...] | None:
+    for fact in assessment.basis.required_but_missing_facts + assessment.basis.observed_facts:
+        if fact.fact_code == fact_code:
+            return fact.subject_refs
+    return None
+
+
+def _collapse_failed_work_overlap(
+    assessments: tuple[DeterministicAssessment, ...],
+) -> tuple[DeterministicAssessment, ...]:
+    """Report one omitted failure once: drop research's copy when work integrity reported it.
+
+    A failed or partial result a completion claim does not disclose satisfies both
+    ``failed_work_omitted`` and ``material_limitation_omitted`` for the same claim and result,
+    and the same ``limitation_refs`` entry answers both. The packs cannot see each other, so the
+    collapse happens here, keyed on the work-integrity assessment that really ran (#909). A
+    deselected, skipped, or failed work-integrity pack leaves the research finding standing.
+    """
+
+    omitted = {
+        refs
+        for item in assessments
+        if item.candidate.kind is FindingKind.FAILED_WORK_OMITTED
+        and (refs := _fact_refs(item, "failure_disclosure_absent")) is not None
+    }
+    if not omitted:
+        return assessments
+    return tuple(
+        item
+        for item in assessments
+        if item.candidate.kind is not FindingKind.MATERIAL_LIMITATION_OMITTED
+        or _fact_refs(item, "material_limitation_present") not in omitted
+    )
+
+
 def run_deterministic_policies(
     case: DeterministicCase,
     scope: CheckScope,
@@ -1471,8 +1509,8 @@ def run_deterministic_policies(
             by_pack[pack] = evaluated
 
     # Finding emission order is intentionally distinct from execution accounting order.
-    assessments = _collapse_response_overlap(
-        by_pack.get(_WORK_PACK, ()) + by_pack.get(_RESEARCH_PACK, ())
+    assessments = _collapse_failed_work_overlap(
+        _collapse_response_overlap(by_pack.get(_WORK_PACK, ()) + by_pack.get(_RESEARCH_PACK, ()))
     )
     keys = tuple(
         (item.candidate.policy_id, item.basis.rule_id, item.candidate.subject_refs)

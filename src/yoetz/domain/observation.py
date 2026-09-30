@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import os
 import re
+import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -50,6 +51,7 @@ __all__ = [
     "CaptureHandoffRetirementReason",
     "CaptureHandoffRetirementStage",
     "OBSERVATION_BACKPRESSURE_REASON",
+    "OBSERVATION_COMMAND_COMMITMENT_DOMAIN",
     "OBSERVATION_CONTENT_CAPTURE_PENDING_REASON",
     "OBSERVATION_HOOK_COMMITMENT_DOMAIN",
     "OBSERVATION_STREAM_LINE_DOMAIN",
@@ -86,6 +88,8 @@ __all__ = [
     "advice_snapshot_from_json",
     "advice_snapshot_to_json",
     "hook_source_commitment",
+    "normalize_observed_command",
+    "observed_command_commitment",
     "observation_control_command_from_json",
     "observation_control_command_to_json",
     "observation_content_chunk_from_json",
@@ -162,6 +166,13 @@ ObservationCapturePart = tuple[str, str, str, int, int]
 OBSERVATION_WORKSPACE_DOMAIN: Final = b"yoetz/observation-workspace/v1\x00"
 OBSERVATION_STREAM_LINE_DOMAIN: Final = b"yoetz/observation-stream-line/v1\x00"
 OBSERVATION_HOOK_COMMITMENT_DOMAIN: Final = b"yoetz/observation-hook-commitment/v1\x00"
+# Installation-keyed command identity (#909). The hook commits to the light-normalized command
+# text and discards it; only the ``hmac-sha256:`` value leaves the hook process.
+OBSERVATION_COMMAND_COMMITMENT_DOMAIN: Final = b"yoetz/observation-command-commitment/v1\x00"
+_MAX_OBSERVED_COMMAND_CHARS: Final = 16_384
+_MAX_OBSERVED_ARGV: Final = 1_024
+_SHELL_WRAPPERS: Final = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+_SHELL_COMMAND_FLAG_RE: Final = re.compile(r"^-[a-z]*c[a-z]*$", re.ASCII)
 
 # A summary is an observation-store record.  It is intentionally kept separate
 # from the task-ledger event families: the local writer can account for every
@@ -263,6 +274,7 @@ _STRUCTURAL_KEYS: Final = frozenset(
         "hook_name",
         "stream_kind",
         "command_digest",
+        "command_commitment",
         "argv_digest",
         "cwd_commitment",
         "file_count",
@@ -812,6 +824,13 @@ def _structural_payload(value: object) -> JsonObject:
             _token(item)
         if key == "protection_reference":
             validate_observation_protection_reference(item)
+        if key == "command_commitment":
+            if type(item) is not str:
+                raise _invalid("invalid_event_value_type")
+            try:
+                validate_commitment(item)
+            except ProtocolValueError as exc:
+                raise _invalid("invalid_event_value_type") from exc
         _reject_path_like(item)
     encoded = canonical_encode(payload)
     if len(encoded) > _MAX_STRUCTURAL_BYTES:
@@ -956,6 +975,106 @@ def hook_source_commitment(key_material: bytes, source_identity: str) -> str:
     digest = hmac.new(
         key_material,
         OBSERVATION_HOOK_COMMITMENT_DOMAIN + source_identity.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"hmac-sha256:{digest}"
+
+
+def _shell_wrapped_command(argv: list[str]) -> str | None:
+    """Return ``X`` for a host shell wrapper such as ``/bin/bash -lc X`` or ``sh -c X``."""
+
+    if len(argv) != 3:
+        return None
+    shell = argv[0].replace("\\", "/").rsplit("/", 1)[-1]
+    if shell not in _SHELL_WRAPPERS or _SHELL_COMMAND_FLAG_RE.fullmatch(argv[1]) is None:
+        return None
+    return argv[2]
+
+
+def _collapse_unquoted_blanks(text: str) -> str:
+    """Collapse runs of unquoted spaces and tabs to one space and trim them at both ends.
+
+    Shell quoting and escapes are tracked so quoted or escaped blanks, quote characters, and line
+    breaks (command separators) are kept byte for byte: the result has the same shell meaning.
+    """
+
+    output: list[str] = []
+    quote: str | None = None
+    escaped = False
+    pending_blank = False
+    for char in text:
+        if quote is None and not escaped and char in " \t":
+            pending_blank = True
+            continue
+        if pending_blank and output:
+            output.append(" ")
+        pending_blank = False
+        output.append(char)
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = True
+        elif quote is None and char in "'\"":
+            quote = char
+        elif char == quote:
+            quote = None
+    return "".join(output)
+
+
+def normalize_observed_command(value: object) -> str | None:
+    """Light, semantics-preserving normalization of a host command argument, or ``None``.
+
+    Accepts the command string (``tool_input.cmd`` / ``command``) or an argv list. Only rewrites
+    that cannot change what the shell runs are applied: unquoted runs of spaces and tabs collapse
+    to one space, and a host shell wrapper (``/bin/bash -lc '...'``, ``bash -lc``, ``sh -c``,
+    including the WSL 2 ``bash -lc`` form) is stripped when its command argument is exact: an argv
+    wrapper always, a string wrapper only when it is the canonical single-quoted form, so an
+    outer shell cannot have expanded anything first. Quoting, expansions, escapes and line breaks
+    are never rewritten, so two commands with different meaning never share an identity; a missed
+    equivalence only keeps two identities apart. The result exists only to be committed; it is
+    never stored, displayed, or sent.
+    """
+
+    text: str | None = None
+    if type(value) is str:
+        text = value
+    elif type(value) is list or type(value) is tuple:
+        items = list(cast(list[object] | tuple[object, ...], value))
+        if (
+            not items
+            or len(items) > _MAX_OBSERVED_ARGV
+            or any(type(item) is not str for item in items)
+        ):
+            return None
+        argv = cast(list[str], items)
+        text = _shell_wrapped_command(argv) or shlex.join(argv)
+    if text is None or "\x00" in text or len(text) > _MAX_OBSERVED_COMMAND_CHARS:
+        return None
+    for _ in range(3):
+        text = _collapse_unquoted_blanks(text)
+        try:
+            words = shlex.split(text, posix=True)
+        except ValueError:
+            return text or None
+        inner = _shell_wrapped_command(words)
+        # ``shlex.join`` single-quotes its argument, so equality proves the wrapper's command
+        # argument reached the inner shell literally, with nothing expanded by an outer shell.
+        if inner is None or shlex.join(words) != text:
+            return text or None
+        text = inner
+    return None
+
+
+def observed_command_commitment(key_material: bytes, command: str) -> str:
+    """Installation-keyed HMAC commitment to one normalized command (never plain sha256)."""
+
+    if type(key_material) is not bytes or not 16 <= len(key_material) <= 64:
+        raise _invalid("invalid_commitment")
+    if type(command) is not str or not command or "\x00" in command:
+        raise _invalid()
+    digest = hmac.new(
+        key_material,
+        OBSERVATION_COMMAND_COMMITMENT_DOMAIN + command.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
     return f"hmac-sha256:{digest}"

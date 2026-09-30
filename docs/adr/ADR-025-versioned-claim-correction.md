@@ -3,8 +3,9 @@
 **Status:** Accepted (2026-08-29), acknowledged in
 [issue #432](https://github.com/TheGaySupreme123/yoetz/issues/432).
 **Implemented by:** `src/yoetz/domain/events.py`, `src/yoetz/kernel/claims.py`,
-`src/yoetz/kernel/reducers.py`, the local policy packs, AI-powered review case and receipt builders,
-and the public claim schema, guidance, descriptors, and conformance suites.
+`src/yoetz/kernel/observed_failures.py`, `src/yoetz/kernel/reducers.py`, the local policy packs,
+AI-powered review case and receipt builders, and the public claim schema, guidance, descriptors,
+and conformance suites.
 **Relates to:** ADR-002 (canonical protocol), ADR-019 (declared completion scope), and ADR-020
 (typed evidence digest provenance).
 
@@ -84,6 +85,22 @@ Append-only history must remain intact, so mutation or erasure is not an accepta
    tombstoned is relevant task-wide, so it must be disclosed and must therefore also be linkable;
    additionally requiring a readable action to author the link would make relevance demand a
    reference the same replay rejects, leaving no recordable completion claim at all.
+
+   **Observed-failure supersession (#909, 2026-09-30).** Relevance above is necessary but no longer
+   sufficient for a *hook-observed* failed or partial result. One shared kernel predicate
+   (`kernel/observed_failures.py`) retires such a result from the required set when, before the
+   claim, either a later hook-observed run of the same command identity followed it (it passed:
+   supersession; any other outcome: that later run is the one judged, so only the latest run of a
+   command can be live) or a later hook-observed edit reported success (state scope). The command
+   identity is the installation-keyed `hmac-sha256:` commitment the hook computes and
+   materialization stores as `omitted:<commitment>`; rows without one (`omitted:structural`, every
+   pre-#909 ledger) take the state-scoped rule only, never "every failure is live". Only
+   service-stamped observations take part on either side: a cooperative failure keeps the exact duty
+   above, and a cooperative success or edit never retires an observed failure. A retired result
+   stays authorable in `limitation_refs`, and the receipt counts it once as history.
+   `limitation_refs_complete`, `failed_work_omitted`, research-evidence limitations, and observation
+   advice all read this one predicate, so admission and the packs cannot disagree. Loosening the
+   required set cannot reject any history that the stricter rule accepted.
 
 4. **Replay owns the revision invariants.** Missing, unreadable, already-superseded, wrong-kind, or
    disjoint targets; irrelevant or success limitations; non-success support; and incomplete

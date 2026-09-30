@@ -412,6 +412,19 @@ A background Bash launch
 is recorded as partial until the host supplies completion evidence. These decisions do not add
 filesystem or batch observation.
 
+**Failure supersession (#909).** Because the ordinary profile already records `PostToolUseFailure`
+as a failure, a red -> green cycle used to leave an unclearable finding. Now a later `Bash` run of
+the same command (only the latest run is judged; a pass clears it), or a later successful
+`Edit`/`Write`/`MultiEdit` post-event, retires the earlier failure before a completion claim; the
+receipt names it once as history. A `PermissionRequest` for an edit tool is not an edit, and a
+file written by a `Bash` heredoc is a command, not an observed edit. The hook computes an
+installation-keyed `command_commitment` from `tool_input.command` on `PreToolUse`, `PostToolUse`,
+and `PostToolUseFailure`, then discards the text. Decision: supported on the ordinary profile; the
+default structural profile observes no generic `Bash` calls, so it records no command identity.
+A failure whose payload omits `tool_input` has no identity and relies on the edit rule.
+Native dogfood acceptance of this path on macOS, Linux and WSL 2 is not yet recorded
+(owner: #909).
+
 Stale-verification advice is scoped to the logical tool call, not to the observed phase. On this
 profile one edit is observed twice — a `PreToolUse` attempt and a `PostToolUse` result sharing the
 normalized `tool_call_id` (Claude's `tool_use_id`) — and the pair reports one

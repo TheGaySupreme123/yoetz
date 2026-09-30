@@ -134,7 +134,11 @@ disclosure field. A replacement names prior effective claim ids in `supersedes_c
 Checks and receipts use only effective claims for current conclusions; superseded claims and their
 past findings remain visible as history. A result limits a claim only when it existed by that claim
 and its action overlaps the claim's declared obligation scope; unscoped records remain
-conservatively task-wide.
+conservatively task-wide. A hook-observed failure is history, not a limitation, once a later
+observed run of the same command passed or a later observed edit reported success before the
+claim; only the latest run of a command is judged. The receipt names such history once. `status`
+with `view=results` shows each observed run's tool, occurrence, keyed command identity, and exit
+status, never command text, so a still-red run can be named in `limitation_refs`.
 
 ## Check mode and AI-powered review coverage
 
