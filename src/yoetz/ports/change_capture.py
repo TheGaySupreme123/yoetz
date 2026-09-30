@@ -71,6 +71,8 @@ CHANGE_CAPTURE_UNAVAILABLE_REASONS: Final = frozenset(
         "unsafe_root",
         "unsupported_repository",
         "git_failed",
+        # The working tree kept moving while it was read: no coherent state could be captured.
+        "changed_during_capture",
         "redaction_incomplete",
     }
 )

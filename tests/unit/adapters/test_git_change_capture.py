@@ -398,11 +398,13 @@ def _slow_git(
     *,
     seconds_per_call: float,
     slow_from_call: int = 0,
+    slow_marker: str | None = None,
     seconds_before: float = 0.0,
 ) -> tuple[_FakeClock, list[float]]:
     """Git calls from ``slow_from_call`` on take ``seconds_per_call`` of a fake clock.
 
-    Earlier calls take ``seconds_before``.
+    Earlier calls take ``seconds_before``. With ``slow_marker``, only the calls whose argv holds
+    it are slow and every other call takes ``seconds_before``.
     A call whose granted timeout is shorter than that ends the way the hardened runner ends a
     timed-out Git: the clock advances by the timeout and the call fails. Nothing sleeps.
     """
@@ -414,7 +416,11 @@ def _slow_git(
     def run(*args: Any, **kwargs: Any) -> tuple[int, bytes]:
         timeout = float(kwargs["timeout_seconds"])
         timeouts.append(timeout)
-        seconds = seconds_per_call if len(timeouts) > slow_from_call else seconds_before
+        if slow_marker is not None:
+            slow = slow_marker in args[1]
+        else:
+            slow = len(timeouts) > slow_from_call
+        seconds = seconds_per_call if slow else seconds_before
         if timeout < seconds:
             clock.now += timeout
             raise ValueError("git_failed")
@@ -438,10 +444,11 @@ def test_slow_git_makes_the_capture_unavailable_within_its_deadline(
         GitChangeCaptureAdapter(_deadline_seconds=20.0).capture(os.fspath(repository), None)
 
     assert raised.value.reason == "git_failed"
-    # Each call got at most 10 s and never more than what was left of the 20 s deadline.
+    # Each call got at most 10 s and never more than what was left of the assembly share of the
+    # 20 s deadline (the rest is kept for the closing stability check).
     assert timeouts[0] == 10.0 and all(timeout <= 10.0 for timeout in timeouts)
     assert timeouts[-1] < 6.0
-    assert clock.now - started == pytest.approx(20.0)
+    assert clock.now - started == pytest.approx(20.0 * getattr(capture_module, "_ASSEMBLY_SHARE"))
 
 
 def test_deadline_inside_the_diff_lists_every_file_and_shows_none(
@@ -450,17 +457,19 @@ def test_deadline_inside_the_diff_lists_every_file_and_shows_none(
     repository = _repository(tmp_path)
     (repository / "selectors.ts").write_text("export const changed = 1;\n", encoding="utf-8")
     (repository / "notes.txt").write_text("untracked words\n", encoding="utf-8")
-    # Config, object format, HEAD, name-status and numstat take 3 s each; the patch never ends.
+    # Config, object format, HEAD, the raw list and numstat take 2 s each; the patch never ends.
     clock, timeouts = _slow_git(
-        monkeypatch, seconds_per_call=60.0, slow_from_call=5, seconds_before=3.0
+        monkeypatch, seconds_per_call=60.0, slow_marker="--unified=3", seconds_before=2.0
     )
     started = clock.now
 
     capture = GitChangeCaptureAdapter(_deadline_seconds=20.0).capture(os.fspath(repository), None)
     text = _text(capture)
 
-    assert timeouts[5] == pytest.approx(5.0)  # the patch got only what was left
-    assert clock.now - started == pytest.approx(20.0)
+    # The patch got only what was left of the 15 s assembly share; the closing stability check
+    # then ran inside the 5 s kept for it.
+    assert timeouts[5] == pytest.approx(5.0)
+    assert 15.0 < clock.now - started <= 20.0
     assert capture.truncated
     assert (
         "selectors.ts (+1 -3) not shown: the capture reached its size, time or file limit" in text
@@ -555,3 +564,262 @@ def test_first_check_base_is_labelled_with_its_commit_and_round_trips(tmp_path: 
     assert capture.base == "first_check" and capture.base_commit == head.commit
     assert f"Base: {head.commit[:12]}, the state at this task's first check" in text
     assert "export const pinned = 1;" in text  # committed after the pin, still in the change
+
+
+# --- R945-03/04/05: a coherent snapshot of the validated repository, with no link read -------
+
+
+def _loose_object_path(repository: Path, oid: str) -> Path:
+    return repository / ".git" / "objects" / oid[:2] / oid[2:]
+
+
+def _outside_blob(tmp_path: Path, content: str) -> Path:
+    """A loose object in a separate repository, holding bytes that are not in the workspace."""
+
+    outside = tmp_path / "outside-repo"
+    outside.mkdir(mode=0o700)
+    _git(outside, "init", "--quiet")
+    (outside / "secret.txt").write_text(content, encoding="utf-8")
+    oid = _git(outside, "hash-object", "-w", "--", "secret.txt").strip()
+    return _loose_object_path(outside, oid)
+
+
+def test_tracked_file_replaced_by_a_hard_link_is_named_but_never_shown(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    (repository / "tracked.txt").write_text("tracked base\n", encoding="utf-8")
+    _git(repository, "add", "--", "tracked.txt")
+    _commit(repository, "track a file")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "private.txt").write_text("OUTSIDE HARDLINK SECRET\n", encoding="utf-8")
+    (repository / "tracked.txt").unlink()
+    os.link(outside / "private.txt", repository / "tracked.txt")
+    (repository / "selectors.ts").write_text("export const shown = 1;\n", encoding="utf-8")
+
+    capture = GitChangeCaptureAdapter().capture(os.fspath(repository), None)
+    text = _text(capture)
+
+    assert "OUTSIDE HARDLINK SECRET" not in text
+    assert "  M tracked.txt not shown: links, special files and multiply linked" in text
+    assert "export const shown = 1;" in text
+    assert capture.omitted_files == 1 and capture.truncated
+
+
+def test_tracked_file_replaced_by_a_symlink_is_named_but_never_shown(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "private.txt").write_text("outside-canary\n", encoding="utf-8")
+    (repository / "selectors.ts").unlink()
+    os.symlink(outside / "private.txt", repository / "selectors.ts")
+
+    capture = GitChangeCaptureAdapter().capture(os.fspath(repository), None)
+    text = _text(capture)
+
+    assert "outside-canary" not in text and os.fspath(outside) not in text
+    assert "selectors.ts not shown: links, special files and multiply linked" in text
+
+
+@pytest.mark.parametrize("link", ("symlink", "hardlink"))
+def test_base_object_substituted_through_a_link_is_never_shown(tmp_path: Path, link: str) -> None:
+    repository = _repository(tmp_path)
+    base = GitChangeCaptureAdapter().read_task_base(os.fspath(repository))
+    oid = _git(repository, "rev-parse", "HEAD:selectors.ts").strip()
+    target = _loose_object_path(repository, oid)
+    outside_object = _outside_blob(tmp_path, "secret-outside\n")
+    target.unlink()
+    if link == "symlink":
+        os.symlink(outside_object, target)
+    else:
+        os.link(outside_object, target)
+    (repository / "selectors.ts").write_text("export const shown = 2;\n", encoding="utf-8")
+
+    capture = GitChangeCaptureAdapter().capture(os.fspath(repository), base)
+    text = _text(capture)
+
+    assert "secret-outside" not in text
+    assert "selectors.ts" in text and "export const shown = 2;" not in text
+    assert capture.omitted_files == 1 and capture.truncated
+
+
+def test_object_store_reached_through_a_symlink_is_refused(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    (repository / "selectors.ts").write_text("export const shown = 3;\n", encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere-objects"
+    (repository / ".git" / "objects").rename(elsewhere)
+    os.symlink(elsewhere, repository / ".git" / "objects")
+
+    with pytest.raises(ChangeCaptureUnavailable) as raised:
+        GitChangeCaptureAdapter().capture(os.fspath(repository), None)
+
+    assert raised.value.reason == "unsafe_root"
+
+
+def test_git_directory_sharing_another_common_directory_is_refused(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    other = tmp_path / "other"
+    other.mkdir(mode=0o700)
+    _git(other, "init", "--quiet")
+    (repository / ".git" / "commondir").write_text(
+        os.fspath(other / ".git") + "\n", encoding="utf-8"
+    )
+    (repository / "selectors.ts").write_text("export const shown = 4;\n", encoding="utf-8")
+
+    with pytest.raises(ChangeCaptureUnavailable) as raised:
+        GitChangeCaptureAdapter().capture(os.fspath(repository), None)
+
+    assert raised.value.reason in {"unsupported_repository", "unsafe_root", "not_git"}
+
+
+def test_validated_root_replaced_by_another_repository_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = _repository(tmp_path)
+    adapter = GitChangeCaptureAdapter()
+    base = adapter.read_task_base(os.fspath(repository))
+    (repository / "selectors.ts").write_text("export const original = 1;\n", encoding="utf-8")
+    # A clone of the same base, so the task base resolves in it too.
+    replacement = tmp_path / "replacement"
+    _git(tmp_path, "clone", "--quiet", "--no-hardlinks", os.fspath(repository), "replacement")
+    replacement.chmod(0o700)
+    (replacement / "selectors.ts").write_text("REPLACEMENT CONTENT\n", encoding="utf-8")
+    real = capture_module.run_read_only_git
+    swapped: list[bool] = []
+
+    def run(handle: Any, arguments: tuple[str, ...], **kwargs: Any) -> tuple[int, bytes]:
+        if "diff" in arguments and not swapped:
+            # A same-user process renames the validated directory away and puts another
+            # repository at its path after the capture validated it.
+            repository.rename(tmp_path / "moved-away")
+            replacement.rename(repository)
+            swapped.append(True)
+        return real(handle, arguments, **kwargs)
+
+    monkeypatch.setattr(capture_module, "run_read_only_git", run)
+
+    with pytest.raises(ChangeCaptureUnavailable) as raised:
+        adapter.capture(os.fspath(repository), base)
+
+    assert swapped and raised.value.reason == "unsafe_root"
+
+
+def _mutate_on(
+    monkeypatch: pytest.MonkeyPatch, marker: str, mutate: Any, *, times: int
+) -> list[tuple[str, ...]]:
+    """Run ``mutate`` just before the first ``times`` Git calls whose argv contains ``marker``."""
+
+    calls: list[tuple[str, ...]] = []
+    real = capture_module.run_read_only_git
+
+    def run(handle: Any, arguments: tuple[str, ...], **kwargs: Any) -> tuple[int, bytes]:
+        if marker in arguments:
+            calls.append(arguments)
+            if len(calls) <= times:
+                mutate(len(calls))
+        return real(handle, arguments, **kwargs)
+
+    monkeypatch.setattr(capture_module, "run_read_only_git", run)
+    return calls
+
+
+def test_tracked_edit_between_git_reads_is_retried_into_one_coherent_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = _repository(tmp_path)
+    target = repository / "selectors.ts"
+    target.write_text("export const first = 1;\n", encoding="utf-8")
+
+    def mutate(_: int) -> None:
+        # A formatter rewrites the file after its counts were read, before its patch.
+        target.write_text(
+            "export const first = 1;\nexport const second = 2;\nexport const third = 3;\n",
+            encoding="utf-8",
+        )
+
+    calls = _mutate_on(monkeypatch, "--unified=3", mutate, times=1)
+
+    capture = GitChangeCaptureAdapter().capture(os.fspath(repository), None)
+    text = _text(capture)
+
+    assert len(calls) == 2  # the first attempt saw the change and was taken again
+    assert "+export const third = 3;" in text
+    assert "  M selectors.ts (+3 -3)" in text
+
+
+def test_working_tree_that_never_holds_still_makes_the_capture_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = _repository(tmp_path)
+    target = repository / "selectors.ts"
+    target.write_text("export const churn = 0;\n", encoding="utf-8")
+
+    def mutate(count: int) -> None:
+        target.write_text(f"export const churn = {count};\n" * count, encoding="utf-8")
+
+    calls = _mutate_on(monkeypatch, "--unified=3", mutate, times=100)
+
+    with pytest.raises(ChangeCaptureUnavailable) as raised:
+        GitChangeCaptureAdapter().capture(os.fspath(repository), None)
+
+    assert raised.value.reason == "changed_during_capture"
+    assert 1 < len(calls) <= 3
+
+
+def test_untracked_file_created_during_the_capture_is_retried_into_one_listing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = _repository(tmp_path)
+    (repository / "a.txt").write_text("first untracked\n", encoding="utf-8")
+
+    def mutate(_: int) -> None:
+        (repository / "b.txt").write_text("second untracked\n", encoding="utf-8")
+
+    real = capture_module.run_read_only_git
+    listed: list[int] = []
+
+    def run(handle: Any, arguments: tuple[str, ...], **kwargs: Any) -> tuple[int, bytes]:
+        result = real(handle, arguments, **kwargs)
+        if "--others" in arguments:
+            listed.append(1)
+            if len(listed) == 1:
+                # A new file appears just after the first listing was taken.
+                mutate(1)
+        return result
+
+    monkeypatch.setattr(capture_module, "run_read_only_git", run)
+
+    capture = GitChangeCaptureAdapter().capture(os.fspath(repository), None)
+    text = _text(capture)
+
+    assert len(listed) >= 3  # first attempt listed twice and differed; the retry agreed
+    assert capture.untracked_files == 2
+    assert "+second untracked" in text and "+first untracked" in text
+
+
+def test_untracked_file_rewritten_while_it_is_read_is_never_a_mix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = _repository(tmp_path)
+    target = repository / "notes.txt"
+    target.write_text("old-" * 10_000 + "\n", encoding="utf-8")
+    inode = target.stat().st_ino
+    real_read = os.read
+    rewrites: list[int] = []
+
+    def read(descriptor: int, size: int) -> bytes:
+        chunk = real_read(descriptor, size)
+        if not rewrites and os.fstat(descriptor).st_ino == inode:
+            # Another process rewrites the file in place after its first chunk was read.
+            rewrites.append(1)
+            with open(target, "r+b") as handle:
+                handle.write(b"new-" * 10_000 + b"\n")
+        return chunk
+
+    monkeypatch.setattr(os, "read", read)
+
+    capture = GitChangeCaptureAdapter().capture(os.fspath(repository), None)
+    text = _text(capture)
+
+    assert rewrites
+    assert "old-" not in text or "new-" not in text
+    assert "+" + "new-" * 20 in text

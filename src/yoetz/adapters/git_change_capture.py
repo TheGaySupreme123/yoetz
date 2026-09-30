@@ -3,9 +3,18 @@
 The service calls this adapter with the repository root its own authenticated control connection
 supplied. Every Git call goes through the hardened runner of ``git_subject_state`` (no shell, no
 global or system config, no hooks, fsmonitor, external diff, textconv or credential helper), with
-Git transports disabled so a partial clone cannot fetch. Untracked files are opened one path
-component at a time relative to the validated root descriptor without following symlinks, so a
-link or a hard link can never make the capture read outside the workspace.
+Git transports disabled so a partial clone cannot fetch. Before and after every Git call the root
+path must still name the directory that was validated, and its ``.git`` the validated one, so a
+directory swapped in at the same path is never read. Untracked files are opened one path
+component at a time relative to the validated root descriptor without following symlinks. A
+tracked file whose working copy is a link, a special file or multiply linked is never shown, and
+every Git object a shown diff reads must hash to its own name through an object store that holds
+no link, so neither a link nor a hard link can make the capture read outside the workspace.
+
+The capture is one coherent state: after assembling it, the adapter re-reads the file list, the
+identity of every file it read, the untracked listing, HEAD and the index, and takes the whole
+capture again (a bounded number of times) when anything moved; a tree that never holds still is
+unavailable as ``changed_during_capture``.
 
 The result is plain text: a short header naming the base, the file counts and every changed file,
 then a unified diff. It is bounded to ``MAX_CHECK_CHANGE_TEXT_BYTES``. When the change is larger,
@@ -15,6 +24,7 @@ whole files are left out rather than cut mid-hunk, and the header names each fil
 from __future__ import annotations
 
 import errno
+import hashlib
 import os
 import shutil
 import stat
@@ -63,8 +73,24 @@ _MAX_LISTED_PATH_BYTES: Final = 200
 # Room kept for the header lines written after the file listing.
 _HEADER_TRAILER_ROOM: Final = 512
 _READ_CHUNK: Final = 65_536
+# A capture whose working tree moved while it was read is taken again at most this many times.
+_CAPTURE_ATTEMPTS: Final = 3
+# The share of the deadline assembly may use; the rest is kept for the closing stability check.
+_ASSEMBLY_SHARE: Final = 0.75
+# Every Git object a shown diff reads is re-hashed; these bound that read.
+_MAX_VERIFIED_OBJECT_BYTES: Final = 8 * 1024 * 1024
+_MAX_TOTAL_VERIFIED_OBJECT_BYTES: Final = 64 * 1024 * 1024
+_MAX_PACK_DIRECTORY_ENTRIES: Final = 4_096
+_BLOB_MODES: Final = frozenset({"100644", "100755", "120000"})
 # Transports are disabled outright: diffing a partial clone must fail, never fetch a blob.
-_CAPTURE_CONFIG: Final = ("-c", "core.quotePath=true", "-c", "protocol.allow=never")
+# Replace refs are ignored so every object is read under its own name, which is what is verified.
+_CAPTURE_CONFIG: Final = (
+    "--no-replace-objects",
+    "-c",
+    "core.quotePath=true",
+    "-c",
+    "protocol.allow=never",
+)
 _DIFF_OPTIONS: Final = (
     "--no-color",
     "--no-ext-diff",
@@ -126,7 +152,12 @@ def _credential_name(path: bytes) -> bool:
 
 
 type _OmitReason = Literal[
-    "capture_limit", "too_large", "not_regular_file", "unreadable", "credential_name"
+    "capture_limit",
+    "too_large",
+    "not_regular_file",
+    "unreadable",
+    "credential_name",
+    "object_unverified",
 ]
 _OMIT_TEXT: Final[dict[_OmitReason, str]] = {
     "credential_name": "not shown: listed by name only, as for every file named like this",
@@ -134,7 +165,58 @@ _OMIT_TEXT: Final[dict[_OmitReason, str]] = {
     "too_large": "not shown: too large for this capture",
     "not_regular_file": "not shown: links, special files and multiply linked files are never read",
     "unreadable": "not shown: could not be read safely",
+    "object_unverified": "not shown: a Git object its diff needs could not be verified",
 }
+# Omitted for what the file is, not its size: its line counts are not shown either.
+_WITHHELD_COUNTS: Final[frozenset[_OmitReason]] = frozenset(
+    {"not_regular_file", "unreadable", "object_unverified"}
+)
+# (mode, device, inode, size, mtime ns, ctime ns, link count, owner) of one path, never followed.
+type _Identity = tuple[int, int, int, int, int, int, int, int]
+# A path reachable only through a link or a non-directory component.
+_BLOCKED: Final[_Identity] = (0, 0, 0, 0, 0, 0, 0, 0)
+
+
+class _ChangedDuringCapture(Exception):
+    """The working tree moved while one capture attempt read it."""
+
+
+@dataclass(frozen=True, slots=True)
+class _Workspace:
+    """A validated workspace and the identity its root and ``.git`` had when validated."""
+
+    handle: LocalWorkspaceHandle
+    root: Path
+    descriptor: int
+    root_identity: tuple[int, int]
+    git_identity: tuple[int, int]
+
+
+@dataclass(frozen=True, slots=True)
+class _RawEntry:
+    status: str
+    path: bytes
+    src_mode: str
+    dst_mode: str
+    src_oid: str
+    dst_oid: str
+
+
+@dataclass(slots=True)
+class _TrackedRead:
+    raw: bytes
+    sections: list[_Section]
+    identities: dict[bytes, _Identity | None]
+
+
+@dataclass(slots=True)
+class _UntrackedRead:
+    total: int
+    sections: list[_Section]
+    listing_truncated: bool
+    listing: bytes | None
+    config: tuple[str, ...]
+    identities: dict[bytes, _Identity | None]
 
 
 @dataclass(slots=True)
@@ -262,66 +344,86 @@ class GitChangeCaptureAdapter:
 
     def read_task_base(self, workspace: str) -> TaskChangeBase:
         deadline = time.monotonic() + self._deadline_seconds
-        handle = self._open(workspace, deadline)
-        object_format = self._object_format(handle, deadline)
-        head = self._rev(handle, "HEAD^{commit}", deadline)
+        pinned = self._open(workspace, deadline)
+        object_format = self._object_format(pinned, deadline)
+        head = self._rev(pinned, "HEAD^{commit}", deadline)
         # A repository with no commit yet starts from the empty tree, so every file the task adds
         # is still part of its change when HEAD later gains commits.
         return TaskChangeBase(object_format, head or _EMPTY_TREES[object_format])
 
     def capture(self, workspace: str, base: TaskChangeBase | None) -> CheckChangeCapture:
         # One deadline bounds the whole capture: every Git call gets at most what is left of it.
-        deadline = time.monotonic() + self._deadline_seconds
-        handle = self._open(workspace, deadline)
-        self._refuse_unsafe_config(handle, deadline)
-        object_format = self._object_format(handle, deadline)
+        # Assembly may use its first part; the rest is kept for the closing stability check.
+        started = time.monotonic()
+        deadline = started + self._deadline_seconds
+        assembly = started + self._deadline_seconds * _ASSEMBLY_SHARE
+        pinned = self._open(workspace, assembly)
+        self._refuse_unsafe_config(pinned, assembly)
+        self._refuse_unsafe_object_store(pinned)
+        object_format = self._object_format(pinned, assembly)
+        for _ in range(_CAPTURE_ATTEMPTS):
+            try:
+                return self._capture_once(pinned, object_format, base, assembly, deadline)
+            except _ChangedDuringCapture:
+                if _expired(assembly):
+                    break
+        raise ChangeCaptureUnavailable("changed_during_capture")
+
+    def _capture_once(
+        self,
+        pinned: _Workspace,
+        object_format: Literal["sha1", "sha256"],
+        base: TaskChangeBase | None,
+        assembly: float,
+        deadline: float,
+    ) -> CheckChangeCapture:
+        head = self._rev(pinned, "HEAD^{commit}", assembly)
+        index = _path_identity(pinned.descriptor, b".git/index")
         base_kind: ChangeBaseKind
         base_id: str | None = None
         if (
             base is not None
             and base.object_format == object_format
-            and self._rev(handle, base.commit + "^{tree}", deadline) is not None
+            and self._rev(pinned, base.commit + "^{tree}", assembly) is not None
         ):
             base_kind, base_id = base.origin, base.commit
+        elif head is not None:
+            base_kind, base_id = "head", head
         else:
-            head = self._rev(handle, "HEAD^{commit}", deadline)
-            if head is not None:
-                base_kind, base_id = "head", head
-            else:
-                base_kind, base_id = "empty", _EMPTY_TREES[object_format]
-        sections = self._tracked_sections(handle, base_id, deadline)
-        untracked_total, untracked_sections, listing_truncated = 0, [], True
-        if not _expired(deadline):
+            base_kind, base_id = "empty", _EMPTY_TREES[object_format]
+        tracked = self._tracked_sections(pinned, object_format, base_id, assembly)
+        untracked = _UntrackedRead(0, [], True, None, (), {})
+        if not _expired(assembly):
             try:
-                untracked_total, untracked_sections, listing_truncated = self._untracked_sections(
-                    handle, deadline
-                )
-            except ChangeCaptureUnavailable:
-                if not _expired(deadline):
+                untracked = self._untracked_sections(pinned, assembly)
+            except ChangeCaptureUnavailable as exc:
+                if not _ran_out(exc, assembly):
                     raise
         # Past the deadline no untracked file is listed or read; the header says the untracked
         # count is a lower bound, and the tracked change above still stands.
-        sections.extend(untracked_sections)
+        self._verify_stable(pinned, base_id, tracked, untracked, head, index, deadline)
+        sections = [*tracked.sections, *untracked.sections]
         sections.sort(key=lambda item: item.path)
         return self._render(
             base_kind,
             base_id,
             sections,
-            tracked=len(sections) - len(untracked_sections),
-            untracked=untracked_total,
-            unlisted_untracked=untracked_total - len(untracked_sections),
-            untracked_listing_truncated=listing_truncated,
+            tracked=len(tracked.sections),
+            untracked=untracked.total,
+            unlisted_untracked=untracked.total - len(untracked.sections),
+            untracked_listing_truncated=untracked.listing_truncated,
         )
 
     # --- Git access --------------------------------------------------------------------------
 
     @staticmethod
-    def _open(workspace: str, deadline: float) -> LocalWorkspaceHandle:
+    def _open(workspace: str, deadline: float) -> _Workspace:
         if shutil.which("git", path=os.defpath) is None:
             raise ChangeCaptureUnavailable("git_unavailable")
         try:
             root = discover_workspace_root(Path(workspace), timeout_seconds=_remaining(deadline))
-            return open_local_workspace(root, timeout_seconds=_remaining(deadline))
+            handle = open_local_workspace(root, timeout_seconds=_remaining(deadline))
+            validated_root, descriptor = local_workspace_root(handle)
         except ValueError as exc:
             if time.monotonic() >= deadline:
                 raise ChangeCaptureUnavailable("git_failed") from None
@@ -331,10 +433,28 @@ class GitChangeCaptureAdapter:
             if reason in {"unsafe_root"}:
                 raise ChangeCaptureUnavailable("unsafe_root") from None
             raise ChangeCaptureUnavailable("unsupported_repository") from None
+        try:
+            # The open descriptor is the validated directory; its identity pins the pathname
+            # every Git call receives (Git itself can only be given a path).
+            facts = os.fstat(descriptor)
+            git_facts = os.stat(".git", dir_fd=descriptor, follow_symlinks=False)
+        except OSError:
+            raise ChangeCaptureUnavailable("unsafe_root") from None
+        if not stat.S_ISDIR(git_facts.st_mode):
+            raise ChangeCaptureUnavailable("unsafe_root")
+        pinned = _Workspace(
+            handle,
+            validated_root,
+            descriptor,
+            (facts.st_dev, facts.st_ino),
+            (git_facts.st_dev, git_facts.st_ino),
+        )
+        _verify_same_root(pinned)
+        return pinned
 
     @staticmethod
     def _git(
-        handle: LocalWorkspaceHandle,
+        pinned: _Workspace,
         arguments: Sequence[str],
         *,
         deadline: float,
@@ -342,9 +462,13 @@ class GitChangeCaptureAdapter:
         accepted: frozenset[int] = frozenset({0}),
         keep_prefix_on_limit: bool = False,
     ) -> tuple[int, bytes]:
+        # Git runs at the root's pathname. Before and after each call that pathname, and its
+        # ``.git``, must still be the validated directories: a directory renamed away and replaced
+        # at the same path fails closed rather than being read.
+        _verify_same_root(pinned)
         try:
-            return run_read_only_git(
-                handle,
+            result = run_read_only_git(
+                pinned.handle,
                 (*_CAPTURE_CONFIG, *arguments),
                 stdout_limit=limit,
                 timeout_seconds=_remaining(deadline),
@@ -352,15 +476,16 @@ class GitChangeCaptureAdapter:
                 keep_prefix_on_limit=keep_prefix_on_limit,
             )
         except ValueError as exc:
+            _verify_same_root(pinned)
             if str(exc) == "git_output_limit":
                 raise
             raise ChangeCaptureUnavailable("git_failed") from None
+        _verify_same_root(pinned)
+        return result
 
-    def _object_format(
-        self, handle: LocalWorkspaceHandle, deadline: float
-    ) -> Literal["sha1", "sha256"]:
+    def _object_format(self, pinned: _Workspace, deadline: float) -> Literal["sha1", "sha256"]:
         _, raw = self._git(
-            handle, ("rev-parse", "--show-object-format"), deadline=deadline, limit=32
+            pinned, ("rev-parse", "--show-object-format"), deadline=deadline, limit=32
         )
         value = raw.strip()
         if value == b"sha1":
@@ -369,9 +494,9 @@ class GitChangeCaptureAdapter:
             return "sha256"
         raise ChangeCaptureUnavailable("unsupported_repository")
 
-    def _rev(self, handle: LocalWorkspaceHandle, spec: str, deadline: float) -> str | None:
+    def _rev(self, pinned: _Workspace, spec: str, deadline: float) -> str | None:
         code, raw = self._git(
-            handle,
+            pinned,
             ("rev-parse", "--verify", "--quiet", "--end-of-options", spec),
             deadline=deadline,
             limit=128,
@@ -384,7 +509,7 @@ class GitChangeCaptureAdapter:
             raise ChangeCaptureUnavailable("git_failed")
         return value
 
-    def _refuse_unsafe_config(self, handle: LocalWorkspaceHandle, deadline: float) -> None:
+    def _refuse_unsafe_config(self, pinned: _Workspace, deadline: float) -> None:
         """Refuse any effective repository config that could run a command or fetch.
 
         The ADR-011 metadata fence reads ``.git/config`` lexically, so a filter driver defined in
@@ -398,7 +523,7 @@ class GitChangeCaptureAdapter:
 
         try:
             _, listing = self._git(
-                handle,
+                pinned,
                 ("config", "--list", "--name-only", "--includes", "--show-scope", "-z"),
                 deadline=deadline,
                 limit=1_048_576,
@@ -423,34 +548,84 @@ class GitChangeCaptureAdapter:
             ):
                 raise ChangeCaptureUnavailable("unsupported_repository")
 
-    def _tracked_sections(
-        self, handle: LocalWorkspaceHandle, base_id: str, deadline: float
-    ) -> list[_Section]:
+    @staticmethod
+    def _refuse_unsafe_object_store(pinned: _Workspace) -> None:
+        """Refuse an object store Git would reach through a link or another repository.
+
+        Git follows links inside ``.git`` and trusts every object file it opens, so an object
+        store (or a pack in it) that is a link, or a ``commondir`` naming another repository's,
+        could hand the diff bytes from outside the workspace. Loose objects are checked one by
+        one as they are verified (``_verify_object``).
+        """
+
+        descriptor = pinned.descriptor
+        expected_uid = os.geteuid() if hasattr(os, "geteuid") else os.getuid()
         try:
-            _, names = self._git(
-                handle,
-                ("diff", "--name-status", "-z", *_DIFF_OPTIONS, base_id, "--"),
-                deadline=deadline,
-                limit=_LIST_LIMIT,
+            objects = os.stat(".git/objects", dir_fd=descriptor, follow_symlinks=False)
+        except OSError:
+            raise ChangeCaptureUnavailable("unsafe_root") from None
+        if not stat.S_ISDIR(objects.st_mode) or objects.st_uid != expected_uid:
+            raise ChangeCaptureUnavailable("unsafe_root")
+        for name in (".git/commondir", ".git/objects/info/alternates"):
+            try:
+                os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                raise ChangeCaptureUnavailable("unsafe_root") from None
+            raise ChangeCaptureUnavailable("unsupported_repository")
+        for name in (".git/objects/info", ".git/objects/pack"):
+            try:
+                facts = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                raise ChangeCaptureUnavailable("unsafe_root") from None
+            if not stat.S_ISDIR(facts.st_mode):
+                raise ChangeCaptureUnavailable("unsafe_root")
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            pack = os.open(".git/objects/pack", flags, dir_fd=descriptor)
+        except FileNotFoundError:
+            return
+        except OSError:
+            raise ChangeCaptureUnavailable("unsafe_root") from None
+        try:
+            with os.scandir(pack) as entries:
+                for count, entry in enumerate(entries, start=1):
+                    if count > _MAX_PACK_DIRECTORY_ENTRIES:
+                        raise ChangeCaptureUnavailable("unsupported_repository")
+                    if not entry.is_file(follow_symlinks=False):
+                        raise ChangeCaptureUnavailable("unsafe_root")
+        except OSError:
+            raise ChangeCaptureUnavailable("unsafe_root") from None
+        finally:
+            os.close(pack)
+
+    @staticmethod
+    def _raw_arguments(base_id: str) -> tuple[str, ...]:
+        return ("diff", "--raw", "-z", "--no-abbrev", *_DIFF_OPTIONS, base_id, "--")
+
+    def _tracked_sections(
+        self,
+        pinned: _Workspace,
+        object_format: Literal["sha1", "sha256"],
+        base_id: str,
+        deadline: float,
+    ) -> _TrackedRead:
+        try:
+            _, raw = self._git(
+                pinned, self._raw_arguments(base_id), deadline=deadline, limit=_LIST_LIMIT
             )
             _, numbers = self._git(
-                handle,
+                pinned,
                 ("diff", "--numstat", "-z", *_DIFF_OPTIONS, base_id, "--"),
                 deadline=deadline,
                 limit=_LIST_LIMIT,
             )
         except ValueError:
             raise ChangeCaptureUnavailable("unsupported_repository") from None
-        fields = _nul_fields(names)
-        if len(fields) % 2:
-            raise ChangeCaptureUnavailable("git_failed")
-        entries: list[tuple[str, bytes]] = []
-        for index in range(0, len(fields), 2):
-            status = fields[index].decode("ascii", errors="replace")[:1] or "M"
-            path = fields[index + 1]
-            if not _safe_relative(path):
-                raise ChangeCaptureUnavailable("unsafe_root")
-            entries.append((status, path))
+        entries = _raw_entries(raw)
         counts: dict[bytes, tuple[str, str]] = {}
         for record in _nul_fields(numbers):
             parts = record.split(b"\t", 2)
@@ -460,37 +635,48 @@ class GitChangeCaptureAdapter:
                 parts[0].decode("ascii", errors="replace"),
                 parts[1].decode("ascii", errors="replace"),
             )
-        sections = [
-            _Section(
-                path,
-                status,
+        # Each working copy's identity is taken before Git reads it and compared again after the
+        # whole capture (``_verify_stable``); the same identity is the no-link fence.
+        identities = {
+            entry.path: _path_identity(pinned.descriptor, entry.path) for entry in entries
+        }
+        sections: list[_Section] = []
+        for entry in entries:
+            section = _Section(
+                entry.path,
+                entry.status,
                 False,
-                *counts.get(path, ("-", "-")),
+                *counts.get(entry.path, ("-", "-")),
                 None,
-                "credential_name" if _credential_name(path) else None,
+                "credential_name" if _credential_name(entry.path) else None,
             )
-            for status, path in entries
-        ]
+            if section.omitted is None and not _worktree_side_safe(entry, identities[entry.path]):
+                # A link, a special file or a second name for other bytes: Git would read what
+                # it points at, so neither its content nor its line counts are shown.
+                section.omitted = "not_regular_file"
+                section.added = section.deleted = "-"
+            sections.append(section)
+        read = _TrackedRead(raw, sections, identities)
         if not sections:
-            return sections
+            return read
         by_path = {section.path: section for section in sections}
         try:
             _, whole = self._git(
-                handle,
+                pinned,
                 ("diff", *_PATCH_OPTIONS, base_id, "--"),
                 deadline=deadline,
                 limit=_WHOLE_DIFF_LIMIT,
             )
         except ValueError:
             whole = None
-        except ChangeCaptureUnavailable:
-            if not _expired(deadline):
+        except ChangeCaptureUnavailable as exc:
+            if not _ran_out(exc, deadline):
                 raise
             # The deadline ran out inside the diff: every changed file is listed, none shown.
             for section in sections:
                 if section.omitted is None:
                     section.omitted = "capture_limit"
-            return sections
+            return read
         if whole is not None:
             for chunk in self._split_sections(whole):
                 path = _section_path(chunk)
@@ -500,7 +686,14 @@ class GitChangeCaptureAdapter:
             for section in sections:
                 if section.text is None and section.omitted is None:
                     section.omitted = "unreadable"
-            return sections
+        else:
+            self._per_file_diffs(pinned, base_id, sections, deadline)
+        self._verify_section_objects(pinned, object_format, entries, sections, deadline)
+        return read
+
+    def _per_file_diffs(
+        self, pinned: _Workspace, base_id: str, sections: list[_Section], deadline: float
+    ) -> None:
         # The whole diff is larger than one bounded read. Fall back to one bounded read per file
         # so an oversized generated file cannot hide the rest of the change.
         count = 0
@@ -513,7 +706,7 @@ class GitChangeCaptureAdapter:
             count += 1
             try:
                 _, text = self._git(
-                    handle,
+                    pinned,
                     (
                         "diff",
                         *_PATCH_OPTIONS,
@@ -527,8 +720,8 @@ class GitChangeCaptureAdapter:
             except ValueError:
                 section.omitted = "too_large"
                 continue
-            except ChangeCaptureUnavailable:
-                if not _expired(deadline):
+            except ChangeCaptureUnavailable as exc:
+                if not _ran_out(exc, deadline):
                     raise
                 # The deadline ran out inside this file's diff: it and the rest are not shown.
                 section.omitted = "capture_limit"
@@ -536,7 +729,86 @@ class GitChangeCaptureAdapter:
             section.text = _decode(text) if text else None
             if section.text is None:
                 section.omitted = "unreadable"
-        return sections
+
+    def _verify_section_objects(
+        self,
+        pinned: _Workspace,
+        object_format: Literal["sha1", "sha256"],
+        entries: list[_RawEntry],
+        sections: list[_Section],
+        deadline: float,
+    ) -> None:
+        """Withhold every shown diff whose Git objects do not hash to their own names.
+
+        Git trusts the object file it opens, so a loose object replaced by a link or a hard link to
+        another repository's object, or a pack reached through a link, would show bytes from
+        outside the workspace under a name the base tree commits to. Re-hashing each object a
+        shown diff reads (the base side, and the index side Git uses for a file whose working
+        copy it did not read) proves its bytes are the ones its name commits to.
+        """
+
+        verified: dict[str, _OmitReason | None] = {}
+        budget = [_MAX_TOTAL_VERIFIED_OBJECT_BYTES]
+        for entry, section in zip(entries, sections, strict=True):
+            if section.text is None:
+                continue
+            for oid, mode in ((entry.src_oid, entry.src_mode), (entry.dst_oid, entry.dst_mode)):
+                if mode not in _BLOB_MODES or not oid.strip("0"):
+                    continue
+                if oid not in verified:
+                    verified[oid] = self._verify_object(
+                        pinned, object_format, oid, deadline, budget
+                    )
+                reason = verified[oid]
+                if reason is not None:
+                    section.text = None
+                    section.omitted = reason
+                    if reason == "object_unverified":
+                        section.added = section.deleted = "-"
+                    break
+
+    def _verify_object(
+        self,
+        pinned: _Workspace,
+        object_format: Literal["sha1", "sha256"],
+        oid: str,
+        deadline: float,
+        budget: list[int],
+    ) -> _OmitReason | None:
+        loose = f".git/objects/{oid[:2]}"
+        for name, directory in ((loose, True), (f"{loose}/{oid[2:]}", False)):
+            try:
+                facts = os.stat(name, dir_fd=pinned.descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                break  # packed: the pack directory holds no link (``_refuse_unsafe_object_store``)
+            except OSError:
+                return "object_unverified"
+            if not (stat.S_ISDIR if directory else stat.S_ISREG)(facts.st_mode):
+                return "object_unverified"
+        if _expired(deadline):
+            return "capture_limit"
+        if budget[0] <= 0:
+            return "capture_limit"
+        limit = min(_MAX_VERIFIED_OBJECT_BYTES, budget[0])
+        try:
+            _, content = self._git(
+                pinned, ("cat-file", "blob", oid), deadline=deadline, limit=limit
+            )
+        except ValueError:
+            # Over its own bound the file is too large; over what is left of the total, the
+            # capture reached its limit.
+            return "too_large" if limit == _MAX_VERIFIED_OBJECT_BYTES else "capture_limit"
+        except ChangeCaptureUnavailable as exc:
+            if _ran_out(exc, deadline):
+                return "capture_limit"
+            if exc.reason != "git_failed":
+                raise
+            return "object_unverified"
+        budget[0] -= len(content)
+        hasher = hashlib.new(object_format)
+        hasher.update(b"blob %d\0" % len(content))
+        hasher.update(content)
+        return None if hasher.hexdigest() == oid else "object_unverified"
 
     @staticmethod
     def _split_sections(diff: bytes) -> list[bytes]:
@@ -553,19 +825,14 @@ class GitChangeCaptureAdapter:
             start = end
         return chunks
 
-    def _untracked_sections(
-        self, handle: LocalWorkspaceHandle, deadline: float
-    ) -> tuple[int, list[_Section], bool]:
-        """Return the untracked total, their sections, and whether the listing was cut short."""
+    def _untracked_listing(
+        self, pinned: _Workspace, config: tuple[str, ...], deadline: float
+    ) -> tuple[bytes, bool]:
+        """Return the NUL-terminated untracked names that fit, and whether the listing was cut."""
 
-        excludes = self._repository_excludes_file(handle, deadline)
-        if excludes is None:
-            excludes = _global_excludes_file(deadline)
-        config = ("-c", f"core.excludesFile={excludes}") if excludes is not None else ()
-        listing_truncated = False
         try:
             _, listing = self._git(
-                handle,
+                pinned,
                 (*config, "ls-files", "--others", "--exclude-standard", "-z"),
                 deadline=deadline,
                 limit=_LIST_LIMIT,
@@ -574,13 +841,22 @@ class GitChangeCaptureAdapter:
         except GitOutputTruncated as exc:
             # Too many untracked paths to list: keep every whole path that fit and disclose the
             # rest as not listed, rather than losing the tracked change along with them.
-            listing = exc.prefix[: exc.prefix.rfind(b"\0") + 1]
-            listing_truncated = True
+            return exc.prefix[: exc.prefix.rfind(b"\0") + 1], True
         except ValueError:
             raise ChangeCaptureUnavailable("unsupported_repository") from None
+        return listing, False
+
+    def _untracked_sections(self, pinned: _Workspace, deadline: float) -> _UntrackedRead:
+        """Return the untracked total, their sections, and whether the listing was cut short."""
+
+        excludes = self._repository_excludes_file(pinned, deadline)
+        if excludes is None:
+            excludes = _global_excludes_file(deadline)
+        config = ("-c", f"core.excludesFile={excludes}") if excludes is not None else ()
+        listing, listing_truncated = self._untracked_listing(pinned, config, deadline)
         paths = sorted(path for path in _nul_fields(listing))
-        _, root_descriptor = local_workspace_root(handle)
         sections: list[_Section] = []
+        identities: dict[bytes, _Identity | None] = {}
         for index, path in enumerate(paths):
             if index >= _MAX_UNTRACKED_FILES:
                 break
@@ -597,18 +873,60 @@ class GitChangeCaptureAdapter:
             if _expired(deadline):
                 sections.append(_Section(path, "A", True, "-", "-", None, "capture_limit"))
                 continue
-            outcome, content = _read_beneath(root_descriptor, path, _MAX_UNTRACKED_FILE_BYTES)
+            identity = _path_identity(pinned.descriptor, path)
+            outcome, content = _read_beneath(
+                pinned.descriptor, path, _MAX_UNTRACKED_FILE_BYTES, identity
+            )
             if outcome != "regular" and outcome != "executable":
                 sections.append(_Section(path, "A", True, "-", "-", None, outcome))
                 continue
             assert content is not None
+            identities[path] = identity
             text, added = _new_file_diff(path, content, outcome == "executable")
             sections.append(_Section(path, "A", True, added, "0", text, None))
-        return len(paths), sections, listing_truncated
+        return _UntrackedRead(len(paths), sections, listing_truncated, listing, config, identities)
 
-    def _repository_excludes_file(
-        self, handle: LocalWorkspaceHandle, deadline: float
-    ) -> str | None:
+    def _verify_stable(
+        self,
+        pinned: _Workspace,
+        base_id: str,
+        tracked: _TrackedRead,
+        untracked: _UntrackedRead,
+        head: str | None,
+        index: _Identity | None,
+        deadline: float,
+    ) -> None:
+        """Prove the capture is one state: nothing it read moved while it was assembled.
+
+        The changed-file list, the identity of every working copy and untracked file read (its
+        inode, size, and modification and change times), the untracked listing, HEAD and the
+        index are read again and must equal what the assembly saw. A write, a rename, a new link
+        or a commit in between changes one of them.
+        """
+
+        self._refuse_unsafe_object_store(pinned)
+        try:
+            _, raw = self._git(
+                pinned, self._raw_arguments(base_id), deadline=deadline, limit=_LIST_LIMIT
+            )
+        except ValueError:
+            raise _ChangedDuringCapture from None
+        if raw != tracked.raw:
+            raise _ChangedDuringCapture
+        for identities in (tracked.identities, untracked.identities):
+            for path, identity in identities.items():
+                if _path_identity(pinned.descriptor, path) != identity:
+                    raise _ChangedDuringCapture
+        if untracked.listing is not None:
+            listing, _ = self._untracked_listing(pinned, untracked.config, deadline)
+            if listing != untracked.listing:
+                raise _ChangedDuringCapture
+        if self._rev(pinned, "HEAD^{commit}", deadline) != head:
+            raise _ChangedDuringCapture
+        if _path_identity(pinned.descriptor, b".git/index") != index:
+            raise _ChangedDuringCapture
+
+    def _repository_excludes_file(self, pinned: _Workspace, deadline: float) -> str | None:
         """Return a repository-level ``core.excludesFile``, which Git prefers over the global one.
 
         The hardened runner pins ``core.excludesFile`` on its command line, which would otherwise
@@ -616,7 +934,7 @@ class GitChangeCaptureAdapter:
         """
 
         code, raw = self._git(
-            handle,
+            pinned,
             ("config", "--get-all", "--show-scope", "-z", "core.excludesFile"),
             deadline=deadline,
             limit=65_536,
@@ -634,9 +952,10 @@ class GitChangeCaptureAdapter:
                 value = fields[index + 1]
         if not value:
             return None
-        root, _ = local_workspace_root(handle)
         path = os.path.expanduser(os.fsdecode(value))
-        return _existing_regular_file(path if os.path.isabs(path) else os.path.join(root, path))
+        return _existing_regular_file(
+            path if os.path.isabs(path) else os.path.join(pinned.root, path)
+        )
 
     # --- rendering ---------------------------------------------------------------------------
 
@@ -736,7 +1055,9 @@ def _header(
                 quoted = quoted[: _MAX_LISTED_PATH_BYTES - 3] + "..."
             if section.added != "-":
                 counts = f" (+{section.added} -{section.deleted})"
-            elif section.untracked and section.text is None:
+            elif (section.untracked and section.text is None) or (
+                section.omitted in _WITHHELD_COUNTS
+            ):
                 counts = ""
             else:
                 counts = " (binary)"
@@ -803,9 +1124,14 @@ def _new_file_diff(path: bytes, content: bytes, executable: bool) -> tuple[bytes
 
 
 def _read_beneath(
-    root_descriptor: int, path: bytes, limit: int
+    root_descriptor: int, path: bytes, limit: int, expected: _Identity | None
 ) -> tuple[_OmitReason | Literal["regular", "executable"], bytes | None]:
-    """Open ``path`` under the root one component at a time, never following a link."""
+    """Open ``path`` under the root one component at a time, never following a link.
+
+    ``expected`` is the path's identity taken just before; a file that is not that file when
+    opened, or that changed while it was read, raises ``_ChangedDuringCapture`` so the whole
+    capture is taken again rather than keeping a mix of two versions.
+    """
 
     parts = path.split(b"/")
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -825,6 +1151,8 @@ def _read_beneath(
         if facts.st_nlink != 1:
             # A second name can be a link to content outside the workspace.
             return "not_regular_file", None
+        if _identity(facts) != expected:
+            raise _ChangedDuringCapture
         if facts.st_size > limit:
             return "too_large", None
         chunks: list[bytes] = []
@@ -837,6 +1165,8 @@ def _read_beneath(
             total += len(chunk)
             if total > limit:
                 return "too_large", None
+        if total != facts.st_size or _identity(os.fstat(descriptor)) != expected:
+            raise _ChangedDuringCapture
         executable = bool(stat.S_IMODE(facts.st_mode) & 0o111)
         return ("executable" if executable else "regular"), b"".join(chunks)
     except OSError as exc:
@@ -847,6 +1177,104 @@ def _read_beneath(
     finally:
         for descriptor in reversed(opened):
             os.close(descriptor)
+
+
+def _identity(facts: os.stat_result) -> _Identity:
+    return (
+        facts.st_mode,
+        facts.st_dev,
+        facts.st_ino,
+        facts.st_size,
+        facts.st_mtime_ns,
+        facts.st_ctime_ns,
+        facts.st_nlink,
+        facts.st_uid,
+    )
+
+
+def _path_identity(root_descriptor: int, path: bytes) -> _Identity | None:
+    """The identity of ``path`` under the root, reached without following any link.
+
+    ``None`` when it does not exist; ``_BLOCKED`` when a component on the way is a link or not a
+    directory, which is never a regular file.
+    """
+
+    parts = path.split(b"/")
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    opened: list[int] = []
+    current = root_descriptor
+    try:
+        for part in parts[:-1]:
+            current = os.open(part, directory_flags, dir_fd=current)
+            opened.append(current)
+        return _identity(os.stat(parts[-1], dir_fd=current, follow_symlinks=False))
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return _BLOCKED
+    finally:
+        for descriptor in reversed(opened):
+            os.close(descriptor)
+
+
+def _worktree_side_safe(entry: _RawEntry, identity: _Identity | None) -> bool:
+    """Whether Git reading this entry's working copy stays within the workspace.
+
+    A deleted file has no working copy and a submodule shows only commit ids. Anything else must
+    be a regular file of the service user with a single link, exactly as for untracked files.
+    """
+
+    if entry.dst_mode in {"000000", "160000"}:
+        return True
+    if identity is None:
+        return False
+    expected_uid = os.geteuid() if hasattr(os, "geteuid") else os.getuid()
+    mode, _, _, _, _, _, links, owner = identity
+    return stat.S_ISREG(mode) and links == 1 and owner == expected_uid
+
+
+def _raw_entries(raw: bytes) -> list[_RawEntry]:
+    """Parse ``git diff --raw -z --no-abbrev`` (renames off): one entry per changed path."""
+
+    fields = _nul_fields(raw)
+    if len(fields) % 2:
+        raise ChangeCaptureUnavailable("git_failed")
+    entries: list[_RawEntry] = []
+    for index in range(0, len(fields), 2):
+        meta = fields[index].decode("ascii", errors="replace")
+        path = fields[index + 1]
+        parts = meta.split(" ")
+        if len(parts) != 5 or not parts[0].startswith(":"):
+            raise ChangeCaptureUnavailable("git_failed")
+        src_mode, dst_mode, src_oid, dst_oid, status = parts[0][1:], *parts[1:]
+        if any(
+            not value or any(character not in "0123456789abcdef" for character in value)
+            for value in (src_mode, dst_mode, src_oid, dst_oid)
+        ):
+            raise ChangeCaptureUnavailable("git_failed")
+        if not _safe_relative(path):
+            raise ChangeCaptureUnavailable("unsafe_root")
+        entries.append(_RawEntry(status[:1] or "M", path, src_mode, dst_mode, src_oid, dst_oid))
+    return entries
+
+
+def _verify_same_root(pinned: _Workspace) -> None:
+    """The root pathname and its ``.git`` must still be the directories that were validated."""
+
+    try:
+        held = os.fstat(pinned.descriptor)
+        current = os.lstat(pinned.root)
+        git_current = os.lstat(pinned.root / ".git")
+    except OSError:
+        raise ChangeCaptureUnavailable("unsafe_root") from None
+    if (
+        (held.st_dev, held.st_ino) != pinned.root_identity
+        or not stat.S_ISDIR(current.st_mode)
+        or (current.st_dev, current.st_ino) != pinned.root_identity
+        or not stat.S_ISDIR(git_current.st_mode)
+        or (git_current.st_dev, git_current.st_ino) != pinned.git_identity
+    ):
+        raise ChangeCaptureUnavailable("unsafe_root")
 
 
 def _remaining(deadline: float) -> float:
@@ -860,6 +1288,12 @@ def _remaining(deadline: float) -> float:
 
 def _expired(deadline: float) -> bool:
     return time.monotonic() >= deadline
+
+
+def _ran_out(exc: ChangeCaptureUnavailable, deadline: float) -> bool:
+    """A Git call failed because the deadline ran out, never because the root was replaced."""
+
+    return exc.reason == "git_failed" and _expired(deadline)
 
 
 def _global_excludes_file(deadline: float) -> str | None:
