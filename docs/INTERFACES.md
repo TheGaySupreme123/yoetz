@@ -801,9 +801,12 @@ naming its result and action and a sentence pointing at `status view=results`; r
 copy of the same (claim, result) omission is dropped when work integrity reported it
 (`_collapse_failed_work_overlap`), so one omitted failure is one finding. The receipt's limitations
 section names superseded, rerun, historical, and `limitation_refs`-disclosed observed failures once,
-bounded to ten ids per clause. Known limit: an edit the harness sees only as a shell command (a
-heredoc written through `exec_command` or `Bash`) is a command, not an observed edit, so a failure
-followed only by such edits stays `live` unless the same command is rerun.
+bounded to ten ids per clause. The edit clause is state-scoped, not causal: any successful
+observed edit retires every earlier observed failure regardless of the paths it touched (option (a)
+on #909), and the receipt says only that the failure preceded a later observed workspace edit.
+Known limit: an edit the harness sees only as a shell command (a heredoc written through
+`exec_command` or `Bash`) is a command, not an observed edit, so a failure followed only by such
+edits stays `live` unless the same command is rerun.
 
 `reason` MAY be omitted for `acknowledged` and MUST be non-empty for `provenance_disputed`,
 `rejected`, or `waived`.

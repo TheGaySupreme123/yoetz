@@ -679,6 +679,20 @@ or outcome-less edit are not proof the workspace changed), and the same host cal
 succeed. A later failure of the same identity is a new condition; it never revives an earlier one.
 Cursor's ordinary shell tool `Shell` is a command tool for this rule.
 
+The edit clause is state-scoped, not causal. Any successful observed edit retires every earlier
+observed failure in the prefix, whatever path it touched, because the failed workspace state is no
+longer the current one; the rule does not relate the edit to the failed command. This is the plain
+form of option (a) that the maintainer chose on #909. Its stricter variant (an edit *and* a later
+passing verification) stays an open question on #909, to revisit if dogfood shows edits outside the
+failing area making real red runs historical. The receipt therefore says a failure "preceded a
+later observed workspace edit", never that the edit fixed it.
+
+This section computes the commitment on hook paths and the legacy spool only. A Codex call that
+reaches the ledger only through the session stream (`CommandExecution`) carries no commitment in
+this change, so it keeps `omitted:structural` and can be retired only by the edit clause, not by a
+later run of the same command. The stream commitment is #910's change; until it lands, Codex
+same-command supersession is active on the hook path only.
+
 The command identity is a new structural envelope field, `command_commitment`: an installation-keyed
 `hmac-sha256:` value (domain `yoetz/observation-command-commitment/v1`, the local observation
 store's key material) over the host command argument (`tool_input.cmd`, `command`, or `argv`) of a
