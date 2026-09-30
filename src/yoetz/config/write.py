@@ -19,6 +19,7 @@ from yoetz.config.models import (
     CODEX_ROUTINE_OUTPUT_LIMIT_DEFAULT,
     CODEX_SUBSCRIPTION_ENDPOINT_PROFILE_ID,
     CODEX_SUBSCRIPTION_PROVIDER_ID,
+    DEFAULT_FINDING_ATTEMPT_BUDGET,
     ConfigError,
     ExternalRuntimeProfileConfig,
     OwnerDeclaredEndpointConfig,
@@ -524,14 +525,14 @@ def render_config_toml(config: YoetzConfig) -> str:
     if config.storage.data_dir is not None:
         storage["data_dir"] = str(config.storage.data_dir)
     _emit_table(lines, "storage", storage)
-    _emit_table(
-        lines,
-        "verification",
-        {
-            "semantic": config.verification.semantic,
-            "max_findings": config.verification.max_findings,
-        },
-    )
+    verification: dict[str, object] = {
+        "semantic": config.verification.semantic,
+        "max_findings": config.verification.max_findings,
+    }
+    # Written only when the owner chose a non-default budget, so existing files keep their bytes.
+    if config.verification.finding_attempt_budget != DEFAULT_FINDING_ATTEMPT_BUDGET:
+        verification["finding_attempt_budget"] = config.verification.finding_attempt_budget
+    _emit_table(lines, "verification", verification)
     _emit_table(
         lines,
         "observation",

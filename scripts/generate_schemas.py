@@ -2303,6 +2303,21 @@ def _start_result_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     return document
 
 
+def _todo_state_schema() -> dict[str, JsonValue]:
+    """The closed finding to-do states of issue #905."""
+
+    return {
+        "enum": ["acknowledged_not_done", "open", "rejection_accepted", "verified_resolved"],
+        "type": "string",
+    }
+
+
+def _attempt_budget_schema() -> dict[str, JsonValue]:
+    """The owner's per-item review-round budget, 1 through 50, as a canonical string."""
+
+    return {"pattern": "^(?:[1-9]|[1-4][0-9]|50)$", "type": "string"}
+
+
 def _check_result_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     """Add the frozen child preview and advisory coordination branches to ``check``."""
 
@@ -2440,6 +2455,37 @@ def _check_result_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         "type": "array",
         "uniqueItems": True,
     }
+    # Issue #905: the task's findings as a to-do list after this check (structural only).
+    definitions["todo_state"] = _todo_state_schema()
+    definitions["checklist_item"] = {
+        "additionalProperties": False,
+        "properties": {
+            "finding_id": {"$ref": "#/$defs/finding_id"},
+            "review_rounds": {"$ref": "#/$defs/canonical_uint"},
+            "todo_state": {"$ref": "#/$defs/todo_state"},
+        },
+        "required": ["finding_id", "todo_state", "review_rounds"],
+        "type": "object",
+    }
+    definitions["finding_checklist"] = {
+        "additionalProperties": False,
+        "properties": {
+            "attempt_budget": _attempt_budget_schema(),
+            "items": {
+                "items": {"$ref": "#/$defs/checklist_item"},
+                "maxItems": 100,
+                "type": "array",
+                "uniqueItems": True,
+            },
+            "next": {
+                "enum": ["decide_at_budget", "request_receipt", "work_open_findings"],
+                "type": "string",
+            },
+        },
+        "required": ["attempt_budget", "items", "next"],
+        "type": "object",
+    }
+    properties["finding_checklist"] = {"$ref": "#/$defs/finding_checklist"}
     policy_execution = cast(dict[str, JsonValue], definitions["policy_execution"])
     policy_execution_properties = cast(dict[str, JsonValue], policy_execution["properties"])
     policy_id = cast(dict[str, JsonValue], policy_execution_properties["policy_id"])
@@ -2587,6 +2633,14 @@ def _status_result_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     finding_item = cast(dict[str, JsonValue], definitions["finding_item"])
     finding_item_properties = cast(dict[str, JsonValue], finding_item["properties"])
     _admit_acknowledged_not_done(cast(dict[str, JsonValue], finding_item_properties["disposition"]))
+    # Issue #905 to-do facts on each row, and the budget they read against on the page.
+    definitions["todo_state"] = _todo_state_schema()
+    finding_item_properties["todo_state"] = {"$ref": "#/$defs/todo_state"}
+    finding_item_properties["review_rounds"] = {"$ref": "#/$defs/canonical_uint"}
+    findings_page = cast(dict[str, JsonValue], definitions["findings_page"])
+    cast(dict[str, JsonValue], findings_page["properties"])["attempt_budget"] = (
+        _attempt_budget_schema()
+    )
     cast(list[JsonValue], finding_item["allOf"]).append(
         {
             "if": {

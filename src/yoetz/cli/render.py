@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from enum import Enum
-from typing import cast
+from typing import Final, cast
 
 from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.errors import normalize_safe_details
 from yoetz.protocol.models import (
     CheckAwaitingHumanModel,
+    CheckFindingChecklistModel,
     CheckProjectedFindingModel,
     CheckSuccessModel,
     OmittedContentModel,
@@ -162,6 +163,51 @@ def render_human_findings(
     return "\n".join(lines)
 
 
+_CHECKBOX: Final = {
+    "open": "[ ]",
+    "verified_resolved": "[x]",
+    "acknowledged_not_done": "[~]",
+    "rejection_accepted": "[-]",
+}
+_CHECKLIST_NEXT_TEXT: Final = {
+    "work_open_findings": "Repair or answer the open findings, then check again.",
+    "decide_at_budget": (
+        "An open finding reached the review-round budget: repair it with new evidence, or "
+        "respond acknowledged_not_done with a reason. Checks are never throttled."
+    ),
+    "request_receipt": "No open findings remain on the list; request the receipt.",
+}
+
+
+def render_checklist_line(
+    index: int, finding_id: str, todo_state: str | None, rounds: str | None, budget: str | None
+) -> str:
+    """One to-do line: ``[ ] F-3 fnd_... open (2/5)`` (issue #905). Structural tokens only."""
+
+    state = _token(todo_state) if todo_state is not None else "unknown"
+    line = f"{_CHECKBOX.get(state, '[?]')} F-{index} {finding_id} {state}"
+    if state == "open" and rounds is not None and budget is not None:
+        line += f" ({rounds}/{budget})"
+    return line
+
+
+def _render_checklist(checklist: CheckFindingChecklistModel) -> list[str]:
+    lines = [f"To-do list (review-round budget {checklist.attempt_budget}):"]
+    for index, item in enumerate(checklist.items, start=1):
+        lines.append(
+            "- "
+            + render_checklist_line(
+                index,
+                item.finding_id,
+                item.todo_state,
+                item.review_rounds,
+                checklist.attempt_budget,
+            )
+        )
+    lines.append(f"Next: {_CHECKLIST_NEXT_TEXT[checklist.next]}")
+    return lines
+
+
 def render_human_check(result: CheckSuccessModel) -> str:
     """Render an exact check verdict and bounded AI-powered review status."""
 
@@ -182,6 +228,8 @@ def render_human_check(result: CheckSuccessModel) -> str:
     suppressed = int(result.suppressed_count)
     if suppressed:
         lines.append(f"Suppressed findings: {suppressed}")
+    if result.finding_checklist is not None:
+        lines.extend(_render_checklist(result.finding_checklist))
     if result.children is not None:
         children = result.children
         lines.append(f"Child dependencies ({children.label}):")
@@ -367,7 +415,17 @@ def render_human_status(result: StatusSuccessModel) -> str:
         if page.next_cursor is not None:
             lines.append(f"Next page: {page.next_cursor}")
     if isinstance(result.page, StatusFindingsPageModel):
-        for finding in result.page.items:
+        for index, finding in enumerate(result.page.items, start=1):
+            if finding.todo_state is not None:
+                lines.append(
+                    render_checklist_line(
+                        index,
+                        finding.finding_id,
+                        finding.todo_state,
+                        finding.review_rounds,
+                        result.page.attempt_budget,
+                    )
+                )
             lines.append(
                 f"{finding.finding_id} resolved={finding.resolved}: "
                 + _projected_text(finding.detail)

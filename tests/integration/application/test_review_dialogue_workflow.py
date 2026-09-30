@@ -17,7 +17,7 @@ import pytest
 
 from builders.projection_workflow import build_projection_application, frontier_json, request_base
 from builders.start_application import protocol_id, start_request
-from yoetz.application.check import FinalSemanticEvaluation
+from yoetz.application.check import FinalSemanticEvaluation, check_internal_json
 from yoetz.application.semantic_case import build_semantic_case, semantic_case_packet_view
 from yoetz.application.service import Application
 from yoetz.domain.events import CheckRecordedPayload, EventSchema, LedgerRecord
@@ -34,6 +34,7 @@ from yoetz.kernel.finding_todo import FindingTodoState, finding_todo, finding_to
 from yoetz.kernel.projections import ProjectionState, projection_snapshot
 from yoetz.kernel.receipt_capacity import receipt_blocking_finding_count
 from yoetz.kernel.reducers import replay
+from yoetz.mcp.summaries import summary_for_check
 from yoetz.ports.ledger import CheckCommitResult, FrozenCase
 from yoetz.ports.semantic import (
     PriorFindingVerdict,
@@ -51,6 +52,8 @@ from yoetz.protocol.models import (
     RespondRequest,
     SemanticReason,
     SemanticStatus,
+    StatusFindingsPageModel,
+    StatusRequest,
 )
 
 pytestmark = pytest.mark.anyio
@@ -169,9 +172,18 @@ class _Session:
     task_id: str = ""
 
 
-async def _session(reviewer: _Reviewer, seed: int) -> tuple[_Session, JsonValue]:
+async def _session(
+    reviewer: _Reviewer, seed: int, *, attempt_budget: int | None = None
+) -> tuple[_Session, JsonValue]:
     app, _policy = await build_projection_application("optional", seed=seed, max_findings=5)
     app = replace(app, semantic_evaluator=reviewer)
+    if attempt_budget is not None:
+        app = replace(
+            app,
+            verification_policy=replace(
+                app.verification_policy, finding_attempt_budget=attempt_budget
+            ),
+        )
     started = await app.start(start_request(seed, title="Converging review dialogue"))
     obligation_id = protocol_id("obl_", seed + 1)
     obligation_event = protocol_id("evt_", seed + 2)
@@ -605,12 +617,41 @@ async def test_review_rounds_count_toward_the_budget_and_never_close_or_throttle
     reviewer = _Reviewer(
         [_challenge_obligation, _still_present_first_finding, _still_present_first_finding]
     )
-    session, frontier = await _session(reviewer, seed)
+    session, frontier = await _session(reviewer, seed, attempt_budget=2)
     first = await _check(session, frontier, seed + 10)
     raised = _semantic(first)
     second = await _check(session, frontier_json(first.result_frontier), seed + 20)
     third = await _check(session, frontier_json(second.result_frontier), seed + 30)
     assert len(reviewer.cases) == 3  # every check ran its review; nothing was throttled
+
+    # The check result carries the to-do list; at the budget it asks for a decision, never acts.
+    assert first.finding_checklist is not None
+    assert first.finding_checklist.next == "work_open_findings"
+    checklist = third.finding_checklist
+    assert checklist is not None and checklist.attempt_budget == 2
+    row = next(item for item in checklist.items if item.finding_id == raised.finding_id)
+    assert (row.todo_state, row.review_rounds) == ("open", 2)
+    assert checklist.next == "decide_at_budget"
+    wire = check_internal_json(third)
+    assert cast(Mapping[str, JsonValue], wire["finding_checklist"])["next"] == "decide_at_budget"
+    summary = summary_for_check(wire)
+    assert "at budget 2" in summary and "next: decide_at_budget" in summary
+
+    status = await session.app.status(
+        StatusRequest.model_validate(
+            {
+                **request_base(protocol_id("req_", seed + 40)),
+                "session_id": session.session_id,
+                "writer_id": session.writer_id,
+                "view": "findings",
+                "limit": "100",
+            }
+        )
+    )
+    assert isinstance(status.page, StatusFindingsPageModel)
+    assert status.page.attempt_budget == "2"
+    status_row = next(item for item in status.page.items if item.finding_id == raised.finding_id)
+    assert (status_row.todo_state, status_row.review_rounds) == ("open", "2")
 
     live = _live_projection(session.app)
     todo = finding_todo(live, raised.finding_id, attempt_budget=2)

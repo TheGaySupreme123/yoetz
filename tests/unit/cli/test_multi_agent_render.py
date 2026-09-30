@@ -64,3 +64,50 @@ def test_check_keeps_child_facts_and_project_advice_outside_findings(label: str)
     assert ("Preview facts do not change the recorded check." in rendered) == (label == "preview")
     assert "Project advice (does not affect the verdict):" in rendered
     assert f"live_member_present: 1; project {project}; tasks {child}" in rendered
+
+
+def test_check_renders_the_finding_checklist_with_structural_tokens_only() -> None:
+    """Issue #905: ``[ ] F-1 ... open (2/2)`` lines and one closed "Next:" sentence."""
+
+    from yoetz.protocol.models import CheckFindingChecklistModel
+
+    checklist = CheckFindingChecklistModel.model_validate(
+        {
+            "attempt_budget": "2",
+            "next": "decide_at_budget",
+            "items": [
+                {
+                    "finding_id": "fnd_59000000-0000-4000-8000-000000000001",
+                    "todo_state": "open",
+                    "review_rounds": "2",
+                },
+                {
+                    "finding_id": "fnd_59000000-0000-4000-8000-000000000002",
+                    "todo_state": "verified_resolved",
+                    "review_rounds": "0",
+                },
+                {
+                    "finding_id": "fnd_59000000-0000-4000-8000-000000000003",
+                    "todo_state": "acknowledged_not_done",
+                    "review_rounds": "1",
+                },
+            ],
+        }
+    )
+    result = CheckSuccessModel.model_construct(
+        verdict="no_issue_detected",
+        semantic_status="not_requested",
+        semantic_reason="deterministic_mode",
+        findings=(),
+        suppressed_count="0",
+        coverage=CoverageModel.model_construct(known_gaps=()),
+        children=None,
+        advisory_notes=(),
+        finding_checklist=checklist,
+    )
+    rendered = render_human_check(result)
+    assert "To-do list (review-round budget 2):" in rendered
+    assert "- [ ] F-1 fnd_59000000-0000-4000-8000-000000000001 open (2/2)" in rendered
+    assert "- [x] F-2 fnd_59000000-0000-4000-8000-000000000002 verified_resolved" in rendered
+    assert "- [~] F-3 fnd_59000000-0000-4000-8000-000000000003 acknowledged_not_done" in rendered
+    assert "Next: An open finding reached the review-round budget" in rendered

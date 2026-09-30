@@ -60,6 +60,8 @@ from yoetz.protocol.models import (
 )
 
 __all__ = [
+    "CheckChecklistItem",
+    "CheckFindingChecklist",
     "AcceptedEventSummary",
     "AppendCommand",
     "AppendEntry",
@@ -706,6 +708,58 @@ class CheckAdvisoryNote:
         object.__setattr__(self, "task_ids", tasks)
 
 
+FindingTodoStateWire = Literal[
+    "acknowledged_not_done", "open", "rejection_accepted", "verified_resolved"
+]
+_TODO_STATES: Final = frozenset(
+    {"acknowledged_not_done", "open", "rejection_accepted", "verified_resolved"}
+)
+# The closed "next:" tokens of the finding checklist (issue #905).
+ChecklistNext = Literal["decide_at_budget", "request_receipt", "work_open_findings"]
+_CHECKLIST_NEXT: Final = frozenset({"decide_at_budget", "request_receipt", "work_open_findings"})
+MAX_CHECKLIST_ITEMS: Final = 100
+
+
+@dataclass(frozen=True, slots=True)
+class CheckChecklistItem:
+    """One finding on the converging to-do list, structural only."""
+
+    finding_id: str
+    todo_state: FindingTodoStateWire
+    review_rounds: int
+
+    def __post_init__(self) -> None:
+        _id(IdKind.FINDING, self.finding_id)
+        if type(self.todo_state) is not str or self.todo_state not in _TODO_STATES:
+            raise _invalid()
+        _uint(self.review_rounds)
+
+
+@dataclass(frozen=True, slots=True)
+class CheckFindingChecklist:
+    """The task's findings as a to-do list after this check (issue #905).
+
+    Current projection context attached beside the frozen check, like advisory notes: it never
+    changes the recorded check event or its verdict.
+    """
+
+    attempt_budget: int
+    items: tuple[CheckChecklistItem, ...]
+    next: ChecklistNext
+
+    def __post_init__(self) -> None:
+        if type(self.attempt_budget) is not int or not 1 <= self.attempt_budget <= 50:
+            raise _invalid()
+        if type(self.items) is not tuple or len(self.items) > MAX_CHECKLIST_ITEMS:
+            raise _invalid()
+        if any(type(item) is not CheckChecklistItem for item in self.items):
+            raise _invalid()
+        if len({item.finding_id for item in self.items}) != len(self.items):
+            raise _invalid()
+        if type(self.next) is not str or self.next not in _CHECKLIST_NEXT:
+            raise _invalid()
+
+
 @dataclass(frozen=True, slots=True)
 class CheckCommitResult:
     outcome: Literal["committed", "replayed"]
@@ -726,6 +780,7 @@ class CheckCommitResult:
     versions: CheckVersionSlice
     children: CheckChildrenPreview | None = None
     advisory_notes: tuple[CheckAdvisoryNote, ...] = ()
+    finding_checklist: CheckFindingChecklist | None = None
 
     def __post_init__(self) -> None:
         if type(self.outcome) is not str or self.outcome not in {"committed", "replayed"}:
@@ -767,6 +822,11 @@ class CheckCommitResult:
         if type(self.coverage) is not Coverage or type(self.versions) is not CheckVersionSlice:
             raise _invalid()
         if self.children is not None and type(self.children) is not CheckChildrenPreview:
+            raise _invalid()
+        if (
+            self.finding_checklist is not None
+            and type(self.finding_checklist) is not CheckFindingChecklist
+        ):
             raise _invalid()
         if type(self.advisory_notes) is not tuple or len(self.advisory_notes) > 64:
             raise _invalid()

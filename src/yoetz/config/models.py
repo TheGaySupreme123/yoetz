@@ -314,14 +314,25 @@ class StorageConfig(StrictConfigModel):
         return value
 
 
+# Mirrors ``yoetz.kernel.finding_todo``; config stays free of kernel imports.
+DEFAULT_FINDING_ATTEMPT_BUDGET: Final = 5
+MAX_FINDING_ATTEMPT_BUDGET: Final = 50
+
+
 class VerificationConfig(StrictConfigModel):
     semantic: Literal["disabled", "optional", "required"] = "required"
     max_findings: int = 10
+    # Issue #905: review rounds an item may stay open before Yoetz asks for a repair with new
+    # evidence or an explicit ``acknowledged_not_done``. It never throttles ``check`` and never
+    # closes or acknowledges anything.
+    finding_attempt_budget: int = Field(
+        default=DEFAULT_FINDING_ATTEMPT_BUDGET, ge=1, le=MAX_FINDING_ATTEMPT_BUDGET
+    )
 
     @model_validator(mode="before")
     @classmethod
     def _validate_raw(cls, value: object) -> object:
-        _reject_unknown(value, frozenset({"semantic", "max_findings"}))
+        _reject_unknown(value, frozenset({"semantic", "max_findings", "finding_attempt_budget"}))
         source = _mapping(value)
         if "max_findings" in source:
             maximum = source["max_findings"]

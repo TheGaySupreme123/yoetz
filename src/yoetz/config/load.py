@@ -48,6 +48,7 @@ _ENV_TO_LEAF: Final[dict[str, _LeafPath | None]] = {
     "YOETZ_STORAGE_DURABILITY": ("storage", "durability"),
     "YOETZ_VERIFICATION_SEMANTIC": ("verification", "semantic"),
     "YOETZ_VERIFICATION_MAX_FINDINGS": ("verification", "max_findings"),
+    "YOETZ_VERIFICATION_FINDING_ATTEMPT_BUDGET": ("verification", "finding_attempt_budget"),
     "YOETZ_LINEAGE_START_LEASE_SECONDS": ("lineage", "start_lease_seconds"),
     "YOETZ_LINEAGE_ATTACH_HANDLE_TTL_SECONDS": ("lineage", "attach_handle_ttl_seconds"),
     "YOETZ_LINEAGE_CONTACT_LOST_RECOVERY_SECONDS": (
@@ -73,6 +74,7 @@ _OVERRIDE_TO_LEAF: Final[dict[str, _LeafPath | None]] = {
     "storage.durability": ("storage", "durability"),
     "verification.semantic": ("verification", "semantic"),
     "verification.max_findings": ("verification", "max_findings"),
+    "verification.finding_attempt_budget": ("verification", "finding_attempt_budget"),
     "lineage.start_lease_seconds": ("lineage", "start_lease_seconds"),
     "lineage.attach_handle_ttl_seconds": ("lineage", "attach_handle_ttl_seconds"),
     "lineage.contact_lost_recovery_seconds": ("lineage", "contact_lost_recovery_seconds"),
@@ -88,6 +90,7 @@ _OVERRIDE_TO_LEAF: Final[dict[str, _LeafPath | None]] = {
 _INTEGER_LEAVES: Final = frozenset(
     {
         ("verification", "max_findings"),
+        ("verification", "finding_attempt_budget"),
         ("lineage", "start_lease_seconds"),
         ("lineage", "attach_handle_ttl_seconds"),
         ("lineage", "contact_lost_recovery_seconds"),

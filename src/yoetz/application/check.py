@@ -69,7 +69,11 @@ from yoetz.kernel.deterministic_checks import (
     render_deterministic_finding_text,
 )
 from yoetz.kernel.finding_resolution import SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS
-from yoetz.kernel.finding_todo import FindingTodoState, finding_todo_state
+from yoetz.kernel.finding_todo import (
+    DEFAULT_FINDING_ATTEMPT_BUDGET,
+    FindingTodoState,
+    finding_todo_state,
+)
 from yoetz.kernel.lineage import LineageEvaluation, evaluate_recorded_lineage
 from yoetz.kernel.policies.research_evidence import research_evidence_findings
 from yoetz.kernel.policies.response_support import (
@@ -88,19 +92,24 @@ from yoetz.ports.control import McpHostProfile
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import (
+    MAX_CHECKLIST_ITEMS,
     CheckAdmissionStage,
     CheckAdvisoryNote,
     CheckAwaitingHuman,
+    CheckChecklistItem,
     CheckChildPreviewItem,
     CheckChildrenPreview,
     CheckCommitResult,
+    CheckFindingChecklist,
     CheckPhase,
     CheckPolicyExecution,
     CheckVersionSlice,
+    FindingsProjectionFilter,
     FrozenCase,
     OperationLease,
     OperationRecord,
     OperationState,
+    ProjectionQuery,
     check_admission_refused,
     check_admission_stage,
 )
@@ -127,6 +136,7 @@ from yoetz.protocol.models import (
     CheckScopeModel,
     SemanticReason,
     SemanticStatus,
+    StatusFindingItemModel,
     validate_semantic_outcome,
     validate_semantic_provenance_binding,
 )
@@ -401,6 +411,26 @@ def check_internal_json(result: CheckCommitResult) -> dict[str, JsonValue]:
             if not result.advisory_notes
             else {"advisory_notes": advisory_notes_json(result.advisory_notes)}
         ),
+        **(
+            {}
+            if result.finding_checklist is None
+            else {"finding_checklist": _checklist_json(result.finding_checklist)}
+        ),
+    }
+
+
+def _checklist_json(checklist: CheckFindingChecklist) -> JsonValue:
+    return {
+        "attempt_budget": str(checklist.attempt_budget),
+        "items": tuple(
+            {
+                "finding_id": item.finding_id,
+                "todo_state": item.todo_state,
+                "review_rounds": str(item.review_rounds),
+            }
+            for item in checklist.items
+        ),
+        "next": checklist.next,
     }
 
 
@@ -900,6 +930,54 @@ async def _current_project_advisory_notes(
         if len(notes) >= 64:
             break
     return tuple(notes)
+
+
+async def _attach_finding_checklist(
+    app: Application, runtime: TaskRuntime, result: CheckCommitResult
+) -> CheckCommitResult:
+    """Attach the task's findings as a to-do list after this check (issue #905).
+
+    Like project advice this is current projection context beside the frozen check: it never
+    changes the recorded event or its verdict, and when the read is unavailable it is omitted.
+    The budget only chooses the ``next`` token; nothing here closes, acknowledges or throttles.
+    """
+
+    policy = getattr(app, "verification_policy", None)
+    budget = getattr(policy, "finding_attempt_budget", DEFAULT_FINDING_ATTEMPT_BUDGET)
+    if type(budget) is not int:
+        budget = DEFAULT_FINDING_ATTEMPT_BUDGET
+    try:
+        page = await runtime.ledger.query_projection(
+            ProjectionQuery(
+                result.session_id,
+                "findings",
+                FindingsProjectionFilter(None, None, None, True),
+                result.result_frontier,
+                MAX_CHECKLIST_ITEMS,
+                None,
+                None,
+            )
+        )
+    except PublicOperationError, ValueError:
+        return result
+    items: list[CheckChecklistItem] = []
+    for item in page.items:
+        if (
+            type(item) is not StatusFindingItemModel
+            or item.todo_state is None
+            or item.review_rounds is None
+        ):
+            continue
+        items.append(CheckChecklistItem(item.finding_id, item.todo_state, int(item.review_rounds)))
+    open_rounds = [item.review_rounds for item in items if item.todo_state == "open"]
+    next_step: Literal["decide_at_budget", "request_receipt", "work_open_findings"] = (
+        "decide_at_budget"
+        if any(rounds >= budget for rounds in open_rounds)
+        else "work_open_findings"
+        if open_rounds
+        else "request_receipt"
+    )
+    return replace(result, finding_checklist=CheckFindingChecklist(budget, tuple(items), next_step))
 
 
 async def _attach_current_project_advisory_notes(
@@ -2435,6 +2513,7 @@ async def execute_check_commit(
             )
         if isinstance(frozen_or_replay, CheckCommitResult):
             replayed = await _attach_replayed_lineage_preview(runtime, frozen_or_replay)
+            replayed = await _attach_finding_checklist(app, runtime, replayed)
             # The ledger replay is frozen; only the additive project-advice projection is current.
             return await _attach_current_project_advisory_notes(app, runtime.task_id, replayed)
         frozen = frozen_or_replay
@@ -2723,6 +2802,7 @@ async def execute_check_commit(
         )
         preview = _lineage_preview(lineage_evaluation, frozen.case.frontier)
         projected = committed if preview is None else replace(committed, children=preview)
+        projected = await _attach_finding_checklist(app, runtime, projected)
         # Advice is deliberately attached after the deterministic commit.  It is current
         # projection context, never part of the frozen check event or its verdict calculation.
         return await _attach_current_project_advisory_notes(app, runtime.task_id, projected)
