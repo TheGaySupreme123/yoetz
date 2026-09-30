@@ -541,7 +541,7 @@ def test_legacy_digest_finding_names_only_actions_an_agent_can_take() -> None:
     # never steered into acknowledging its way out of a coverage gap (issue #186) ...
     assert code in detail
     assert "no finding response, recheck, or further digest-only publication changes it" in detail
-    assert "no response is needed" in detail
+    assert "it needs no repair or recheck; one acknowledged response answers it" in detail
     # ... and it no longer promises a remedy ordinary publication cannot perform (issue #912).
     assert "content-bearing" not in detail
     assert "filter.strength immutable_snapshot" in detail

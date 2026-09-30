@@ -503,7 +503,8 @@ def render_deterministic_finding_text(
             detail = (
                 f"{detail} Evidence provenance is recorded history: no finding response, recheck,"
                 " or further digest-only publication changes it, and the receipt discloses it, so"
-                " no response is needed for it. Where a claim needs stronger support, cite an"
+                " it needs no repair or recheck; one acknowledged response answers it. Where a"
+                " claim needs stronger support, cite an"
                 " existing captured evidence id (status view=evidence, filter.strength"
                 " immutable_snapshot) or new evidence with a typed digest_binding in a"
                 " replacement claim."

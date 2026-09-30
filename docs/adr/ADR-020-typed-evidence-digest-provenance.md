@@ -141,8 +141,9 @@ ordinary cooperative publication cannot claim.
     number of cited items, as caller-asserted digests Yoetz did not verify, and says no response or
     recheck changes that. `evidence_digest_subject_legacy_unknown` still raises the finding; its
     text names only agent-performable actions (cite captured or typed evidence in a replacement
-    claim) and says no response is needed. Findings recorded under the old rule are not returned by
-    the next check, so a qualifying check resolves them as history. Relatedly, a resolved finding's
+    claim) and says it needs no repair or recheck: one acknowledged response answers it. Findings
+    recorded under the old rule are not returned by the next check, so a qualifying check resolves
+    them as history. Relatedly, a resolved finding's
     own coverage no longer folds into receipt coverage: it stays in the document as history, and
     only current rows bound the conclusion. The owner-approved service-side binding of a caller
     digest to a matching captured object or byte range (verified, not asserted, provenance) is not
