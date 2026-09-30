@@ -401,6 +401,28 @@ serving process shows as `executable_mismatch` / `full_restart_required`, not as
 applied-vs-serving drift. If a ceiling check ever needs a Cursor-specific applied-route record,
 that is a separate design-gated change.
 
+### Initialize instructions body (issue #918)
+
+Decision for Cursor: supported here — the native `--host cursor` bridge serves the same compact
+initialize body as Codex (`COMPACT_INITIALIZE_INSTRUCTIONS`, at most 2,048 bytes) instead of the
+19,835-byte `agent-instructions.md` document. No Cursor-specific constraint argues for the full
+body. Cursor documents no instruction-size cap, and it does not document whether or how it puts
+MCP initialize `instructions` into the model's context, so the full block was never a guaranteed
+delivery path for the safety floor on this host. The compact body names all five guidance URIs
+and tells the agent to read `agent-instructions.md` with `read_guidance` before the first
+`start`. Cursor's `read_guidance` result is unchanged: its text `content` still carries the whole
+document, because Cursor does not reliably deliver `structuredContent`, so the full safety floor
+stays model-visible one call away. The route tail and the destination disclosure are composed
+exactly as before; the Auto-review question below is unaffected. The same body on Codex and
+Cursor, and a compact body on Claude Code, keeps the three native hosts consistent.
+
+The portable Agent Plugins carrier (`yoetz mcp serve` without `--host cursor`) keeps the generic
+full body, like every generic route. An open Cursor session keeps the instructions from its
+`initialize`; after an upgrade, a full application quit starts a bridge that serves the compact
+body. Evidence boundary: `tests/unit/mcp/test_compact_host_instructions.py` locks the selection;
+the #918 cost evidence is Codex-only, and the Cursor dogfood lane (macOS, Linux, WSL 2) is pending.
+Revisit this decision if that lane shows agents skipping the safety-floor read.
+
 ## Auto-review and host admission
 
 Cursor's Auto-review run mode sends non-allowlisted MCP calls to a classifier that may allow,

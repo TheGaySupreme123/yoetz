@@ -67,7 +67,7 @@ from yoetz.mcp.semantic_destination import (
     SemanticDestinationDisclosure,
     read_semantic_destination_disclosure,
 )
-from yoetz.mcp.summaries import render_safe_compact_summary
+from yoetz.mcp.summaries import render_safe_compact_summary, summary_for_read_guidance
 from yoetz.observability.logging import (
     LogMode,
     configure_logging,
@@ -2651,10 +2651,37 @@ async def dispatch_read_guidance(
     )
     wire = public_model_to_wire(result)
     return types.CallToolResult(
-        content=[types.TextContent(type="text", text=text)],
+        content=[
+            types.TextContent(
+                type="text", text=_guidance_text(wire, text, host_profile=runtime.host_profile)
+            )
+        ],
         structuredContent=cast(dict[str, object], wire),
         isError=False,
     )
+
+
+def _guidance_text(
+    wire: Mapping[str, object],
+    text: str,
+    *,
+    host_profile: McpHostProfile,
+) -> str:
+    """Project one guidance result onto the text channel for the selected host (issue #918).
+
+    The ``codex`` profile already relies on ``structuredContent`` for every other tool's full
+    result (its text channel is the bounded summary), and in Codex code mode the whole result stays
+    in the script sandbox, so a second full copy in ``content`` costs wire and bridge bytes only.
+    That profile therefore gets a bounded pointer to ``structuredContent.text``; the structured
+    result, and so the output schema, is unchanged. Generic, Claude and Cursor hosts keep the
+    document in ``content``: they may rely on it for the model-visible text (Cursor does not
+    reliably deliver ``structuredContent``). Revert this branch if a Codex dogfood run shows extra
+    guidance re-reads (issue #918).
+    """
+
+    if host_profile == "codex":
+        return summary_for_read_guidance(wire)
+    return text
 
 
 async def list_tools(runtime: BridgeRuntime = BRIDGE_RUNTIME) -> list[types.Tool]:

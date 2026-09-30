@@ -24,6 +24,7 @@ __all__ = [
     "render_safe_compact_summary",
     "summary_for_check",
     "summary_for_public_error",
+    "summary_for_read_guidance",
     "summary_for_receipt",
     "summary_for_status",
 ]
@@ -47,6 +48,8 @@ _CORRELATION_ID: Final = re.compile(
 )
 # Closed shape for the frontier head: either the genesis sentinel or a canonical digest.
 _HEAD_DIGEST: Final = re.compile(r"^(?:genesis|sha256:[0-9a-f]{64})$", re.ASCII)
+# Closed shape of a packaged guidance URI, the only location a guidance pointer may name.
+_GUIDANCE_URI: Final = re.compile(r"^yoetz://guidance/[a-z0-9-]{1,64}\.md$", re.ASCII)
 
 
 def _failure_class_from_mapping(value: object) -> object | None:
@@ -731,6 +734,23 @@ def summary_for_receipt(envelope: object) -> str:
     remaining -= len(obligation_clause.encode("ascii"))
     gap_clause = _bounded_list_clause("gap codes: ", gap_codes, byte_budget=remaining)
     return _bounded(prefix + obligation_clause + gap_clause + suffix)
+
+
+def summary_for_read_guidance(envelope: object) -> str:
+    """Name where a guidance result's full text is, without repeating it (issue #918).
+
+    The URI is re-gated against the closed packaged-guidance shape and the byte count against the
+    count shape, so the pointer carries only registry facts, never document text.
+    """
+
+    source = _mapping(envelope)
+    uri = source.get("uri")
+    if type(uri) is not str or _GUIDANCE_URI.fullmatch(uri) is None:
+        uri = "unavailable"
+    return _bounded(
+        f"Guidance {uri}: {_safe_count(source.get('byte_count'))} bytes; "
+        "full text in structuredContent.text."
+    )
 
 
 def _summary_for_other_success(source: Mapping[str, JsonValue]) -> str:

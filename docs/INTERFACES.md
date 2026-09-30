@@ -374,6 +374,14 @@ routes keep the bounded weaker projection above, preserving the shared portable 
 identity is a serving and diagnostic fact; it does not grant host admission or agent-chat
 attestation, which retain their independent client allowlists and authorization checks.
 
+`read_guidance` is the one success result whose text `content` normally repeats a whole document:
+generic, Claude and Cursor hosts receive the guidance text in both `content[0].text` and
+`structuredContent.text`. On the `codex` profile only (issue #918), `content[0].text` is a bounded
+ASCII pointer, `Guidance <uri>: <n> bytes; full text in structuredContent.text.`, built from the
+registered URI and byte count alone. `structuredContent`, and so the `read-guidance-result` schema,
+is identical for every host. This item is revertible: it stays only while Codex dogfood shows no
+additional guidance re-read turns.
+
 Protocol reason
 `expected_frontier_required` marks a state-sensitive `publish_work` batch that omitted
 `expected_frontier`. It names that field and is retryable because validation wrote no durable
@@ -6184,7 +6192,7 @@ facade and are never MCP tools.
   `tools/list` returns), `TOOL_DESCRIPTOR_DIGESTS`, `TOOL_DESCRIPTOR_SET_DIGEST`,
   `INITIALIZE_GUIDANCE_URIS`, `server_instructions()`, `ORDINARY_MCP_PUBLISH_EVENT_FAMILIES`,
   `PRESENTATION_INPUT_SCHEMA_BUDGETS`, `SERVER_INSTRUCTIONS_BUDGET`, `ADVERTISED_SURFACE_BUDGET`,
-  and `advertised_surface_metrics()`. Initialize `instructions` carry the packaged
+  and `advertised_surface_metrics()`. Generic-host initialize `instructions` carry the packaged
   `agent-instructions.md` document and then the route-profile suffix; every other guidance document
   is fetched on demand through `resources/read` or `read_guidance`. `server_instructions()` also
   takes `host_profile` (issue #789): the `claude` host receives `CLAUDE_CODE_INITIALIZE_INSTRUCTIONS`,
@@ -6192,7 +6200,15 @@ facade and are never MCP tools.
   the Claude Code desktop rendering cap recorded as an observed host fact in the Claude runbook;
   `packaged_max_chars` 964, derived so the body, the policy tail and `MAX_DISCLOSURE_ENCODED_BYTES`
   fit under the cap together; `max_chars` 2,048), with the same route tail and disclosure
-  composition; every other host keeps the packaged document byte for byte. A host may charge the
+  composition. The hosts in `COMPACT_INSTRUCTIONS_HOST_PROFILES` (`codex` and `cursor`, issue
+  #918) receive `COMPACT_INITIALIZE_INSTRUCTIONS`, a host-neutral packaged summary bounded by
+  `COMPACT_INSTRUCTIONS_BUDGET` (`packaged_max_encoded_bytes` 2,048; `max_encoded_bytes` adds the
+  policy route line and tail plus the disclosure ceiling). It names every guidance URI and tells
+  the agent to read `agent-instructions.md` with `read_guidance` before the first `start`, and
+  keeps the start trigger, late-start, no-false-activation, cadence, consent, disclosure and
+  coverage-wording rules; the route tail and disclosure are composed identically. The `generic`
+  host, and any bare registration without `--host`, keeps the packaged document byte for byte. A
+  host may charge the
   `instructions` string once per advertised tool — Codex copies it into every tool `description` —
   so `SERVER_INSTRUCTIONS_BUDGET` bounds that string per route profile and
   `ADVERTISED_SURFACE_BUDGET` bounds the aggregate of instructions-per-tool plus every description
@@ -6220,8 +6236,9 @@ facade and are never MCP tools.
   the exact sufficient coverage.
 - `mcp/resources.py`: exposes the packaged harness-neutral guidance documents as MCP resources under
   stable `yoetz://guidance/<name>` URIs for hosts that return the resource text. Initialize
-  `instructions` always carry `agent-instructions.md`, whose catalog paragraph names the other four
-  URIs and the `resources/read` → `read_guidance` → installed-copy chain that reaches them. A
+  `instructions` always carry either `agent-instructions.md`, whose catalog paragraph names the
+  other four URIs and the `resources/read` → `read_guidance` → installed-copy chain that reaches
+  them, or a compact host body (#789, #918) that names all five URIs and `read_guidance`. A
   conformant `resources/read` payload does
   not mean the host delivered those bytes to the model; an empty body is not a fetch. A
   schema-valid `resources/list` payload likewise does not mean the host accepted the list; some

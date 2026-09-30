@@ -92,10 +92,13 @@ renders `CLAUDE_CODE_INITIALIZE_INSTRUCTIONS` (at most `packaged_max_chars` = 96
 whose first two sentences are the trigger and the late-start rule, followed by the same route tail
 and startup-read destination disclosure (#479) as every other host. The bound is derived so that
 the text, the policy tail and the 1,000-byte disclosure ceiling fit under 2,048 together: the
-privacy disclosure is never the part that gets cut. `generic`, `codex` and `cursor` hosts keep the
-full document byte for byte. `tests/packaging/test_claude_code_instructions_cap.py` fails when
-the Claude text outgrows the recorded cap; `tests/unit/mcp/test_claude_code_instructions.py`
-locks the sentence order, the arithmetic and the other hosts' identity. Everything the compact
+privacy disclosure is never the part that gets cut. The `generic` host keeps the full document
+byte for byte; since #918 `codex` and `cursor` receive their own compact body (see the Codex and
+Cursor runbooks), and the Claude body and Claude `read_guidance` results are unchanged by it.
+`tests/packaging/test_claude_code_instructions_cap.py` fails when the Claude text outgrows the
+recorded cap; `tests/unit/mcp/test_claude_code_instructions.py` locks the sentence order, the
+arithmetic and the generic host's identity, and `tests/unit/mcp/test_compact_host_instructions.py`
+pins the Claude body's digest. Everything the compact
 body omits is one `read_guidance` call away. Claude renders the same block into native
 subagents, which receive no hook cue saying they are children, so the trigger paragraph exempts a
 subagent whose assignment names neither an attach handle nor a parent session (#509). The parent

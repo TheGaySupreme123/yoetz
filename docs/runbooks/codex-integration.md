@@ -49,8 +49,10 @@ required review and all host/disclosure approval boundaries. Installed guidance 
 neither activation nor AI-powered review dispatch.
 
 The Codex skill routes to the existing five MCP guidance URIs with installed reference fallbacks.
-The server initializes only the safety floor. Consumer source-inspection restrictions do not
-prohibit developing or debugging Yoetz itself against isolated test state.
+The server initializes only a compact summary of the safety floor, which names all five URIs and
+says to read `agent-instructions.md` before the first `start` (see
+[code-mode host profile](#code-mode-host-profile-issue-918)). Consumer source-inspection
+restrictions do not prohibit developing or debugging Yoetz itself against isolated test state.
 
 A new Codex session reads guidance and discovers tool schemas before calling MCP `start` as
 its first workflow operation, before substantive research, commands, edits, or delegation.
@@ -252,6 +254,68 @@ Codex discovery (ADR-012). The separate removal check-then-remove flow is
 digest-bound confirmation, preserve entries already observed as foreign, and verify the final
 state by re-reading it. A "registered" result still never implies Codex will successfully connect
 at runtime.
+
+### Code-mode host profile (issue #918)
+
+Codex `0.157.1` runs in code mode: the model has one `exec` tool and calls Yoetz from JavaScript as
+`tools.mcp__yoetz__<tool>(...)`. Raw MCP results stay in the script sandbox; only what the script
+prints reaches the model. Each `ALL_TOOLS` entry's description is composed by Codex from the
+initialize instructions, the tool description and a generated declaration, so the instructions
+are charged once per advertised tool (seven copies). The `--host codex` profile keeps every
+ceremony step and makes each one cheaper:
+
+- **Compact initialize body.** The bridge serves `COMPACT_INITIALIZE_INSTRUCTIONS` instead of the
+  19,835-byte `agent-instructions.md`. The stated 2,048-byte cap (`COMPACT_INSTRUCTIONS_BUDGET`)
+  covers the packaged body alone, currently 1,991 bytes. The served block adds the route line and,
+  on the policy route, the destination disclosure (#479), which is appended whole as before: 2,074
+  bytes on the policy route without a disclosure, 2,098 bytes on the strict route, and at most
+  3,132 bytes (`max_encoded_bytes`) with the longest admissible disclosure. The packaged
+  advertised surface falls from 223,627 to 99,300 bytes. The body keeps the start trigger and
+  late-start rule, the schema-load step, all five guidance URIs and when to read each, the
+  cadence, the no-false-activation and no-fabrication rules, typed continuations, the
+  unavailable-service statement, the disclosure, consent and recovery boundaries, and
+  coverage-honest wording. It tells the agent to read `agent-instructions.md` with `read_guidance`
+  before the first `start`, so the full safety floor is one call away.
+  `tests/packaging/test_compact_instructions_cap.py` gates the stated cap next to the Claude cap
+  gate; `tests/unit/mcp/test_compact_host_instructions.py` and an import-time lint pin the cap,
+  those rules and the shared tail. A legacy registration without `--host codex` keeps the generic
+  body.
+- **Code-mode section in the skill.** `skills/codex/yoetz/SKILL.md` shows a declaration-only
+  `ALL_TOOLS` discovery helper, reading guidance from `structuredContent.text`, a UUIDv4 helper
+  that works without `crypto`, and `yield_time_ms` sized to the bridge deadline of the Yoetz call in
+  that cell (`check` 300,000 ms; `respond` and `receipt` 50,000 ms; `start`, `publish_work` and
+  `status` 30,000 ms; see [response and receipt timeout recovery](#response-and-receipt-timeout-recovery)).
+  The yield guidance is scoped to Yoetz cells; builds and tests keep their own cells. The helper
+  takes the strongest entropy the cell has: `crypto.randomUUID()`, then `crypto.getRandomValues()`
+  with the version-4 and RFC 4122 variant bits set, and only without `crypto` a `Math.random()`
+  fallback that the snippet labels as not cryptographic. A collision on that fallback can make two
+  requests share an idempotency identity, so native dogfood should record which source the code-mode
+  runtime provides; service-minted ids (#919) remain the stronger answer. The helper is tested by
+  running its exact snippet 10,000 times per id prefix under Node, in a fresh context and an ES
+  module without `crypto`, with only `getRandomValues`, and with `randomUUID` (the latter two with
+  `Math.random` disabled to prove the fallback is not used), against the `req_`, `evt_`, `act_`,
+  `res_`, `evd_`, `clm_` and `obl_` patterns in `schemas/`; the patterns stay strict.
+- **Single-copy guidance.** On this profile only, a `read_guidance` result's `content[0].text` is
+  the bounded pointer `Guidance <uri>: <n> bytes; full text in structuredContent.text.`;
+  `structuredContent` and the output schema are unchanged. Outside code mode, Codex hands the
+  model the serialized `structuredContent` and ignores `content` whenever `structuredContent` is
+  present (upstream `CallToolResult::as_function_call_output_payload`, read 2026-09-30 on the
+  `main` branch, not pinned to `0.157.1`), as it already does for every other Yoetz result, so the
+  pointer is not the model-visible copy there either. This is the lowest-priority item and is
+  revertible: if a Codex dogfood run shows additional guidance re-read turns, restore the full
+  text in `content`. The other items stand alone.
+
+Lifecycles: a running Codex session keeps the instructions it received at `initialize`; a fresh
+session, which starts a new bridge, picks up the compact body after an upgrade. Skill changes take
+effect when the plugin or skill is reinstalled or updated through the normal upgrade path.
+
+Evidence boundary: the changes above are verified by unit tests only. The Codex code-mode dogfood
+acceptance (0 `crypto is not defined` failures, 0 `request_id` pattern rejections, a semantic
+`check` that completes without a `wait` turn, and no extra guidance re-reads) is pending on the
+dogfood lane for macOS, Linux and WSL 2. Codex does not document a maximum `yield_time_ms` for code
+mode; a run observed 120,000 ms honored. If a cell still replies `Script running`, the skill directs
+one covering `wait` rather than repeated short polls. The Claude Code body and `read_guidance`
+results are unchanged; the Cursor decision is recorded in the Cursor runbook.
 
 ## Auto review and host admission
 

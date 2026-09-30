@@ -2,9 +2,10 @@
 
 Claude Code desktop keeps the first 2,048 characters of an MCP server's initialize
 ``instructions`` and appends a literal ``… [truncated]`` marker. The packaged document served to
-every other host is several times that size, so on Claude the block ended mid-sentence before the
+the generic host is several times that size, so on Claude the block ended mid-sentence before the
 one rule that matters: call ``start`` first. These tests lock the host-specific body, its budget
-arithmetic, and the byte identity of every other host's text.
+arithmetic, and the byte identity of the generic host's text. The Codex and Cursor compact body
+(#918) is locked in ``test_compact_host_instructions.py``.
 """
 
 from __future__ import annotations
@@ -128,8 +129,9 @@ def test_strict_instructions_for_claude_fit_under_the_cap_and_ignore_the_disclos
     )
 
 
-@pytest.mark.parametrize("host_profile", ["generic", "codex", "cursor"])
-def test_every_other_host_keeps_the_packaged_document_byte_for_byte(host_profile: str) -> None:
+# Codex and Cursor receive their own compact body since #918; see test_compact_host_instructions.
+@pytest.mark.parametrize("host_profile", ["generic"])
+def test_the_generic_host_keeps_the_packaged_document_byte_for_byte(host_profile: str) -> None:
     from typing import cast
 
     from yoetz.ports.control import McpHostProfile

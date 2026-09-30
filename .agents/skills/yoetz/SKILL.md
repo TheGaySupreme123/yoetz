@@ -24,8 +24,9 @@ only by the bounded optional-service fallback in
 
 ## Load guidance for the current operation
 
-Initialize `instructions` already include `agent-instructions.md`; re-read only when absent from
-context. Other guidance is fetched on demand from MCP server `yoetz`. The five URIs below are the
+Initialize `instructions` carry a compact summary of `agent-instructions.md`, not the document;
+read it before the first `start`, then re-read only when absent from context. Other guidance is
+fetched on demand from MCP server `yoetz`. The five URIs below are the
 complete catalog. Do not call `resources/list` or `list_mcp_resources` to discover them. A list
 failure is not a missing server and is not a reason to read product source.
 
@@ -38,7 +39,7 @@ Do not call `start` on an empty guidance body. Retain already-read guidance whil
 - When schema metadata is missing or a request is rejected:
   `yoetz://guidance/request-templates.md` (complete bodies for all six operations and
   ordinary publish families; replace every illustrative value before use).
-- `yoetz://guidance/agent-instructions.md` is the non-negotiable safety floor. It is already delivered as the server's initialize instructions; re-read it if that text is not in context.
+- `yoetz://guidance/agent-instructions.md` is the non-negotiable safety floor. The server's initialize instructions carry only its compact summary; read it before the first `start` and re-read it if that text is not in context.
 
 Author each request from its tool input schema plus this guidance, never from memory or from product
 source. If the host drops schema metadata, use the request templates resource rather than reading
@@ -59,6 +60,75 @@ Delegated child routes require an authenticated attach handle or target selector
 tasks fail closed with `auto_attach_binding_ambiguous` and a bounded count only. Never infer a
 selector from workspace membership or age, and treat an explicit `mode=create` collision as a
 `SESSION_CONFLICT` rather than a recovery signal.
+
+## Code mode
+
+In Codex code mode you call Yoetz from an `exec` script as `tools.mcp__yoetz__<tool>(args)`, and
+only what the script prints with `text(...)` reaches you. Every workflow step and guidance read
+stays; these patterns only make each one cheaper.
+
+Discover a tool's request shape by printing only its declaration, not the whole description:
+
+```js
+const decl = (name) => {
+  const d = ALL_TOOLS.find((t) => t.name === `mcp__yoetz__${name}`)?.description ?? "";
+  const i = d.indexOf("exec tool declaration:");
+  return i < 0 ? d : d.slice(i);
+};
+text(decl("start"));
+```
+
+Read guidance from `structuredContent.text`. On this host the text `content` of a `read_guidance`
+result names that field instead of repeating the document:
+
+```js
+const g = await tools.mcp__yoetz__read_guidance({ uri: "yoetz://guidance/workflow.md" });
+text(g.structuredContent.text);
+```
+
+The sandbox may have no `crypto`, so a bare `crypto.randomUUID()` can throw. Every `request_id`,
+and every id you author in an event draft (`evt_`, `act_`, `res_`, `evd_`, `clm_`, `obl_`), is
+still a lowercase UUIDv4 behind its prefix. Include this helper in each cell that mints ids; never
+hand-roll a shorter or non-v4 id, which the schemas reject. It uses the strongest source the cell
+has: `crypto.randomUUID()`, then `crypto.getRandomValues()`, and only when neither exists
+`Math.random()`, which is not cryptographic and is a last resort for a sandbox without `crypto`:
+
+```js
+const uuid4 = () => {
+  const c = globalThis.crypto;
+  if (typeof c?.randomUUID === "function") return c.randomUUID().toLowerCase();
+  const b = new Uint8Array(16);
+  if (typeof c?.getRandomValues === "function") c.getRandomValues(b);
+  else for (let i = 0; i < 16; i++) b[i] = Math.floor(Math.random() * 256); // fallback: not cryptographic
+  b[6] = (b[6] & 0x0f) | 0x40; // version 4
+  b[8] = (b[8] & 0x3f) | 0x80; // RFC 4122 variant
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+};
+const newId = (prefix) => `${prefix}_${uuid4()}`;
+```
+
+Mint a `request_id` once per request body and keep it: replaying or recovering that body reuses
+the same id, and only a corrected body (`input_correction_new_identity`) gets a new one.
+
+Size the yield to the Yoetz call, not to the session. Put a Yoetz `check`, `respond` or `receipt`
+in its own cell and set that cell's `yield_time_ms` at or above the call's deadline, so the result
+returns in the same turn instead of a `Script running` reply followed by `wait` turns. A cell that
+finishes early returns early. The bridge deadlines are `check` 300000 (AI-powered review can run
+for minutes), `respond` 50000, `receipt` 50000, and `start`, `publish_work` and `status` 30000
+each; an owner-set `YOETZ_MCP_DEADLINE_MS_<TOOL>` changes them. A cell that runs
+`yoetz closure-prepare` reads several `status` pages, so allow the `status` deadline for each page.
+Keep builds, tests and other non-Yoetz work in their own cells with their own yields. If a Yoetz
+cell still replies `Script running`, send one `wait` for it whose `yield_time_ms` covers the rest
+of the deadline, not a series of short waits.
+
+```js
+// @exec: {"yield_time_ms": 300000}
+// Paste uuid4 and newId from above into this cell first; checkRequest is your schema-built body.
+const request_id = newId("req");
+const r = await tools.mcp__yoetz__check({ ...checkRequest, request_id });
+text(JSON.stringify({ request_id, result: r.structuredContent }));
+```
 
 ## Delegation and project work
 
