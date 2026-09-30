@@ -5472,6 +5472,10 @@ def _native_outcome_facts(
 # object or as JSON text; the freeform function-output header ``Exit code: N`` (``apply_patch`` and
 # the classic shell); and the unified-exec header ``Process exited with code N``.
 _CODEX_TOP_LEVEL_FACT_KEYS: Final = ("exit_status", "success", "denied")
+# Codex's own shell tools, compared case-insensitively. The shared selection set also names
+# ``exec`` and ``command``; a code-mode ``exec`` cell's result is model-authored JSON, so it is
+# never read as a process exit here.
+_CODEX_SHELL_OUTCOME_TOOLS: Final = frozenset({"bash", "shell", "exec_command", "local_shell"})
 _CODEX_EXIT_FACT_KEYS: Final = ("exit_code", "exitCode", "exit_status", "exitStatus")
 _CODEX_EXEC_RESULT_MARKERS: Final = frozenset(
     {"chunk_id", "wall_time_seconds", "original_token_count"}
@@ -5511,9 +5515,11 @@ def _codex_result_object(
 
     Codex serializes a nested ``exec_command`` result as JSON text whose ``wall_time_seconds`` is
     fractional; that vendor float is dropped here and nothing parsed leaves this call. JSON text
-    counts as the host's result only when it carries one of Codex's own exec-result keys, so a
-    command whose output happens to be a JSON document naming ``exit_code`` is never mistaken for
-    the host's outcome.
+    counts as the host's result only when it carries one of Codex's own exec-result keys and a
+    string ``output``, so a command whose output happens to be a JSON document naming
+    ``exit_code`` is never mistaken for the host's outcome. A result sent as a JSON *object* with a
+    float field never reaches this reader: the strict hook stdin parser refuses the whole event as
+    ``float_forbidden`` (a pre-existing boundary; the recorded 0.157.1 shapes carry text).
     """
 
     if isinstance(value, Mapping):
@@ -5534,7 +5540,9 @@ def _codex_result_object(
     if not isinstance(parsed, dict):
         return None
     result = cast(dict[str, JsonValue], parsed)
-    if require_exec_marker and _CODEX_EXEC_RESULT_MARKERS.isdisjoint(result):
+    if require_exec_marker and (
+        _CODEX_EXEC_RESULT_MARKERS.isdisjoint(result) or type(result.get("output")) is not str
+    ):
         return None
     return result
 
@@ -5582,7 +5590,7 @@ def _codex_post_tool_outcome(payload: Mapping[str, JsonValue]) -> _NativeOutcome
             result = _codex_result_object(response, require_exec_marker=False)
             if result is not None:
                 facts.append({key: result[key] for key in _MCP_RESULT_FACT_KEYS if key in result})
-        elif tool.lower() in _SHELL_TOOLS or tool in _PATCH_TOOL_NAMES:
+        elif tool.lower() in _CODEX_SHELL_OUTCOME_TOOLS or tool in _PATCH_TOOL_NAMES:
             result = _codex_result_object(response, require_exec_marker=type(response) is str)
             if result is not None:
                 # ``exit_code: null`` is a process that has not exited yet: no fact. A true error

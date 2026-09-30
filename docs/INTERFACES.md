@@ -4966,11 +4966,14 @@ remain disclosed: a cell whose only nested tool is unhooked, in a session where 
 hooked, is not recorded in the ledger; and a retained wrapper counts in the local `observed_count`
 without an admitted, summarized or intentionally omitted bucket. The same gate holds back a rollout
 `event_msg`/`item_completed` `CommandExecution`, `McpToolCall` or `FileChange` row (event kind
-`item_completed`, issue #910): its id (`exec-<uuid>`) never joins the hook's call, and the hook post
-already states the call's outcome, so once tool hooks fire it stays local with the same accounting
-as a wrapper. Without tool hooks it is delivered with its `status`/`exit_code` outcome and its
-`command_commitment`. The same limits apply, plus one: a hook result left `unknown` by a still
-running process is not completed from the held rollout item. The currently
+`item_completed`, issue #910) while the latest hook post of the same call id or command commitment
+states an outcome: its id (`exec-<uuid>`) normally never joins the hook's call, so it stays local
+with the same accounting as a wrapper. When that hook post is outcome-less, the item is delivered:
+with the same id it corrects the hook's `unknown` result (ADR-022 decision 15); with the same
+command it records the exit as a second action for that run. Without tool hooks it is delivered with
+its `status`/`exit_code` outcome and its `command_commitment`. An `McpToolCall` item with an
+`error` or a result `isError: true` fails whatever its `status`; a `FileChange` item is an edit.
+The currently
 installed Claude and Cursor native profiles are post-only carriers: their post observations never
 diagnose a missing pre-event. A post with an actual tool-call identity, such as Claude's
 `tool_use_id`, can materialize an observed action/result pair with a distinct post-only action

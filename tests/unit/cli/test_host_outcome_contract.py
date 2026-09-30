@@ -585,3 +585,81 @@ def test_codex_stream_copy_of_a_command_is_not_a_second_advice_subject(tmp_path:
     stream = _rollout_envelopes(tmp_path, session)[1]
     assert stream.structural_payload["tool_name"] == "command_execution"
     assert _advice_unresolved((stream,)) == []
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "tool_response"),
+    [
+        # A code-mode ``exec`` cell's result is model-authored JSON, never a process exit.
+        ("exec", '{"chunk_id":"c","exit_code":1,"output":"x"}'),
+        ("exec", {"exit_code": 1}),
+        # JSON text needs an exec-result key and a string ``output`` to be the host's result.
+        ("Bash", '{"chunk_id":"c","exit_code":1}'),
+        ("Bash", '{"chunk_id":"c","exit_code":1,"output":null}'),
+    ],
+)
+def test_codex_reader_ignores_cells_and_incomplete_exec_results(
+    tool_name: str, tool_response: JsonValue
+) -> None:
+    envelope = map_hook_payload_to_envelope(
+        "PostToolUse",
+        {"tool_name": tool_name, "tool_use_id": "call-cell", "tool_response": tool_response},
+        session_commitment="hmac-sha256:" + "6" * 64,
+        event_ordinal=1,
+        key_material=_KEY,
+    )
+    assert "exit_status" not in envelope.structural_payload
+    assert "success" not in envelope.structural_payload
+
+
+@pytest.mark.parametrize(
+    ("item", "outcome"),
+    [
+        ({"status": "completed"}, ResultOutcome.SUCCESS),
+        ({"status": "completed", "error": {"message": "x"}}, ResultOutcome.FAILURE),
+        (
+            {"status": "completed", "result": {"content": [], "isError": True}},
+            ResultOutcome.FAILURE,
+        ),
+        (
+            {"status": "completed", "result": {"content": [], "isError": False}},
+            ResultOutcome.SUCCESS,
+        ),
+    ],
+)
+def test_codex_stream_mcp_item_failure_wins(
+    tmp_path: Path, item: dict[str, JsonValue], outcome: ResultOutcome
+) -> None:
+    from builders.codex_rollout import encode_lines, item_completed, session_meta
+
+    path = tmp_path / "rollout.jsonl"
+    path.write_bytes(
+        encode_lines(
+            session_meta(cli_version="0.157.1", history_mode="paginated"),
+            item_completed(
+                {
+                    "arguments": {},
+                    "id": "call_910_mcp_item",
+                    "server": "yoetz",
+                    "tool": "publish_work",
+                    "type": "McpToolCall",
+                    **item,
+                }
+            ),
+        )
+    )
+    reader = SessionStreamReader(
+        session_commitment="hmac-sha256:" + "4" * 64,
+        profile=None,
+        cursor=ObservationCursor(
+            source_generation=1,
+            byte_position=0,
+            event_position=0,
+            last_source_commitment=_EMPTY,
+            mapping_version=STREAM_MAPPING_VERSION,
+        ),
+        key_material=_KEY,
+    )
+    envelope = reader.advance(path).envelopes[-1]
+    assert envelope.event_kind == "item_completed"
+    assert _result(materialize_observation_envelope(envelope, task_id=_TASK)).outcome is outcome

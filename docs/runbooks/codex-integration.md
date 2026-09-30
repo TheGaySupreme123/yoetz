@@ -962,8 +962,11 @@ top-level field. For each tool family Yoetz reads only closed facts. It records 
   `tools.exec_command` in a code-mode `exec` cell): the `exit_code` of the exec result object,
   sent as an object or as JSON text, or the `Exit code: N` / `Process exited with code N` line of
   the function-output header. JSON text is read only when it carries one of Codex's exec-result
-  keys (`chunk_id`, `wall_time_seconds`, `original_token_count`), so a command's own JSON output
-  is never taken for the host's result.
+  keys (`chunk_id`, `wall_time_seconds`, `original_token_count`) and a string `output`, so a
+  command's own JSON output is never taken for the host's result. The code-mode `exec` cell itself
+  is never read: its result is model-authored. A result sent as a JSON object with a fractional
+  number is refused whole by the strict hook parser (`float_forbidden`); the recorded shapes send
+  such results as text.
 - **`apply_patch`**: the `Exit code: N` header.
 - **MCP tools**, including Yoetz's own: only the protocol-level `isError`. The result body is
   tool-domain data.
@@ -984,18 +987,29 @@ command item names no tool, so it is recorded as `command_execution` (a patch it
 hook call id equals the rollout item id, the stream fact appends a correction to an `unknown` hook
 result and never rewrites it (ADR-022 decision 15).
 
-The rollout item is a second copy of a hooked call under a different id (`exec-<uuid>`), so it
-follows the same rule as a code-mode `exec` cell (#917). Once this session's tool hooks
-(`PreToolUse`/`PostToolUse`) have fired, the reader keeps completed command, MCP and patch items in
-the local store and does not deliver them: the hook row records the call and, since #910, its exit
-status. A session whose tool hooks never fired delivers the items with their outcomes, as the only
-record of those calls. One hooked command is therefore one action and one result, and a red-latest
-claim names it once. Like a retained cell, a retained item counts in `observed_count` without an
-admitted, summarized or intentionally omitted bucket. Two limits are disclosed. A call in a
-hook-observed session whose own hook did not fire (an unhooked tool or a hook timeout) is not
-recorded from the rollout. A hook result that stayed `unknown` because the process was still
-running is not completed from the rollout; it keeps `host_outcome_unavailable`. Both are owned by
-#910.
+The rollout item is normally a second copy of a hooked call under a different id (`exec-<uuid>`),
+so it follows the same rule as a code-mode `exec` cell (#917). Once this session's tool hooks
+(`PreToolUse`/`PostToolUse`) have fired, the reader keeps a completed command, MCP or patch item in
+the local store and does not deliver it, provided the hook row already states that call's outcome.
+The reader checks this against the latest hook post of the same call id or the same command
+commitment. When that hook post states no outcome, for example a process still running when its
+hook fired, the item is the only carrier of the exit and is delivered. With the same id, ADR-022
+decision 15 appends the correction to the hook's `unknown` result. With a different id but the
+same command, the item records the exit as its own result. That run is then two actions, a
+disclosed trade-off, and #909 judges the later one. A session whose tool hooks never fired
+delivers every item with its outcome, as the only record of those calls. One hooked command with
+a stated outcome is therefore one action and one result, and a red-latest claim names it once. Like
+a retained cell, a retained item counts in `observed_count` without an admitted, summarized or
+intentionally omitted bucket. A call in a hook-observed session whose own hook did not fire (an
+unhooked tool or a lost hook) is not recorded from the rollout; this limit is owned by #910.
+Outside code mode, a stream-only session records a direct `exec_command` twice, once from its
+`function_call` pair and once from its `item_completed` item, because their ids differ. #917 owns
+that pairing.
+
+An `McpToolCall` item fails when it names an `error` or its result carries `isError: true`,
+whatever its `status` says. A `FileChange` item is recorded in the edit family (tool
+`file_change`), so a stream-only patch retires an earlier failure under #909's edit rule. Mapping
+versions are intentionally unchanged: already-stored envelopes keep the facts they recorded.
 
 A delivered `CommandExecution` item carries the hook's installation-keyed `command_commitment`,
 computed from its `command` argv with the shell wrapper stripped, so failure supersession (#909)

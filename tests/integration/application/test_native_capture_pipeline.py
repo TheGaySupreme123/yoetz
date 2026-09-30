@@ -449,7 +449,6 @@ async def _capture_claude_post_requests(
                 "tool_name": "Bash",
                 "tool_use_id": tool_use_id,
                 "tool_response": marker.decode("utf-8"),
-                "exit_status": 0,
             },
         )
         == 0
@@ -676,7 +675,6 @@ async def _native_claude_case(
                 "tool_name": "Bash",
                 "tool_use_id": "composition-tool-1",
                 "tool_response": marker.decode("utf-8"),
-                "exit_status": 0,
             },
         )
         == 0
@@ -2285,7 +2283,6 @@ async def test_unreadable_native_capture_degrades_without_semantic_content(tmp_p
             "tool_name": "Bash",
             "tool_use_id": "unreadable-tool-1",
             "tool_response": "unreadable-native-capture-marker",
-            "exit_status": 0,
         },
     )
     _pre_request, _capture_request, structural_request = _assert_native_handoff_requests(
@@ -2361,7 +2358,6 @@ async def test_disabled_native_content_never_enters_service_request(tmp_path: Pa
         "tool_name": "Bash",
         "tool_use_id": "disabled-tool-1",
         "tool_response": "must-not-be-captured",
-        "exit_status": 0,
     }
 
     def run_hook() -> int:
@@ -2438,7 +2434,6 @@ async def test_service_recovers_unknown_inventory_without_a_fresh_native_event(
                 "tool_name": "Bash",
                 "tool_use_id": "rejected-before-recovery",
                 "error": "synthetic failed command",
-                "exit_status": 1,
             },
         )
         == 0
@@ -2468,7 +2463,6 @@ async def test_service_recovers_unknown_inventory_without_a_fresh_native_event(
                     "tool_name": "Bash",
                     "tool_use_id": "accepted-after-recovery",
                     "tool_response": "capture-recovery-marker-695",
-                    "exit_status": 1,
                 },
             )
             == 0
@@ -2913,10 +2907,10 @@ async def test_codex_recorded_outcome_shapes_reach_the_ledger(tmp_path: Path) ->
     """#910: Codex hook and rollout outcome facts become ledger results; none is invented.
 
     Every OUT-001 hook shape runs through the real hook handler, outbox, coordinator and SQLite
-    ledger. The rollout's completed tool items are handed to the coordinator directly, as a
-    session whose tool hooks never fired delivers them (the hook-observed delivery gate is
-    covered in ``test_codex_code_mode_replay``), and one of them shares its id with an
-    outcome-less hook call so the stream failure corrects that ``unknown`` result.
+    ledger. The rollout's completed tool items are handed to the coordinator directly, bypassing
+    the reader's delivery gate (covered in ``test_codex_code_mode_replay``). One of them shares its
+    id with an outcome-less hook call, the case that gate delivers in a hooked session, so the
+    stream failure corrects that ``unknown`` result.
     """
 
     from fixture_loader import load_fixture_json

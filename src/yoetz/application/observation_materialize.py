@@ -139,6 +139,9 @@ _LOGICAL_IDENTITY_DOMAIN: Final = "yoetz/observation-logical-identity/v1"
 _ID_DOMAIN: Final = b"yoetz/observation-materialize-id/v1\x00"
 _FILE_TOOLS: Final = frozenset(
     {
+        # A Codex rollout ``FileChange`` item is the patch a hooked or stream-only call applied
+        # (#910); it belongs to the edit family so a stream-only edit can retire a failure (#909).
+        "file_change",
         "apply_patch",
         "edit",
         "write_file",

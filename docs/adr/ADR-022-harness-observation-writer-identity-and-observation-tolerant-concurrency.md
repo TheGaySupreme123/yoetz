@@ -712,12 +712,18 @@ The session stream now names a rollout `event_msg`/`item_completed` command, MCP
 the completed tool call it is (event kind `item_completed`). Its `status` and `exit_code` become a
 result instead of an opaque row, and `exit_code: null` states no outcome. Where the hook call id
 equals the rollout item id, decision 15's correction path applies unchanged. The item's id
-(`exec-<uuid>`) does not join the hook's call, so it follows #917's code-mode wrapper gate: once
-Codex tool hooks have admitted input for the session, the item stays in the local store with the
-wrapper's accounting, because the hook post already records the call and its outcome. A session
-without tool hooks delivers it, with its outcome, as the only record of the call. The disclosed
-limits are the wrapper's, plus a hook result left `unknown` by a still-running process, which the
-held item does not complete. Mapping versions are unchanged. Already-stored envelopes keep their
+(`exec-<uuid>`) normally does not join the hook's call, so it follows #917's code-mode wrapper gate:
+once Codex tool hooks have admitted input for the session, the item stays in the local store with
+the wrapper's accounting, but only while the latest hook post of the same call id or command
+commitment states an outcome. An item for an outcome-less hook post (a process still running when
+its hook fired) is delivered, so decision 15 corrects the hook's `unknown` row when the ids join,
+and otherwise the exit is recorded as a second action for that run, which #909 judges as the later
+run. A session without tool hooks delivers every item, with its outcome, as the only record of the
+call. An `McpToolCall` item that names an `error` or a result `isError: true` fails whatever its
+`status`, and a `FileChange` item belongs to the edit family. The Codex outcome reader reads only
+Codex's own shell tools (`Bash`, `shell`, `exec_command`, `local_shell`), never a code-mode `exec`
+cell, and JSON text only when it carries an exec-result key and a string `output`. Mapping versions
+are intentionally unchanged: already-stored envelopes keep the facts they recorded. Already-stored envelopes keep their
 recorded facts, so historical `unknown` rows and their gap are not re-materialized. Recording
 failures makes the failed-work rules reachable on Codex, so this change is sequenced after the
 failure-supersession change of #909. A stream `CommandExecution` item carries the same

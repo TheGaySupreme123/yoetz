@@ -642,6 +642,15 @@ def _completed_tool_item(record: CodexParsedRecord) -> bool:
     return isinstance(payload, JsonObject) and payload.get("type") == _STREAM_COMPLETED_PAYLOAD
 
 
+def _mcp_item_failed(body: JsonObject) -> bool:
+    """A rollout ``McpToolCall`` item that states a failure beside its ``status``."""
+
+    if body.get("error") not in (None, False, ""):
+        return True
+    result = body.get("result")
+    return isinstance(result, JsonObject) and result.get("isError") is True
+
+
 def _structural_body(record: CodexParsedRecord) -> JsonObject | None:
     payload = record.value.get("payload")
     if isinstance(payload, JsonObject):
@@ -1131,6 +1140,10 @@ def structural_from_stream_record(
         if tool is not None:
             fields["tool_name"] = tool
         status = _token(body.get("status")) or _token(body.get("result_status"))
+        if item_type == "McpToolCall" and _mcp_item_failed(body):
+            # Failure wins: an MCP item that names an error, or whose result carries the protocol
+            # ``isError`` bit, failed whatever its ``status`` says (#910).
+            status = "failed"
         if status is not None:
             fields["result_status"] = status
         exit_code = body.get("exit_code")
@@ -1843,6 +1856,52 @@ def _hooked_tool_item(envelope: ObservationEnvelope) -> bool:
     )
 
 
+def _outcome_less_hook_calls(
+    store: LocalObservationStore, workspace_commitment: str, session_commitment: str
+) -> frozenset[str]:
+    """This session's Codex hook calls whose latest ``PostToolUse`` states no outcome (#910).
+
+    Each is named by its call id and by its keyed ``command_commitment``. A rollout item for one
+    of them is the only carrier of that call's exit, for example a process still running when its
+    hook fired, so it is delivered rather than held: with the same id ADR-022 decision 15 appends
+    the correction; with the same command it records the run's exit as its own result. A later
+    outcome-bearing hook post of the same call or command removes the name.
+    """
+
+    lister = getattr(store, "list_envelopes", None)
+    if not callable(lister):
+        return frozenset()
+    try:
+        envelopes = cast(tuple[ObservationEnvelope, ...], lister(workspace_commitment))
+    except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
+        return frozenset()
+    names: set[str] = set()
+    for envelope in envelopes:
+        if (
+            envelope.source is not ObservationSource.CODEX_HOOK
+            or envelope.session_commitment != session_commitment
+            or envelope.event_kind != "PostToolUse"
+        ):
+            continue
+        structural = envelope.structural_payload
+        stated = (
+            type(structural.get("exit_status")) is int
+            or type(structural.get("success")) is bool
+            or structural.get("denied") is True
+        )
+        for token in (
+            _token(structural.get("tool_call_id")),
+            _token(structural.get("command_commitment")),
+        ):
+            if token is None:
+                continue
+            if stated:
+                names.discard(token)
+            else:
+                names.add(token)
+    return frozenset(names)
+
+
 def _codex_hook_observes_session(
     store: LocalObservationStore, workspace_commitment: str, session_commitment: str
 ) -> bool:
@@ -2164,6 +2223,8 @@ def _reconcile_session_stream_path(
 
     advance_classifications = advance.classifications
     hook_observed = _codex_hook_observes_session(store, workspace_commitment, session_commitment)
+    # Read lazily, once per pass, and only when a completed tool item appears in a hooked session.
+    outcome_less_calls: frozenset[str] | None = None
     for index, unpaired_envelope in enumerate(advance.envelopes):
         if delivery_blocked:
             break
@@ -2311,9 +2372,23 @@ def _reconcile_session_stream_path(
         # fire for this session, the hook row already records that call and its exit status, so
         # the rollout copy stays local instead of doubling the call. A session whose tool hooks
         # never fired delivers the item, with its outcome, as the only record of the call.
-        cell_wrapper = hook_observed and (
-            _code_mode_cell_wrapper(envelope.structural_payload) or _hooked_tool_item(envelope)
-        )
+        # The hook row is the record only while it states the call's outcome: an item for a call
+        # or command whose latest hook post is outcome-less is delivered (delay, not drop).
+        cell_wrapper = hook_observed and _code_mode_cell_wrapper(envelope.structural_payload)
+        if hook_observed and not cell_wrapper and _hooked_tool_item(envelope):
+            if outcome_less_calls is None:
+                outcome_less_calls = _outcome_less_hook_calls(
+                    store, workspace_commitment, session_commitment
+                )
+            item_names = {
+                name
+                for name in (
+                    _token(envelope.structural_payload.get("tool_call_id")),
+                    _token(envelope.structural_payload.get("command_commitment")),
+                )
+                if name is not None
+            }
+            cell_wrapper = outcome_less_calls.isdisjoint(item_names)
         deliverable = not cell_wrapper and self_observation_deliverable(
             _stream_phase(envelope.structural_payload), envelope.structural_payload
         )

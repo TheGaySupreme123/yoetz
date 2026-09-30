@@ -777,3 +777,100 @@ async def test_stream_only_command_items_are_recorded_with_outcomes(replay: _Rep
     ledger = _claim_ledger(replay)
     ledger.claim(versioned=True)
     assert omissions(ledger) == ()
+
+
+def _running_run(cell: _Replay, call: str) -> None:
+    """A nested exec_command whose process outlives its yield window: the hook states no exit."""
+
+    command = {"command": "cargo test"}
+    cell.hook("PreToolUse", tool_name="Bash", tool_use_id=call, tool_input=command)
+    cell.hook(
+        "PostToolUse",
+        tool_name="Bash",
+        tool_use_id=call,
+        tool_input=command,
+        tool_response=json.dumps(
+            {
+                "chunk_id": call[-6:],
+                "original_token_count": 0,
+                "output": "public synthetic output",
+                "session_id": 3,
+                "wall_time_seconds": 10.0,
+            }
+        ),
+    )
+
+
+@pytest.mark.anyio
+async def test_held_item_corrects_an_outcome_less_hook_result_when_ids_join(
+    replay: _Replay,
+) -> None:
+    """ADR-022 decision 15 on the real reader path: the gate never holds the only outcome."""
+
+    _session_start(replay)
+    _running_run(replay, "call_join")
+    replay.append(_command_execution("call_join", "cargo test", 101, "2026-09-29T18:00:10.000Z"))
+    replay.hook("Stop", last_assistant_message="Tests pass.", stop_hook_active=False)
+    await _sweep_all(replay)
+    actions = replay.rows("action_recorded")
+    results = [cast(ResultRecordedPayload, row.payload) for row in replay.rows("result_recorded")]
+    assert len(actions) == 1
+    assert [(item.outcome, item.exit_status) for item in results] == [
+        (ResultOutcome.UNKNOWN, None),  # the hook row is never rewritten
+        (ResultOutcome.FAILURE, 101),  # the appended correction
+    ]
+
+
+@pytest.mark.anyio
+async def test_still_running_hook_result_is_completed_from_the_rollout(replay: _Replay) -> None:
+    """Delay, not drop: an exit the hook never saw reaches the ledger from the rollout item."""
+
+    _session_start(replay)
+    _running_run(replay, "call_long")
+    replay.append(
+        _command_execution("exec-910-long", "cargo test", 101, "2026-09-29T18:00:10.000Z")
+    )
+    replay.hook("Stop", last_assistant_message="Tests pass.", stop_hook_active=False)
+    await _sweep_all(replay)
+    results = [cast(ResultRecordedPayload, row.payload) for row in replay.rows("result_recorded")]
+    assert (ResultOutcome.FAILURE, 101) in [(item.outcome, item.exit_status) for item in results]
+
+
+@pytest.mark.anyio
+async def test_stream_only_patch_item_is_an_edit_that_retires_a_failure(replay: _Replay) -> None:
+    """A rollout ``FileChange`` is an edit (#910), so #909's edit rule applies without hooks."""
+
+    _session_start(replay)
+    replay.append(
+        _command_execution("exec-910-red", "npm run test-type", 2, "2026-09-29T17:58:10.000Z"),
+        _rollout_row(
+            "event_msg",
+            {
+                "completed_at_ms": 1_790_704_700_000,
+                "item": {
+                    "changes": [{"kind": "update", "path": "src/public.ts"}],
+                    "id": "call_910_patch_item",
+                    "status": "completed",
+                    "stderr": "",
+                    "stdout": "",
+                    "type": "FileChange",
+                },
+                "started_at_ms": 1_790_704_699_000,
+                "thread_id": HOST,
+                "turn_id": "turn_1",
+                "type": "item_completed",
+            },
+            "2026-09-29T17:58:20.000Z",
+        ),
+    )
+    replay.hook("Stop", last_assistant_message="Fixed.", stop_hook_active=False)
+    assert not replay.store.codex_hook_observes_session(replay.commitment, replay.session)
+    await _sweep_all(replay)
+    kinds = [
+        cast(ActionRecordedPayload, row.payload).action_kind
+        for row in replay.rows("action_recorded")
+    ]
+    assert kinds == [ActionKind.COMMAND, ActionKind.EDIT]
+    ledger = _claim_ledger(replay)
+    ledger.claim(versioned=True)
+    assert omissions(ledger) == ()
