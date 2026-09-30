@@ -1954,7 +1954,8 @@ def _hooked_tool_item_held(
     if not callable(counter) or not callable(lister):
         return False
     try:
-        if counter(workspace_commitment, session_commitment) <= 0:
+        count: object = counter(workspace_commitment, session_commitment)
+        if type(count) is not int or count <= 0:
             return False
         envelopes = cast(tuple[ObservationEnvelope, ...], lister(workspace_commitment))
     except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:

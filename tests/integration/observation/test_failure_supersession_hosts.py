@@ -333,3 +333,47 @@ def test_codex_stream_rerun_carries_the_hook_command_identity(tmp_path: Path) ->
     assert len({action.command for action in actions}) == 1
     ledger.claim(versioned=True)
     assert omissions(ledger) == ()
+
+
+def _codex_patch(emit: _Emit, call: str, tool_response: str) -> None:
+    base = {"session_id": "codex-909-910", "turn_id": "turn-1", "tool_name": "apply_patch"}
+    patch = {"command": "*** Begin Patch\n*** Update File: src/a.py\n@@\n-a\n+b\n*** End Patch"}
+    emit(
+        "PreToolUse",
+        {**base, "hook_event_name": "PreToolUse", "tool_use_id": call, "tool_input": patch},
+    )
+    emit(
+        "PostToolUse",
+        {
+            **base,
+            "hook_event_name": "PostToolUse",
+            "tool_use_id": call,
+            "tool_input": patch,
+            "tool_response": tool_response,
+        },
+    )
+
+
+def test_codex_patch_retires_a_failure_only_with_a_stated_success(tmp_path: Path) -> None:
+    """#909 x #910: an ``apply_patch`` whose result states no exit is not a completed edit."""
+
+    emit, build = _host(tmp_path, "codex")
+    _codex_exec(emit, "call-red", f"npm run test-type -- {_CANARY}", exit_code=2)
+    _codex_patch(emit, "call-patch-unknown", "Patch queued")
+    unknown_edit = build()
+    red = list(_results(unknown_edit))[0]
+    unknown_edit.claim()
+    # The failure stays live; the outcome-less patch result is a limitation of its own.
+    assert red in omitted_results(unknown_edit)
+
+    _codex_patch(
+        emit,
+        "call-patch-applied",
+        "Exit code: 0\nWall time: 0 seconds\nOutput:\nSuccess. Updated the following files:\n"
+        "M src/a.py\n",
+    )
+    applied = build()
+    applied.claim()
+    # A patch that states ``Exit code: 0`` retires the failure: it is no longer named.
+    assert red not in omitted_results(applied)
+    assert "1 preceded a later observed workspace edit" in receipt_limitations(applied)

@@ -946,3 +946,62 @@ async def test_stream_only_patch_item_is_an_edit_that_retires_a_failure(replay: 
     ledger = _claim_ledger(replay)
     ledger.claim(versioned=True)
     assert omissions(ledger) == ()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("first_exit", [101, 0])
+async def test_same_command_calls_each_keep_their_only_exit(
+    replay: _Replay, first_exit: int
+) -> None:
+    """One call's stated outcome never withholds another same-command call's only exit (#910).
+
+    The first ``cargo test`` outlives its yield window, so its hook states no exit; the second
+    states exit 0. The second's rollout copy stays local, and the first's rollout item, under an
+    id that joins neither hook call, is delivered as the first call's only exit.
+    """
+
+    _session_start(replay)
+    _running_run(replay, "call_first")
+    command = {"command": "cargo test"}
+    replay.hook("PreToolUse", tool_name="Bash", tool_use_id="call_second", tool_input=command)
+    replay.append(
+        _command_execution("exec-910-second", "cargo test", 0, "2026-09-29T18:00:05.000Z")
+    )
+    replay.hook(
+        "PostToolUse",
+        tool_name="Bash",
+        tool_use_id="call_second",
+        tool_input=command,
+        tool_response=json.dumps(
+            {
+                "chunk_id": "second",
+                "exit_code": 0,
+                "original_token_count": 4,
+                "output": "public synthetic output",
+                "wall_time_seconds": 3.0,
+            }
+        ),
+    )
+    replay.append(
+        _command_execution("exec-910-first", "cargo test", first_exit, "2026-09-29T18:00:10.000Z")
+    )
+    replay.hook("Stop", last_assistant_message="Tests pass.", stop_hook_active=False)
+    recorder = await _sweep_all(replay)
+    results = [cast(ResultRecordedPayload, row.payload) for row in replay.rows("result_recorded")]
+    facts = sorted(((item.outcome.value, item.exit_status) for item in results), key=repr)
+    expected_stream = (
+        ResultOutcome.FAILURE.value if first_exit else ResultOutcome.SUCCESS.value,
+        first_exit,
+    )
+    # The first call's hook row (unknown), the second's stated exit, and the first's exit from
+    # its rollout item: each exactly once.
+    assert facts == sorted(
+        [(ResultOutcome.UNKNOWN.value, None), (ResultOutcome.SUCCESS.value, 0), expected_stream],
+        key=repr,
+    )
+    delivered_items = [
+        cast(str, envelope.structural_payload.get("tool_call_id"))
+        for envelope in recorder.delivered
+        if envelope.event_kind == "item_completed"
+    ]
+    assert len(delivered_items) == 1
