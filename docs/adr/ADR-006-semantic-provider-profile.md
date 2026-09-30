@@ -833,3 +833,20 @@ a requirement both plan and diff omitted.
   the specification and wins over the plan; a plan or diff that omits a stated requirement is a
   discrepancy citing the statement; never request behaviour the statement excludes; weigh
   `agent_transcribed` as the agent's account.
+
+### The byte budget binds, not a 16-excerpt count (2026-09-30, issue #907 Phase 1b)
+
+Every observed review selected exactly 16 excerpts while using at most 30% of its approved excerpt
+bytes, so the count constant was the real limit.
+
+- `MAX_REVIEW_EXCERPTS` is 64, a protocol maximum that bounds work. `ReviewPacket.targeted_excerpts`
+  and outbound-case 1.2.0 `targeted_excerpts` take up to 64 entries. The case item bound
+  (`_MAX_CASE_ITEMS`, outbound-case `content_items`) rises by the same 48 items, so the other
+  sections keep the room they had.
+- The case builder is unchanged: it still stops at the effective `max_excerpts`, so the Expanded
+  1.2.0 preset (64) lets `max_total_excerpt_bytes` bind, and a policy approved under 1.1.0 still
+  stops at 16. One item per slot: excerpts are never concatenated to fit a count.
+- `semantic_case_built` diagnostics add `semantic_excerpt_count_limit` and
+  `semantic_excerpt_byte_limit` beside the selected counts, so a reader can tell which limit bound.
+- The privacy side (consent, re-approval, egress denial) is recorded in the ADR-009 amendment of
+  the same date.

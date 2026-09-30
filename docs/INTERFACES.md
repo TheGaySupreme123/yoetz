@@ -6968,3 +6968,32 @@ plan. Names and contracts:
   instructions): the task statement is the specification and wins over the plan; an omitted or
   contradicted stated requirement is a discrepancy citing the statement's source ref; never request
   behaviour it excludes; weigh `agent_transcribed` as the agent's account.
+
+### Excerpt count (issue #907 Phase 1b)
+
+- `MAX_REVIEW_EXCERPTS` (`protocol/models.py`) is 64, a protocol maximum. It bounds
+  `ReviewPacket.targeted_excerpts`, `ReviewSelectionPolicy.max_excerpts` and outbound-case 1.2.0
+  `targeted_excerpts`. `PRE_1_2_MAX_EXCERPTS` (`domain/privacy.py`, 16) is the bound of wire
+  1.0.0/1.1.0.
+- `ReviewSelectionPolicy.for_profile(EXPANDED, preset_version="1.2.0")` sets `max_excerpts` to 64.
+  The 1.1.0 Expanded preset and both Assisted presets keep 16. Every preset keeps 16,384 bytes per
+  excerpt and 131,072 bytes in total.
+- `review_selection_policy_schema_version` returns 1.2.0 when a selection names `task_statement`
+  or sets `max_excerpts` above 16, and 1.1.0 otherwise. A 1.0.0/1.1.0 row that decodes to more
+  than 16 excerpts is `privacy_policy_row_corrupt`.
+- Privacy-policy 1.2.0 (unreleased, edited in place) bounds `max_excerpts` by 64 and pins the
+  Expanded preset's `max_excerpts` const at 64. The released 1.1.0 schema is unchanged.
+- Egress (`application/egress.py`): after minimization and the channel ceilings, a
+  `semantic-review` payload is `blocked_by_policy` / `policy_denied` when its `excerpt` rows exceed
+  the effective `max_excerpts`, any row exceeds `max_excerpt_bytes`, or their sum exceeds
+  `max_total_excerpt_bytes`. An unreadable payload is refused the same way.
+- The case item bound `_MAX_CASE_ITEMS` (`ports/semantic.py`) is `256 + MAX_REVIEW_EXCERPTS - 16`
+  (304), and outbound-case 1.2.0 `content_items` allows 305.
+- The `semantic_case_built` counters add `semantic_excerpt_count_limit` and
+  `semantic_excerpt_byte_limit` (the effective limits).
+- CLI: `policy_excerpt_limits_disclosure` renders the approved limits and, when the current recipe
+  for the profile differs, the proposed ones. `yoetz privacy show` on a terminal prints it as
+  "Excerpt limits: …". `yoetz --privacy` prints "Current excerpt limits: …" and the draft's
+  "Maximum: …". The ceremony adds fixed words to a `max_excerpts` change.
+- Golden vectors: TSK-001's privacy-policy wire now also pins the PRIV-004 Expanded policy under
+  both presets: 1.1.0 with 16 excerpts, byte-identical to origin/0.3, and 1.2.0 with 64.
