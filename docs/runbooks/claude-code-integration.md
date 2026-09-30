@@ -1358,9 +1358,10 @@ edit fields are kept (`file_path`/`notebook_path` as a relative `path`, `old_str
 `edits[]`, `content`, `new_source`, cell identifiers) plus the result's line-numbered
 `structuredPatch`; the result's `filePath`, `originalFile` and unknown fields are never kept. No
 Bash call is needed: the dedicated edit tools are captured directly. `PostToolUseFailure` marks the
-edit `failed`. Shell heredoc edits (`cat > path <<EOF`, `tee path <<EOF`, `git apply <<EOF`) are also captured
-from the post-tool shell event as changed-file or workspace-diff content, marked
-`edit_source: shell`; edits made by `sed -i`, scripts or `git apply <file>` are not captured.
+edit `failed`. Shell heredoc edits (`cat > path <<EOF`, `tee path <<EOF`, `git apply <<EOF`) are
+also captured from the post-tool shell event as changed-file or workspace-diff content, marked
+`edit_source: shell`; edits made by `sed -i`, scripts or `git apply <file>` are not captured, but
+the check-time change below still shows their result.
 
 The capture runs from the post-tool event only, once per edit: the pre-tool proposal is neither
 duplicated nor kept as raw tool input. Each captured edit names the host-reported outcome
@@ -1374,16 +1375,44 @@ case-insensitively, and no filesystem lookup is made. Edits use the ordinary cap
 16 chunks and about 680 KB per event), not the routine-output budgets, and remain subject to the
 existing capture consent, secret scanning and outbox admission.
 
-Selection ranks claim-linked evidence first, then captured edits (newest first), then other
-captured output, so later test logs or file reads cannot starve a patch. A selected capture whose
-envelope has aged out of the latest-256 session window is still read by exact content reference;
-one that cannot be reached is disclosed as `content_unselected`. Identical retained bytes are
-selected once. Retained code is split into bounded UTF-8 excerpts, with omitted content and
-truncated prefixes disclosed under the existing count and byte limits. Hooks do not create a fresh
-check-time Git diff. Shell-mediated edits, missing capture and stale code still require explicit
-content/state evidence; bounded packet inclusion does not prove that the reviewer detects a
-defect. Pause, revoke and content-capture disable continue to stop admission through the existing
-shared controls.
+Selection ranks claim-linked evidence first, then captured edits (newest first), then other captured
+output, so later test logs or file reads cannot starve a patch. A selected capture whose envelope
+has aged out of the latest-256 session window is still read by exact content reference; one that
+cannot be reached is disclosed as `content_unselected`. Identical retained bytes are selected once.
+Retained code is split into bounded UTF-8 excerpts, with omitted content and truncated prefixes
+disclosed under the existing count and byte limits. Hooks do not create a Git diff; the service
+does, once per check, as described in [Check-time change](#check-time-change). Bounded packet
+inclusion does not prove that the reviewer detects a defect. Pause, revoke and content-capture
+disable continue to stop admission through the existing shared controls.
+
+### Check-time change
+
+When the review recipe selects diff excerpts (`assisted`, `expanded`, or a custom recipe that keeps
+the `diff` kind), each check carries a **check-time change** (ADR-031): the Yoetz service reads the
+task's repository once, when the check runs, and puts the result ahead of every other excerpt in the
+review packet. It covers committed and uncommitted changes to tracked files since the commit
+recorded when the task started, plus untracked files Git does not ignore (`.gitignore`,
+`.git/info/exclude` and your global Git ignore file). A header lists every changed file with its
+line counts and says which files were not shown. Script edits (`sed -i`, Python rewrites, `git apply
+<file>`), commits and hooks that never fired are therefore reviewed even though no capture exists
+for them.
+
+The directory is the one the check's own connection named: the project directory Claude Code started
+the Yoetz MCP bridge in, or the working directory of `yoetz check`. The service reads that directory
+only when it resolves to the task's own repository, and never runs a shell, hook, external diff,
+credential helper or network transport. The task-start commit is recorded when `start` creates the
+task. A task created before this version, or from a connection that named no workspace, has none;
+its checks show the change against HEAD and report `check_time_change_base_unavailable`, because
+commits made earlier in the task may be missing. It needs no content profile or hook: with only the
+structural profile, or with plugin-directory loading on macOS, the check still reads the change from
+the repository. The capture honours the review recipe and privacy policy like any other excerpt:
+credential-like spans are redacted first (`check_time_change_redacted`), every part still passes the
+never-send scan, and a change larger than the packet reports `check_time_change_truncated`. The
+capture is `check_time_change_unavailable` for a linked Git worktree (its `.git` is a file), a
+group- or world-writable repository root, a repository whose `.git/config` has `include` or `filter`
+sections, or a partial clone. A replayed or resumed check reviews the change captured when it first
+ran, not the tree as it is later. `yoetz service diagnostics` counts the parts that reached the
+packet as `semantic_check_change_parts_selected`.
 
 ## Background semantic advice controls
 

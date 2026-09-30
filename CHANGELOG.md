@@ -23,6 +23,14 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- AI-powered review now sees the change under review even when no hook captured it. When the
+  review recipe selects diff excerpts, each check reads the task's repository once and gives the
+  reviewer the change since the task started (committed and uncommitted edits, plus untracked files
+  Git does not ignore) ahead of other excerpts, with a header naming every changed file. Script
+  edits, commits, missed hooks and Cursor's ordinary profile are covered on every host. The
+  task-start commit is recorded when `start` creates a task; limits are disclosed as
+  `check_time_change_unavailable`, `check_time_change_base_unavailable`,
+  `check_time_change_truncated` and `check_time_change_redacted` coverage gaps (#883, ADR-031).
 - With the Codex subscription evaluator bound, the service no longer re-hashes the retained Codex
   runtime (about 359 MB on Linux) on the event loop for every observation advice cycle. Structural
   readiness is memoized by binding and file fingerprints and re-checked off the event loop only

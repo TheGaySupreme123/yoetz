@@ -25,11 +25,13 @@ machine installation ceiling and then runs ordinary
 checks/retries without per-request human prompts. The user may choose a stricter, broader, custom,
 or forked configuration instead.
 
-Repository identity comes from the trusted client's actual/configured working directory, not from
-an agent-supplied task reference. Yoetz resolves Git's common root and immediately discards the raw
-path after creating an installation-keyed commitment. Branches and linked worktrees share one grant;
-independent clones and unrelated repositories need their own. Without the exact grant, Yoetz blocks
-before provider construction, credential-handle minting, authorization, or dispatch.
+Repository identity comes from the trusted client's actual/configured working directory, not from an
+agent-supplied task reference. Yoetz resolves Git's common root and creates an installation-keyed
+commitment. The raw path is never stored, logged or returned; it stays in service memory for that
+client connection only, so a check can read the check-time change described below. Branches and
+linked worktrees share one grant; independent clones and unrelated repositories need their own.
+Without the exact grant, Yoetz blocks before provider construction, credential-handle minting,
+authorization, or dispatch.
 
 Package upgrades preserve accepted machine-policy bytes. A bounded migration may automatically
 clone previously accepted authority onto an eligible pre-upgrade repository, or one first repository
@@ -59,17 +61,23 @@ turning update checks off). That mode still permits only exact release-profiled 
 for the Yoetz service, confidential helper, approved local model, OS credential/user-presence
 service, and session-lifecycle monitor; it does not permit arbitrary AF_UNIX destinations.
 
-An independent review-context profile controls which potentially useful material is selected
-before those disclosure rules run: `structural`, `goal_aware`, `assisted`, `expanded`, or `custom`.
-The recommended `assisted` packet includes goal, obligations, claims, decisions, material timeline,
+An independent review-context profile controls which potentially useful material is selected before
+those disclosure rules run: `structural`, `goal_aware`, `assisted`, `expanded`, or `custom`. The
+recommended `assisted` packet includes goal, obligations, claims, decisions, material timeline,
 deterministic finding bases, coverage and change-observation facts, plus bounded problem-local
 recorded evidence/test/failure/diff/source excerpts. It excludes sensitive/confidential content by
 default and carries an explicit omission reason when content was not recorded, selected, or allowed.
-Missing source never means “no code changed.” v0.1 does not browse live Git/filesystem to fill a
-semantic-review packet; source must already be captured or agent-published in the frozen case.
-The separate ADR-011 `yoetz state capture` support command may read one explicitly named local Git
-worktree and return only bounded structural state digests. It neither returns source/path content
-nor gives the service, MCP clients, or review providers a repository handle.
+Missing source never means “no code changed.” Yoetz does not browse the filesystem to fill a
+semantic-review packet. The one repository read is the **check-time change** (ADR-031): when the
+review recipe selects diff excerpts, the service reads the task's own repository once per check,
+with Git's hooks, helpers and network transports disabled, and renders the change since the task
+started, including untracked files Git does not ignore. It is redacted like captured content, stored
+encrypted, and offered to the privacy gateway as ordinary bounded diff excerpts under the same
+policy, categories and never-send scan. Everything else must already be captured or agent-published
+in the frozen case. The separate ADR-011 `yoetz state capture` support command may read one
+explicitly named local Git worktree and return only bounded structural state digests. It returns no
+source or path content. Neither it nor the check-time change gives MCP clients or review providers a
+repository handle.
 
 The upstream recommendation appears only for an exact installed endpoint whose current versioned
 data-use record states customer-content training `prohibited`, retention `none|bounded`, and

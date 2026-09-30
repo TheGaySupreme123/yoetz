@@ -1137,6 +1137,20 @@ Four further codes describe a review that did run but could not deliver everythi
   References are never sliced to fit; a partial subject list presented as the finding's own would
   be a different finding. The review still dispatches once with the other findings.
 
+Four codes bound the ADR-031 check-time change, the service's one read of the task's repository
+for a check whose recipe selects diff excerpts. They appear on the packet and check coverage only
+when that recipe selected the change:
+
+- `check_time_change_unavailable` — no part reached the packet: no trusted workspace for this
+  check or one outside the task's repository, an unsupported Git state (linked worktree, unsafe
+  root, `include`/`filter` config, partial clone), a failed or timed-out capture, or no claim,
+  obligation or plan to link it to;
+- `check_time_change_base_unavailable` — no resolvable task-start commit, so the change is shown
+  against HEAD and commits made during the task may be missing;
+- `check_time_change_truncated` — a changed file (named in the change's header) or a part of the
+  change did not reach the reviewer;
+- `check_time_change_redacted` — credential-like spans were replaced before storage and review.
+
 Post-validation fences each challenge independently: a rejected challenge costs only itself, the
 challenges beside it still become findings, and the drop is declared through this gap. A judgment
 that fails the *structural* fence yields no AI-powered findings at all and is recorded as
@@ -1747,7 +1761,9 @@ AI-powered review absence/weakness codes
 semantic_relevance_review_not_run|optional_semantic_review_blocked_by_policy|
 optional_semantic_review_registration_drift|
 semantic_review_context_withheld|semantic_challenges_rejected|
-semantic_case_content_over_item_limit|semantic_case_finding_refs_over_limit`) plus the
+semantic_case_content_over_item_limit|semantic_case_finding_refs_over_limit|
+check_time_change_unavailable|check_time_change_base_unavailable|
+check_time_change_truncated|check_time_change_redacted`) plus the
 evidence-strength codes
 (`evidence_content_digest_only|evidence_content_withheld|evidence_digest_subject_legacy_unknown`)
 and the host-observation codes (`captured_object_unavailable|content_unselected|
@@ -2373,8 +2389,11 @@ the client itself: CLI/UI use their actual process working directory and the MCP
 configured/session working directory. It is never populated from an operation body or public
 `workspace_ref`. The service resolves symlinks, resolves a Git worktree to its canonical common
 repository root (or a non-Git workspace to its resolved directory), computes the installation-keyed
-`repository_privacy_commitment`, and discards the raw locator before the handshake completes. The
-resulting `ControlSession` carries only `RepositoryPrivacyContext(commitment, identity_kind)`.
+`repository_privacy_commitment`, and keeps no other copy of the raw locator. The resulting
+`ControlSession` carries `RepositoryPrivacyContext(commitment, identity_kind)` plus, in service
+memory only and outside its equality and `repr`, the exact `workspace_locator` the commitment was
+derived from. That locator is read only by the ADR-031 check-time change capture of the same
+connection's `start` and `check` calls; it is never stored, logged, projected or returned.
 Branches and
 linked worktrees share one commitment; independent clones and unrelated repositories do not. An
 older hello decoder or omitted locator produces an unbound session and cannot create, migrate, or
@@ -3667,7 +3686,10 @@ complete result contains both `tree_digest` and `diff_digest`; every partial, ch
 unsupported, or over-limit capture returns no subject state and explicit closed limitations. The
 port returns no repository content, path, filename, branch, remote, Git output, or component
 digest. It is client-local support used before ordinary publication, not a seventh MCP/workflow
-operation, not service-owned ambient inspection, and not an `ArtifactInspectionPort`.
+operation, not service-owned ambient inspection, and not an `ArtifactInspectionPort`. The adapter
+also exposes its hardened runner and root fences (`discover_workspace_root`,
+`local_workspace_root`, `run_read_only_git`) to the ADR-031 check-time change capture; that sibling
+returns content, under its own decision, and this port still returns none.
 
 The closed limitation values are `not_git`, `unsafe_root`, `submodule_present`,
 `symlink_unsupported`, `object_format_unsupported`, `git_config_limit_exceeded`,
@@ -6891,7 +6913,49 @@ content profile and does not increase the owner's configured capacity.
 
 The owner-only `service diagnostics` ring also records `semantic_composition/semantic_case_built`
 with integer counts: `semantic_capture_parts_resolved`, `semantic_diff_parts_resolved`,
-`semantic_excerpts_selected`, `semantic_diff_excerpts_selected`, and
-`semantic_excerpt_bytes_selected`. Resolved parts have passed capture authentication; selected
-excerpts are in the built packet. These counts precede privacy minimization and do not prove
-provider delivery or code correctness. The record contains no content, paths, or content hashes.
+`semantic_excerpts_selected`, `semantic_diff_excerpts_selected`,
+`semantic_excerpt_bytes_selected`, `semantic_check_change_parts_selected` (ADR-031 parts in the
+packet), and `semantic_edit_evidence_in_case` (materialized native edit captures in the frozen
+case, before any resolver fence; zero beside known native edits means their captures never reached
+the ledger). Resolved parts have passed capture authentication; selected excerpts are in the built
+packet. These counts precede privacy minimization and do not prove provider delivery or code
+correctness. The record contains no content, paths, or content hashes.
+
+### Check-time change (ADR-031, #883)
+
+`ChangeCapturePort` (`yoetz.ports.change_capture`) has two blocking, read-only calls:
+`read_task_base(workspace) -> TaskChangeBase` and `capture(workspace, base | None) ->
+CheckChangeCapture`. `GitChangeCaptureAdapter` is the only implementation; the service runs it off
+the event loop. `ChangeCaptureUnavailable.reason` is one of `git_unavailable`, `not_git`,
+`unsafe_root`, `unsupported_repository`, `git_failed` (a Git call over its time bound included) or
+`redaction_incomplete` (credential-shaped spans still found after 64 redaction passes, so the change
+is withheld whole), recorded as a bounded
+`semantic_composition/check_time_change_unavailable` (or `start/task_change_base_unavailable`)
+diagnostic and never as text.
+
+- **Base.** A `start` whose outcome is `created` or `delegated` records `TaskChangeBase(object_format,
+  commit)` (the empty tree for an unborn repository) as an encrypted `change_capture` object of
+  media type `application/vnd.yoetz.task-change-base+json`, schema `yoetz.task-change-base/1`. The
+  optional ledger seam `record_task_change_base(ref) -> bool` keeps the first one only (pointer in
+  `bundle_meta` key `task_change_base`, object inventoried as a root); `load_task_change_base()`
+  authenticates it. Attach and resume record nothing.
+- **Source.** `Application.check` binds `CheckWorkspaceSource(workspace, repository_commitment)`
+  from its own `RepositoryPrivacyContext` for the duration of the check
+  (`check_workspace_source_scope`). The semantic composition captures only when that commitment
+  equals the task route's, and only for a new durable job whose recipe selects diff excerpts.
+- **Object.** `CheckChangeCapture(base, text, tracked_files, untracked_files, omitted_files,
+  truncated, redacted)` is stored after capture-time redaction as one `change_capture` object of
+  media type `application/vnd.yoetz.check-change+json`, schema `yoetz.check-change/1`. `base` is
+  `task_start`, `head` (no resolvable recorded base) or `empty` (no commit exists). The job's
+  `yoetz.semantic-case/2` object gains an optional `check_change` member,
+  `{"schema": "yoetz.check-change-binding/1", "object": pointer | null, "unavailable": bool}`;
+  jobs without it rebuild without a change.
+- **Packet.** `build_semantic_case(check_time_change=CheckTimeChange(ref, capture) | None,
+  check_time_change_unavailable=bool)` admits parts with ids `change-check-time-NNN`, section
+  `excerpt`, category `evidence_excerpt`, source kind `diff`, source ref `check-time-change`,
+  linked to effective claims and obligations (else the latest plan), each prefixed
+  `[Yoetz check-time change, part i of n]`. `_check_time_change_reservation(selection)` returns the
+  share admitted before other excerpts (half the excerpt count, at least one, and half the total
+  bytes); leftovers backfill after every other excerpt. The case digest binds the object identity,
+  content digest, base, flags and admitted part count; a case without a selected change keeps its
+  historical digest input.

@@ -108,6 +108,15 @@ The excerpt is truncated to at most 4,096 UTF-8 bytes, silently and possibly mid
 slice within 4,096 UTF-8 bytes so the reviewer receives it intact; `description` itself accepts up
 to 8,192 characters, so the field limit does not protect against excerpt truncation.
 
+When the review recipe selects diff excerpts, Yoetz itself also reads the task's repository at
+check time and gives the reviewer that **check-time change** first: committed and uncommitted
+changes since the task started, plus untracked files Git does not ignore, including edits made by
+scripts or commits that no hook captured. Do not paste or digest the whole diff for the reviewer;
+use `description` for the problem-local hunk or test slice the claim depends on. The
+`check_time_change_unavailable`, `check_time_change_base_unavailable`,
+`check_time_change_truncated` and `check_time_change_redacted` coverage gaps name what that change
+could not show.
+
 Cite the evidence id in the claim's `supporting_refs`. Evidence referenced only from
 `result_recorded.evidence_refs` does not qualify for excerpt selection under linked-subject
 relevance unless that result is linked by a readable response to an unresolved in-scope finding.

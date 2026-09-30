@@ -126,9 +126,11 @@ is the only surface that renders them.
 asymmetry is the point: tightening can flow through gates, widening always requires a human.
 
 Privacy commands bind to the repository derived from their actual working directory. The service
-resolves symlinks and Git's common root, commits it under the installation key, and discards the raw
-path. Branches and linked worktrees share authority; independent clones and unrelated repositories
-do not. A task's public `workspace_ref` is not consulted.
+resolves symlinks and Git's common root and commits it under the installation key. It never stores
+the raw path; it keeps it in memory for that connection only, so a check can read the change
+described in [What AI-powered review actually sends](#what-ai-powered-review-actually-sends).
+Branches and linked worktrees share authority; independent clones and unrelated repositories do not.
+A task's public `workspace_ref` is not consulted.
 
 The CLI recommends **Assisted review** when the exact configured provider route has a current
 reviewed data-use record stating no default training and retention no longer than 30 days, and
@@ -189,13 +191,22 @@ include the configured pair in the review screen before approval.
 ## What AI-powered review actually sends
 
 When you accept the CLI's recommended `assisted-review` recipe, it shows and confirms a standing
-exact-repository policy that sends the reviewer a structured packet: the goal, obligations, claims, the
-material timeline, local findings and their exact bases, coverage gaps, and bounded
-problem-local excerpts of evidence, tests, diffs, or source **already recorded in the case**.
+exact-repository policy that sends the reviewer a structured packet: the goal, obligations, claims,
+the material timeline, local findings and their exact bases, coverage gaps, and bounded
+problem-local excerpts of evidence, tests, diffs, or source **already recorded in the case**, plus
+the **check-time change**.
+
+The check-time change is the one thing Yoetz reads from your repository for review. When the recipe
+includes diff excerpts, each check reads the change since the task started — committed and
+uncommitted edits to tracked files, plus untracked files Git does not ignore — from the repository
+of the check's own connection, and shows it to the reviewer first, with a header naming every
+changed file. It covers edits made by scripts and commits that no hook captured. Git hooks, helpers
+and network access are off while it is read, credential-like text is redacted, and each part still
+passes the never-send check. A change larger than the packet is cut and says so.
 
 Sensitive and confidential content is off. The never-send set remains absolute. The reviewer gets a
-packet built from the ledger, not a handle on your repository — composition passes bundled provider
-adapters no repository, storage, environment, or transcript handles.
+packet, not a handle on your repository — composition passes bundled provider adapters no
+repository, storage, environment, or transcript handles.
 
 The Codex subscription evaluator follows the same policy and receives the same approved packet.
 The difference is credential and transport authority: Codex owns ChatGPT login and internally

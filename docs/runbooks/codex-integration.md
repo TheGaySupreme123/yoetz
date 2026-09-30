@@ -1642,21 +1642,21 @@ source tests do not establish native host/platform acceptance.
 
 ### Reviewable native edits
 
-Codex `apply_patch` calls (including code-mode nested calls) enter the shared encrypted capture
-lane as workspace-diff content. Codex 0.157.x sends the patch as `tool_input.command` on both
-PreToolUse and PostToolUse; the older `patch`/`input` carriers are still read. The post-tool
-`Exit code: N` result prefix supplies the edit outcome and the structural `exit_status`. In code
-mode the outer `exec` cell has no hook payload, but each nested `tools.apply_patch("...")` call is
-dispatched through the tool registry and fires its own `apply_patch` hooks with the same shape, and
-each nested `tools.exec_command` fires `Bash` hooks with `tool_input.command`. A shell
-`apply_patch <<EOF` is intercepted by `exec_command` and fires only PreToolUse, so its patch is
-captured from that event with outcome `unknown`. Whole-file heredoc writes (`cat > path <<EOF`,
-`tee path <<EOF`) and `git apply <<EOF` are captured from the post-tool `Bash` event; writes outside
-the workspace, such as `/tmp` scratch files, are skipped. Edits made by `sed -i`, scripts or
-`git apply <file>` carry no edit bytes in the command and are not captured; other generic command
-input does not become code evidence. This capture uses the existing profileless Codex observation consent; users
-who granted it earlier now also have `apply_patch` text encrypted locally, while egress still follows
-the selected review recipe.
+Codex `apply_patch` calls (including code-mode nested calls) enter the shared encrypted capture lane
+as workspace-diff content. Codex 0.157.x sends the patch as `tool_input.command` on both PreToolUse
+and PostToolUse; the older `patch`/`input` carriers are still read. The post-tool `Exit code: N`
+result prefix supplies the edit outcome and the structural `exit_status`. In code mode the outer
+`exec` cell has no hook payload, but each nested `tools.apply_patch("...")` call is dispatched
+through the tool registry and fires its own `apply_patch` hooks with the same shape, and each nested
+`tools.exec_command` fires `Bash` hooks with `tool_input.command`. A shell `apply_patch <<EOF` is
+intercepted by `exec_command` and fires only PreToolUse, so its patch is captured from that event
+with outcome `unknown`. Whole-file heredoc writes (`cat > path <<EOF`, `tee path <<EOF`) and `git
+apply <<EOF` are captured from the post-tool `Bash` event; writes outside the workspace, such as
+`/tmp` scratch files, are skipped. Edits made by `sed -i`, scripts or `git apply <file>` carry no
+edit bytes in the command and are not captured (the check-time change below still shows their
+result); other generic command input does not become code evidence. This capture uses the existing
+profileless Codex observation consent; users who granted it earlier now also have `apply_patch` text
+encrypted locally, while egress still follows the selected review recipe.
 
 The capture runs from the post-tool event only, once per edit: the pre-tool proposal is neither
 duplicated nor kept as raw tool input. Each captured edit names the host-reported outcome
@@ -1670,16 +1670,44 @@ case-insensitively, and no filesystem lookup is made. Edits use the ordinary cap
 16 chunks and about 680 KB per event), not the routine-output budgets, and remain subject to the
 existing capture consent, secret scanning and outbox admission.
 
-Selection ranks claim-linked evidence first, then captured edits (newest first), then other
-captured output, so later test logs or file reads cannot starve a patch. A selected capture whose
-envelope has aged out of the latest-256 session window is still read by exact content reference;
-one that cannot be reached is disclosed as `content_unselected`. Identical retained bytes are
-selected once. Retained code is split into bounded UTF-8 excerpts, with omitted content and
-truncated prefixes disclosed under the existing count and byte limits. Hooks do not create a fresh
-check-time Git diff. Shell-mediated edits, missing capture and stale code still require explicit
-content/state evidence; bounded packet inclusion does not prove that the reviewer detects a
-defect. Pause, revoke and content-capture disable continue to stop admission through the existing
-shared controls.
+Selection ranks claim-linked evidence first, then captured edits (newest first), then other captured
+output, so later test logs or file reads cannot starve a patch. A selected capture whose envelope
+has aged out of the latest-256 session window is still read by exact content reference; one that
+cannot be reached is disclosed as `content_unselected`. Identical retained bytes are selected once.
+Retained code is split into bounded UTF-8 excerpts, with omitted content and truncated prefixes
+disclosed under the existing count and byte limits. Hooks do not create a Git diff; the service
+does, once per check, as described in [Check-time change](#check-time-change). Bounded packet
+inclusion does not prove that the reviewer detects a defect. Pause, revoke and content-capture
+disable continue to stop admission through the existing shared controls.
+
+### Check-time change
+
+When the review recipe selects diff excerpts (`assisted`, `expanded`, or a custom recipe that keeps
+the `diff` kind), each check carries a **check-time change** (ADR-031): the Yoetz service reads the
+task's repository once, when the check runs, and puts the result ahead of every other excerpt in the
+review packet. It covers committed and uncommitted changes to tracked files since the commit
+recorded when the task started, plus untracked files Git does not ignore (`.gitignore`,
+`.git/info/exclude` and your global Git ignore file). A header lists every changed file with its
+line counts and says which files were not shown. Script edits (`sed -i`, Python rewrites, `git apply
+<file>`), commits and hooks that never fired are therefore reviewed even though no capture exists
+for them.
+
+The directory is the one the check's own connection named: the Codex MCP bridge's working directory,
+or the working directory of `yoetz check`. The service reads that directory only when it resolves to
+the task's own repository, and never runs a shell, hook, external diff, credential helper or network
+transport. The task-start commit is recorded when `start` creates the task. A task created before
+this version, or from a connection that named no workspace, has none; its checks show the change
+against HEAD and report `check_time_change_base_unavailable`, because commits made earlier in the
+task may be missing. Codex code mode, nested `tools.apply_patch` calls and `exec_command` rewrites
+need nothing extra: the change is read from the repository, not from any hook. The capture honours
+the review recipe and privacy policy like any other excerpt: credential-like spans are redacted
+first (`check_time_change_redacted`), every part still passes the never-send scan, and a change
+larger than the packet reports `check_time_change_truncated`. The capture is
+`check_time_change_unavailable` for a linked Git worktree (its `.git` is a file), a group- or
+world-writable repository root, a repository whose `.git/config` has `include` or `filter` sections,
+or a partial clone. A replayed or resumed check reviews the change captured when it first ran, not
+the tree as it is later. `yoetz service diagnostics` counts the parts that reached the packet as
+`semantic_check_change_parts_selected`.
 
 ## Background semantic advice controls
 
