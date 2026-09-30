@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -71,6 +71,7 @@ from yoetz.domain.values import (
     ObjectId,
     actor_id,
     event_id,
+    evidence_id,
     finding_id,
     object_id,
     occurred_at_consistency,
@@ -1173,36 +1174,73 @@ def _compact_obligation_item(obligation: str, record: object) -> StatusCompactOb
     return StatusCompactObligationModel.model_validate(values)
 
 
-def _evidence_source_authorship(
-    projection: ProjectionState, records: tuple[LedgerRecord, ...]
-) -> dict[str, SourceAuthorship]:
-    """Read each readable evidence row's source-event authorship from the frozen prefix.
+def _evidence_source_rows(
+    projection: ProjectionState,
+    records: tuple[LedgerRecord, ...],
+    evidence_ids: Iterable[str] | None = None,
+) -> dict[str, LedgerRecord]:
+    """Locate the accepted source event of each readable evidence row in the frozen prefix.
 
-    Every value comes from the accepted event envelope (writer chain, session, ingestion sequence,
-    ledger-recorded publication channel and observation stamp). It is recomputed for every query
-    so a requester-specific decision is never cached across frontiers or writers.
+    Replay admits only a contiguous chain whose ingestion sequences start at 1, so a row's
+    ``source_frontier`` indexes its source event directly; any other shape falls back to one scan.
+    ``evidence_ids`` limits the lookup to those rows (a page), otherwise every readable row.
     """
 
-    wanted = {
-        record.source_event_id: evidence
-        for evidence, record in projection.evidence.items()
-        if record.payload is not None
-    }
-    found: dict[str, SourceAuthorship] = {}
-    if not wanted:
-        return found
-    for row in records:
-        evidence = wanted.get(row.event_id)
-        if evidence is None:
+    found: dict[str, LedgerRecord] = {}
+    unresolved: dict[str, str] = {}
+    for evidence in projection.evidence if evidence_ids is None else evidence_ids:
+        record = projection.evidence.get(evidence_id(evidence))
+        if record is None or record.payload is None:
             continue
-        found[evidence] = SourceAuthorship(
-            row.writer.writer_id,
-            row.session_id,
-            row.ledger.ingestion_sequence,
-            row.publication_channel,
-            is_observation_authored(row),
-        )
+        index = record.source_frontier - 1
+        if 0 <= index < len(records) and records[index].event_id == record.source_event_id:
+            found[evidence] = records[index]
+        else:
+            unresolved[record.source_event_id] = evidence
+    if unresolved:
+        for row in records:
+            evidence = unresolved.get(row.event_id)
+            if evidence is not None:
+                found[evidence] = row
     return found
+
+
+def _source_authorship(row: LedgerRecord | None) -> SourceAuthorship | None:
+    """Read one source event's authorship from its accepted envelope.
+
+    Writer chain, session and sequence are service-assigned; the channel is the ledger-recorded
+    one (a cooperative writer records only ``cooperative_mcp`` or ``local_cli``); the observation
+    stamp cannot be asserted by a cooperative writer.
+    """
+
+    if row is None:
+        return None
+    return SourceAuthorship(
+        row.writer.writer_id,
+        row.session_id,
+        row.ledger.ingestion_sequence,
+        row.publication_channel,
+        is_observation_authored(row),
+    )
+
+
+def _later_redaction_targets(
+    suffix: tuple[LedgerRecord, ...],
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Collect the event and object targets of every redaction after a pinned frontier.
+
+    An object target redacts the event whose payload object it names, exactly as replay resolves
+    it, so a row can be withdrawn by either identity. The suffix is empty for a head read.
+    """
+
+    events: set[str] = set()
+    objects: set[str] = set()
+    for row in suffix:
+        if row.schema.name != "redaction_recorded":
+            continue
+        events.update(row.projection_locator.redaction_target_event_ids)
+        objects.update(row.projection_locator.redaction_target_object_ids)
+    return frozenset(events), frozenset(objects)
 
 
 def _authored_by_requester(
@@ -1332,14 +1370,14 @@ def _projection_items(
         )
     if view is ProjectionView.EVIDENCE:
         evidence_items: list[ProjectionItem] = []
-        channels = _evidence_source_authorship(projection, records)
+        sources = _evidence_source_rows(projection, records)
         for evidence, record in sorted(
             projection.evidence.items(), key=lambda item: item[0].encode()
         ):
             payload = record.payload
             if payload is None:
                 continue
-            source = channels.get(evidence)
+            source = sources.get(evidence)
             if source is None:
                 raise _error(PublicErrorCode.STORAGE_CORRUPT)
             state = payload.subject_state
@@ -2304,11 +2342,13 @@ class MemoryLedgerAdapter:
             )
         )
         # Ledger authorship is read per query, never from the row cache: ``author=mine`` and the
-        # disclosure provenance both depend on the requesting writer and this exact prefix.
+        # disclosure provenance both depend on the requesting writer and this exact prefix. Only
+        # the author filter needs every row's source; otherwise only the returned page is read.
+        author_filtered = (
+            type(query.filter) is EvidenceProjectionFilter and query.filter.author is not None
+        )
         evidence_sources = (
-            _evidence_source_authorship(effective_projection, prefix)
-            if view is ProjectionView.EVIDENCE
-            else {}
+            _evidence_source_rows(effective_projection, prefix) if author_filtered else {}
         )
         filtered_items: list[ProjectionItem] = []
         for item in all_items:
@@ -2346,7 +2386,9 @@ class MemoryLedgerAdapter:
                     and (
                         query.filter.author is None
                         or _authored_by_requester(
-                            evidence_sources.get(item.evidence_id), query, effective
+                            _source_authorship(evidence_sources.get(item.evidence_id)),
+                            query,
+                            effective,
                         )
                     )
                 )
@@ -2393,28 +2435,23 @@ class MemoryLedgerAdapter:
         selected = tuple(filtered_items[: query.limit])
         item_sources: tuple[tuple[SourceAuthorship, ...], ...] = ()
         if view is ProjectionView.EVIDENCE and selected:
-            # A pinned read replays its own prefix, so a row redacted later still carries its
-            # prose there. The self-authorship exemption must never re-disclose what the current
-            # ledger has redacted: such a row stays unattributed and keeps the category ceiling.
-            redacted_later = frozenset(
-                target
-                for row in records
-                if row.ledger.ingestion_sequence > query.requested_frontier.sequence
-                and row.schema.name == "redaction_recorded"
-                for target in row.projection_locator.redaction_target_event_ids
+            page_ids = tuple(
+                item.evidence_id for item in selected if type(item) is StatusEvidenceItemModel
             )
-            withdrawn = frozenset(
-                evidence
-                for evidence, record in effective_projection.evidence.items()
-                if record.source_event_id in redacted_later
-            )
+            if not author_filtered:
+                evidence_sources = _evidence_source_rows(effective_projection, prefix, page_ids)
+            # A pinned read replays its own prefix, so a row redacted later (by its event or by
+            # its payload object) still carries its prose there. The self-authorship exemption
+            # must never re-disclose what the current ledger has redacted: such a row stays
+            # unattributed and keeps the category ceiling.
+            redacted_events, redacted_objects = _later_redaction_targets(records[len(prefix) :])
             item_sources = tuple(
                 ()
-                if item.evidence_id in withdrawn
-                or (source := evidence_sources.get(item.evidence_id)) is None
-                else (source,)
-                for item in selected
-                if type(item) is StatusEvidenceItemModel
+                if (row := evidence_sources.get(evidence)) is None
+                or row.event_id in redacted_events
+                or row.payload_ref.object_id in redacted_objects
+                else (cast(SourceAuthorship, _source_authorship(row)),)
+                for evidence in page_ids
             )
         next_position = None
         if selected and len(filtered_items) > len(selected):

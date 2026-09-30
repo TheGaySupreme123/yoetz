@@ -3135,7 +3135,8 @@ writer — stay `other_writer` even when session and host match. Attach opens a 
 new writer, so rows published before it are not `self_authored` for the attached session. A row
 whose source event a later `redaction_recorded` targets is withdrawn from attribution even on a
 pinned read (`at_frontier` or an older cursor), so self-authorship never re-discloses redacted
-prose. A local-disclosure receipt lists an included self-authored category under its approved
+prose; a later redaction of the source event's payload object counts the same as an event target.
+A local-disclosure receipt lists an included self-authored category under its approved
 categories without stating why; the `self_authored` provenance is recorded only in the internal
 `AgentProjectionAuditSubject`, and surfacing it in `privacy receipts get` needs an egress-receipt
 schema change that is a design-gated follow-up.

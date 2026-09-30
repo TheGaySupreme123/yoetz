@@ -121,7 +121,7 @@ def test_human_summary_is_weaker_than_structured_output() -> None:
     evidence_summary = render_safe_compact_summary(status)
     assert evidence_summary == (
         "Status view: evidence; frontier: 9; freshness: current; open obligations: 0; "
-        "evidence rows: 2 (hook_observed 1); "
+        "evidence rows: 2 (hook_observed 1, unrecorded 1); "
         "unanswered findings: 0; receipt-blocking findings: 2; reported gaps: 2."
     )
     assert secret not in evidence_summary

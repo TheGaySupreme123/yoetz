@@ -82,6 +82,18 @@ def test_rows_from_earlier_03_builds_still_validate_without_a_channel() -> None:
     assert all(item.publication_channel is None for item in success.page.items)
     assert public_model_to_wire(wrapped) == earlier
 
+    # Renderers omit the missing channel instead of printing a placeholder value.
+    expected_lines = [
+        line.replace(" cooperative_mcp ", " ").replace(" hook_observed ", " ")
+        for line in _document()["expected"]["human_lines"]["unfiltered"]
+    ]
+    rendered = render_human_status(success).splitlines()
+    assert rendered == expected_lines
+    assert not any("None" in line for line in rendered)
+    summary = render_safe_compact_summary(cast(JsonValue, earlier))
+    assert "evidence rows: 3 (unrecorded 3);" in summary
+    assert "None" not in summary
+
 
 @pytest.mark.parametrize("author", ("theirs", "", "MINE"))
 def test_author_admits_only_mine(author: str) -> None:

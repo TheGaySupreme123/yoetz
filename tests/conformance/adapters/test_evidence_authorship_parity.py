@@ -8,15 +8,24 @@ read replays its own prefix, and self-authorship must never re-disclose owner-re
 
 from __future__ import annotations
 
+from dataclasses import replace
+from typing import cast
+
 import apsw
 import pytest
 
 from builders.replay import replay_records
 from integration.storage.test_append_and_replay import command_from_records, memory_for, sqlite_for
-from yoetz.domain.events import LedgerRecord, is_observation_authored
+from yoetz.domain.events import (
+    LedgerRecord,
+    RedactionRecordedPayload,
+    encode_payload,
+    is_observation_authored,
+)
 from yoetz.domain.privacy import SourceAuthorship
-from yoetz.domain.values import Frontier
-from yoetz.ports.ledger import EvidenceProjectionFilter, ProjectionQuery
+from yoetz.domain.values import Frontier, object_id
+from yoetz.ports.ledger import AppendCommand, EvidenceProjectionFilter, ProjectionQuery
+from yoetz.protocol.canonical import canonical_encode
 from yoetz.protocol.models import StatusEvidenceItemModel
 
 pytestmark = pytest.mark.anyio
@@ -29,10 +38,43 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
+def _object_only(command: AppendCommand, redaction: LedgerRecord, target: str) -> AppendCommand:
+    """Retarget the fixture redaction at one payload object only, as an owner may record it."""
+
+    entries = list(command.entries)
+    index = next(i for i, entry in enumerate(entries) if entry.draft.event_id == redaction.event_id)
+    payload = replace(
+        cast(RedactionRecordedPayload, redaction.payload),
+        target_event_ids=(),
+        target_object_ids=(object_id(target),),
+    )
+    entries[index] = replace(
+        entries[index],
+        draft=replace(entries[index].draft, payload=payload, artifact_refs=(object_id(target),)),
+    )
+    return replace(command, entries=tuple(entries))
+
+
 async def _page(
-    backend: str, records: tuple[LedgerRecord, ...], frontier: int, writer: str | None
+    backend: str,
+    records: tuple[LedgerRecord, ...],
+    frontier: int,
+    writer: str | None,
+    *,
+    object_redaction: str | None = None,
 ) -> tuple[tuple[StatusEvidenceItemModel, ...], tuple[tuple[SourceAuthorship, ...], ...]]:
     command, objects = command_from_records(records, expected_frontier=0)
+    if object_redaction is not None:
+        redaction = next(row for row in records if row.schema.name == "redaction_recorded")
+        command = _object_only(command, redaction, object_redaction)
+        payload = next(
+            entry.draft.payload
+            for entry in command.entries
+            if entry.draft.event_id == redaction.event_id
+        )
+        objects._data[redaction.payload_ref.object_id] = canonical_encode(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+            encode_payload(cast(RedactionRecordedPayload, payload))
+        )
     db = apsw.Connection(":memory:") if backend == "sqlite" else None
     ledger = memory_for(command, objects) if db is None else sqlite_for(command, objects, db)
     try:
@@ -93,3 +135,39 @@ async def test_backends_attribute_list_and_withdraw_alike(backend: str) -> None:
     assert [item.evidence_id for item in mine] == [item.evidence_id for item in items]
     other, _ = await _page(backend, prefix, before, _OTHER_WRITER)
     assert other == ()
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+async def test_a_later_object_redaction_of_the_source_payload_also_withdraws(backend: str) -> None:
+    """Redacting the source event's payload object tombstones the row just like an event target."""
+
+    records = replay_records("all-event-families")
+    redaction = next(row for row in records if row.schema.name == "redaction_recorded")
+    source = next(
+        row
+        for row in records
+        if row.schema.name == "evidence_recorded"
+        and row.event_id in redaction.projection_locator.redaction_target_event_ids
+    )
+    before = redaction.ledger.ingestion_sequence - 1
+    items, sources = await _page(
+        backend, records, before, None, object_redaction=source.payload_ref.object_id
+    )
+    assert len(items) == 1
+    assert sources == ((),)
+    # The unrelated captured-artifact object target keeps the row attributed: only the source
+    # event's payload object carries the redacted prose.
+    items, sources = await _page(
+        backend,
+        records,
+        before,
+        None,
+        object_redaction=next(
+            iter(
+                set(redaction.projection_locator.redaction_target_object_ids)
+                - {source.payload_ref.object_id}
+            )
+        ),
+    )
+    assert len(items) == 1
+    assert sources != ((),)

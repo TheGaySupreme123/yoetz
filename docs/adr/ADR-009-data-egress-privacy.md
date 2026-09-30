@@ -137,9 +137,9 @@ case → single-use authorization → bounded gateway → bound sink/provider �
    the default ceiling. Reconciling that forward contract is left to a maintainer decision recorded
    on #914. Every other leaf is ambiguous and keeps the category ceiling, including every finding.
    Attach opens a new session with a new writer, so rows published before it are not
-   self-authored for the attached session. A row whose source event a later redaction targets is
-   withdrawn from attribution even on a pinned read, so the exemption never re-discloses redacted
-   prose. The never-send scan still runs first, `sensitive_confidential` stays absolute, and each
+   self-authored for the attached session. A row whose source event a later redaction targets,
+   by event or by the event's payload object, is withdrawn from attribution even on a pinned read,
+   so the exemption never re-discloses redacted prose. The never-send scan still runs first, `sensitive_confidential` stays absolute, and each
    projection still writes its receipt. The receipt's approved categories show the inclusion but
    not the reason: the `self_authored` provenance is recorded only in the internal audit subject,
    and surfacing it in `privacy receipts get` needs a design-gated egress-receipt schema change,

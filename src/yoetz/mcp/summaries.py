@@ -648,8 +648,13 @@ def _evidence_channel_clause(source: Mapping[str, JsonValue]) -> str:
         )
         if type(channel) is str and channel in counts:
             counts[channel] += 1
-    by_channel = ", ".join(f"{channel} {count}" for channel, count in counts.items() if count)
-    return f"evidence rows: {_item_count(rows)} ({by_channel or 'none'}); "
+    parts = [f"{channel} {count}" for channel, count in counts.items() if count]
+    # Rows from earlier 0.3 builds carry no channel; an unknown value is caller text and is never
+    # rendered. Both are counted, not named.
+    unrecorded = len(rows) - sum(counts.values())
+    if unrecorded:
+        parts.append(f"unrecorded {unrecorded}")
+    return f"evidence rows: {_item_count(rows)} ({', '.join(parts) or 'none'}); "
 
 
 def _operation_progress_clause(source: Mapping[str, JsonValue]) -> str:
