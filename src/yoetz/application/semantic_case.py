@@ -2888,7 +2888,9 @@ class ReviewPacketDisclosure:
     names is removed. ``withheld`` holds the references an omission row names for a reason other
     than ``not_recorded``: that reason means the ledger had no more readable content for the record
     than its own recorded payload. ``payload_events`` are the carried ``evt_`` history items whose
-    recorded payload travelled with them (not structural metadata only).
+    own content holds the event's recorded payload, read from the item itself: a structural-only
+    item or one replaced by the size-bound marker is not one, whatever omission rows survived the
+    omission cap.
     """
 
     carried: frozenset[str]
@@ -2938,7 +2940,7 @@ def review_packet_disclosure(prepared: bytes) -> ReviewPacketDisclosure | None:
             continue
         carried.add(source)
         category = row.get("category")
-        if source.startswith("evt_") and category != DataCategory.BOUNDED_STRUCTURAL_METADATA.value:
+        if source.startswith("evt_") and _history_item_carries_payload(source, row.get("content")):
             payload_events.add(source)
         linked = row.get("linked_subject_refs")
         if (
@@ -2963,6 +2965,18 @@ def review_packet_disclosure(prepared: bytes) -> ReviewPacketDisclosure | None:
     )
 
 
+def _history_item_carries_payload(event_ref: str, content: JsonValue | None) -> bool:
+    """Whether a carried history item's own content holds this event's recorded payload."""
+
+    if type(content) is not str:
+        return False
+    try:
+        body = strict_json_parse(content.encode("utf-8"))
+    except ValueError:
+        return False
+    return isinstance(body, dict) and body.get("event_id") == event_ref and "payload" in body
+
+
 def review_packet_content_refs(prepared: bytes) -> frozenset[str] | None:
     """The frontier references whose own content the sent packet carried (see above)."""
 
@@ -2978,8 +2992,10 @@ def sent_ledger_refs(
     With recorded history, a result or evidence record usually travels as the history item of the
     event that recorded it, keyed by that ``evt_`` id. Such a record counts as sent when that item
     carried its recorded payload and no omission row withholds the record itself (a
-    ``not_recorded`` omission does not: the payload is all the ledger holds for it). An unreadable
-    record never counts.
+    ``not_recorded`` omission does not: the payload is all the ledger holds for it). Evidence with
+    a captured object never counts this way: its payload only describes bytes the reviewer needs
+    to see, so it counts only when its own excerpt was carried, whatever the omission rows say. An
+    unreadable record never counts.
     """
 
     extra: set[str] = set()
@@ -2991,6 +3007,7 @@ def sent_ledger_refs(
                 or ref in disclosure.withheld
                 or row.payload is None
                 or row.redacted
+                or getattr(row.payload, "captured_object_id", None) is not None
             ):
                 continue
             if str(row.source_event_id) in disclosure.payload_events:

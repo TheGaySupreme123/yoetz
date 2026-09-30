@@ -6843,8 +6843,12 @@ counts when it is the `source_ref` of a carried content item, or a part of a car
 captured evidence excerpt (an `evd_` reference linked to the lead excerpt that combines its bytes).
 A result or evidence record also counts when the history item of the event that recorded it was
 carried with its recorded payload, which is how records travel when recorded history is available.
-That does not apply when an omission row names the record for a reason other than `not_recorded`
-(the ledger holds nothing more readable than the payload, as for digest-only evidence). Mentions
+The payload's presence is read from the item's own content, never from omission rows, which the
+selection cap may drop. That does not apply when an omission row names the record for a reason
+other than `not_recorded` (for a record without a captured object, nothing more readable than the
+payload exists, as for digest-only evidence). Evidence with a captured object never counts through
+its recording event: it counts only when its own excerpt was carried, so bytes that were never
+resolved or were left out are never credited, whatever omission rows survive. Mentions
 in other items, other typed links, the citable-reference list and omission rows do not count, and
 a reference named by any omission row is excluded even when a structural item for it survived. The
 record holds typed ledger references only, ASCII-sorted, 1 to 576 of them: one source per case item

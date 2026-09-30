@@ -9,6 +9,7 @@ prove.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import cast
 
 from builders.policy_cases import (
@@ -255,10 +256,10 @@ def _sent_refs(case: SemanticCase, approved: set[str]) -> frozenset[str]:
     return refs
 
 
-def _blockers(included: frozenset[str]) -> tuple[str, ...]:
+def _blockers(included: frozenset[str], case: DeterministicCase | None = None) -> tuple[str, ...]:
     """What a completed reduced review that sent exactly *included* proves about ``fnd(1)``."""
 
-    case = _case()
+    case = _case() if case is None else case
     check = CheckRecordedPayload(
         mode=CheckMode.SEMANTIC_REQUIRED,
         policies=(PolicyVersion("work-integrity", "0.1.0"),),
@@ -403,3 +404,216 @@ def test_a_carried_multi_part_excerpt_carries_every_part_it_combines() -> None:
 
     assert carried() == frozenset({lead, part})
     assert carried(lead) == frozenset()
+
+
+def _history_case(evidence: EvidenceRecordedPayload) -> DeterministicCase:
+    """``_case`` with *evidence* as the repair, frozen the way production freezes it.
+
+    Recorded history is available, so results and evidence travel as the history items of the
+    events that recorded them, keyed by those ``evt_`` ids.
+    """
+
+    from yoetz.domain.events import EVIDENCE_SCHEMA_VERSION, encode_payload
+    from yoetz.kernel.deterministic_checks import FrozenHistoryEvent
+
+    base = _case()
+    projection = base.projection
+    case = make_case(
+        plans=projection.plans,
+        obligations=projection.obligations,
+        claims=projection.claims,
+        findings=projection.findings,
+        actions=projection.actions,
+        evidence={_REPAIR: evidence_record(evidence, 6)},
+        results=projection.results,
+        responses=projection.responses,
+        extra_refs=tuple(evt(900 + number) for number in range(8)),
+    )
+    rows = sorted(
+        (("action_recorded", "1.0.0", row) for row in case.projection.actions.values()),
+        key=lambda item: item[2].source_frontier,
+    )
+    rows += [("evidence_recorded", EVIDENCE_SCHEMA_VERSION, case.projection.evidence[_REPAIR])]
+    rows += [("result_recorded", "1.0.0", row) for row in case.projection.results.values()]
+    history = tuple(
+        FrozenHistoryEvent(
+            event_id=row.source_event_id,
+            schema_name=name,
+            schema_version=version,
+            ingestion_sequence=row.source_frontier,
+            occurred_at="2026-07-01T00:00:00.000Z",
+            accepted_at=None,
+            occurred_at_consistency=None,
+            payload_digest=row.payload_digest,
+            content_visibility="available",
+            payload=encode_payload(row.payload),  # type: ignore[arg-type]
+        )
+        for name, version, row in sorted(rows, key=lambda item: item[2].source_frontier)
+    )
+    return replace(case, history=history, history_availability="available")
+
+
+def _captured() -> EvidenceRecordedPayload:
+    """Repair evidence whose content is an observation-captured object."""
+
+    from yoetz.domain.events import (
+        EvidenceContentAvailability,
+        EvidenceDigestBinding,
+        EvidenceDigestProvenance,
+        EvidenceDigestSubject,
+    )
+    from yoetz.domain.values import object_id
+
+    return EvidenceRecordedPayload(
+        evidence_id=_REPAIR,
+        evidence_kind=EvidenceKind.OTHER,
+        strength=EvidenceImmutability.IMMUTABLE_SNAPSHOT,
+        observed_at=timestamp_from_string("2026-07-01T00:00:00.000Z"),
+        captured_object_id=object_id("obj_00000000-0000-4000-8000-000000000904"),
+        content_digest="sha256:" + "4" * 64,
+        description="Observation-captured test output bytes part=1/1",
+        digest_binding=EvidenceDigestBinding(
+            subject=EvidenceDigestSubject.BOUNDED_EXCERPT,
+            content_availability=EvidenceContentAvailability.CAPTURED,
+            byte_count=64,
+            provenance=EvidenceDigestProvenance.OBSERVATION_CAPTURED,
+        ),
+    )
+
+
+def _history_blockers(
+    case: DeterministicCase, selection: ReviewSelectionPolicy
+) -> tuple[SemanticCase, frozenset[str], frozenset[str], tuple[str, ...]]:
+    """Build, send and read the packet for *case*, then ask what it proves about ``fnd(1)``.
+
+    Returns the case, the history events that carried their payload, the sent ledger refs, and the
+    resolution blockers.
+    """
+
+    from yoetz.application.semantic_case import review_packet_disclosure, sent_ledger_refs
+
+    semantic = build_semantic_case(
+        case_id="cas_10000000-0000-4000-8000-000000000905",
+        frozen_case=case,
+        dependency_digest="sha256:" + "b" * 64,
+        findings=(),
+        review_context_profile=ReviewContextProfile.CUSTOM,
+        review_selection=selection,
+        policy_id="pvy_10000000-0000-4000-8000-000000000001",
+        policy_version="1",
+    )
+    disclosure = review_packet_disclosure(
+        semantic_case_to_prepared_payload(semantic, _offered(semantic))
+    )
+    assert disclosure is not None
+    sent = sent_ledger_refs(disclosure, case.projection)
+    return semantic, disclosure.payload_events, sent, _blockers(sent, case)
+
+
+def _selection(*, excerpts: bool, max_omissions: int) -> ReviewSelectionPolicy:
+    base = ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED)
+    return ReviewSelectionPolicy(
+        sections=base.sections,
+        excerpt_kinds=base.excerpt_kinds if excerpts else (),
+        relevance=base.relevance,
+        include_finding_prose=base.include_finding_prose,
+        include_exact_command_text=base.include_exact_command_text,
+        max_timeline_items=base.max_timeline_items,
+        max_assessments=base.max_assessments,
+        max_change_observations=base.max_change_observations,
+        max_excerpts=base.max_excerpts,
+        max_omissions=max_omissions,
+        max_excerpt_bytes=base.max_excerpt_bytes,
+        max_total_excerpt_bytes=base.max_total_excerpt_bytes,
+    )
+
+
+def test_captured_evidence_whose_bytes_were_never_resolved_is_not_credited() -> None:
+    """A captured repair with no resolved bytes gets a ``not_recorded`` omission (#904, A).
+
+    Its recording event travelled with its payload, but that payload only describes bytes the
+    reviewer never saw, so the record is not credited and the finding stays open.
+    """
+
+    case = _history_case(_captured())
+    assert case.history_availability == "available"
+    semantic, payload_events, sent, blockers = _history_blockers(
+        case, _selection(excerpts=True, max_omissions=64)
+    )
+    reasons = {row.reason for row in semantic.packet.omissions if row.subject_ref == _REPAIR}
+    assert reasons == {"not_recorded"}
+    assert str(evt(6)) in payload_events, "its recording event travelled with its payload"
+    assert _REPAIR not in sent
+    assert blockers == _OUTSIDE
+
+
+def test_captured_evidence_left_out_stays_open_even_when_its_omission_row_is_capped() -> None:
+    """With ``max_omissions=0`` no omission row says the excerpt was left out (#904, B).
+
+    Credit never depends on an omission row surviving the cap: captured evidence needs its own
+    carried excerpt.
+    """
+
+    case = _history_case(_captured())
+    semantic, payload_events, sent, blockers = _history_blockers(
+        case, _selection(excerpts=False, max_omissions=0)
+    )
+    assert semantic.packet.omissions == ()
+    assert not any(item.source_ref == _REPAIR for item in semantic.items)
+    assert str(evt(6)) in payload_events
+    assert _REPAIR not in sent
+    assert blockers == _OUTSIDE
+
+
+def test_recorded_evidence_carried_by_its_event_is_credited_without_omission_rows() -> None:
+    """Evidence whose payload is its content counts through its event whatever rows survive."""
+
+    evidence = EvidenceRecordedPayload(
+        _REPAIR,
+        EvidenceKind.TEST_RESULT,
+        EvidenceImmutability.METADATA_ONLY,
+        timestamp_from_string("2026-07-01T00:00:00.000Z"),
+        description="test output: 12 passed, offsets rejected when negative",
+    )
+    case = _history_case(evidence)
+    _semantic, payload_events, sent, blockers = _history_blockers(
+        case, _selection(excerpts=False, max_omissions=0)
+    )
+    assert str(evt(6)) in payload_events
+    assert _REPAIR in sent
+    assert blockers == ()
+
+
+def test_a_history_item_replaced_by_the_size_marker_carries_no_payload() -> None:
+    from yoetz.application.semantic_case import review_packet_disclosure
+    from yoetz.protocol.canonical import JsonValue, canonical_encode
+
+    event = str(evt(6))
+
+    def payload_events(content: dict[str, JsonValue]) -> frozenset[str]:
+        document: dict[str, JsonValue] = {
+            "schema": "yoetz.review-packet-case/1",
+            "frontier_refs": [event],
+            "items": [
+                {
+                    "item_id": f"history-{event}",
+                    "section": "timeline",
+                    "category": "evidence_excerpt",
+                    "source_ref": event,
+                    "content": canonical_encode(cast(JsonValue, content)).decode("utf-8"),
+                }
+            ],
+            "review_packet": {"omissions": []},
+        }
+        read = review_packet_disclosure(canonical_encode(cast(JsonValue, document)))
+        assert read is not None
+        return read.payload_events
+
+    assert payload_events({"event_id": event, "payload": {"evidence_id": str(_REPAIR)}}) == {event}
+    assert payload_events({"event_id": event, "kind": "evidence_recorded"}) == frozenset()
+    assert (
+        payload_events(
+            {"reason": "over_case_item_limit", "schema": "yoetz.bounded-content-omission/1"}
+        )
+        == frozenset()
+    )

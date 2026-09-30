@@ -821,13 +821,20 @@ a bounded scope. Its effect on resolution is now decided (interim step, by maint
   - it is a part of a carried multi-part captured evidence excerpt (an `evd_` reference linked to
     the lead excerpt whose bytes combine it), so any part may be cited;
   - it is a result or evidence record whose recording event travelled as a history item with its
-    recorded payload, which is how records travel when recorded history is available.
+    recorded payload, which is how records travel when recorded history is available. Whether the
+    payload travelled is read from the item's own content, never from omission rows, which the
+    selection cap may drop; an item replaced by the size-bound marker carries no payload. Evidence
+    with a captured object never counts this way. Its payload only describes bytes the reviewer
+    must see, so it counts only when its own excerpt was carried.
 
   A mention inside another item, any other typed link, the citable-reference list, or an omission
   row does not count. A reference that any omission row names is excluded even when a structural
   item for it survived. The third way does not apply when an omission row names the record itself
-  for any reason other than `not_recorded`. That reason means the ledger holds nothing more
-  readable for the record than its recorded payload, as for digest-only evidence. The field
+  for any reason other than `not_recorded`. For a record without a captured object, that reason
+  means the ledger holds nothing more readable than its recorded payload, as for digest-only
+  evidence. The builder also emits `not_recorded` for captured evidence whose bytes were not
+  resolved. The captured-object rule above keeps that case uncredited without a new omission
+  reason, because the omission vocabulary is part of the released outbound-case contract. The field
   appears only beside the recorded conclusion and the `semantic_reference_scope_reduced` code. It
   holds at most 576 references: one source per case item (256), the combined captured parts (64),
   and one record per carried history event.

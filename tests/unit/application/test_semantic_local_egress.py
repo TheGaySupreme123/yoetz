@@ -284,6 +284,13 @@ async def test_semantic_success_names_only_content_the_exact_prepared_packet_car
                         "source_ref": recorded_by,
                         "category": "command_metadata",
                         "linked_subject_refs": [recorded_by],
+                        # The item's own content carries the recording event's payload.
+                        "content": canonical_encode(
+                            cast(
+                                JsonValue,
+                                {"event_id": recorded_by, "payload": {"outcome": "success"}},
+                            )
+                        ).decode("utf-8"),
                     },
                 ],
                 "review_packet": {
