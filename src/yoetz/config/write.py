@@ -532,15 +532,15 @@ def render_config_toml(config: YoetzConfig) -> str:
             "max_findings": config.verification.max_findings,
         },
     )
-    _emit_table(
-        lines,
-        "observation",
-        {
-            "enabled": config.observation.enabled,
-            "semantic_advice_enabled": config.observation.semantic_advice_enabled,
-            "semantic_advice_min_interval_seconds": config.observation.semantic_advice_min_interval_seconds,
-        },
+    # An unset background-advice switch stays unset so the product default keeps applying; only
+    # an owner's explicit choice is persisted (#888).
+    observation: dict[str, object] = {"enabled": config.observation.enabled}
+    if config.observation.semantic_advice_enabled is not None:
+        observation["semantic_advice_enabled"] = config.observation.semantic_advice_enabled
+    observation["semantic_advice_min_interval_seconds"] = (
+        config.observation.semantic_advice_min_interval_seconds
     )
+    _emit_table(lines, "observation", observation)
     _emit_table(
         lines,
         "lineage",

@@ -760,6 +760,28 @@ retained usage and a usage-unknown count in status or diagnostics would need a b
 wire change and remain open on #923. The same service behavior applies to Codex, Claude Code and
 Cursor on macOS, Linux and Windows through WSL 2.
 
+### Background advice default on explicit-check routes (2026-09-30, issue #888)
+
+Background advice reviews only structural rule and gap codes between checks, while explicit
+AI-powered checks review the change with the full packet. `observation.semantic_advice_enabled`
+is therefore tri-state: unset means the product default, which is off wherever explicit
+AI-powered checks run (`verification.semantic` `required` or `optional`); an explicit `true` or
+`false` always wins. `background_advice_setting` resolves the effective switch and one closed
+reason: `owner_enabled`, `owner_disabled`, `explicit_checks_default`, `semantic_review_disabled`
+or `observation_disabled`. The service composes the background scheduler and dispatch only when
+it is enabled, and provider readiness (issue #923) still gates every build and dispatch. The
+config writer persists the setting only when the owner set it, so a written default never turns
+into an apparent owner choice; configurations written by 0.3 development builds between #890 and
+this change carry an explicit `true` and keep advice on until that line is removed.
+`yoetz provider status` (`background_advice`), `yoetz setup status --next`
+(`facts.background_advice`) and the terminal interface status layer show the effective state and
+reason with fixed text; setting `true` is the way back. The setup wizard reports
+`semantic_advice_ready` only when the provider is ready and background advice is on, with the note
+`background_advice_off:<reason>` otherwise. This records the recommended option B of
+#923 pending the owner's recorded choice on #888; a dedicated advice purpose and prompt (option
+A) remains open. The same resolution applies to Codex, Claude Code and Cursor on macOS, Linux and
+Windows through WSL 2.
+
 ### Unassessable content and repair-first feedback (issue #885)
 
 The existing `insufficient_packet` judgment is the nonblocking outcome when missing content

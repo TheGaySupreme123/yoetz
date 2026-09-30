@@ -82,6 +82,21 @@ async def installation_readiness(project: Path, operation: SetupOperation) -> di
     return result
 
 
+def _background_advice() -> dict[str, JsonValue] | None:
+    """The configured background-advice switch and reason; unreadable config reports nothing."""
+
+    import os
+
+    from yoetz.cli.provider_status import background_advice_facts
+    from yoetz.config.load import load_config
+    from yoetz.config.models import ConfigError
+
+    try:
+        return background_advice_facts(load_config({}, os.environ, None))
+    except ConfigError, OSError, ValueError:
+        return None
+
+
 def setup_next(
     *,
     operation: SetupOperation,
@@ -103,6 +118,10 @@ def setup_next(
     facts = (
         {} if operation == "connection" else anyio.run(installation_readiness, project, operation)
     )
+    if operation != "connection":
+        advice = _background_advice()
+        if advice is not None:
+            facts["background_advice"] = advice
     arguments = cast(list[str] | None, facts.pop("arguments", None))
     reason = cast(SetupReadinessReason, str(facts.pop("reason", "ready")))
     selected_home: str | None = None
@@ -161,11 +180,15 @@ def setup_next(
         next_command=None if arguments is None else continuation(arguments, project=project),
         facts=facts,
     )
+    from yoetz.cli.provider_status import background_advice_human_line
+
+    advice_line = background_advice_human_line(facts.get("background_advice"))
     typer.echo(
         report.model_dump_json(by_alias=True)
         if json_output
         else (
             reason.replace("_", " ")
+            + ("" if advice_line is None else "\nBackground AI-powered advice: " + advice_line)
             + (
                 "\nNext: " + report.next_command
                 if report.next_command

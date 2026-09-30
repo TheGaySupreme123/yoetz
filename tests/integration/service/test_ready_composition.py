@@ -31,7 +31,7 @@ from yoetz.adapters.sqlite.migrations import (
     initialize_catalog,
 )
 from yoetz.application.service import ClientProjectionContext, ControlProjectionBinding
-from yoetz.config.models import VerificationConfig, YoetzConfig
+from yoetz.config.models import ObservationConfig, VerificationConfig, YoetzConfig
 from yoetz.config.write import fireworks_provider
 from yoetz.domain.host_lineage import host_lineage_from_payload
 from yoetz.domain.observation import (
@@ -2998,11 +2998,13 @@ async def test_background_advice_is_admitted_only_while_a_provider_is_usable(
     initialize = memory.capture(SecretPurpose.VAULT_INITIALIZE, bytearray(b"correct horse battery"))
     await vault.initialize_passphrase(initialize, "sha256:" + "f" * 64)
     provider = fireworks_provider(model="accounts/fireworks/models/minimax-m3")
-    # The benchmark's arm B: review required by default, nothing bound, local-only policy.
+    # The benchmark's arm B: review required by default, nothing bound, local-only policy. The
+    # owner has turned background advice on (#888 made it off by default on this route).
     config = YoetzConfig(
         profile="local-openai" if provider_bound else "strict-local",
         provider=provider if provider_bound else None,
         verification=VerificationConfig(semantic="required"),
+        observation=ObservationConfig(semantic_advice_enabled=True),
     )
     factory = build_ready_application_factory(
         lifecycle=lifecycle,
@@ -3134,6 +3136,78 @@ async def test_background_advice_is_admitted_only_while_a_provider_is_usable(
         assert rows() == [("pending", None)]
     finally:
         db.close()
+        if app is not None:
+            await app.close()
+        await vault.close()
+        memory.close()
+        await lifecycle.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("semantic", "chosen", "scheduled"),
+    [("required", None, False), ("optional", None, False), ("required", True, True)],
+)
+async def test_background_advice_is_off_by_default_where_explicit_checks_run(
+    tmp_path: Path,
+    semantic: str,
+    chosen: bool | None,
+    scheduled: bool,
+) -> None:
+    """Issue #888 (option B of #923): explicit AI-powered checks carry the review.
+
+    Without an owner choice the composed service wires neither the background scheduler nor
+    its dispatch, even with a bound provider; an explicit ``true`` turns it back on.
+    """
+
+    tmp_path.chmod(0o700)
+    clock = _Clock()
+    memory = LocalSecretMemory()
+    lifecycle = ServiceLifecycle(
+        clock,
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "d" * 64,
+        instance_id=_INSTANCE_ID,
+    )
+    await lifecycle.acquire_singleton()
+    await lifecycle.transition(ServiceState.LOCKED)
+    vault = VaultService(
+        installation_id=_INSTALLATION_ID,
+        service_generation=1,
+        mode=VaultMode.UNINITIALIZED,
+        secret_memory=memory,
+        clock=clock,
+        vault_store_factory=lambda: EncryptedVaultStore(tmp_path / "vault"),
+        pristine_state_digest="sha256:" + "e" * 64,
+    )
+    initialize = memory.capture(SecretPurpose.VAULT_INITIALIZE, bytearray(b"correct horse battery"))
+    await vault.initialize_passphrase(initialize, "sha256:" + "f" * 64)
+    config = YoetzConfig(
+        profile="local-openai",
+        provider=fireworks_provider(model="accounts/fireworks/models/minimax-m3"),
+        verification=VerificationConfig(semantic=cast(Any, semantic)),
+        observation=ObservationConfig(semantic_advice_enabled=chosen),
+    )
+    factory = build_ready_application_factory(
+        lifecycle=lifecycle,
+        vault=vault,
+        config=config,
+        paths=_Paths(tmp_path),
+        clock=clock,
+        secret_memory=memory,
+        diagnostics=_Diagnostics(),
+    )
+    app = None
+    try:
+        context = await factory.context_provider(1, vault.generation)
+        assert context.rediscover_pending_verification is not None
+        coordinator: object = getattr(context.rediscover_pending_verification, "__self__")
+        scheduler = getattr(coordinator, "advice_context_builder").semantic_scheduler
+        dispatch = getattr(coordinator, "advice_semantic_dispatch")
+        app = await factory.open(context)
+        assert (scheduler is not None) is scheduled
+        assert (dispatch is not None) is scheduled
+    finally:
         if app is not None:
             await app.close()
         await vault.close()

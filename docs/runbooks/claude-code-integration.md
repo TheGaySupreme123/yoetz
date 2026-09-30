@@ -1387,7 +1387,12 @@ shared controls.
 
 ## Background semantic advice controls
 
-Background review uses the shared service's routine budget, condition deduplication and durable
+Background review is off by default wherever explicit AI-powered checks run
+(`[verification] semantic` `required` or `optional`); an explicit `[observation]
+semantic_advice_enabled` always wins, and `true` turns it back on (issue #888). `yoetz provider
+status` (`background_advice`), `yoetz setup status --next` (`facts.background_advice`) and the
+terminal interface status view show the effective state and its closed reason. When on,
+background review uses the shared service's routine budget, condition deduplication and durable
 per-session interval on macOS, Linux and Windows through WSL 2. See
 [background review frequency](../usage/providers.md#background-review-frequency) for disable,
 resume and interval settings. The setting gates recovered pending work as well as new scheduling;

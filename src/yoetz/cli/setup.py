@@ -2883,11 +2883,22 @@ async def run_setup_wizard(
     )
     if semantic_status is not None:
         semantic_ready = semantic_status.get("semantic_ready") is True
-        readiness["semantic_advice_ready"] = semantic_ready
+        # Background advice is its own switch, off by default where explicit checks run (#888):
+        # a ready provider alone is not ready background advice.
+        advice = semantic_status.get("background_advice")
+        advice_facts: Mapping[str, JsonValue] = (
+            cast(Mapping[str, JsonValue], advice) if isinstance(advice, Mapping) else {}
+        )
+        advice_on = advice_facts.get("enabled") is True
+        advice_reason: JsonValue = advice_facts.get("reason")
+        readiness["semantic_advice_ready"] = semantic_ready and advice_on
         readiness["semantic_advice_note"] = (
-            "configured_and_composed; live_provider_dispatch_not_tested"
-            if semantic_ready
-            else "semantic_configuration_incomplete"
+            "semantic_configuration_incomplete"
+            if not semantic_ready
+            else "configured_and_composed; live_provider_dispatch_not_tested"
+            if advice_on
+            else "background_advice_off:"
+            + (advice_reason if type(advice_reason) is str else "unknown")
         )
     recommendations = await _refresh_setup_recommendations(
         binary=chosen,

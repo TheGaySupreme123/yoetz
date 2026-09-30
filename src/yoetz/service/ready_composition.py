@@ -157,6 +157,7 @@ from yoetz.config.models import (
     ExternalRuntimeProfileConfig,
     ProviderProfileConfig,
     YoetzConfig,
+    background_advice_setting,
     fallback_external_endpoint,
     primary_external_endpoint,
 )
@@ -5679,14 +5680,11 @@ async def provide_service_ready_context(
     advice_semantic_supervisor = ObservationAdviceSemanticSupervisor(
         service_generation=service_generation
     )
-    # The owner's switches decide whether background advice exists at all; provider readiness is
-    # re-read per build and per dispatch (#923). A credential or channel change takes effect on
-    # the next observation; a binding change recomposes the service, never the host session.
-    advice_semantic_enabled = (
-        semantic_configured
-        and config.observation.enabled
-        and config.observation.semantic_advice_enabled
-    )
+    # The owner's switches decide whether background advice exists at all: off by default where
+    # explicit AI-powered checks run, an explicit setting always wins (#888). Provider readiness
+    # is re-read per build and per dispatch (#923). A credential or channel change takes effect
+    # on the next observation; a binding change recomposes the service, never the host session.
+    advice_semantic_enabled = background_advice_setting(config).enabled
 
     async def _advice_semantic_route_ready(yoetz_session_id: str) -> bool:
         # The same predicate the dispatch uses; lets an ``authorization_missing`` row retry
