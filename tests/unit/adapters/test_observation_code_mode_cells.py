@@ -14,7 +14,9 @@ from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.domain.observation import (
     ObservationCursor,
     ObservationEnvelope,
+    ObservationGapCode,
     ObservationSource,
+    ObservationStatusQuery,
 )
 from yoetz.domain.values import JsonObject, Timestamp
 
@@ -115,15 +117,102 @@ def test_a_new_session_past_the_tracking_bound_keeps_hooked_cells_local(tmp_path
     assert store.codex_tool_hook_count(workspace, _session(2)) == 1
 
 
+def test_an_evicted_session_reconciled_before_its_nested_hook_keeps_the_cell_local(
+    tmp_path: Path,
+) -> None:
+    """A forgotten hook session never turns its next cell into a second record (#917).
+
+    Session A was hooked, then 256 other sessions' tool hooks evicted it from the
+    bounded map. A manual reconcile reads A's next ``exec`` cell before its nested
+    hook is admitted; the nested hook then arrives and the output is reconciled.
+    The nested hook rows are the cell's record, so neither wrapper row is delivered.
+    """
+
+    home = tmp_path / "codex-home"
+    sessions = home / "sessions"
+    sessions.mkdir(parents=True)
+    home.chmod(0o700)
+    session_id = "019f9b27-c1de-7a61-9c5e-5d0b89759418"
+    rollout = sessions / f"rollout-{session_id}.jsonl"
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    store, workspace = _store(state)
+    session = store.session_commitment(session_id)
+    store.bind_session(workspace, session)
+    store.ingest(_tool_hook(session, "call_earlier"), workspace_commitment=workspace)
+    with store.batched(workspace):
+        for index in range(1, 257):
+            store.ingest(_tool_hook(_session(index), "call-1"), workspace_commitment=workspace)
+    assert store.codex_tool_hook_count(workspace, session) == 0
+
+    def reconcile() -> None:
+        reconcile_session_stream(
+            store,
+            workspace_commitment=workspace,
+            session_commitment=session,
+            codex_session_id=session_id,
+            locator=CodexSessionStreamLocator(home),
+        )
+
+    # ``yoetz observe reconcile`` reads the cell's call before its nested hook fires.
+    rollout.write_bytes(encode_lines(session_meta(session_id=session_id), _cell_row("call_cell")))
+    reconcile()
+    store.ingest(_tool_hook(session, "call_nested"), workspace_commitment=workspace)
+    store.ingest(_tool_hook(session, "call_nested", "PostToolUse"), workspace_commitment=workspace)
+    with rollout.open("ab") as handle:
+        handle.write(encode_lines(_cell_row("call_cell", output=True)))
+    reconcile()
+
+    wrappers = [
+        row.envelope
+        for row in store.list_pending_outbox_rows(workspace)
+        if row.envelope.source is ObservationSource.CODEX_SESSION_STREAM
+        and row.envelope.structural_payload.get("action")
+        in {"custom_tool_call", "custom_tool_call_output"}
+    ]
+    assert wrappers == []
+
+
+def test_a_cell_read_before_the_sessions_first_tool_hook_follows_its_own_hooks(
+    tmp_path: Path,
+) -> None:
+    """An early read of a session's first cell is decided by that cell's own hooks."""
+
+    store, workspace = _store(tmp_path)
+    session = _session(11)
+    store.begin_code_mode_cell(workspace, session, "call_first")
+    store.ingest(_tool_hook(session, "call-a"), workspace_commitment=workspace)
+    assert store.finish_code_mode_cell(workspace, session, "call_first") is True
+
+
+def test_a_session_forgotten_and_rehooked_while_its_cell_is_open_keeps_the_cell_local(
+    tmp_path: Path,
+) -> None:
+    """Eviction resets a session's hook count; a later nested hook still counts for the cell."""
+
+    store, workspace = _store(tmp_path)
+    session = _session(12)
+    for call in ("call-a", "call-b", "call-c"):
+        store.ingest(_tool_hook(session, call), workspace_commitment=workspace)
+    store.begin_code_mode_cell(workspace, session, "call_open")
+    with store.batched(workspace):
+        for index in range(1_000, 1_256):
+            store.ingest(_tool_hook(_session(index), "call-1"), workspace_commitment=workspace)
+    assert store.codex_tool_hook_count(workspace, session) == 0
+    store.ingest(_tool_hook(session, "call-nested"), workspace_commitment=workspace)
+    assert store.finish_code_mode_cell(workspace, session, "call_open") is True
+
+
 def test_a_cell_is_local_only_when_its_own_nested_tool_hooks_fired(tmp_path: Path) -> None:
     store, workspace = _store(tmp_path)
     session = _session(9)
-    # No tool hook yet in this session: the cell keeps its full record.
-    assert store.begin_code_mode_cell(workspace, session, "call_first") is False
-    store.ingest(_tool_hook(session, "call-a"), workspace_commitment=workspace)
+    # No tool hook has fired in this session yet: a call is still held, and a
+    # cell whose tools fire no hook is recorded through its output.
+    assert store.begin_code_mode_cell(workspace, session, "call_first") is True
     assert store.finish_code_mode_cell(workspace, session, "call_first") is False
 
-    # A hooked cell: the pre is held and the output stays local.
+    # A hooked cell: the call is held and the output stays local.
+    store.ingest(_tool_hook(session, "call-a"), workspace_commitment=workspace)
     assert store.begin_code_mode_cell(workspace, session, "call_hooked") is True
     store.ingest(_tool_hook(session, "call-a", "PostToolUse"), workspace_commitment=workspace)
     assert store.finish_code_mode_cell(workspace, session, "call_hooked") is True
@@ -173,3 +262,37 @@ def test_delivered_notices_do_not_exhaust_new_scope_notices(tmp_path: Path) -> N
         source_identity="hook:orphan-256-again",
     )
     assert store.peek_unpaired_notice(workspace, session) is None
+
+
+def test_a_forgotten_delivered_scope_is_announced_at_most_once_more(tmp_path: Path) -> None:
+    """The notice map's bound is the documented one: beyond it a scope repeats once."""
+
+    store, workspace = _store(tmp_path)
+    session = _session(4)
+
+    def orphan(generation: int, tag: str) -> None:
+        store.note_unpaired_event(
+            workspace,
+            source=ObservationSource.CODEX_HOOK,
+            session_commitment=session,
+            source_generation=generation,
+            source_identity=f"hook:orphan-{generation}-{tag}",
+        )
+
+    with store.batched(workspace):
+        for generation in range(1, 258):
+            orphan(generation, "first")
+            notice = store.peek_unpaired_notice(workspace, session)
+            assert notice is not None and notice.source_generation == generation
+            store.commit_unpaired_notice_delivery(workspace, notice.lane)
+    # Scope 1 was the oldest delivered notice, forgotten to admit scope 257.
+    orphan(1, "again")
+    repeated = store.peek_unpaired_notice(workspace, session)
+    assert repeated is not None and repeated.source_generation == 1
+    store.commit_unpaired_notice_delivery(workspace, repeated.lane)
+    # Retained again, it is not announced a third time.
+    orphan(1, "third")
+    assert store.peek_unpaired_notice(workspace, session) is None
+    # The aggregate gap stays disclosed throughout.
+    gaps = store.status(ObservationStatusQuery(workspace)).gaps
+    assert ObservationGapCode.UNPAIRED_EVENT.value in gaps

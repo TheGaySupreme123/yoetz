@@ -1788,11 +1788,11 @@ def _code_mode_cell_held(
 ) -> bool:
     """Whether one code-mode ``exec`` cell row stays in the local store only (#917).
 
-    The decision is per cell: its call is held once Codex tool hooks fire in the
-    session, and its output stays local only when tool hooks fired after the
-    call was read, so a cell whose tools fire no hook keeps its record. A store
-    without the seams, an unreadable one, or a row without a call id answers
-    ``False`` so the row is delivered as before.
+    The decision is per cell: its call is always held, and its output stays
+    local only when a tool hook of the session was ingested after the call was
+    read, so a cell whose tools fire no hook keeps its record through its
+    output. A store without the seams, an unreadable one, or a row without a
+    call id answers ``False`` so the row is delivered as before.
     """
 
     if not _code_mode_cell_wrapper(structural):

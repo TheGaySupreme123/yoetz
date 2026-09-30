@@ -1255,14 +1255,15 @@ class _GapState:
 class _CodeModeCell:
     """Tool-hook bookkeeping for one Codex code-mode ``exec`` cell (#917).
 
-    ``hooks_at_start`` is the session's tool-hook count when the stream read the
-    cell's call. The cell's own output is kept local only when that pre was held
-    and further tool hooks fired before the output; the decision, once made, is
-    replayed unchanged.
+    ``hook_clock_at_start`` is the store's tool-hook clock when the stream read
+    the cell's call, which is always held. The cell's output is kept local only
+    when a tool hook of the same session fired after that read; the decision,
+    once made, is replayed unchanged. A clock rather than a per-session count
+    keeps the evidence valid when the bounded session map forgets and relearns
+    the session while the cell is open.
     """
 
-    hooks_at_start: int
-    pre_withheld: bool
+    hook_clock_at_start: int
     output_local: bool | None
     touched: int
 
@@ -1285,8 +1286,11 @@ class UnpairedScopeNotice:
 
     A scope is one (source, host session, source generation) lane that has at
     least one paired-profile orphan post. The notice is informational only: it
-    is never a finding, needs no response, and a delivered scope is never
-    announced again, across restart and resume.
+    is never a finding and needs no response. A delivered scope is not announced
+    again, across restart and resume, while it is retained; the bounded map
+    forgets the oldest delivered scope to admit a new one, so only a scope older
+    than 256 newer scopes can be announced a second time (the aggregate gap stays
+    disclosed either way).
     """
 
     lane: str
@@ -1379,16 +1383,15 @@ def _code_mode_cells_from_json(raw: object) -> dict[str, _CodeModeCell]:
         if type(key) is not str or not key or not isinstance(value, Mapping):
             continue
         entry = cast(Mapping[str, object], value)
-        withheld = entry.get("pre_withheld")
+        start = entry.get("hook_clock_at_start")
         local = entry.get("output_local")
-        if type(withheld) is not bool or (local is not None and type(local) is not bool):
+        if (
+            type(start) is not int
+            or not 0 <= start <= _MAX_SAFE_INTEGER
+            or (local is not None and type(local) is not bool)
+        ):
             continue
-        cells[key] = _CodeModeCell(
-            _bounded_counter(entry.get("hooks_at_start")),
-            withheld,
-            local,
-            _bounded_counter(entry.get("touched")),
-        )
+        cells[key] = _CodeModeCell(start, local, _bounded_counter(entry.get("touched")))
     return dict(
         sorted(cells.items(), key=lambda item: item[1].touched)[-_MAX_CODEX_TOOL_HOOK_ENTRIES:]
     )
@@ -5048,7 +5051,10 @@ class LocalObservationStore:
             return min(pending, key=lambda notice: (notice.ordinal, notice.lane), default=None)
 
     def commit_unpaired_notice_delivery(self, workspace: str, lane: str) -> None:
-        """Mark one notice delivered after its bytes reached the host; it never repeats."""
+        """Mark one notice delivered after its bytes reached the host.
+
+        A delivered notice is not repeated while the bounded map retains it.
+        """
 
         with self._lock:
             state = self._load(workspace)
@@ -5787,8 +5793,10 @@ class LocalObservationStore:
         """Count one Codex ``PreToolUse``/``PostToolUse`` hook for a host session (#917).
 
         Lifecycle hooks do not count: they are registered even when no tool hook
-        fires. The bounded map forgets the least recently active session, never
-        the new one; a forgotten session only makes its later cells deliverable.
+        fires. Each entry also stamps the store's tool-hook clock, which is what
+        decides a code-mode cell. The bounded map forgets the least recently
+        active session, never the new one; a forgotten session relearns a fresh
+        stamp from its next tool hook, so an open cell still sees that hook.
         """
 
         assert state.codex_tool_hooks is not None
@@ -5813,31 +5821,32 @@ class LocalObservationStore:
     def begin_code_mode_cell(self, workspace: str, session_commitment: str, call_id: str) -> bool:
         """Note that the stream read a code-mode ``exec`` cell's call; return whether to hold it.
 
-        The call is held (kept local) when Codex tool hooks have already fired
-        in this session, so a hooked cell adds no second action. The first
-        answer for a cell is durable and replayed unchanged (#917).
+        The call is always held (kept local): whether the cell's nested calls
+        are hook-recorded is only known once its output is read, and an early
+        answer from the session's past would be irreversible. The read position
+        is durable and replayed unchanged (#917).
         """
 
         with self._lock:
             state = self._load(workspace)
             assert state.code_mode_cells is not None
             key = _code_mode_cell_key(session_commitment, call_id)
-            current = state.code_mode_cells.get(key)
-            if current is not None:
-                return current.pre_withheld
-            count = (state.codex_tool_hooks or {}).get(session_commitment, (0, 0))[0]
-            self._remember_code_mode_cell(state, key, _CodeModeCell(count, count > 0, None, 0))
+            if key in state.code_mode_cells:
+                return True
+            self._remember_code_mode_cell(
+                state, key, _CodeModeCell(state.codex_tool_hook_clock, None, 0)
+            )
             self._save(workspace, state)
-            return count > 0
+            return True
 
     def finish_code_mode_cell(self, workspace: str, session_commitment: str, call_id: str) -> bool:
         """Return whether a code-mode cell's output stays local (#917).
 
-        It stays local only when the cell's call was held and at least one
-        Codex tool hook fired in this session after the stream read that call:
-        the nested hook rows are then the cell's record. Otherwise the output is
-        delivered, so a cell whose tools fire no hook keeps its record. An
-        output whose call was never noted is delivered.
+        It stays local only when at least one Codex tool hook fired in this
+        session after the stream read the cell's call: the nested hook rows are
+        then the cell's record. Otherwise the output is delivered and records the
+        cell, so a cell whose tools fire no hook keeps its record. An output
+        whose call was never noted is delivered.
         """
 
         with self._lock:
@@ -5849,8 +5858,8 @@ class LocalObservationStore:
                 return False
             if current.output_local is not None:
                 return current.output_local
-            count = (state.codex_tool_hooks or {}).get(session_commitment, (0, 0))[0]
-            local = current.pre_withheld and count > current.hooks_at_start
+            last_hook = (state.codex_tool_hooks or {}).get(session_commitment, (0, 0))[1]
+            local = last_hook > current.hook_clock_at_start
             self._remember_code_mode_cell(
                 state, key, dataclasses.replace(current, output_local=local)
             )
@@ -11167,8 +11176,7 @@ class LocalObservationStore:
                 {
                     key: JsonObject(
                         {
-                            "hooks_at_start": cell.hooks_at_start,
-                            "pre_withheld": cell.pre_withheld,
+                            "hook_clock_at_start": cell.hook_clock_at_start,
                             "output_local": cell.output_local,
                             "touched": cell.touched,
                         }

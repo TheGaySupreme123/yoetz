@@ -4925,22 +4925,27 @@ reattach resolves to the committed operation. A pre committed before this change
 `pre-event:` identity and its operation digest, so its redelivery replays that operation and a
 call spanning the upgrade keeps its historical second action instead of a third; history is never
 rewritten. A Codex code-mode `exec` cell (the rollout `custom_tool_call` named `exec` and its
-output) is a container that fires no hook, and the session-stream reader decides per cell. It keeps
-the cell's call row local once Codex tool hooks (`PreToolUse`/`PostToolUse`, not lifecycle hooks)
-have fired for the host session, and keeps the cell's output local too only when a further tool
-hook fired after it read that call: the nested calls' own hook rows are then the ledger record of
-the cell. Otherwise it delivers the output, which records the cell as its own action and result, so
-a cell whose tools fire no hook (only `tools.update_plan`, for example) is recorded even after other
-cells were hooked. Each cell's decision is durable and replayed. Per-session tool-hook counts and
-per-cell decisions are bounded at 256 entries each; a full map forgets the least recently active
-entry, which can only make that session's later cells, or that cell's output, deliverable. Limits
-that remain disclosed: a cell that mixes hooked and unhooked tools stays local, so its unhooked
-tool is not recorded; the decision follows when the reader sees the cell's rows relative to tool
-hook ingestion, so a hooked cell whose call is read before any tool hook of the session fired, or
-only after all of its own nested hooks fired, keeps its own action beside its nested calls (a
-second record, never a loss), while a tool hook that lands while an unhooked cell runs (a late
-asynchronous hook, for example) can still keep that cell local; and a retained wrapper counts in
-the local `observed_count` without an admitted, summarized or intentionally omitted bucket. The currently
+output) is a container that fires no hook, and the session-stream reader decides per cell. It
+always keeps the cell's call row local, because whether the nested calls are hook-recorded is known
+only later, and keeps the cell's output local too only when a Codex tool hook
+(`PreToolUse`/`PostToolUse`, not lifecycle hooks) of the same host session was ingested after it
+read that call: the nested calls' own hook rows are then the ledger record of the cell. Otherwise it
+delivers the output, which records the cell as its own action and result (the held call row adds
+only content-free metadata), so a cell whose tools fire no hook (only `tools.update_plan`, for
+example) is recorded whether or not other cells were hooked. Each cell's decision is durable and
+replayed. It compares ingestion order on a store-wide tool-hook clock rather than the session's
+earlier hook history, so a read of the call before its nested hook (a manual `yoetz observe
+reconcile`, the session's first cell, or a session the bounded map forgot) still keeps a hooked
+cell local. Per-session tool-hook stamps and per-cell decisions are bounded at 256 entries each; a
+full map forgets the least recently active entry. Limits that remain disclosed: a cell that mixes
+hooked and unhooked tools stays local, so its unhooked tool is not recorded; a hooked cell whose call
+is read only after all of its own nested hooks were ingested, or whose cell entry or session stamp
+the bounded maps forget before its output (256 more recent entries in between), keeps its own action
+beside its nested calls (a second record, never a loss); a tool hook that lands while an unhooked
+cell runs (a late asynchronous hook, for example) can still keep that cell local; a cell whose
+output never reaches the rollout (an interrupted cell) keeps its call local and adds no record of
+its own; and a retained wrapper counts in the local `observed_count` without an admitted,
+summarized or intentionally omitted bucket. The currently
 installed Claude and Cursor native profiles are post-only carriers: their post observations never
 diagnose a missing pre-event. A post with an actual tool-call identity, such as Claude's
 `tool_use_id`, can materialize an observed action/result pair with a distinct post-only action
