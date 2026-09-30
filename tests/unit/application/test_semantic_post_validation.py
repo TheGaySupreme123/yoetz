@@ -689,7 +689,8 @@ def test_a_restatement_contradicts_an_explicit_fixed_and_leaves_terminal_items_a
     )
     assert _rulings(contradicted) == [(str(fnd(1)), "unassessable", ())]
     assert contradicted.restatements_suppressed == 1
-    assert contradicted.verdicts_unsupported == 1
+    # R3: the contradicted ruling is set aside on its own item, not an unsupported-ruling gap.
+    assert (contradicted.verdicts_unsupported, contradicted.verdicts_set_aside) == (0, 1)
 
     not_done = ResponseRecordedPayload(
         finding_id=fnd(1),
@@ -748,3 +749,46 @@ def test_a_hidden_source_claim_is_rejected_before_any_restatement_is_recorded() 
     assert review.rejected_by_reason == ((SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM, 1),)
     assert review.restatements_suppressed == 0
     assert review.verdicts == ()
+
+
+def test_a_ruling_on_a_final_item_never_raises_the_gap_that_blocks_its_siblings() -> None:
+    """R3: a ruling on an ``acknowledged_not_done`` item is set aside as a diagnostic only.
+
+    Since unsupported rulings block every unruled open AI-powered finding on the check, counting
+    it there would stall the siblings for no honesty gain. A ruling on an unknown target still
+    counts as unsupported.
+    """
+
+    case = _dialogue_case()
+    not_done = ResponseRecordedPayload(
+        finding_id=fnd(2),
+        finding_frontier=FRONTIER,
+        disposition=ResponseDisposition.ACKNOWLEDGED_NOT_DONE,
+        reason="The index is unreachable from this sandbox; out of scope here.",
+    )
+    final = replace(
+        case,
+        projection=replace(
+            case.projection,
+            responses={**case.projection.responses, fnd(2): record(not_done, 8)},
+        ),
+    )
+    judgment = SemanticJudgment(
+        "no_material_discrepancy",
+        (),
+        (_verdict(1, "fixed", str(res(2))), _verdict(2, "fixed", str(res(2)))),
+    )
+    review = validate_semantic_judgment(
+        final, (), judgment, _provenance(), expected_frontier=final.frontier
+    )
+    assert _rulings(review) == [(str(fnd(1)), "fixed", (str(res(2)),))]
+    assert (review.verdicts_unsupported, review.verdicts_set_aside) == (0, 1)
+
+    unknown = validate_semantic_judgment(
+        final,
+        (),
+        SemanticJudgment("no_material_discrepancy", (), (_verdict(9, "fixed", str(res(2))),)),
+        _provenance(),
+        expected_frontier=final.frontier,
+    )
+    assert (unknown.verdicts_unsupported, unknown.verdicts_set_aside) == (1, 0)

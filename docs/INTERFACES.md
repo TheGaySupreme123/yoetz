@@ -6962,7 +6962,10 @@ the optional `check_recorded` `1.3.0` field `prior_finding_verdicts` (`{finding_
 cited_refs}`, 1–8, ASCII-sorted by finding id, never the note; unreleased 1.3.0 extended in place),
 present only when at least one ruling was admitted, so a check without rulings keeps its bytes.
 `semantic_prior_verdicts_unsupported` discloses dropped or reduced rulings and, like
-`semantic_prior_findings_over_limit`, is tolerated by both proof classes. Tolerated means they never veto
+`semantic_prior_findings_over_limit`, is tolerated by both proof classes. A ruling on an item that
+is already final (`verified_resolved`, `acknowledged_not_done`, `rejection_accepted`), or one the
+same review's restatement contradicts, is set aside instead: it adds no gap and is counted only as
+the `semantic_prior_rulings_set_aside` diagnostic. Tolerated means they never veto
 a ruled row: on a check carrying either code, a `semantic_model_derived` row the check recorded no
 ruling for gets the blocker `reviewer_assessment_incomplete`, because the review may not have
 seen it (section limit, envelope trimming, or a selection without the assessments section, which
@@ -7018,8 +7021,8 @@ Wire (all additive, unreleased versions changed in place):
 
 - `check-result` `1.3.0` success: optional `finding_checklist` `{attempt_budget, counts, items[],
   next}`. `attempt_budget` is a canonical string `1`–`50`; each item is `{finding_id, todo_state,
-  review_rounds}` (at most 100: the current actionable items, newest row per issue, in rank
-  order, final rows included; coverage limitations are not to-dos);
+  review_rounds}` (at most 100: the current actionable items, newest row per issue, open items
+  first and otherwise in rank order, final rows included; coverage limitations are not to-dos);
   `next` is `decide_at_budget` (an open item reached the budget: repair with new evidence or
   respond `acknowledged_not_done`), `work_open_findings`, or `request_receipt`. It is current
   projection context attached after the commit, like advisory notes, and is omitted when that read
@@ -7057,4 +7060,6 @@ Wire (all additive, unreleased versions changed in place):
 - MCP text summaries count items by state with closed tokens only (`to-do: open N (M at budget
   B), verified V, not done A, rejection accepted R; next: <token>`); the CLI renders
   `[ ] F-1 fnd_… open (2/5)`, `[x]` verified, `[~]` not done, `[-]` rejection accepted, and one
-  closed "Next:" sentence. The TUI keeps its counts and does not render per-item states yet.
+  closed "Next:" sentence, plus a `Counts:` line from the check's whole-list counts and `Not
+  listed: K` when the list leaves items out. The status findings summary counts actionable rows
+  on the page only. The TUI keeps its counts and does not render per-item states yet.

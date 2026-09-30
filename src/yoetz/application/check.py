@@ -238,6 +238,9 @@ class SemanticJudgmentReview:
     verdicts_unsupported: int = 0
     # Challenges that restated a recorded AI-powered finding with nothing newer (issue #905).
     restatements_suppressed: int = 0
+    # Rulings set aside without the unsupported gap: on a final item, or contradicted by the same
+    # review's restatement (issue #905). A diagnostic count only.
+    verdicts_set_aside: int = 0
 
     def __post_init__(self) -> None:
         if (
@@ -250,6 +253,8 @@ class SemanticJudgmentReview:
         if any(type(pair) is not tuple or len(pair) != 2 for pair in self.rejected_by_reason):
             raise _invalid("semantic_judgment_review_invalid")
         if type(self.restatements_suppressed) is not int or self.restatements_suppressed < 0:
+            raise _invalid("semantic_judgment_review_invalid")
+        if type(self.verdicts_set_aside) is not int or self.verdicts_set_aside < 0:
             raise _invalid("semantic_judgment_review_invalid")
         if any(
             reason not in _SEMANTIC_REJECTION_REASONS or type(count) is not int or count < 1
@@ -955,8 +960,9 @@ def build_finding_checklist(
 ) -> CheckFindingChecklist:
     """The current actionable findings as a to-do list, with whole-list counts (issue #905).
 
-    Items are the newest row per issue in rank order, at most 100; the counts and ``next`` cover
-    every current actionable item, so a long list can never read as done. Coverage limitations
+    Items are the newest row per issue, open items first and otherwise in rank order, at most
+    100; the counts and ``next`` cover every current actionable item, so a long list can never
+    read as done. Coverage limitations
     are not to-dos and never drive ``next``.
     """
 
@@ -975,11 +981,14 @@ def build_finding_checklist(
         if counts.open
         else "request_receipt"
     )
+    # Open items first (a stable sort keeps rank order inside each group), so a long history of
+    # closed rows can never push the remaining work out of the listed hundred.
+    listed = sorted(todos, key=lambda todo: todo.state is not FindingTodoState.OPEN)
     return CheckFindingChecklist(
         attempt_budget,
         tuple(
             CheckChecklistItem(str(todo.finding_id), todo.state.value, todo.review_rounds)
-            for todo in todos[:MAX_CHECKLIST_ITEMS]
+            for todo in listed[:MAX_CHECKLIST_ITEMS]
         ),
         next_step,
         counts,
@@ -2040,8 +2049,16 @@ def _admit_prior_verdicts(
     *,
     prior_finding_refs: frozenset[str] | None,
     citable_refs: frozenset[str] | None,
-) -> tuple[dict[str, PriorFindingVerdictRecord], int]:
+) -> tuple[dict[str, PriorFindingVerdictRecord], int, int]:
     """Fence the reviewer's per-finding rulings (issue #905).
+
+    Returns the admitted rulings, the count of unsupported ones (malformed, unknown or outside
+    the fence, unshown, trimmed, reduced or repeated; disclosed as
+    ``semantic_prior_verdicts_unsupported``), and the count set aside because their target is
+    already final (``verified_resolved``, ``acknowledged_not_done``, ``rejection_accepted``).
+    A final item is never re-reviewed, so a ruling on it says nothing about the review's other
+    findings and must not raise the gap that blocks every unruled open finding; it is only
+    counted as a diagnostic.
 
     A ruling is kept only for a readable, unresolved AI-powered finding inside the frozen fence;
     one on such a finding the packet's prior-findings section did not carry
@@ -2058,6 +2075,7 @@ def _admit_prior_verdicts(
 
     admitted: dict[str, PriorFindingVerdictRecord] = {}
     unsupported = judgment.prior_finding_verdicts_dropped
+    set_aside = 0
     projection = case.projection
     for verdict in judgment.prior_finding_verdicts:
         key = verdict.finding_id
@@ -2067,13 +2085,17 @@ def _admit_prior_verdicts(
             or record is None
             or record.payload is None
             or record.redacted
-            or record.resolved_by_check_event_id is not None
             or record.payload.origin is not FindingOrigin.SEMANTIC_MODEL_DERIVED
-            # A terminal item is never re-reviewed, so no ruling on it is admitted.
+        ):
+            unsupported += 1
+            continue
+        if (
+            record.resolved_by_check_event_id is not None
             or finding_todo_state(projection, record.payload.finding_id)
             is not FindingTodoState.OPEN
         ):
-            unsupported += 1
+            # A terminal item is never re-reviewed, so no ruling on it is admitted.
+            set_aside += 1
             continue
         cited = tuple(
             ref
@@ -2101,7 +2123,7 @@ def _admit_prior_verdicts(
                 admitted[key] = PriorFindingVerdictRecord(finding_id(key), "unassessable", ())
             continue
         admitted[key] = PriorFindingVerdictRecord(finding_id(key), kind, cited)
-    return admitted, unsupported
+    return admitted, unsupported, set_aside
 
 
 def semantic_capture_baseline_gaps(result: FinalSemanticEvaluation) -> frozenset[str]:
@@ -2162,11 +2184,18 @@ def validate_semantic_judgment(
         or provenance.reason is not SemanticReason.SEMANTIC_COMPLETED
     ):
         raise _rejected("semantic_judgment_invalid")
-    admitted, verdicts_unsupported = _admit_prior_verdicts(
+    admitted, verdicts_unsupported, verdicts_set_aside = _admit_prior_verdicts(
         case, judgment, prior_finding_refs=prior_finding_refs, citable_refs=citable_refs
     )
     if judgment.conclusion != "challenges_returned":
-        return SemanticJudgmentReview((), 0, (), _sorted_verdicts(admitted), verdicts_unsupported)
+        return SemanticJudgmentReview(
+            (),
+            0,
+            (),
+            _sorted_verdicts(admitted),
+            verdicts_unsupported,
+            verdicts_set_aside=verdicts_set_aside,
+        )
     coverage = case_coverage(case, semantic=True)
     if not capture_baseline_gaps <= SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS:
         raise _rejected("semantic_judgment_invalid")
@@ -2206,7 +2235,9 @@ def validate_semantic_judgment(
         restated = _restated_finding(case, challenge.finding_kind, refs)
         if restated is not None:
             suppressed, reduced = _record_restatement(case, admitted, restated, refs)
-            verdicts_unsupported += reduced
+            # A ruling the same review's restatement contradicts is recorded as unassessable on
+            # that item; it is not an unsupported ruling about the review's other findings.
+            verdicts_set_aside += reduced
             if suppressed:
                 # Seen again, suppressed (issue #905): the recorded item already carries this
                 # problem and its state; a second row would only restart it. Disclosed on the
@@ -2260,6 +2291,7 @@ def validate_semantic_judgment(
         _sorted_verdicts(admitted),
         verdicts_unsupported,
         restatements,
+        verdicts_set_aside,
     )
 
 
@@ -2517,6 +2549,7 @@ def _record_semantic_review_accounting(
             "semantic_candidates_accepted": len(review.candidates),
             "semantic_challenges_rejected": review.challenges_rejected,
             "semantic_restatements_suppressed": review.restatements_suppressed,
+            "semantic_prior_rulings_set_aside": review.verdicts_set_aside,
             "semantic_findings_selected": selected,
             "semantic_findings_suppressed": len(semantic) - selected,
         },

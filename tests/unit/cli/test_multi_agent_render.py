@@ -118,3 +118,44 @@ def test_check_renders_the_finding_checklist_with_structural_tokens_only() -> No
     assert "- [x] F-2 fnd_59000000-0000-4000-8000-000000000002 verified_resolved" in rendered
     assert "- [~] F-3 fnd_59000000-0000-4000-8000-000000000003 acknowledged_not_done" in rendered
     assert "Next: An open finding reached the review-round budget" in rendered
+    assert "Counts: open 1 (1 at budget), verified 1, not done 1, rejection accepted 0" in rendered
+    assert "Not listed:" not in rendered
+
+
+def test_check_checklist_says_how_many_items_the_list_leaves_out() -> None:
+    from yoetz.protocol.models import CheckFindingChecklistModel
+
+    checklist = CheckFindingChecklistModel.model_validate(
+        {
+            "attempt_budget": "5",
+            "counts": {
+                "acknowledged_not_done": "0",
+                "open": "1",
+                "open_at_budget": "0",
+                "rejection_accepted": "0",
+                "verified_resolved": "101",
+            },
+            "next": "work_open_findings",
+            "items": [
+                {
+                    "finding_id": "fnd_59000000-0000-4000-8000-000000000101",
+                    "todo_state": "open",
+                    "review_rounds": "0",
+                }
+            ],
+        }
+    )
+    result = CheckSuccessModel.model_construct(
+        verdict="action_required",
+        semantic_status="not_requested",
+        semantic_reason="deterministic_mode",
+        findings=(),
+        suppressed_count="0",
+        coverage=CoverageModel.model_construct(known_gaps=()),
+        children=None,
+        advisory_notes=(),
+        finding_checklist=checklist,
+    )
+    rendered = render_human_check(result)
+    assert "Counts: open 1, verified 101, not done 0, rejection accepted 0" in rendered
+    assert "Not listed: 101" in rendered

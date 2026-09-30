@@ -377,7 +377,9 @@ def test_the_checklist_counts_and_next_cover_items_past_the_listed_hundred() -> 
     rows[fnd(101)] = finding_record(late, 4)
     checklist = build_finding_checklist(_state(rows), attempt_budget=5)
     assert len(checklist.items) == 100
-    assert fnd(101) not in {item.finding_id for item in checklist.items}
+    # R2: the open item ranked last is listed first; a closed row makes room for it.
+    assert checklist.items[0].finding_id == fnd(101)
+    assert checklist.items[0].todo_state == "open"
     assert (checklist.counts.open, checklist.counts.verified_resolved) == (1, 100)
     assert checklist.next == "work_open_findings"
 

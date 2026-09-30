@@ -9,6 +9,7 @@ from typing import Final, cast
 
 from pydantic import BaseModel
 
+from yoetz.domain.findings import FINDING_KIND_TRAITS, FindingKind
 from yoetz.mcp.errors import VALIDATION_REASON_TOKENS
 from yoetz.protocol.canonical import JsonValue, ensure_canonical_value
 from yoetz.protocol.errors import PublicErrorCode, normalize_safe_details
@@ -132,11 +133,24 @@ _BUDGET: Final = re.compile(r"^(?:[1-9]|[1-4][0-9]|50)$", re.ASCII)
 _ROUNDS: Final = re.compile(r"^(?:0|[1-9][0-9]{0,17})$", re.ASCII)
 
 
+def _actionable_kind(kind: object) -> bool:
+    """Whether a row's kind is a to-do; unknown or malformed kinds never count."""
+
+    if type(kind) is not str:
+        return False
+    try:
+        return FINDING_KIND_TRAITS[FindingKind(kind)][1]
+    except ValueError:
+        return False
+
+
 def _checklist_clause(rows: object, budget: object, next_step: object | None) -> str:
     """Count findings by to-do state with closed tokens only (issue #905).
 
     Rows are re-read from the structured result; anything that is not an allowlisted state,
     a canonical count or a canonical budget is ignored, so no caller text reaches the summary.
+    Coverage-limitation kinds (and unknown kinds) are not to-dos and are not counted, matching the
+    check's own checklist counts.
     """
 
     if not isinstance(rows, list | tuple):
@@ -148,6 +162,8 @@ def _checklist_clause(rows: object, budget: object, next_step: object | None) ->
         if not isinstance(raw, Mapping):
             continue
         row = cast(Mapping[str, JsonValue], raw)
+        if not _actionable_kind(row.get("kind")):
+            continue
         state = row.get("todo_state")
         if type(state) is not str or state not in counts:
             continue

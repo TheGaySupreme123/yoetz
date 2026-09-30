@@ -204,6 +204,25 @@ def _render_checklist(checklist: CheckFindingChecklistModel) -> list[str]:
                 checklist.attempt_budget,
             )
         )
+    counts = checklist.counts
+    at_budget = int(counts.open_at_budget)
+    lines.append(
+        f"Counts: open {counts.open}"
+        + (f" ({at_budget} at budget)" if at_budget else "")
+        + f", verified {counts.verified_resolved}, not done {counts.acknowledged_not_done}, "
+        f"rejection accepted {counts.rejection_accepted}"
+    )
+    total = sum(
+        int(value)
+        for value in (
+            counts.open,
+            counts.verified_resolved,
+            counts.acknowledged_not_done,
+            counts.rejection_accepted,
+        )
+    )
+    if total > len(checklist.items):
+        lines.append(f"Not listed: {total - len(checklist.items)}")
     lines.append(f"Next: {_CHECKLIST_NEXT_TEXT[checklist.next]}")
     return lines
 

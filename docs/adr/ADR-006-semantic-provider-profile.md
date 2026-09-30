@@ -885,7 +885,9 @@ check whose packet left prior findings out (`semantic_prior_findings_over_limit`
 selection without the assessments section) or dropped a ruling
 (`semantic_prior_verdicts_unsupported`), every AI-powered finding the check recorded no ruling for
 is blocked as `reviewer_assessment_incomplete`. The codes stay disclosures, never vetoes on ruled
-findings.
+findings. A ruling on an item that is already final, or one contradicted by the same review's
+restatement, is set aside without that gap (a diagnostic count only), so it cannot stall the
+review's other open findings.
 
 **Terminal states: findings as a to-do list that ends.** Every recorded finding is in exactly one
 to-do state, read from replayed projection facts only (`kernel/finding_todo.py`, transition table
