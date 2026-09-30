@@ -15,7 +15,7 @@ from typing import cast
 
 import pytest
 
-from builders.policy_cases import clm, evt, finding_record, fnd, obl
+from builders.policy_cases import act, clm, evt, finding_record, fnd, obl
 from yoetz.domain.events import (
     CheckChangePartialFile,
     CheckChangeShownFiles,
@@ -2263,3 +2263,632 @@ def test_receipt_names_legacy_resolutions_boundedly_in_one_gap() -> None:
         text = render_receipt_human(receipt, markdown=markdown)
         assert "20 resolved AI-powered findings" in text
         assert str(fnd(1)) in text and "and 4 more" in text
+
+
+# Issue #904: a bounded AI-powered review selection is disclosure, not a veto on repair proof.
+_SCOPE_REDUCED = "semantic_reference_scope_reduced"
+# The agent-visible gaps of an ordinary semantic check in a long hook-observed session.
+_LONG_SESSION_REVIEW_GAPS = (
+    "content_unselected",
+    "evidence_content_digest_only",
+    "host_outcome_unavailable",
+    _SCOPE_REDUCED,
+    "unpaired_event",
+)
+
+
+def _assessed(check: CheckRecordedPayload) -> CheckRecordedPayload:
+    return replace(check, semantic_conclusion="no_material_discrepancy")
+
+
+def _in_view(*refs: str) -> tuple[str, ...]:
+    return tuple(sorted(set(refs), key=str.encode))
+
+
+# What an ordinary reduced packet carried: the finding's subject and ``_changed_state``'s repair.
+_REPAIR_IN_VIEW: tuple[str, ...] = (obl(1), act(9))
+
+
+def _review_check(
+    *gaps: str, tested: int = 8, included: tuple[str, ...] | None = _REPAIR_IN_VIEW
+) -> CheckRecordedPayload:
+    """A completed, assessable semantic check whose coverage carries exactly *gaps*.
+
+    A reduced-scope check records *included* as its packet's included references (issue #904);
+    ``None`` models a check with no such record.
+    """
+
+    coverage = _coverage(gaps=gaps, semantic=True, freshness=LedgerFreshness.PARTIAL)
+    check = _assessed(_check(tested=tested, semantic=_SEMANTIC_OK, coverage=coverage))
+    if _SCOPE_REDUCED in gaps and included is not None:
+        check = replace(check, semantic_included_refs=_in_view(*included))
+    return check
+
+
+def _semantic_finding(*gaps: str) -> Finding:
+    """An AI-powered finding whose own recorded coverage carries exactly *gaps*."""
+
+    coverage = _coverage(gaps=gaps, semantic=True, freshness=LedgerFreshness.PARTIAL)
+    return replace(_finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED), coverage=coverage)
+
+
+def _blockers(
+    finding: Finding,
+    check: CheckRecordedPayload,
+    *,
+    raised_under_reduced_scope: bool = False,
+) -> tuple[str, ...]:
+    from yoetz.kernel.finding_resolution import resolution_blockers
+
+    return resolution_blockers(
+        finding,
+        4,
+        check,
+        frozenset(),
+        proof_state=_changed_state(check),
+        raised_under_reduced_scope=raised_under_reduced_scope,
+    )
+
+
+def test_a_reduced_review_scope_never_weakens_local_proof() -> None:
+    """The local-check case is not reduced (ADR-006), so only the review packet is bounded."""
+
+    finding = _finding()
+    readable = _check(semantic=_SEMANTIC_OK, coverage=_coverage(semantic=True))
+    reduced = _check(
+        semantic=_SEMANTIC_OK,
+        coverage=_coverage(gaps=(_SCOPE_REDUCED,), semantic=True),
+    )
+    assert _blockers(finding, readable) == ()
+    assert _blockers(finding, reduced) == ()
+    assert _resolves(finding, reduced) is True
+    # The same holds when the bounded review itself did not run to completion.
+    not_run = _check(
+        coverage=_coverage(gaps=(_SCOPE_REDUCED, "semantic_relevance_review_not_run")),
+    )
+    assert _blockers(finding, not_run) == ()
+
+
+def test_the_dateutil_local_finding_shape_resolves_under_a_reduced_review_scope() -> None:
+    """dateutil ``fnd_2c29e40c``: its only blocker was ``semantic_reference_scope_reduced``."""
+
+    finding = replace(
+        _finding(kind=FindingKind.LEDGER_STALE_OR_INCOMPLETE),
+        coverage=_coverage(
+            gaps=("evidence_content_digest_only",), freshness=LedgerFreshness.CURRENT
+        ),
+    )
+    later = _review_check(*_LONG_SESSION_REVIEW_GAPS)
+    assert _blockers(finding, later) == ()
+    assert _resolves(finding, later) is True
+    # Not returned is still required; the interim leaves a truncated payload blocking.
+    assert not qualifying_check_resolves(finding, 4, later, frozenset({issue_key(finding)}))
+    truncated = _review_check(*_LONG_SESSION_REVIEW_GAPS, "truncated_payload")
+    assert _blockers(finding, truncated) == ("coverage:truncated_payload",)
+
+
+def test_a_semantic_finding_stamped_with_the_scope_resolves_under_the_same_limit() -> None:
+    """A post-upgrade finding records the reduced scope its review ran under (issue #904)."""
+
+    original = _semantic_finding(
+        "content_unselected", "host_outcome_unavailable", _SCOPE_REDUCED, "unpaired_event"
+    )
+    later = _review_check(*_LONG_SESSION_REVIEW_GAPS)
+    assert _blockers(original, later) == ()
+    assert _resolves(original, later) is True
+    # Every other requirement stands: a re-roll, an unassessable answer, an unfinished review.
+    assert _resolves(original, later, changed=False) is False
+    insufficient = replace(
+        later,
+        semantic_conclusion="insufficient_packet",
+        coverage=replace(
+            later.coverage,
+            known_gaps=tuple(sorted((*later.coverage.known_gaps, "semantic_packet_insufficient"))),
+        ),
+    )
+    assert _blockers(original, insufficient) == (
+        "semantic_packet_insufficient",
+        "coverage:content_unselected",
+        "coverage:host_outcome_unavailable",
+        "coverage:semantic_packet_insufficient",
+        "coverage:" + _SCOPE_REDUCED,
+        "coverage:unpaired_event",
+    )
+    assert _resolves(original, _check(coverage=later.coverage)) is False
+
+
+def test_a_new_reduced_review_scope_still_blocks_semantic_proof() -> None:
+    """A review that saw the whole ledger raised it; a bounded later review is a new limit."""
+
+    original = _semantic_finding("content_unselected", "host_outcome_unavailable", "unpaired_event")
+    later = _review_check(*_LONG_SESSION_REVIEW_GAPS)
+    assert _blockers(original, later) == ("coverage:" + _SCOPE_REDUCED,)
+    assert _resolves(original, later) is False
+
+
+def test_a_pre_upgrade_finding_uses_its_raising_checks_recorded_scope() -> None:
+    """Lifecycle fallback: the raising check recorded the code the finding could not carry."""
+
+    original = _semantic_finding("content_unselected", "host_outcome_unavailable", "unpaired_event")
+    later = _review_check(*_LONG_SESSION_REVIEW_GAPS)
+    assert _blockers(original, later, raised_under_reduced_scope=True) == ()
+    assert qualifying_check_resolves(
+        original,
+        4,
+        later,
+        frozenset(),
+        proof_state=_changed_state(later),
+        raised_under_reduced_scope=True,
+    )
+    # The fallback supplies only the scope code: no other limitation and no other requirement.
+    truncated = _review_check(*_LONG_SESSION_REVIEW_GAPS, "truncated_payload")
+    assert _blockers(original, truncated, raised_under_reduced_scope=True) == (
+        "coverage:truncated_payload",
+    )
+    assert _blockers(
+        original,
+        replace(later, semantic_conclusion=None, semantic_included_refs=None),
+        raised_under_reduced_scope=True,
+    ) == (
+        "coverage:content_unselected",
+        "coverage:host_outcome_unavailable",
+        "coverage:" + _SCOPE_REDUCED,
+        "coverage:unpaired_event",
+    )
+    # The finding's recorded coverage is never rewritten.
+    assert _SCOPE_REDUCED not in original.coverage.known_gaps
+
+
+def _raising_check(*gaps: str) -> CheckRecordedPayload:
+    """The completed review that raised ``_semantic_finding`` at subject frontier 3."""
+
+    return _review_check(*gaps, tested=3)
+
+
+def test_apply_records_the_raising_check_only_for_a_reduced_scope_review() -> None:
+    raised = _semantic_finding("content_unselected", "host_outcome_unavailable", "unpaired_event")
+    local = _finding(2, subject_refs=(obl(2),))
+    assert raised.subject_frontier == local.subject_frontier == _raising_check().subject_frontier
+    findings = {fnd(1): finding_record(raised, 4), fnd(2): finding_record(local, 4)}
+
+    apply_check_resolution(
+        findings, replace(_raising_check(), returned_finding_ids=(fnd(1), fnd(2))), evt(5)
+    )
+    assert findings[fnd(1)].reduced_scope_raising_check_event_id is None, "scope was not reduced"
+
+    apply_check_resolution(
+        findings,
+        replace(_raising_check(*_LONG_SESSION_REVIEW_GAPS), returned_finding_ids=(fnd(1), fnd(2))),
+        evt(6),
+    )
+    assert findings[fnd(1)].reduced_scope_raising_check_event_id == evt(6)
+    assert findings[fnd(2)].reduced_scope_raising_check_event_id is None, "local proof needs none"
+
+    # A later check that returns the same row again is not the check that raised it.
+    later_return = replace(
+        _review_check(*_LONG_SESSION_REVIEW_GAPS), returned_finding_ids=(fnd(1),)
+    )
+    fresh = {fnd(1): finding_record(raised, 4)}
+    apply_check_resolution(fresh, later_return, evt(9))
+    assert fresh[fnd(1)].reduced_scope_raising_check_event_id is None
+
+
+def test_the_recorded_raising_scope_resolves_through_the_fold_until_redacted() -> None:
+    raised = _semantic_finding("content_unselected", "host_outcome_unavailable", "unpaired_event")
+    findings = {fnd(1): finding_record(raised, 4)}
+    raising = replace(_raising_check(*_LONG_SESSION_REVIEW_GAPS), returned_finding_ids=(fnd(1),))
+    apply_check_resolution(findings, raising, evt(5))
+    assert findings[fnd(1)].reduced_scope_raising_check_event_id == evt(5)
+
+    # Redacting the raising check removes the fallback: its coverage is no longer readable.
+    redacted = dict(findings)
+    reopen_findings_resolved_by(redacted, frozenset({evt(5)}))
+    assert redacted[fnd(1)].reduced_scope_raising_check_event_id is None
+    later = _review_check(*_LONG_SESSION_REVIEW_GAPS)
+    apply_check_resolution(redacted, later, evt(9), proof_state=_changed_state(later))
+    assert redacted[fnd(1)].resolved_by_check_event_id is None
+
+    apply_check_resolution(findings, later, evt(9), proof_state=_changed_state(later))
+    assert findings[fnd(1)].resolved_by_check_event_id == evt(9)
+    assert findings[fnd(1)].resolution_raising_check_event_id == evt(5), "proof read the raiser"
+    # Redacting the raising check after resolution reopens the row: that proof read the raising
+    # check's recorded scope, and unreadable proof is no proof.
+    reopen_findings_resolved_by(findings, frozenset({evt(5)}))
+    assert findings[fnd(1)].resolved_by_check_event_id is None
+    assert findings[fnd(1)].resolution_raising_check_event_id is None
+    assert findings[fnd(1)].reduced_scope_raising_check_event_id is None
+    # The reopened row now meets later reviews without the fallback: the scope code blocks.
+    again = _review_check(*_LONG_SESSION_REVIEW_GAPS, tested=10)
+    apply_check_resolution(findings, again, evt(11), proof_state=_changed_state(again))
+    assert findings[fnd(1)].resolved_by_check_event_id is None
+
+
+@pytest.mark.parametrize("independent", ["stamped_finding", "unreduced_proving_check"])
+def test_redacting_the_raising_check_keeps_a_proof_that_never_read_it(independent: str) -> None:
+    """Only a resolution that needed the raising check's scope reopens when it is redacted."""
+
+    gaps = ["content_unselected", "host_outcome_unavailable", "unpaired_event"]
+    later_gaps = list(_LONG_SESSION_REVIEW_GAPS)
+    if independent == "stamped_finding":
+        gaps.append(_SCOPE_REDUCED)  # Post-upgrade: the finding's own coverage carries it.
+    else:
+        later_gaps.remove(_SCOPE_REDUCED)  # The proving review was not reduced at all.
+    findings = {fnd(1): finding_record(_semantic_finding(*gaps), 4)}
+    raising = replace(_raising_check(*_LONG_SESSION_REVIEW_GAPS), returned_finding_ids=(fnd(1),))
+    apply_check_resolution(findings, raising, evt(5))
+    assert findings[fnd(1)].reduced_scope_raising_check_event_id == evt(5)
+    later = _review_check(*later_gaps)
+    apply_check_resolution(findings, later, evt(9), proof_state=_changed_state(later))
+    assert findings[fnd(1)].resolved_by_check_event_id == evt(9)
+    assert findings[fnd(1)].resolution_raising_check_event_id is None
+
+    reopen_findings_resolved_by(findings, frozenset({evt(5)}))
+    assert findings[fnd(1)].resolved_by_check_event_id == evt(9)
+    assert findings[fnd(1)].reduced_scope_raising_check_event_id is None
+    # Redacting the proving check still reopens it.
+    reopen_findings_resolved_by(findings, frozenset({evt(9)}))
+    assert findings[fnd(1)].resolved_by_check_event_id is None
+
+
+def test_a_returned_row_drops_the_raising_check_its_old_proof_relied_on() -> None:
+    record = replace(
+        finding_record(_semantic_finding("content_unselected"), 4),
+        resolved_by_check_event_id=evt(9),
+        reduced_scope_raising_check_event_id=evt(5),
+        resolution_raising_check_event_id=evt(5),
+    )
+    findings = {fnd(1): record}
+    apply_check_resolution(findings, _check(returned=(fnd(1),)), evt(11))
+    assert findings[fnd(1)].resolved_by_check_event_id is None
+    assert findings[fnd(1)].resolution_raising_check_event_id is None
+    assert findings[fnd(1)].reduced_scope_raising_check_event_id == evt(5)
+
+
+def test_snapshot_round_trips_the_raising_scope_and_omits_it_when_absent() -> None:
+    raised = _semantic_finding("content_unselected")
+    plain = finding_record(_finding(2, subject_refs=(obl(2),)), 5)
+    recorded = replace(finding_record(raised, 4), reduced_scope_raising_check_event_id=evt(6))
+    state = replace(
+        empty_projection_state(),
+        frontier=9,
+        head_digest=_DIGEST,
+        findings={fnd(1): recorded, fnd(2): plain},
+        freshness=LedgerFreshness.CURRENT,
+    )
+    snapshot = projection_snapshot(state)
+    rows = snapshot["findings"]
+    assert isinstance(rows, dict)
+    assert "reduced_scope_raising_check_event_id" not in rows[fnd(2)]  # type: ignore[operator]
+    assert rows[fnd(1)]["reduced_scope_raising_check_event_id"] == evt(6)  # type: ignore[index]
+    decoded = projection_from_snapshot(snapshot)
+    assert decoded == state
+    assert canonical_encode(projection_snapshot(decoded)) == canonical_encode(snapshot)
+    rows[fnd(1)]["reduced_scope_raising_check_event_id"] = None  # type: ignore[index]
+    with pytest.raises(ValueError, match="invalid_projection_state"):
+        projection_from_snapshot(snapshot)
+
+    relied = replace(
+        recorded, resolved_by_check_event_id=evt(9), resolution_raising_check_event_id=evt(6)
+    )
+    relied_state = replace(state, findings={fnd(1): relied, fnd(2): plain})
+    relied_snapshot = projection_snapshot(relied_state)
+    relied_rows = relied_snapshot["findings"]
+    assert isinstance(relied_rows, dict)
+    assert "resolution_raising_check_event_id" not in relied_rows[fnd(2)]  # type: ignore[operator]
+    assert relied_rows[fnd(1)]["resolution_raising_check_event_id"] == evt(6)  # type: ignore[index]
+    assert projection_from_snapshot(relied_snapshot) == relied_state
+    # A relied-on raising check without the resolution it supported is not a valid record.
+    with pytest.raises(ValueError, match="invalid_projection_state"):
+        replace(relied, resolved_by_check_event_id=None)
+    del relied_rows[fnd(1)]["resolved_by_check_event_id"]  # type: ignore[attr-defined]
+    with pytest.raises(ValueError, match="invalid_projection_state"):
+        projection_from_snapshot(relied_snapshot)
+
+
+# drizzle ``fnd_8d68fbc3``: raised by a review whose coverage carried a gap outside the baseline.
+_DRIZZLE_RAISED_UNDER = (
+    "completion_plan_not_claimed",
+    "content_unselected",
+    "evidence_content_digest_only",
+    "host_outcome_unavailable",
+    "semantic_case_content_over_item_limit",
+    "unpaired_event",
+)
+_DRIZZLE_LATER_REVIEW = (
+    "content_unselected",
+    "evidence_content_digest_only",
+    "host_outcome_unavailable",
+    "semantic_case_content_over_item_limit",
+    _SCOPE_REDUCED,
+    "unpaired_event",
+)
+
+
+@pytest.mark.parametrize(
+    "beyond_baseline",
+    ["completion_plan_not_claimed", "content_redacted", "command_attempt_uncorroborated"],
+)
+def test_a_lapsed_limit_beyond_the_baseline_makes_the_baseline_readable(
+    beyond_baseline: str,
+) -> None:
+    """Secondary edge: the first later check without that limit saw at least as much."""
+
+    raised_under = (
+        *(gap for gap in _DRIZZLE_RAISED_UNDER if gap != "completion_plan_not_claimed"),
+        beyond_baseline,
+    )
+    original = _semantic_finding(*raised_under)
+    later = _review_check(*_DRIZZLE_LATER_REVIEW)
+    assert _blockers(original, later, raised_under_reduced_scope=True) == ()
+    # Post-upgrade the scope is stamped instead; the answer is the same.
+    stamped = _semantic_finding(*raised_under, _SCOPE_REDUCED)
+    assert _blockers(stamped, later) == ()
+    # The interim still refuses a truncated payload.
+    truncated = _review_check(*_DRIZZLE_LATER_REVIEW, "truncated_payload")
+    assert _blockers(stamped, truncated) == ("coverage:truncated_payload",)
+
+    # While the limitation is still present it keeps blocking, exactly as before.
+    still = _review_check(*_DRIZZLE_LATER_REVIEW, beyond_baseline)
+    assert _blockers(original, still, raised_under_reduced_scope=True) == tuple(
+        "coverage:" + gap
+        for gap in sorted(
+            {*_DRIZZLE_LATER_REVIEW, beyond_baseline} - {"evidence_content_digest_only"}
+        )
+    )
+
+
+def test_a_lapsed_limit_never_rehabilitates_unproven_original_freshness() -> None:
+    original = replace(
+        _semantic_finding(*_DRIZZLE_RAISED_UNDER),
+        coverage=_coverage(
+            gaps=_DRIZZLE_RAISED_UNDER, semantic=True, freshness=LedgerFreshness.REDACTED_GAP
+        ),
+    )
+    later = _review_check(*_DRIZZLE_LATER_REVIEW)
+    assert _blockers(original, later, raised_under_reduced_scope=True) == tuple(
+        "coverage:" + gap for gap in _DRIZZLE_LATER_REVIEW if gap != "evidence_content_digest_only"
+    )
+
+
+@pytest.mark.parametrize(
+    "gap",
+    [
+        "content_redacted",
+        "event_payload_unavailable",
+        "redacted_event",
+        "redacted_object",
+        "truncated_payload",
+        "semantic_packet_insufficient",
+        "semantic_review_context_withheld",
+        "semantic_challenges_rejected",
+    ],
+)
+def test_a_newly_appearing_real_limit_still_blocks_semantic_proof(gap: str) -> None:
+    """Regression: the scope tolerance does not open the closed default (issue #904)."""
+
+    original = _semantic_finding(*_LONG_SESSION_REVIEW_GAPS)
+    later = _review_check(*_LONG_SESSION_REVIEW_GAPS, gap)
+    blockers = _blockers(original, later, raised_under_reduced_scope=True)
+    assert "coverage:" + gap in blockers
+    assert "coverage:" + _SCOPE_REDUCED not in blockers
+    assert _resolves(original, later) is False
+
+
+def test_capture_failures_block_local_proof_too() -> None:
+    """The interim tolerance is the selection code alone; truncation waits for its source test."""
+
+    from yoetz.kernel.finding_resolution import CAPTURE_FAILURE_GAPS
+
+    for gap in sorted(CAPTURE_FAILURE_GAPS):
+        later = _review_check(*_LONG_SESSION_REVIEW_GAPS, gap)
+        assert _blockers(_finding(), later) == ("coverage:" + gap,), gap
+
+
+def test_selection_and_capture_failure_classes_are_disjoint_and_closed() -> None:
+    from yoetz.application.check import SEMANTIC_CASE_CONTENT_GAPS
+    from yoetz.domain.receipts import SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP
+    from yoetz.kernel.finding_resolution import (
+        CAPTURE_FAILURE_GAPS,
+        REVIEW_SELECTION_GAPS,
+        SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS,
+        SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP,
+    )
+
+    assert SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP == _SCOPE_REDUCED
+    assert SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP in REVIEW_SELECTION_GAPS
+    assert not REVIEW_SELECTION_GAPS & CAPTURE_FAILURE_GAPS
+    assert REVIEW_SELECTION_GAPS <= SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS
+    assert not CAPTURE_FAILURE_GAPS & SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS
+
+    # Every code a review packet can fold into check coverage has a decided resolution class:
+    # (blocks local proof, tolerated for semantic proof when unchanged from the finding's own
+    # recorded baseline). A new packet code fails here until someone decides its row.
+    decided = {
+        "captured_object_unavailable": (False, True),
+        "content_capture_unavailable": (True, True),
+        "content_unselected": (False, True),
+        "content_redacted": (True, False),
+        "truncated_payload": (True, False),
+        "semantic_case_finding_refs_over_limit": (False, False),
+        SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP: (False, True),
+        SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP: (False, True),
+    }
+    packet_codes = SEMANTIC_CASE_CONTENT_GAPS | {
+        SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
+        SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP,
+    }
+    assert packet_codes == set(decided)
+    for code, (blocks_local, unchanged_tolerated) in decided.items():
+        later = _review_check(code)
+        assert bool(_blockers(_finding(), later)) is blocks_local, code
+        assert (not _blockers(_semantic_finding(code), later)) is unchanged_tolerated, code
+        assert _blockers(_semantic_finding(), later) == ("coverage:" + code,), code
+        if code in REVIEW_SELECTION_GAPS:
+            assert (blocks_local, unchanged_tolerated) == (False, True), code
+        if code in CAPTURE_FAILURE_GAPS:
+            assert (blocks_local, unchanged_tolerated) == (True, False), code
+
+
+def _answered_state(
+    check: CheckRecordedPayload, *, cites: str, redacted_evidence: bool = False
+) -> ProjectionState:
+    """``_changed_state`` plus repair evidence and a response to ``fnd(1)`` citing *cites*.
+
+    The evidence ``evd(7)`` and the result ``res(7)``, which links it, are recorded after the
+    finding and before the checked frontier; the response cites one of them.
+    """
+
+    from builders.policy_cases import evd, evidence_record, record, res
+    from yoetz.domain.events import (
+        EvidenceKind,
+        EvidenceRecordedPayload,
+        ResponseRecordedPayload,
+        ResultOutcome,
+        ResultRecordedPayload,
+    )
+    from yoetz.domain.findings import ResponseDisposition
+    from yoetz.domain.values import timestamp_from_string
+
+    state = _changed_state(check)
+    evidence = evidence_record(
+        EvidenceRecordedPayload(
+            evidence_id=evd(7),
+            evidence_kind=EvidenceKind.TEST_RESULT,
+            strength=EvidenceImmutability.METADATA_ONLY,
+            observed_at=timestamp_from_string("2026-01-01T00:00:00.000Z"),
+            reference="repair-test-log",
+        ),
+        6,
+    )
+    if redacted_evidence:
+        evidence = replace(evidence, payload=None, redacted=True)
+    result = record(
+        ResultRecordedPayload(res(7), act(9), ResultOutcome.SUCCESS, 0, evidence_refs=(evd(7),)),
+        7,
+    )
+    response = record(
+        ResponseRecordedPayload(
+            finding_id=fnd(1),
+            finding_frontier=Frontier(4, _DIGEST),
+            disposition=ResponseDisposition.ACKNOWLEDGED,
+            evidence_refs=(cites,),  # type: ignore[arg-type]
+        ),
+        8,
+    )
+    return replace(
+        state,
+        frontier=max(state.frontier, 8),
+        evidence={evd(7): evidence},
+        results={res(7): result},
+        responses={fnd(1): response},
+    )
+
+
+def test_a_reduced_review_without_the_repair_in_view_cannot_resolve_a_semantic_finding() -> None:
+    """PR930-F1: the same reduced-scope code on a later review is not proof that it saw the repair.
+
+    The finding was raised under a reduced scope, the agent made a material change, and a later
+    completed review under the same bound did not return the issue. Nothing records that the later
+    packet carried that change, so the scope code keeps blocking and stays on the receipt.
+    """
+
+    original = _semantic_finding(
+        "content_unselected", "host_outcome_unavailable", _SCOPE_REDUCED, "unpaired_event"
+    )
+    omitted = ("finding_material_outside_reduced_review_scope", "coverage:" + _SCOPE_REDUCED)
+    unrecorded = _review_check(*_LONG_SESSION_REVIEW_GAPS, included=None)
+    assert _blockers(original, unrecorded) == omitted
+    assert _resolves(original, unrecorded) is False
+    # The lifecycle fallback supplies the baseline code, never the missing relevance proof.
+    unstamped = _semantic_finding(
+        "content_unselected", "host_outcome_unavailable", "unpaired_event"
+    )
+    assert _blockers(unstamped, unrecorded, raised_under_reduced_scope=True) == omitted
+
+    # The recorded packet must carry the finding's subject and the change made after it.
+    repair_omitted = _review_check(*_LONG_SESSION_REVIEW_GAPS, included=(obl(1), obl(2)))
+    assert _blockers(original, repair_omitted) == omitted
+    subject_omitted = _review_check(*_LONG_SESSION_REVIEW_GAPS, included=(act(9),))
+    assert _blockers(original, subject_omitted) == omitted
+    # The change may be named by its logical row or by the event that recorded it.
+    by_event = _review_check(*_LONG_SESSION_REVIEW_GAPS, included=(obl(1), evt(5)))
+    assert _blockers(original, by_event) == ()
+    assert _blockers(original, _review_check(*_LONG_SESSION_REVIEW_GAPS)) == ()
+
+    # Without a material change the missing repair is the only thing named.
+    assert _blockers(original, unrecorded)  # sanity: still blocked
+    from yoetz.kernel.finding_resolution import resolution_blockers
+
+    unchanged = replace(_changed_state(unrecorded), actions={})
+    assert resolution_blockers(original, 4, unrecorded, frozenset(), proof_state=unchanged) == (
+        "no_material_change_since_finding",
+    )
+
+
+@pytest.mark.parametrize("cites", ["evidence", "result"])
+def test_a_reduced_review_must_carry_the_repair_evidence_the_response_links(cites: str) -> None:
+    """Relevance includes the repair the agent answered with, not only the finding's subjects."""
+
+    from builders.policy_cases import evd, res
+    from yoetz.kernel.finding_resolution import resolution_blockers
+
+    original = _semantic_finding(
+        "content_unselected", "host_outcome_unavailable", _SCOPE_REDUCED, "unpaired_event"
+    )
+    cited = evd(7) if cites == "evidence" else res(7)
+    omitted = ("finding_material_outside_reduced_review_scope", "coverage:" + _SCOPE_REDUCED)
+
+    def blockers(check: CheckRecordedPayload, **state: bool) -> tuple[str, ...]:
+        answered = _answered_state(check, cites=cited, **state)
+        return resolution_blockers(original, 4, check, frozenset(), proof_state=answered)
+
+    # The subject and a change were in view, but not the linked repair evidence.
+    assert blockers(_review_check(*_LONG_SESSION_REVIEW_GAPS)) == omitted
+    with_repair = _review_check(*_LONG_SESSION_REVIEW_GAPS, included=(*_REPAIR_IN_VIEW, evd(7)))
+    assert blockers(with_repair) == ()
+    # Unreadable repair evidence cannot be shown to have been in view.
+    assert blockers(with_repair, redacted_evidence=True) == omitted
+    # An unreduced review saw the whole frontier and needs no record.
+    unreduced = _review_check(*[gap for gap in _LONG_SESSION_REVIEW_GAPS if gap != _SCOPE_REDUCED])
+    assert blockers(unreduced) == ()
+
+
+def test_the_included_reference_record_is_bound_to_a_completed_reduced_review() -> None:
+    from yoetz.domain.events import EventSchema, decode_payload, encode_payload
+    from yoetz.protocol.errors import ProtocolValueError
+
+    reduced = _review_check(*_LONG_SESSION_REVIEW_GAPS)
+    assert reduced.semantic_included_refs == _in_view(*_REPAIR_IN_VIEW)
+    encoded = encode_payload(reduced)
+    assert decode_payload(EventSchema("check_recorded", "1.3.0"), encoded) == reduced
+    unreduced = _review_check("content_unselected")
+    assert "semantic_included_refs" not in encode_payload(unreduced)  # type: ignore[operator]
+    for invalid in (
+        {"semantic_included_refs": _in_view(*_REPAIR_IN_VIEW)[::-1]},  # not ASCII-sorted
+        {"semantic_included_refs": ()},  # empty is not a record
+        {"semantic_included_refs": ("free text",)},
+        {"semantic_included_refs": _REPAIR_IN_VIEW, "semantic_conclusion": None},
+    ):
+        with pytest.raises(ProtocolValueError):
+            replace(reduced, **invalid)  # type: ignore[arg-type]
+    with pytest.raises(ProtocolValueError):
+        replace(unreduced, semantic_included_refs=_in_view(*_REPAIR_IN_VIEW))
+
+
+def test_an_unrecorded_sent_packet_is_disclosed_and_blocks_only_semantic_proof() -> None:
+    """``semantic_included_refs_not_recorded`` limits the reduced review, never the local case."""
+
+    from yoetz.domain.events import SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP
+
+    later = _review_check(
+        *_LONG_SESSION_REVIEW_GAPS, SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP, included=None
+    )
+    assert _blockers(_finding(), later) == ()
+    stamped = _semantic_finding(
+        "content_unselected", "host_outcome_unavailable", _SCOPE_REDUCED, "unpaired_event"
+    )
+    assert _blockers(stamped, later) == (
+        "finding_material_outside_reduced_review_scope",
+        "coverage:" + SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP,
+        "coverage:" + _SCOPE_REDUCED,
+    )

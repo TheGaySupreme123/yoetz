@@ -34,6 +34,15 @@ from yoetz.application.observation_materialize import (
     observation_author,
 )
 from yoetz.application.publish_work import PublishWorkInternalResult
+from yoetz.application.receipt import ReceiptInternalResult
+from yoetz.application.semantic_case import (
+    ReviewPacketDisclosure,
+    build_semantic_case,
+    review_packet_disclosure,
+    semantic_case_to_candidate_context,
+    semantic_case_to_prepared_payload,
+    sent_ledger_refs,
+)
 from yoetz.application.service import Application, VerificationPolicy
 from yoetz.application.start import StartInternalResult
 from yoetz.domain.events import (
@@ -76,10 +85,13 @@ from yoetz.domain.privacy import (
     LocalDisclosureApproved,
     LocalDisclosureReceipt,
     PrivacyOutcome,
+    ProviderBinding,
     ReceiptCounts,
     ReceiptPolicyBinding,
     ReceiptSecretScan,
     ReceiptTransformations,
+    ReviewContextProfile,
+    ReviewSelectionPolicy,
 )
 from yoetz.domain.receipts import PolicyVersionEntry, ReceiptVersionSlice, SchemaVersionEntry
 from yoetz.domain.values import (
@@ -95,10 +107,12 @@ from yoetz.domain.values import (
     timestamp_from_datetime,
 )
 from yoetz.domain.values import JsonObject as DomainJsonObject
+from yoetz.kernel.finding_resolution import finding_is_resolved
 from yoetz.kernel.policies.observation_advice import (
     OBSERVATION_ADVICE_POLICY_ID,
     ObservationAdviceCandidate,
 )
+from yoetz.kernel.projections import projection_from_snapshot, projection_snapshot
 from yoetz.kernel.receipt_capacity import receipt_gap_codes
 from yoetz.kernel.reducers import replay
 from yoetz.mcp.summaries import summary_for_status
@@ -124,7 +138,7 @@ from yoetz.ports.objects import (
 )
 from yoetz.ports.publish_response_catalog import PublishResponseCatalogPort
 from yoetz.ports.runtime import BundleProvisionCommand, BundleRuntimePort, RouteCommand, TaskRuntime
-from yoetz.ports.semantic import ReviewerChallenge, SamplingParams, SemanticJudgment
+from yoetz.ports.semantic import ReviewerChallenge, SamplingParams, SemanticCase, SemanticJudgment
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.coverage import (
     ArtifactObservation,
@@ -5166,8 +5180,16 @@ def _scripted_semantic_evaluator(
     *,
     case_gaps: tuple[str, ...],
     over_item_limit: bool,
+    scope_reduced: list[bool] | None = None,
+    omitted_refs: list[tuple[str, ...]] | None = None,
 ) -> Callable[..., Awaitable[object]]:
-    """Answer each check with the next scripted conclusion under the same capture limits."""
+    """Answer each check with the next scripted conclusion under the same capture limits.
+
+    ``scope_reduced`` scripts, per check, whether the review packet carried a reduced reference
+    scope; omitted, no packet is reduced. ``omitted_refs`` scripts, per reduced check, which
+    frozen references its sent packet carried no content item for; every other one is reported as
+    sent. Omitted, a reduced review reports nothing about what it sent.
+    """
 
     async def evaluate(
         frozen: object,
@@ -5185,11 +5207,18 @@ def _scripted_semantic_evaluator(
             if conclusion == "challenges_returned"
             else SemanticJudgment("no_material_discrepancy", ())
         )
+        reduced = bool(scope_reduced and scope_reduced.pop(0))
+        included: frozenset[str] | None = None
+        if reduced and omitted_refs:
+            allowed = cast(FrozenCase, frozen).case.allowed_ids
+            included = frozenset(str(ref) for ref in allowed) - set(omitted_refs.pop(0))
         return replace(
             raised,
             judgment=judgment,
             case_content_gaps=case_gaps,
             case_content_over_item_limit=over_item_limit,
+            case_reference_scope_reduced=reduced,
+            case_included_refs=included,
         )
 
     return evaluate
@@ -7091,3 +7120,917 @@ async def test_status_finding_frontier_answers_every_origin_on_the_first_attempt
         )
         assert responded.response.disposition == "rejected"
         current = responded.result_frontier
+
+
+_SCOPE_REDUCED = "semantic_reference_scope_reduced"
+
+
+async def _semantic_recheck(
+    app: Application,
+    started: StartInternalResult,
+    seed: int,
+    frontier: Frontier | FrontierModel,
+) -> CheckCommitResult:
+    result = await app.check(
+        CheckRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(frontier),
+                "mode": "semantic_if_configured",
+                "max_findings": "8",
+            }
+        )
+    )
+    assert type(result) is CheckCommitResult
+    return result
+
+
+async def _publish_repair_evidence(
+    app: Application,
+    started: StartInternalResult,
+    seed: int,
+    frontier: Frontier | FrontierModel,
+) -> PublishWorkInternalResult:
+    published = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 1)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(frontier),
+                "event_drafts": (
+                    {
+                        "event_id": protocol_id("evt_", seed + 2),
+                        "schema": {"name": "evidence_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-07-19T12:00:03.000Z",
+                        "causal_parents": (),
+                        "payload": {
+                            "evidence_id": protocol_id("evd_", seed),
+                            "evidence_kind": "artifact",
+                            "strength": "mutable_reference",
+                            "observed_at": "2026-07-19T12:00:03.000Z",
+                            "reference": "repair-evidence",
+                        },
+                        "artifact_refs": (),
+                        "evidence_refs": (),
+                    },
+                ),
+            }
+        )
+    )
+    assert type(published) is PublishWorkInternalResult
+    return published
+
+
+async def _assert_reduced_scope_disclosed(
+    app: Application,
+    started: StartInternalResult,
+    seed: int,
+    frontier: Frontier | FrontierModel,
+    *,
+    blockers: tuple[str, ...] = (),
+) -> None:
+    """Status and every receipt rendering still say the review saw a bounded scope.
+
+    Each of *blockers* must also appear in the JSON document and in the markdown and text
+    renderings, where the receipt explains why a finding stays current.
+    """
+
+    status = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "view": "compact",
+                "limit": "10",
+            }
+        )
+    )
+    compact = cast(StatusCompactPageModel, status.page).items[0]
+    assert _SCOPE_REDUCED in compact.coverage.known_gaps
+    for offset, fmt in enumerate(("json", "markdown", "text"), start=1):
+        receipt = await app.receipt(
+            ReceiptRequest.model_validate(
+                {
+                    **_request_base(protocol_id("req_", seed + offset)),
+                    "task_id": started.task_id,
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": _frontier(frontier),
+                    "format": fmt,
+                    "include": "standard",
+                    "redaction_profile": "full_local",
+                }
+            )
+        )
+        frontier = receipt.result_frontier
+        assert _SCOPE_REDUCED in receipt.coverage.known_gaps
+        assert receipt.coverage.ledger_freshness is not LedgerFreshness.CURRENT
+        assert receipt.conclusion != "no_issue_detected"
+        if fmt != "json":
+            assert receipt.human_text is not None
+            assert _SCOPE_REDUCED in receipt.human_text
+            rendered = receipt.human_text
+        else:
+            assert receipt.document is not None
+            rendered = canonical_encode(receipt.document).decode("utf-8")
+        for blocker in blockers:
+            assert blocker in rendered, (fmt, blocker)
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+async def test_semantic_finding_resolves_under_its_recorded_reduced_reference_scope(
+    ledger_backend: Literal["memory", "sqlite"],
+) -> None:
+    """Issue #904 through the real check, replay, status and receipt path.
+
+    Every review of a long session runs over a reduced reference scope. The finding records the
+    one its review ran under, so a completed review under the same bound resolves it after a
+    repair, while check, status and receipts keep disclosing the bounded scope.
+    """
+
+    seed = 5600
+    conclusions = ["challenges_returned", "no_material_discrepancy", "no_material_discrepancy"]
+    app, runtime, _ = _build_app(
+        seed_offset=56,
+        semantic="optional",
+        ledger_backend=ledger_backend,
+        semantic_evaluator=_scripted_semantic_evaluator(
+            protocol_id("clm_", seed + 5),
+            conclusions,
+            case_gaps=("content_unselected",),
+            over_item_limit=False,
+            scope_reduced=[True, True, True],
+            # Each packet leaves out the unrelated obligation event and carries everything else.
+            omitted_refs=[(protocol_id("evt_", seed + 2),)] * 3,
+        ),
+    )
+    started, checked, _obligation = await _bootstrap_finding(
+        app, seed=seed, mode="semantic_if_configured"
+    )
+    finding = next(
+        item for item in checked.findings if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    )
+    # The raise-time stamp: durable finding coverage, beside the check's own disclosure.
+    assert _SCOPE_REDUCED in finding.coverage.known_gaps
+    assert _SCOPE_REDUCED in checked.coverage.known_gaps
+
+    rerolled = await _semantic_recheck(app, started, seed + 20, checked.result_frontier)
+    assert finding.finding_id not in {item.finding_id for item in rerolled.findings}
+    view = await _findings_view(app, started, seed + 21, include_resolved=True)
+    row = next(item for item in view.items if item.finding_id == finding.finding_id)
+    assert row.resolved is False
+    # Only the missing repair is named; the unchanged scope is not a blocker.
+    assert "no_material_change_since_finding" in str(row.detail)
+    assert "coverage:" + _SCOPE_REDUCED not in str(row.detail)
+
+    published = await _publish_repair_evidence(app, started, seed + 30, rerolled.result_frontier)
+    repaired = await _semantic_recheck(app, started, seed + 40, published.result_frontier)
+    assert _SCOPE_REDUCED in repaired.coverage.known_gaps
+    view = await _findings_view(app, started, seed + 41, include_resolved=True)
+    assert next(item for item in view.items if item.finding_id == finding.finding_id).resolved
+    assert conclusions == []
+
+    ledger, _objects = next(iter(runtime.resources.values()))
+    records = tuple([row async for row in ledger.load_events(started.session_id)])
+    rebuilt = replay(records)
+    assert finding_is_resolved(rebuilt, finding.finding_id)
+    stored = await ledger.load_projection(started.session_id, ProjectionView.CANDIDATE_FINDINGS)
+    assert stored is not None and stored.state == rebuilt
+
+    await _assert_reduced_scope_disclosed(app, started, seed + 50, repaired.result_frontier)
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+async def test_a_reduced_review_that_omitted_the_repair_leaves_the_semantic_finding_open(
+    ledger_backend: Literal["memory", "sqlite"],
+) -> None:
+    """PR930-F1 through the real check, replay, status and receipt path.
+
+    The finding was raised under a reduced reference scope, the agent published repair evidence
+    and answered the finding with it, and a later completed review under the same bound did not
+    return the issue. That review's sent packet carried no content for the repair evidence, so it
+    proves nothing about the repair: the finding stays current, and status and every receipt
+    rendering name why while disclosing the bounded scope. A review whose sent content was not
+    recorded proves nothing either and carries ``semantic_included_refs_not_recorded``. The next
+    review whose packet carried the repair resolves it.
+    """
+
+    seed = 5900
+    repair_evidence = protocol_id("evd_", seed + 30)
+    repair_event = protocol_id("evt_", seed + 32)
+    conclusions = [
+        "challenges_returned",
+        "no_material_discrepancy",
+        "no_material_discrepancy",
+        "no_material_discrepancy",
+    ]
+    omitted = [
+        (protocol_id("evt_", seed + 2),),
+        (repair_evidence, repair_event),
+        (protocol_id("evt_", seed + 2),),
+    ]
+    reduced = [True, True, True, True]
+    app, runtime, _ = _build_app(
+        seed_offset=59,
+        semantic="optional",
+        ledger_backend=ledger_backend,
+        semantic_evaluator=_scripted_semantic_evaluator(
+            protocol_id("clm_", seed + 5),
+            conclusions,
+            case_gaps=("content_unselected",),
+            over_item_limit=False,
+            scope_reduced=reduced,
+            omitted_refs=omitted,
+        ),
+    )
+    started, checked, _obligation = await _bootstrap_finding(
+        app, seed=seed, mode="semantic_if_configured"
+    )
+    finding = next(
+        item for item in checked.findings if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    )
+    assert _SCOPE_REDUCED in finding.coverage.known_gaps
+
+    published = await _publish_repair_evidence(app, started, seed + 30, checked.result_frontier)
+    answered = await app.respond(
+        RespondRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 35)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(published.result_frontier),
+                "finding_id": finding.finding_id,
+                "finding_frontier": _frontier(checked.result_frontier),
+                "disposition": "acknowledged",
+                "reason": "Recorded the result that supports the claim.",
+                "evidence_refs": (repair_evidence,),
+            }
+        )
+    )
+    frontier: Frontier | FrontierModel = answered.result_frontier
+
+    async def recheck_leaves_open(request_seed: int, reason: str) -> CheckCommitResult:
+        repaired = await _semantic_recheck(app, started, request_seed, frontier)
+        assert finding.finding_id not in {item.finding_id for item in repaired.findings}
+        assert _SCOPE_REDUCED in repaired.coverage.known_gaps
+        view = await _findings_view(app, started, request_seed + 1, include_resolved=True)
+        row = next(item for item in view.items if item.finding_id == finding.finding_id)
+        assert row.resolved is False
+        assert reason in str(row.detail)
+        assert "coverage:" + _SCOPE_REDUCED in str(row.detail)
+        return repaired
+
+    omitted_repair = await recheck_leaves_open(
+        seed + 40, "finding_material_outside_reduced_review_scope"
+    )
+    frontier = omitted_repair.result_frontier
+    # A reduced review that records no included references is no proof either.
+    omitted.clear()
+    unrecorded = await recheck_leaves_open(
+        seed + 44, "finding_material_outside_reduced_review_scope"
+    )
+    # A completed reduced review whose sent content was not recorded says so on its coverage.
+    assert "semantic_included_refs_not_recorded" in unrecorded.coverage.known_gaps
+    assert "semantic_included_refs_not_recorded" not in omitted_repair.coverage.known_gaps
+    await _assert_reduced_scope_disclosed(
+        app,
+        started,
+        seed + 50,
+        unrecorded.result_frontier,
+        blockers=(
+            "finding_material_outside_reduced_review_scope",
+            "coverage:" + _SCOPE_REDUCED,
+            "semantic_included_refs_not_recorded",
+        ),
+    )
+
+    ledger, _objects = next(iter(runtime.resources.values()))
+    records = tuple([item async for item in ledger.load_events(started.session_id)])
+    rebuilt = replay(records)
+    assert not finding_is_resolved(rebuilt, finding.finding_id)
+    stored = await ledger.load_projection(started.session_id, ProjectionView.CANDIDATE_FINDINGS)
+    assert stored is not None and stored.state == rebuilt
+    included = [
+        row.payload.semantic_included_refs
+        for row in records
+        if isinstance(row.payload, CheckRecordedPayload)
+    ]
+    assert included[0] is not None and repair_evidence not in included[0]
+    assert included[1] is not None and repair_evidence not in included[1]
+    assert included[2] is None
+
+    # The next review whose packet carried the repair evidence resolves the finding.
+    omitted.append((protocol_id("evt_", seed + 2),))
+    status = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 60)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "view": "compact",
+                "limit": "10",
+            }
+        )
+    )
+    in_view = await _semantic_recheck(app, started, seed + 61, status.result_frontier)
+    assert finding.finding_id not in {item.finding_id for item in in_view.findings}
+    view = await _findings_view(app, started, seed + 62, include_resolved=True)
+    assert next(item for item in view.items if item.finding_id == finding.finding_id).resolved
+    assert conclusions == [] and reduced == []
+
+
+async def _resolve_pre_upgrade_finding(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    seed: int,
+    ledger_backend: Literal["memory", "sqlite"] = "memory",
+) -> tuple[
+    Application,
+    _WorkflowRuntime,
+    StartInternalResult,
+    CheckCommitResult,
+    Finding,
+    CheckCommitResult,
+]:
+    """Raise a finding without the scope stamp, as a pre-upgrade service did, then resolve it.
+
+    The raising check records the reduced scope the finding does not carry. The upgraded service
+    reads that check's recorded coverage, so a repair and a completed review under the same bound
+    resolve the finding.
+    """
+
+    import yoetz.application.check as check_module
+
+    stamp = check_module.semantic_capture_baseline_gaps
+
+    def pre_upgrade_stamp(result: FinalSemanticEvaluation) -> frozenset[str]:
+        return stamp(result) - {_SCOPE_REDUCED}
+
+    conclusions = ["challenges_returned", "no_material_discrepancy"]
+    app, runtime, _ = _build_app(
+        seed_offset=seed // 100,
+        semantic="optional",
+        ledger_backend=ledger_backend,
+        semantic_evaluator=_scripted_semantic_evaluator(
+            protocol_id("clm_", seed + 5),
+            conclusions,
+            case_gaps=("content_unselected",),
+            over_item_limit=False,
+            scope_reduced=[True, True],
+            omitted_refs=[(protocol_id("evt_", seed + 2),)] * 2,
+        ),
+    )
+    monkeypatch.setattr(check_module, "semantic_capture_baseline_gaps", pre_upgrade_stamp)
+    started, checked, _obligation = await _bootstrap_finding(
+        app, seed=seed, mode="semantic_if_configured"
+    )
+    monkeypatch.undo()
+    finding = next(
+        item for item in checked.findings if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    )
+    assert "content_unselected" in finding.coverage.known_gaps
+    assert _SCOPE_REDUCED not in finding.coverage.known_gaps
+    assert _SCOPE_REDUCED in checked.coverage.known_gaps
+
+    published = await _publish_repair_evidence(app, started, seed + 30, checked.result_frontier)
+    repaired = await _semantic_recheck(app, started, seed + 40, published.result_frontier)
+    assert finding.finding_id not in {item.finding_id for item in repaired.findings}
+    view = await _findings_view(app, started, seed + 41, include_resolved=True)
+    row = next(item for item in view.items if item.finding_id == finding.finding_id)
+    assert row.resolved is True, row.detail
+    assert conclusions == []
+    return app, runtime, started, checked, finding, repaired
+
+
+async def test_pre_upgrade_semantic_finding_resolves_through_its_raising_checks_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lifecycle fallback: a finding raised before the stamp is never rewritten, and resolves.
+
+    A projection rebuild over the same ledger gives the same answer.
+    """
+
+    seed = 5700
+    app, runtime, started, _checked, finding, repaired = await _resolve_pre_upgrade_finding(
+        monkeypatch, seed=seed
+    )
+    ledger, _objects = next(iter(runtime.resources.values()))
+    records = tuple([row async for row in ledger.load_events(started.session_id)])
+    rebuilt = replay(records)
+    record = rebuilt.findings[finding.finding_id]
+    assert finding_is_resolved(rebuilt, finding.finding_id)
+    # Never retro-stamped: the recorded finding keeps the coverage it was raised with.
+    assert record.payload is not None
+    assert _SCOPE_REDUCED not in record.payload.coverage.known_gaps
+    assert record.reduced_scope_raising_check_event_id is not None
+    assert finding_is_resolved(
+        projection_from_snapshot(projection_snapshot(rebuilt)), finding.finding_id
+    )
+    await _assert_reduced_scope_disclosed(app, started, seed + 50, repaired.result_frontier)
+
+
+async def _append_local_redaction(
+    app: Application,
+    runtime: _WorkflowRuntime,
+    started: StartInternalResult,
+    *,
+    seed: int,
+    expected_frontier: int,
+    target: str,
+) -> None:
+    """Append a local human's logical redaction of *target*, shaped like the recorded fixture."""
+
+    from yoetz.domain.events import (
+        RedactionMethod,
+        RedactionReasonCategory,
+        RedactionRecordedPayload,
+    )
+    from yoetz.domain.values import Actor, ActorType, actor_id
+
+    ledger, objects = next(iter(runtime.resources.values()))
+    now = app.clock.now_utc()
+    payload = RedactionRecordedPayload(
+        (event_id(target),),
+        (),
+        RedactionMethod.LOGICAL_REDACTION,
+        RedactionReasonCategory.OTHER,
+        actor_id("human.test.local"),
+        "The raising check is redacted.",
+    )
+    encoded = canonical_encode(encode_payload(payload))
+    metadata = ObjectMetadata(
+        ObjectKind.EVENT_PAYLOAD, media_type_for("redaction_recorded"), started.task_id, now
+    )
+    staged = await objects.stage(ObjectSource(data=encoded, declared_size=len(encoded)), metadata)
+    payload_ref = await objects.finalize(staged)
+    channel = PublicationChannel.LOCAL_CLI
+    await ledger.append_batch(
+        AppendCommand(
+            started.task_id,
+            started.session_id,
+            started.writer_id,
+            protocol_id("req_", seed),
+            OperationKind.PUBLISH_WORK,
+            _DIGEST,
+            expected_frontier,
+            (
+                AppendEntry(
+                    EventDraft(
+                        event_id(protocol_id("evt_", seed + 1)),
+                        EventSchema("redaction_recorded", "1.0.0"),
+                        timestamp_from_datetime(now),
+                        (),
+                        payload,
+                        (),
+                        (),
+                    ),
+                    Actor(
+                        actor_id("human.test.local"),
+                        ActorType.HUMAN,
+                        AuthorshipAssurance.LOCALLY_AUTHENTICATED,
+                    ),
+                    payload_ref,
+                    payload_ref.commitment,
+                    metadata.media_type,
+                    payload_ref.plaintext_size,
+                    channel,
+                    coverage_for_channel(channel),
+                    "projected",
+                ),
+            ),
+            None,
+        )
+    )
+
+
+async def _resolved_in_json_receipt(
+    app: Application,
+    started: StartInternalResult,
+    seed: int,
+    frontier: Frontier | FrontierModel,
+) -> tuple[frozenset[str], ReceiptInternalResult]:
+    receipt = await app.receipt(
+        ReceiptRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed)),
+                "task_id": started.task_id,
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(frontier),
+                "format": "json",
+                "include": "standard",
+                "redaction_profile": "full_local",
+            }
+        )
+    )
+    document = cast(Mapping[str, JsonValue], receipt.document)
+    sections = cast(tuple[Mapping[str, JsonValue], ...], document["sections"])
+    summary = next(section for section in sections if section["key"] == "summary")
+    items = cast(tuple[str, ...], summary["items"])
+    return frozenset(item for item in items if item.startswith("fnd_")), receipt
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+async def test_redacting_the_raising_check_reopens_a_resolution_that_read_it(
+    monkeypatch: pytest.MonkeyPatch, ledger_backend: Literal["memory", "sqlite"]
+) -> None:
+    """Unreadable proof is no proof (#904 review): the fallback's source check is proof input.
+
+    A pre-upgrade finding resolved only through its raising check's recorded reduced scope. Once
+    that check is redacted, status and receipts report it current again, and a projection rebuild
+    over the same ledger agrees.
+    """
+
+    seed = 5900
+    app, runtime, started, checked, finding, repaired = await _resolve_pre_upgrade_finding(
+        monkeypatch, seed=seed, ledger_backend=ledger_backend
+    )
+    resolved_ids, receipt = await _resolved_in_json_receipt(
+        app, started, seed + 50, repaired.result_frontier
+    )
+    assert finding.finding_id in resolved_ids
+
+    ledger, _objects = next(iter(runtime.resources.values()))
+    records = tuple([row async for row in ledger.load_events(started.session_id)])
+    raising = next(
+        row
+        for row in records
+        if isinstance(row.payload, CheckRecordedPayload)
+        and finding.finding_id in row.payload.returned_finding_ids
+        and row.payload.subject_frontier.sequence == checked.subject_frontier.sequence
+    )
+    record = replay(records).findings[finding.finding_id]
+    assert record.resolution_raising_check_event_id == raising.event_id
+
+    await _append_local_redaction(
+        app,
+        runtime,
+        started,
+        seed=seed + 60,
+        expected_frontier=receipt.result_frontier.sequence,
+        target=raising.event_id,
+    )
+    view = await _findings_view(app, started, seed + 62, include_resolved=True)
+    row = next(item for item in view.items if item.finding_id == finding.finding_id)
+    assert row.resolved is False
+    head = await ledger.load_projection(started.session_id, ProjectionView.CANDIDATE_FINDINGS)
+    assert head is not None
+    resolved_ids, _receipt = await _resolved_in_json_receipt(app, started, seed + 63, head.frontier)
+    assert finding.finding_id not in resolved_ids
+
+    records = tuple([row async for row in ledger.load_events(started.session_id)])
+    rebuilt = replay(records)
+    assert not finding_is_resolved(rebuilt, finding.finding_id)
+    assert rebuilt.findings[finding.finding_id].reduced_scope_raising_check_event_id is None
+    stored = await ledger.load_projection(started.session_id, ProjectionView.CANDIDATE_FINDINGS)
+    assert stored is not None and stored.state == rebuilt
+    assert (
+        finding_is_resolved(
+            projection_from_snapshot(projection_snapshot(rebuilt)), finding.finding_id
+        )
+        is False
+    )
+
+
+async def test_a_newly_reduced_reference_scope_still_blocks_semantic_resolution() -> None:
+    """A finding raised by a review that saw the whole ledger is not cleared by a bounded one."""
+
+    seed = 5800
+    conclusions = ["challenges_returned", "no_material_discrepancy"]
+    app, _runtime, _ = _build_app(
+        seed_offset=58,
+        semantic="optional",
+        semantic_evaluator=_scripted_semantic_evaluator(
+            protocol_id("clm_", seed + 5),
+            conclusions,
+            case_gaps=("content_unselected",),
+            over_item_limit=False,
+            scope_reduced=[False, True],
+        ),
+    )
+    started, checked, _obligation = await _bootstrap_finding(
+        app, seed=seed, mode="semantic_if_configured"
+    )
+    finding = next(
+        item for item in checked.findings if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    )
+    assert _SCOPE_REDUCED not in finding.coverage.known_gaps
+    assert _SCOPE_REDUCED not in checked.coverage.known_gaps
+
+    published = await _publish_repair_evidence(app, started, seed + 30, checked.result_frontier)
+    repaired = await _semantic_recheck(app, started, seed + 40, published.result_frontier)
+    assert _SCOPE_REDUCED in repaired.coverage.known_gaps
+    view = await _findings_view(app, started, seed + 41, include_resolved=True)
+    row = next(item for item in view.items if item.finding_id == finding.finding_id)
+    assert row.resolved is False
+    assert "coverage:" + _SCOPE_REDUCED in str(row.detail)
+
+
+_REVIEW_SCOPE = AuthorizationScope(
+    AuthorizationScopeKind.TASK,
+    "ins_10000000-0000-4000-8000-000000000001",
+    "hmac-sha256:" + "a" * 64,
+    "tsk_10000000-0000-4000-8000-000000000001",
+)
+
+
+def _sent_packet_evaluator(
+    claim_ref: str,
+    conclusions: list[str],
+    sent: list[tuple[SemanticCase, ReviewPacketDisclosure]],
+    *,
+    withhold_excerpts_of: frozenset[str] = frozenset(),
+) -> Callable[..., Awaitable[object]]:
+    """A reduced review whose record is what the real sent packet carried (#904).
+
+    It builds the real review case from the production-frozen case (recorded history available),
+    approves every offered item except the excerpts of *withhold_excerpts_of* (a per-item privacy
+    drop), assembles the exact provider document, reads it, and names the ledger records it
+    carried the way the composition does.
+    """
+
+    async def evaluate(
+        frozen: object,
+        findings: object,
+        runtime: object | None = None,
+        lineage_evaluation: object | None = None,
+    ) -> object:
+        raised = cast(
+            FinalSemanticEvaluation,
+            await _scripted_semantic_evaluator(
+                claim_ref,
+                conclusions,
+                case_gaps=("content_unselected",),
+                over_item_limit=False,
+                scope_reduced=[True],
+            )(frozen, findings),
+        )
+        case = cast(FrozenCase, frozen).case
+        assert case.history_availability == "available", "production freezes recorded history"
+        profile = ReviewContextProfile.EXPANDED
+        semantic = build_semantic_case(
+            case_id=protocol_id("cas_", 9040 + len(sent)),
+            frozen_case=case,
+            dependency_digest=_DIGEST,
+            findings=cast(tuple[Finding, ...], findings),
+            review_context_profile=profile,
+            review_selection=ReviewSelectionPolicy.for_profile(profile),
+            policy_id=protocol_id("pvy_", 9040),
+            policy_version="1",
+        )
+        candidate = semantic_case_to_candidate_context(
+            semantic,
+            request_id=protocol_id("req_", 9040 + len(sent)),
+            scope=_REVIEW_SCOPE,
+            provider_binding=ProviderBinding(
+                "fireworks", "test-model", "chat-completions", "1", "external"
+            ),
+        )
+        withheld = {
+            item.item_id
+            for item in semantic.items
+            if item.section == "excerpt" and item.source_ref in withhold_excerpts_of
+        }
+        prepared = semantic_case_to_prepared_payload(
+            semantic, {item.item_id for item in candidate.items} - withheld
+        )
+        disclosure = review_packet_disclosure(prepared)
+        assert disclosure is not None
+        sent.append((semantic, disclosure))
+        return replace(raised, case_included_refs=sent_ledger_refs(disclosure, case.projection))
+
+    return evaluate
+
+
+async def _publish_drafts(
+    app: Application,
+    started: StartInternalResult,
+    seed: int,
+    frontier: Frontier | FrontierModel,
+    drafts: tuple[dict[str, JsonValue], ...],
+) -> PublishWorkInternalResult:
+    published = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(frontier),
+                "event_drafts": drafts,
+            }
+        )
+    )
+    assert type(published) is PublishWorkInternalResult
+    return published
+
+
+def _draft(event: str, name: str, payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    return {
+        "event_id": event,
+        "schema": {"name": name, "version": "1.0.0"},
+        "occurred_at": "2026-07-19T12:00:03.000Z",
+        "causal_parents": (),
+        "payload": payload,
+        "artifact_refs": (),
+        "evidence_refs": (),
+    }
+
+
+_REPAIRS = (
+    "result_without_evidence",
+    "described_evidence",
+    "reference_only_evidence",
+    "digest_only_evidence",
+)
+
+
+@pytest.mark.parametrize("repair", _REPAIRS)
+async def test_a_reduced_review_credits_a_repair_carried_by_its_recording_event(
+    repair: str,
+) -> None:
+    """Liveness on the production case shape, where recorded history is available (#904).
+
+    Results and evidence then travel as history items keyed by the event that recorded them; a
+    logical ``res_`` or ``evd_`` is a content ``source_ref`` only for a failure or evidence excerpt.
+    A repair the sent packet carried under its recording event must still resolve the finding.
+    """
+
+    seed = 6100 + 100 * _REPAIRS.index(repair)
+    conclusions = ["challenges_returned", "no_material_discrepancy"]
+    sent: list[tuple[SemanticCase, ReviewPacketDisclosure]] = []
+    app, runtime, _ = _build_app(
+        seed_offset=seed // 100,
+        semantic="optional",
+        semantic_evaluator=_sent_packet_evaluator(protocol_id("clm_", seed + 5), conclusions, sent),
+    )
+    started, checked, _obligation = await _bootstrap_finding(
+        app, seed=seed, mode="semantic_if_configured"
+    )
+    finding = next(
+        item for item in checked.findings if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    )
+    assert _SCOPE_REDUCED in finding.coverage.known_gaps
+
+    action, result, evidence = (
+        protocol_id("act_", seed + 30),
+        protocol_id("res_", seed + 31),
+        protocol_id("evd_", seed + 32),
+    )
+    recording_event = protocol_id("evt_", seed + 42)
+    if repair == "result_without_evidence":
+        cited = result
+        drafts = (
+            _draft(
+                protocol_id("evt_", seed + 41),
+                "action_recorded",
+                {"action_id": action, "action_kind": "edit", "description": "Validate offsets"},
+            ),
+            _draft(
+                recording_event,
+                "result_recorded",
+                {"result_id": result, "action_id": action, "outcome": "success", "exit_status": 0},
+            ),
+        )
+    else:
+        cited = evidence
+        described = repair == "described_evidence"
+        drafts = (
+            _draft(
+                recording_event,
+                "evidence_recorded",
+                {
+                    "evidence_id": evidence,
+                    "evidence_kind": "test_result" if described else "artifact",
+                    "strength": "mutable_reference",
+                    "observed_at": "2026-07-19T12:00:03.000Z",
+                    **(
+                        {
+                            "description": "12 passed; negative offsets rejected",
+                            "reference": "ci-run-6200",
+                        }
+                        if described
+                        else {"reference": "ci-run-6300"}
+                        if repair == "reference_only_evidence"
+                        else {"reference": "ci-run-6400", "content_digest": "sha256:" + "7" * 64}
+                    ),
+                },
+            ),
+        )
+    published = await _publish_drafts(app, started, seed + 40, checked.result_frontier, drafts)
+    answered = await app.respond(
+        RespondRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 50)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(published.result_frontier),
+                "finding_id": finding.finding_id,
+                "finding_frontier": _frontier(checked.result_frontier),
+                "disposition": "acknowledged",
+                "reason": "Validated offsets and recorded the run.",
+                "evidence_refs": (cited,),
+            }
+        )
+    )
+    repaired = await _semantic_recheck(app, started, seed + 60, answered.result_frontier)
+    assert conclusions == []
+    assert _SCOPE_REDUCED in repaired.coverage.known_gaps
+    assert "semantic_included_refs_not_recorded" not in repaired.coverage.known_gaps
+
+    _semantic, disclosure = sent[-1]
+    if repair == "result_without_evidence":
+        # The successful result is carried only as its recording event's history item.
+        assert result not in disclosure.carried
+        assert recording_event in disclosure.payload_events
+    view = await _findings_view(app, started, seed + 61, include_resolved=True)
+    row = next(item for item in view.items if item.finding_id == finding.finding_id)
+    assert row.resolved is True, row.detail
+
+    ledger, _objects = next(iter(runtime.resources.values()))
+    records = tuple([item async for item in ledger.load_events(started.session_id)])
+    [check] = [
+        row.payload
+        for row in records
+        if isinstance(row.payload, CheckRecordedPayload)
+        and row.payload.subject_frontier.sequence == repaired.subject_frontier.sequence
+    ]
+    assert check.semantic_included_refs is not None and cited in check.semantic_included_refs
+    assert finding_is_resolved(replay(records), finding.finding_id)
+
+
+async def test_a_reduced_review_does_not_credit_a_record_it_withheld() -> None:
+    """The recording event was sent, but privacy withheld the record's own excerpt: still open.
+
+    Only a ``not_recorded`` omission (the payload is all the ledger holds) lets a recording event
+    stand in for its record; a ``not_selected`` or policy-withheld record is not credited.
+    """
+
+    seed = 6600
+    evidence = protocol_id("evd_", seed + 32)
+    recording_event = protocol_id("evt_", seed + 42)
+    conclusions = ["challenges_returned", "no_material_discrepancy"]
+    sent: list[tuple[SemanticCase, ReviewPacketDisclosure]] = []
+    app, _runtime, _ = _build_app(
+        seed_offset=66,
+        semantic="optional",
+        semantic_evaluator=_sent_packet_evaluator(
+            protocol_id("clm_", seed + 5),
+            conclusions,
+            sent,
+            withhold_excerpts_of=frozenset({evidence}),
+        ),
+    )
+    started, checked, _obligation = await _bootstrap_finding(
+        app, seed=seed, mode="semantic_if_configured"
+    )
+    finding = next(
+        item for item in checked.findings if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    )
+    published = await _publish_drafts(
+        app,
+        started,
+        seed + 40,
+        checked.result_frontier,
+        (
+            _draft(
+                recording_event,
+                "evidence_recorded",
+                {
+                    "evidence_id": evidence,
+                    "evidence_kind": "test_result",
+                    "strength": "mutable_reference",
+                    "observed_at": "2026-07-19T12:00:03.000Z",
+                    "description": "12 passed; negative offsets rejected",
+                    "reference": "ci-run-6400",
+                },
+            ),
+        ),
+    )
+    answered = await app.respond(
+        RespondRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 50)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(published.result_frontier),
+                "finding_id": finding.finding_id,
+                "finding_frontier": _frontier(checked.result_frontier),
+                "disposition": "acknowledged",
+                "reason": "Validated offsets and recorded the run.",
+                "evidence_refs": (evidence,),
+            }
+        )
+    )
+    repaired = await _semantic_recheck(app, started, seed + 60, answered.result_frontier)
+    _semantic, disclosure = sent[-1]
+    assert recording_event in disclosure.payload_events
+    assert evidence in disclosure.withheld and evidence not in disclosure.carried
+    assert _SCOPE_REDUCED in repaired.coverage.known_gaps
+    view = await _findings_view(app, started, seed + 61, include_resolved=True)
+    row = next(item for item in view.items if item.finding_id == finding.finding_id)
+    assert row.resolved is False
+    assert "finding_material_outside_reduced_review_scope" in str(row.detail)

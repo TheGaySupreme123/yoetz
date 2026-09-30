@@ -162,9 +162,13 @@ __all__ = [
     "review_question_set",
     "captured_edit_paths",
     "review_selection_digest",
+    "ReviewPacketDisclosure",
     "repair_evidence_refs",
     "SemanticPacketView",
     "semantic_case_packet_view",
+    "review_packet_content_refs",
+    "review_packet_disclosure",
+    "sent_ledger_refs",
     "semantic_case_to_candidate_context",
     "semantic_case_to_prepared_payload",
 ]
@@ -4537,6 +4541,143 @@ def assemble_filtered_review_packet(
         },
     )
     return canonical_encode(cast(JsonValue, document))
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewPacketDisclosure:
+    """What one exact sent review packet carried, read from its provider-facing bytes (#904).
+
+    ``carried`` holds the frontier references whose own content item survived: the ``source_ref``
+    of a carried item, plus the member evidence of a carried multi-part evidence excerpt (its
+    ``evd_`` linked references, whose bytes that excerpt combines). Every reference any omission row
+    names is removed. ``withheld`` holds the references an omission row names for a reason other
+    than ``not_recorded``: that reason means the ledger had no more readable content for the record
+    than its own recorded payload. ``payload_events`` are the carried ``evt_`` history items whose
+    own content holds the event's recorded payload, read from the item itself: a structural-only
+    item or one replaced by the size-bound marker is not one, whatever omission rows survived the
+    omission cap.
+    """
+
+    carried: frozenset[str]
+    withheld: frozenset[str]
+    payload_events: frozenset[str]
+
+
+def review_packet_disclosure(prepared: bytes) -> ReviewPacketDisclosure | None:
+    """Read what the sent review packet carried, after envelope bounding and minimization.
+
+    A mention in another item's content, a typed link (other than the combined parts of a carried
+    evidence excerpt), the citable-reference list, or an omission row never counts as carried.
+    ``None`` means the document is not a readable review packet, so nothing may be claimed.
+    """
+
+    try:
+        document = strict_json_parse(prepared)
+    except ValueError:
+        return None
+    if not isinstance(document, dict) or document.get("schema") != _PACKET_SCHEMA:
+        return None
+    frontier_raw = document.get("frontier_refs")
+    items_raw = document.get("items")
+    packet_raw = document.get("review_packet")
+    if (
+        type(frontier_raw) is not list
+        or type(items_raw) is not list
+        or not isinstance(packet_raw, dict)
+    ):
+        return None
+    frontier = {ref for ref in cast(list[JsonValue], frontier_raw) if type(ref) is str}
+    omissions_raw = packet_raw.get("omissions", [])
+    if type(omissions_raw) is not list:
+        return None
+    omitted: set[str] = set()
+    withheld: set[str] = set()
+    for row in cast(list[JsonValue], omissions_raw):
+        if not isinstance(row, dict) or type(subject := row.get("subject_ref")) is not str:
+            continue
+        omitted.add(subject)
+        if row.get("reason") != "not_recorded":
+            withheld.add(subject)
+    carried: set[str] = set()
+    payload_events: set[str] = set()
+    for row in cast(list[JsonValue], items_raw):
+        if not isinstance(row, dict) or type(source := row.get("source_ref")) is not str:
+            continue
+        carried.add(source)
+        category = row.get("category")
+        if source.startswith("evt_") and _history_item_carries_payload(source, row.get("content")):
+            payload_events.add(source)
+        linked = row.get("linked_subject_refs")
+        if (
+            row.get("section") == "excerpt"
+            and category == DataCategory.EVIDENCE_EXCERPT.value
+            and source.startswith("evd_")
+            and source not in omitted
+            and type(linked) is list
+        ):
+            # A multi-part captured group is one excerpt keyed by its lead evidence; the other
+            # parts' bytes are combined into it, and only those parts are linked as ``evd_``.
+            carried.update(
+                ref
+                for ref in cast(list[JsonValue], linked)
+                if type(ref) is str and ref.startswith("evd_")
+            )
+    kept = frozenset((carried & frontier) - omitted)
+    return ReviewPacketDisclosure(
+        carried=kept,
+        withheld=frozenset(withheld & frontier),
+        payload_events=frozenset(payload_events) & kept,
+    )
+
+
+def _history_item_carries_payload(event_ref: str, content: JsonValue | None) -> bool:
+    """Whether a carried history item's own content holds this event's recorded payload."""
+
+    if type(content) is not str:
+        return False
+    try:
+        body = strict_json_parse(content.encode("utf-8"))
+    except ValueError:
+        return False
+    return isinstance(body, dict) and body.get("event_id") == event_ref and "payload" in body
+
+
+def review_packet_content_refs(prepared: bytes) -> frozenset[str] | None:
+    """The frontier references whose own content the sent packet carried (see above)."""
+
+    disclosure = review_packet_disclosure(prepared)
+    return None if disclosure is None else disclosure.carried
+
+
+def sent_ledger_refs(
+    disclosure: ReviewPacketDisclosure, projection: ProjectionState
+) -> frozenset[str]:
+    """The ledger references a sent packet carried, including records carried by their event.
+
+    With recorded history, a result or evidence record usually travels as the history item of the
+    event that recorded it, keyed by that ``evt_`` id. Such a record counts as sent when that item
+    carried its recorded payload and no omission row withholds the record itself (a
+    ``not_recorded`` omission does not: the payload is all the ledger holds for it). Evidence with
+    a captured object never counts this way: its payload only describes bytes the reviewer needs
+    to see, so it counts only when its own excerpt was carried, whatever the omission rows say. An
+    unreadable record never counts.
+    """
+
+    extra: set[str] = set()
+    for rows in (projection.results, projection.evidence):
+        for key, row in rows.items():
+            ref = str(key)
+            if (
+                ref in disclosure.carried
+                or ref in disclosure.withheld
+                or row.payload is None
+                or row.redacted
+                or getattr(row.payload, "captured_object_id", None) is not None
+            ):
+                continue
+            if str(row.source_event_id) in disclosure.payload_events:
+                extra.add(ref)
+    return disclosure.carried | frozenset(extra)
 
 
 class SemanticCaseTooLarge(ValueError):

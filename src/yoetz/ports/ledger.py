@@ -2047,6 +2047,7 @@ class LedgerPort(Protocol):
         prior_finding_verdicts: tuple[PriorFindingVerdictRecord, ...] = (),
         missing_for_assessment: tuple[MissingForAssessmentItem, ...] = (),
         check_change_files: CheckChangeShownFiles | None = None,
+        semantic_included_refs: tuple[str, ...] | None = None,
     ) -> CheckCommitResult: ...
 
     async def fail_check_if_current(

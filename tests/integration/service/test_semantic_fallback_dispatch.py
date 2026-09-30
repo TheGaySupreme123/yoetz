@@ -27,6 +27,7 @@ from yoetz.application.egress import (
     SemanticEgressSuccess,
 )
 from yoetz.application.semantic_attempts import SemanticAttemptAccounting
+from yoetz.application.semantic_case import ReviewPacketDisclosure
 from yoetz.domain.findings import (
     SamplingParams,
     SemanticDispatchKind,
@@ -259,6 +260,67 @@ async def test_two_primary_failures_hand_the_same_case_to_the_fallback(
         "expired",
         "selected",
     ]
+
+
+class _DisclosingPrivacy(_PairedPrivacy):
+    """Answers every attempt with a judgment and names what its sent packet carried (#904)."""
+
+    disclosed = frozenset(
+        {"evd_53000000-0000-4000-8000-000000000907", "clm_53000000-0000-4000-8000-000000000907"}
+    )
+
+    async def evaluate_semantic(self, candidate: object, deadline: object) -> object:
+        del deadline
+        setattr(self, "calls", cast(int, getattr(self, "calls")) + 1)
+        binding = cast(ProviderBinding, getattr(candidate, "provider_binding"))
+        return SemanticEgressSuccess(
+            request_id=cast(str, getattr(candidate, "request_id")),
+            privacy_proposal_id="ppr_53000000-0000-4000-8000-000000000907",
+            authorization_id="aut_53000000-0000-4000-8000-000000000907",
+            dispatch_kind=SemanticDispatchKind.EXTERNAL,
+            result=SemanticResultSuccess(
+                SemanticJudgment("no_material_discrepancy", ()),
+                _provenance(binding, status=SemanticStatus.SUCCEEDED, failure_class=None),
+            ),
+            case_digest="sha256:" + "5" * 64,
+            privacy_receipt_id="egr_53000000-0000-4000-8000-000000000907",
+            request_commitment="hmac-sha256:" + "6" * 64,
+            disclosure=ReviewPacketDisclosure(
+                carried=self.disclosed, withheld=frozenset(), payload_events=frozenset()
+            ),
+        )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "adapter_factory",
+    (memory_adapter, sqlite_adapter),
+    ids=("memory", "sqlite"),
+)
+async def test_the_selected_attempt_carries_what_its_sent_packet_included(
+    adapter_factory: Callable[[object], MemoryLedgerAdapter | SqliteLedger],
+) -> None:
+    """Issue #904: the durable path carries the sent packet's content refs, and so does replay.
+
+    The recovered selection reads them from the durable response object without another
+    provider call, so a restart between response and check commit records the same fact.
+    """
+
+    adapter = adapter_factory(append_command())
+    frozen, runtime = await _durable_semantic_case(adapter)
+    privacy = _DisclosingPrivacy(task_id=runtime.task_id)
+    evaluator = _paired_evaluator(privacy, runtime, fallback_binding=None)
+
+    original = await evaluator(frozen, (), runtime)
+
+    assert original.status is SemanticStatus.SUCCEEDED
+    assert original.case_included_refs == _DisclosingPrivacy.disclosed
+    assert original.operation_lease is not None
+    calls = cast(int, getattr(privacy, "calls"))
+    recovered = await evaluator(FrozenCase(frozen.case, original.operation_lease), (), runtime)
+    assert getattr(privacy, "calls") == calls
+    assert recovered.status is SemanticStatus.SUCCEEDED
+    assert recovered.case_included_refs == _DisclosingPrivacy.disclosed
 
 
 @pytest.mark.anyio

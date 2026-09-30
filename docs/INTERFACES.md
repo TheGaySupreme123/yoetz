@@ -1865,17 +1865,22 @@ complete canonical subject_refs)`. A later same-key row supersedes the old and s
 Resolution is proof-based and replay-derived, owned by `kernel/finding_resolution.py`: the reducer
 folds every readable `check_recorded` event into each finding's projection record as
 `resolved_by_check_event_id` (`FindingProjectionRecord`; the snapshot key is emitted only when set,
-so pre-existing snapshots stay byte-identical). A check resolves a current row only when all of
-these hold: its recorded `subject_frontier` is at or after the finding's ingestion sequence; every
-finding it returned is readable and none shares the row's issue key; `suppressed_count` is zero; the
-execution for the row's `(policy_id, policy_version)` is `run/completed`; its normalized `scope` is
-whole-case or names one of the row's `subject_refs`; its coverage `ledger_freshness` is not
-`stale_after_material_change|unknown`; and its `known_gaps` lie within the proof class's closed
-tolerated set. `redacted_gap` also blocks by default. One local-only exception admits it when the
-finding's own recorded coverage was readable and the check-wide gap set contains only tolerated
-codes including at least one host-observation code; this keeps unrelated host capture limits from
-making a structured-ledger repair permanently unprovable. For local rows the tolerated set is the
-AI-powered review absence/weakness codes
+so pre-existing snapshots stay byte-identical). The same record carries
+`reduced_scope_raising_check_event_id`, emitted only when set, when the check whose completed
+AI-powered review raised the row (same tested frontier and review attempt) recorded
+`semantic_reference_scope_reduced` (#904); redacting that check clears it. When a resolution
+qualified only through that recorded scope, `resolution_raising_check_event_id` (also emitted only
+when set) names the same check, and redacting it reopens the row like redacting the proving check.
+A check resolves a current row only when all of these hold: its recorded `subject_frontier` is at or
+after the finding's ingestion sequence; every finding it returned is readable and none shares the
+row's issue key; `suppressed_count` is zero; the execution for the row's `(policy_id,
+policy_version)` is `run/completed`; its normalized `scope` is whole-case or names one of the row's
+`subject_refs`; its coverage `ledger_freshness` is not `stale_after_material_change|unknown`; and
+its `known_gaps` lie within the proof class's closed tolerated set. `redacted_gap` also blocks by
+default. One local-only exception admits it when the finding's own recorded coverage was readable
+and the check-wide gap set contains only tolerated codes including at least one host-observation
+code; this keeps unrelated host capture limits from making a structured-ledger repair permanently
+unprovable. For local rows the tolerated set is the AI-powered review absence/weakness codes
 (`semantic_review_not_requested|semantic_review_not_configured|
 semantic_relevance_review_not_run|optional_semantic_review_blocked_by_policy|
 optional_semantic_review_registration_drift|
@@ -1890,18 +1895,21 @@ check_time_change_redacted`) plus the evidence-strength
 codes
 (`evidence_content_digest_only|evidence_content_withheld|evidence_digest_subject_legacy_unknown`)
 and the host-observation codes (`captured_object_unavailable|content_unselected|
-host_outcome_unavailable|unpaired_event`). Those host codes remain receipt coverage limitations;
-they only stop vetoing local absence proof because local packs judge structured event payloads and
-typed coverage, never captured-object bytes. If missing content matters to the rule, the completed
-pack re-fires the issue or returns its own coverage finding. The exception also requires the
-finding's original coverage to contain only the pre-existing AI-powered review, evidence, and
-host-observation tolerances and to have freshness outside
-`stale_after_material_change|redacted_gap|unknown`. For `semantic_model_derived` rows only the
-evidence-strength codes, `semantic_prior_findings_over_limit`,
-`semantic_prior_verdicts_unsupported` and `semantic_restatements_suppressed` are tolerated (plus,
-for a row the check records a `fixed` ruling for, the insufficient-packet codes and
-`content_unselected`), and the check must also record
-`succeeded/semantic_completed`. Outside the narrow command-gap partition described below, any
+host_outcome_unavailable|unpaired_event`), plus the review-selection code
+`semantic_reference_scope_reduced` (#904): the local-check case is not reduced, so a bounded
+AI-powered review packet is not a limitation of local proof. Those host and selection codes remain
+receipt coverage limitations; the host codes only stop vetoing local absence proof because local
+packs judge structured event payloads and typed coverage, never captured-object bytes. If missing
+content matters to the rule, the completed pack re-fires the issue or returns its own coverage
+finding. The exception also requires the finding's original coverage to contain only the
+pre-existing AI-powered review, evidence, host-observation, and selection tolerances and to have
+freshness outside `stale_after_material_change|redacted_gap|unknown`. For `semantic_model_derived`
+rows only the evidence-strength codes, `semantic_prior_findings_over_limit`,
+`semantic_prior_verdicts_unsupported` and `semantic_restatements_suppressed` are tolerated outright
+(plus, for a row the check records a `fixed` ruling for, the insufficient-packet codes and
+`content_unselected`), and the check must also record `succeeded/semantic_completed`; the
+capture-baseline comparison below (#884, #904) may also tolerate codes already in the row's own
+recorded baseline. Outside the narrow command-gap partition described below, any
 other gap — redacted or unavailable payloads, redacted objects,
 missing refs, unknown events, completion scope, import range, or a code not in the list — blocks
 both proof classes. A local-only check therefore never resolves an AI-powered finding, and a
@@ -3680,7 +3688,12 @@ frontier IDs, is bound into the case digest, and travels as a canonical integer 
 envelope and assembled packet. `semantic_reference_scope_reduced` marks the packet, check, status
 and receipt coverage as partial; selection grants no additional content/disclosure authority.
 Captured prose is not scanned to invent structural dependencies. The complete local-check case and
-its integrity checks remain unchanged.
+its integrity checks remain unchanged. The code is disclosure, not a proof limitation of the local
+case (#904): it never blocks resolution of a local finding. For an AI-powered finding it joins the
+capture baseline, so it blocks when it is new since the review that raised the finding. It also
+blocks when the later check's `semantic_included_refs` (the references whose content the sent
+packet carried) lack the finding's subjects, its response-linked repair material, or a change made
+after it (see the #904 resolution paragraph below).
 
 Recorded parent lineage enters the case as structural items only: identities, lifecycle, freshness,
 coverage tokens, and finding identities. A document that fits in one 16 KiB item stays
@@ -7289,6 +7302,60 @@ unknown past `MAX_CHECK_CHANGE_RAISED_FILES` = 1024 files or when either side is
 unknown and reopens a resolution that depended on it; all three fields are emitted in projection
 snapshots only when set.
 
+Issue #904 adds the reduced reference scope to that baseline (ADR-006). The check stamps
+`semantic_reference_scope_reduced` onto the semantic findings its reduced-scope review raised. For
+a finding recorded before that stamp, the reducer reads the raising check's recorded coverage
+(`reduced_scope_raising_check_event_id`) and never rewrites the finding. A finding raised under a
+gap outside the baseline set gets a readable baseline on the first later check carrying none of
+those gaps; while one is present it keeps blocking. Resolution classifies selection codes
+(`semantic_reference_scope_reduced`, `content_unselected`) apart from capture-failure codes
+(`content_redacted`, `truncated_payload`, `event_payload_unavailable`, `redacted_event`,
+`redacted_object`), which neither proof class tolerates and no baseline absorbs. `truncated_payload`
+keeps blocking until its source is settled. Coverage wording and every receipt gap are unchanged.
+
+The baseline tolerates `semantic_reference_scope_reduced` for a semantic finding only when the
+later check shows that its reduced review sent the finding's material (PR930-F1). A completed
+reduced review records `semantic_included_refs` on the check: the frontier references the exact
+prepared packet carried, read after envelope bounding and privacy minimization. The selected
+attempt's durable response carries the same set, so recovery and resume record it too. A reference
+counts when it is the `source_ref` of a carried content item, or a part of a carried multi-part
+captured evidence excerpt (an `evd_` reference linked to the lead excerpt that combines its bytes).
+A result or evidence record also counts when the history item of the event that recorded it was
+carried with its recorded payload, which is how records travel when recorded history is available.
+The payload's presence is read from the item's own content, never from omission rows, which the
+selection cap may drop. That does not apply when an omission row names the record for a reason
+other than `not_recorded` (for a record without a captured object, nothing more readable than the
+payload exists, as for digest-only evidence). Evidence with a captured object never counts through
+its recording event: it counts only when its own excerpt was carried, so bytes that were never
+resolved or were left out are never credited, whatever omission rows survive. Mentions
+in other items, other typed links, the citable-reference list and omission rows do not count, and
+a reference named by any omission row is excluded even when a structural item for it survived. The
+record holds typed ledger references only, ASCII-sorted, 1 to 576 of them: one source per case item
+(256), the combined captured parts (64), and one record per carried history event. It appears only
+on `check_recorded` 1.3.0 beside `semantic_conclusion` and the `semantic_reference_scope_reduced`
+coverage code. The record must contain every finding subject and every repair reference linked by
+the finding's latest readable response. Cited evidence counts, and so does the evidence of a cited
+result, or the result itself when it cites no evidence. The record must also contain at least one
+material change after the finding, named by its logical row or by its source event. Otherwise the
+code stays a blocker and the explanation adds `finding_material_outside_reduced_review_scope`. An
+unreadable response or linked row cannot be shown to have been sent. When nothing changed
+materially, only `no_material_change_since_finding` is named. The response event itself is not
+required; an acknowledgement is not repair evidence. A result citing no evidence travels only
+through its recording event in the recent history window, so citing the repair's evidence, which
+rechecks select first, keeps a long session's repair in view.
+
+When a completed reduced review's sent set cannot be recorded, the check records no field and
+carries the coverage gap `semantic_included_refs_not_recorded`. Causes: the prepared document is
+not a readable review packet, the packet carried no frontier content item, the set exceeds the
+bound, or the selected result was recovered from a durable response written before this record
+existed. A valid sent set stays within the bound by construction. Status and every receipt
+rendering show the gap like any other. It limits the reduced review only: local proof tolerates
+it, and it blocks AI-powered proof. The continuation is bounded:
+make sure the repair evidence is recorded and cited by the response, then run one new check, whose
+new review attempt records what it sent. If that check carries the code again, stop rechecking,
+leave the finding current, and disclose the limitation in the receipt. ADR-006 (#904) holds the
+truth table.
+
 
 `check_recorded` version `1.3.0` adds required `semantic_conclusion` on succeeded attempts. The
 closed values are `no_material_discrepancy`, `challenges_returned`, and `insufficient_packet`.
@@ -7303,7 +7370,11 @@ written before it existed still decodes; every new record carries it): disjoint 
 commitments sorted by commitment, counts in `0..262144` with `clean_bytes <= shown_bytes`, at most
 128 files in all; `complete` false means more files were shown and the record holds the first 128 in
 change order (ADR-031 decision 9). Rows written by the branch-only builds of this field before its
-final shape no longer decode. The owning schema generator and
+final shape no longer decode. It also admits optional
+`semantic_included_refs` (#904): the frontier references the reduced review's sent packet carried,
+at most 576. It is present only with `semantic_conclusion` and the
+`semantic_reference_scope_reduced` coverage code. It is omitted on unreduced reviews, so their
+bytes are unchanged. The owning schema generator and
 `fixtures/canonical/check-conclusion-1.3.0.case.json` lock the new and legacy bytes.
 
 ### Review packet selection and named missing items (issue #907, Phase 1a)

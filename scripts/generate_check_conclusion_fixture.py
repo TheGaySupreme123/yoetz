@@ -49,6 +49,17 @@ def document(root: Path) -> dict[str, Any]:
         "projection_version": "yoetz/0.1.0",
         "semantic_provenance": provenance,
     }
+    reduced = dict(base)
+    reduced["coverage"] = {
+        **coverage,
+        "known_gaps": ["content_unselected", "semantic_reference_scope_reduced"],
+    }
+    # Issue #904: a reduced packet records the frontier references it included.
+    reduced["semantic_included_refs"] = [
+        "evd_00000000-0000-4000-8000-000000000904",
+        "evt_00000000-0000-4000-8000-000000000904",
+        "obl_00000000-0000-4000-8000-000000000904",
+    ]
     vectors: list[dict[str, Any]] = []
     # ADR-031 (#883) appends one vector: a completed review that carried a check-time change
     # records keyed commitments to the files it was shown. Earlier vectors keep their bytes.
@@ -66,15 +77,17 @@ def document(root: Path) -> dict[str, Any]:
             }
         ],
     }
-    for conclusion, files in [
-        (None, None),
-        ("no_material_discrepancy", None),
-        ("challenges_returned", None),
-        ("insufficient_packet", None),
-        ("no_material_discrepancy", check_change_files),
+    for conclusion, source, files in [
+        (None, base, None),
+        ("no_material_discrepancy", base, None),
+        ("challenges_returned", base, None),
+        ("insufficient_packet", base, None),
+        ("no_material_discrepancy", base, check_change_files),
+        # Issue #904 appends a reduced-scope review that recorded what its packet included.
+        ("no_material_discrepancy", reduced, None),
     ]:
         version = "1.2.0" if conclusion is None else "1.3.0"
-        wire = dict(base)
+        wire = dict(source)
         if conclusion is not None:
             wire["semantic_conclusion"] = conclusion
         if files is not None:
@@ -130,9 +143,16 @@ def document(root: Path) -> dict[str, Any]:
         "fixture_schema": "yoetz.fixture-case/1.0.0",
         "fixture_version": "1.0.0",
         "fixture_id": _ID,
-        "purpose": "Distinguish legacy unknown review outcomes from recorded conclusions.",
+        "purpose": (
+            "Distinguish legacy unknown review outcomes from recorded conclusions, and record "
+            "a reduced review packet's included references."
+        ),
         "minimum_versions": {"fixture_contract": "1.0.0", "protocol": "1.0"},
-        "owns_requirements": ["ISSUE-884/check-conclusion", "ISSUE-907/missing-for-assessment"],
+        "owns_requirements": [
+            "ISSUE-884/check-conclusion",
+            "ISSUE-904/reduced-scope-included-refs",
+            "ISSUE-907/missing-for-assessment",
+        ],
         "controls": {
             "clock": "fixture_supplied",
             "ids": "fixture_supplied",

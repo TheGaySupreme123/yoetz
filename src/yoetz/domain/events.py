@@ -130,12 +130,15 @@ __all__ = [
     "MAX_REF_LIST",
     "MAX_REQUESTED_ITEMS",
     "MAX_TASK_STATEMENT_BYTES",
+    "MAX_SEMANTIC_INCLUDED_REFS",
     "MAX_TEXT_BYTES",
     "OBSERVATION_COORDINATOR_ACTOR_ID",
     "PAYLOAD_TYPES",
     "CLAIM_SCHEMA_VERSION",
     "COORDINATION_EVENT_SCHEMA_VERSION",
     "SCHEMA_VERSION",
+    "SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP",
+    "SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP",
     "EVIDENCE_SCHEMA_VERSION",
     "EVIDENCE_SCHEMA_VERSIONS",
     "EVIDENCE_TYPED_SCHEMA_VERSION",
@@ -295,6 +298,14 @@ MAX_REF_LIST: Final = 64
 MAX_CAUSAL_PARENTS: Final = 32
 MAX_REQUESTED_ITEMS: Final = 64
 MAX_ALTERNATIVES: Final = 16
+# The frontier references a reduced AI-powered review packet carried, recorded on its check (issue
+# #904): one source per case item (at most 256), the combined parts of captured evidence excerpts
+# (at most 64), and the result or evidence record of each carried history event (at most one per
+# item). A valid sent set therefore never exceeds 576. A check whose set cannot be recorded carries
+# SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP instead, and its reduced scope keeps blocking resolution.
+MAX_SEMANTIC_INCLUDED_REFS: Final = 576
+SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP: Final = "semantic_reference_scope_reduced"
+SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP: Final = "semantic_included_refs_not_recorded"
 
 _MAX_SAFE_INTEGER: Final = 9_007_199_254_740_991
 _MAX_SQLITE_INTEGER: Final = 9_223_372_036_854_775_807
@@ -555,6 +566,30 @@ def _text_tuple(
     if unique and len(result) != len(set(result)):
         raise ProtocolValueError("duplicate_set_member")
     return result
+
+
+_INCLUDED_REF_CONSTRUCTORS: Final[Mapping[str, Callable[[object], str]]] = MappingProxyType(
+    {
+        "act_": action_id,
+        "clm_": claim_id,
+        "evd_": evidence_id,
+        "evt_": event_id,
+        "fnd_": finding_id,
+        "obl_": obligation_id,
+        "res_": result_id,
+    }
+)
+
+
+def _included_ref(value: object) -> str:
+    """One typed ledger reference a review packet can carry; never free text."""
+
+    if type(value) is not str:
+        raise ProtocolValueError("invalid_event_value_type")
+    constructor = _INCLUDED_REF_CONSTRUCTORS.get(value[:4])
+    if constructor is None:
+        raise ProtocolValueError("invalid_event_value_type")
+    return constructor(value)
 
 
 def _evidence_result_ref(value: object) -> EvidenceId | ResultId:
@@ -2584,6 +2619,11 @@ class CheckRecordedPayload:
     # ADR-031: set only on a completed review (``check_recorded`` 1.3.0) whose packet carried a
     # check-time change. AI-powered finding resolution compares these sets across checks.
     check_change_files: CheckChangeShownFiles | None = None
+    # The frontier references whose own content item a reduced AI-powered review packet actually
+    # sent (after envelope bounding and privacy minimization, issue #904). Present only on a
+    # completed review whose coverage records the reduced scope; resolution tests a finding's
+    # relevant material against it.
+    semantic_included_refs: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mode", _exact_enum(self.mode, CheckMode))
@@ -2675,6 +2715,23 @@ class CheckRecordedPayload:
             > MAX_CHECK_CHANGE_SHOWN_FILES
         ):
             raise ProtocolValueError("invalid_event_value_type")
+        if self.semantic_included_refs is not None:
+            if (
+                self.semantic_conclusion is None
+                or SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP not in self.coverage.known_gaps
+            ):
+                raise ProtocolValueError("invalid_event_value_type")
+            object.__setattr__(
+                self,
+                "semantic_included_refs",
+                _id_tuple(
+                    self.semantic_included_refs,
+                    _included_ref,
+                    minimum=1,
+                    maximum=MAX_SEMANTIC_INCLUDED_REFS,
+                    field="semantic_included_refs",
+                ),
+            )
         if type(self.engine_version) is not str or self.engine_version != "0.1.0":
             raise ProtocolValueError("invalid_event_value_type")
         if type(self.projection_version) is not str or self.projection_version != "yoetz/0.1.0":
@@ -3462,6 +3519,7 @@ _PAYLOAD_SHAPES: Final[Mapping[str, tuple[frozenset[str], frozenset[str]]]] = Ma
                     "prior_finding_verdicts",
                     "missing_for_assessment",
                     "check_change_files",
+                    "semantic_included_refs",
                 }
             ),
         ),
@@ -3955,6 +4013,11 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
                 _optional(source, "missing_for_assessment")
             ),
             check_change_files=_decode_check_change_files(_optional(source, "check_change_files")),
+            semantic_included_refs=(
+                None
+                if (included := _optional(source, "semantic_included_refs")) is None
+                else cast(tuple[str, ...], tuple(_array(included)))
+            ),
             semantic_provenance=(
                 None
                 if provenance_value is None
@@ -4472,6 +4535,7 @@ def encode_payload(payload: EventPayload) -> JsonValue:
         )
         if value.check_change_files is not None:
             result["check_change_files"] = check_change_files_to_json(value.check_change_files)
+        _optional_value(result, "semantic_included_refs", value.semantic_included_refs)
         return _json_object(result)
     if payload_type is ReceiptRecordedPayload:
         value = cast(ReceiptRecordedPayload, payload)

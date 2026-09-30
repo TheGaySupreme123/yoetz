@@ -165,6 +165,7 @@ from yoetz.application.semantic_case import (
     check_time_change_parts_carried,
     semantic_case_packet_view,
     semantic_case_to_candidate_context,
+    sent_ledger_refs,
 )
 from yoetz.application.semantic_content import (
     edit_capture_evidence_count,
@@ -253,6 +254,7 @@ from yoetz.domain.values import (
 )
 from yoetz.kernel.lineage import LineageEvaluation
 from yoetz.kernel.policies.observation_advice import ObservationCompositionFact
+from yoetz.kernel.projections import ProjectionState
 from yoetz.observability.logging import (
     record_bounded_counts_without_raising,
     record_bounded_event_without_raising,
@@ -3117,11 +3119,14 @@ def _map_egress_to_final(
     *,
     attempt_id: str | None = None,
     operation_request_id: str | None = None,
+    projection: ProjectionState | None = None,
 ) -> FinalSemanticEvaluation:
     """Map privacy egress outcomes to check FinalSemanticEvaluation without inventing findings.
 
-    Production passes the durable ``attempt_id``. Tests may pass only an ``IdPort`` to mint a
-    provisional attempt identity for mapping assertions.
+    Production passes the durable ``attempt_id`` and the frozen case's ``projection``, which lets a
+    success name the result and evidence records its sent packet carried under their recording
+    events (issue #904). Tests may pass only an ``IdPort`` to mint a provisional attempt identity
+    for mapping assertions.
     """
 
     resolved_attempt = attempt_id
@@ -3146,6 +3151,13 @@ def _map_egress_to_final(
             SemanticReason.SEMANTIC_COMPLETED,
             judgment=result.result.judgment,
             provenance=provenance,
+            case_included_refs=(
+                None
+                if result.disclosure is None
+                else result.disclosure.carried
+                if projection is None
+                else sent_ledger_refs(result.disclosure, projection)
+            ),
         )
     if type(result) is SemanticEgressAwaitingHuman:
         # The proposal id and its expiry are the only things that make this branch recoverable.
@@ -3702,6 +3714,11 @@ async def _publish_semantic_response_object(
         body["provenance"] = cast(
             CanonicalJsonValue, dict(semantic_provenance_to_json(evaluation.provenance).items())
         )
+    if evaluation.case_included_refs is not None:
+        # What the sent packet carried (#904), so a recovered selection records the same fact.
+        body["disclosed_content_refs"] = cast(
+            CanonicalJsonValue, sorted(evaluation.case_included_refs, key=str.encode)
+        )
     payload = canonical_encode(cast(CanonicalJsonValue, body))
     staged = await runtime.objects.stage(
         ObjectSource(data=payload, declared_size=len(payload)),
@@ -3772,7 +3789,15 @@ async def _recover_response_evaluation(
             return None
     if status is SemanticStatus.SUCCEEDED and (judgment is None or provenance is None):
         return None
-    return FinalSemanticEvaluation(status, reason, judgment=judgment, provenance=provenance)
+    disclosed: frozenset[str] | None = None
+    raw_disclosed = body.get("disclosed_content_refs")
+    if type(raw_disclosed) is list:
+        refs = cast(list[object], raw_disclosed)
+        if all(type(ref) is str for ref in refs):
+            disclosed = frozenset(cast(list[str], refs))
+    return FinalSemanticEvaluation(
+        status, reason, judgment=judgment, provenance=provenance, case_included_refs=disclosed
+    )
 
 
 async def _workspace_root_for_runtime(runtime: TaskRuntime | None) -> str | None:
@@ -4707,7 +4732,7 @@ def _privacy_gated_semantic_evaluator(
                 # composing the case, so it must be restated here or the probe path presents
                 # a shortened case as complete.
                 return replace(
-                    _map_egress_to_final(result, ids),
+                    _map_egress_to_final(result, ids, projection=frozen.case.projection),
                     case_content_over_item_limit=over_item_limit,
                     case_reference_scope_reduced=reference_scope_reduced,
                     case_content_gaps=content_gaps,
@@ -4860,6 +4885,7 @@ def _privacy_gated_semantic_evaluator(
                             ids,
                             attempt_id=handle.attempt_id,
                             operation_request_id=frozen.lease.operation_id,
+                            projection=frozen.case.projection,
                         )
                         if final.status in {SemanticStatus.SUCCEEDED, SemanticStatus.INVALID}:
                             # A provider response came back and is now validated and recorded.
@@ -5007,10 +5033,13 @@ def _privacy_gated_semantic_evaluator(
                 judgment = None
                 provenance = None
                 continuation = None
+                disclosed: frozenset[str] | None = None
                 if type(evaluation) is FinalSemanticEvaluation:
                     if status is SemanticStatus.SUCCEEDED:
                         judgment = evaluation.judgment
                         provenance = evaluation.provenance
+                        # What the exact sent packet carried, from the selected attempt (#904).
+                        disclosed = evaluation.case_included_refs
                     elif (
                         status is evaluation.status
                         and reason is evaluation.reason
@@ -5046,6 +5075,7 @@ def _privacy_gated_semantic_evaluator(
                     withheld_review_categories=withheld,
                     case_content_over_item_limit=over_item_limit,
                     case_reference_scope_reduced=reference_scope_reduced,
+                    case_included_refs=disclosed,
                     case_content_gaps=content_gaps,
                     unsuppliable_missing_kinds=unsuppliable,
                     case_prior_finding_refs=packet_prior_refs,

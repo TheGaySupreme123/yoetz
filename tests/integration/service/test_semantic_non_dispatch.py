@@ -7,7 +7,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -25,6 +25,7 @@ from builders.policy_cases import (
     clm,
     evd,
     evidence_record,
+    evt,
     make_case,
     obl,
     obligation_record,
@@ -87,7 +88,7 @@ from yoetz.domain.receipts import (
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
 )
 from yoetz.domain.values import EvidenceId, timestamp_from_string
-from yoetz.kernel.deterministic_checks import CaseGap
+from yoetz.kernel.deterministic_checks import CaseGap, FindingBasisRef
 from yoetz.kernel.projections import EvidenceProjectionRecord
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.importer import ImporterPort
@@ -1423,7 +1424,9 @@ class _FindingIds:
         return new_id(kind)
 
 
-def _wide_frozen(width: int) -> tuple[FrozenCase, tuple[Finding, ...]]:
+def _wide_frozen(
+    width: int, extra_refs: tuple[FindingBasisRef, ...] = ()
+) -> tuple[FrozenCase, tuple[Finding, ...]]:
     """Ordinary task material plus one gap naming ``width`` subjects (issue #858 shape).
 
     The work-integrity pack turns the gap into one ``ledger_stale_or_incomplete`` finding whose
@@ -1465,7 +1468,7 @@ def _wide_frozen(width: int) -> tuple[FrozenCase, tuple[Finding, ...]]:
         obligations={obl(1): obligation},
         claims={clm(1): claim},
         evidence=evidence,
-        extra_refs=(clm(1), obl(1), evd(1)),
+        extra_refs=(clm(1), obl(1), evd(1), *extra_refs),
         gaps=(CaseGap("missing_ref:bulk", "missing_ref", subjects),),
     )
     assessments, _ = run_deterministic_policies(
@@ -1494,6 +1497,41 @@ def _wide_frozen(width: int) -> tuple[FrozenCase, tuple[Finding, ...]]:
         ),
     )
     return frozen, findings
+
+
+@pytest.mark.anyio
+async def test_a_reduced_case_records_no_included_references_it_did_not_send(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #904: only what a sent packet carried is recorded, never the builder's closure.
+
+    The case's reference closure names refs that were only mentioned, linked or omitted. A review
+    that never produced a result sent nothing the check may credit, so the final evaluation carries
+    no included references even though its scope was reduced.
+    """
+
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+    privacy = _Privacy(profile=ReviewContextProfile.EXPANDED)
+    privacy.terminal_provider_result = True
+    unrelated = tuple(evt(900 + number) for number in range(4))
+    frozen, findings = _wide_frozen(17, unrelated)
+
+    result = await _evaluator(privacy, lambda: _PROVIDER, _route())(frozen, findings)
+
+    [candidate] = privacy.candidates
+    envelopes: list[dict[str, Any]] = []
+    for item in candidate.items:
+        if b'"frontier_refs"' not in item.plaintext:
+            continue
+        parsed: object = json.loads(item.plaintext)
+        if isinstance(parsed, dict) and "frontier_refs" in parsed:
+            envelopes.append(cast(dict[str, Any], parsed))
+    [envelope] = envelopes
+    assert int(cast(str, envelope["omitted_reference_count"])) >= len(unrelated)
+    assert cast(list[str], envelope["frontier_refs"]), "the closure names references"
+    assert result.status is SemanticStatus.UNAVAILABLE
+    assert result.case_reference_scope_reduced is True
+    assert result.case_included_refs is None
 
 
 @pytest.mark.anyio

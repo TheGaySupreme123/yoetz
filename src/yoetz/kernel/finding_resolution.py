@@ -6,9 +6,10 @@ state contains the finding, whose matching policy pack ran to completion with no
 whose scope covers the finding's subject, whose coverage carries no weakening gap for the
 finding's proof class, and which did not return the same issue again. A closed local-only
 exception lets case-wide host-observation limitations remain on the receipt without vetoing clean
-structured-ledger proof. A response disposition never resolves a finding; it only answers it on
-the record. Weak, skipped, failed, capped, stale, unreadable, or non-overlapping checks do nothing,
-and nothing here ever strengthens coverage.
+structured-ledger proof, and a bounded AI-powered review selection stays disclosure rather than a
+veto on proof it did not weaken. A response disposition never resolves a finding; it only answers
+it on the record. Weak, skipped, failed, capped, stale, unreadable, or non-overlapping checks do
+nothing, and nothing here ever strengthens coverage.
 
 Everything in this module is pure and replay-derived, so a receipt, a status counter, and a
 projection checkpoint all read the same fact.
@@ -16,12 +17,14 @@ projection checkpoint all read the same fact.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, MutableMapping
+from collections.abc import Iterable, Iterator, Mapping, MutableMapping
 from dataclasses import replace
-from typing import Final, Literal
+from typing import Final, Literal, cast
 
 from yoetz.domain.coordination import CoordinationGapCode
 from yoetz.domain.events import (
+    SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP,
+    SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP,
     CheckChangeShownFiles,
     CheckRecordedPayload,
     ClaimKind,
@@ -53,7 +56,7 @@ from yoetz.domain.receipts import (
     SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
 )
 from yoetz.domain.task_statement import TASK_STATEMENT_GAPS, may_carry_task_statement
-from yoetz.domain.values import EventId, FindingId, ResultId
+from yoetz.domain.values import EventId, EvidenceId, FindingId, ResultId
 from yoetz.kernel.claims import effective_claim_items
 from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.projections import (
@@ -69,7 +72,10 @@ from yoetz.protocol.coverage import LedgerFreshness
 from yoetz.protocol.models import SemanticReason, SemanticStatus
 
 __all__ = [
+    "CAPTURE_FAILURE_GAPS",
+    "REVIEW_SELECTION_GAPS",
     "SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS",
+    "SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP",
     "IssueKey",
     "OPEN_REVIEW_VERDICTS",
     "apply_check_resolution",
@@ -98,6 +104,36 @@ _INSUFFICIENT_PACKET_GAPS: Final = frozenset(
         SEMANTIC_MISSING_UNAVAILABLE_GAP,
     }
 )
+
+# ``SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP``: the AI-powered review packet carried the bounded
+# dependency closure of what it selected rather than every reference at the frozen frontier
+# (ADR-006, #675). The ledger outgrows the packet in any real session, so this is the normal case,
+# not an exception. The check records the references the reduced packet included, and an AI-powered
+# finding may use the unchanged scope as a baseline only when its relevant material was among them.
+# Selection versus capture failure (issue #904). A *selection* code records a deliberate, bounded
+# choice of what material to show; a *capture-failure* code records material that was clipped,
+# redacted, or lost. Selection codes keep bounding every coverage they are folded into, and the
+# receipt keeps saying the review saw a bounded scope, but they never describe the complete local
+# case, so they never weaken local proof; for AI-powered proof they are compared with the finding's
+# recorded baseline, so an unchanged selection is tolerated and a new one still blocks. Capture
+# failures are never tolerated by either proof class and never become a baseline. This names only
+# the codes #904 decided; every tolerated set below stays closed, so an unclassified code still
+# blocks both proof classes until someone decides otherwise here.
+REVIEW_SELECTION_GAPS: Final = frozenset(
+    {"content_unselected", SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP}
+)
+CAPTURE_FAILURE_GAPS: Final = frozenset(
+    {
+        "content_redacted",
+        "event_payload_unavailable",
+        "redacted_event",
+        "redacted_object",
+        # Waits for the truncation-source test and relevance rule (issue #904); until then a
+        # clipped payload may be the finding's own evidence, so it blocks.
+        "truncated_payload",
+    }
+)
+
 # Coverage gaps that describe only the AI-powered review's own absence or weakness. A
 # local finding is proven absent by the local pack that owns it, so these gaps
 # do not weaken that proof; for an AI-powered finding they do, because the AI-powered review is the
@@ -121,6 +157,9 @@ _SEMANTIC_ONLY_GAPS: Final = frozenset(
         # The check-time change is AI-powered review input only (ADR-031); local packs never
         # read it, so its limits cannot weaken a local absence proof.
         *CHECK_TIME_CHANGE_GAPS,
+        # The reduced review's sent content could not be recorded (issue #904): a limit of that
+        # review, never of the complete local case. For AI-powered proof it blocks.
+        SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP,
     }
 )
 # Evidence-strength gaps: the cited evidence was readable but its content was not captured or
@@ -167,22 +206,27 @@ _REVIEW_DIALOGUE_DISCLOSURE_GAPS: Final = frozenset(
 _BASE_DETERMINISTIC_PROOF_TOLERATED_GAPS: Final = (
     _SEMANTIC_ONLY_GAPS | _EVIDENCE_STRENGTH_GAPS | _REVIEW_DIALOGUE_DISCLOSURE_GAPS
 )
+# A reduced AI-powered review scope bounds the review packet only; the local-check case is not
+# reduced (ADR-006), so review selection never weakens a local absence proof (issue #904).
 _DETERMINISTIC_PROOF_TOLERATED_GAPS: Final = (
-    _BASE_DETERMINISTIC_PROOF_TOLERATED_GAPS | _HOST_OBSERVATION_GAPS
+    _BASE_DETERMINISTIC_PROOF_TOLERATED_GAPS | _HOST_OBSERVATION_GAPS | REVIEW_SELECTION_GAPS
 )
 _SEMANTIC_PROOF_TOLERATED_GAPS: Final = _EVIDENCE_STRENGTH_GAPS | _REVIEW_DIALOGUE_DISCLOSURE_GAPS
 # These native capture limits may be compared with the readable original finding's baseline.
 # The check stamps the ones its review ran under onto every semantic finding it raises, so the
 # baseline is durable finding coverage, not a later reconstruction (issue #884). Recorded clipping
 # of an oversized item is included: it stays disclosed on every receipt, but an unchanged,
-# already-recorded limit must not make a repaired issue permanently unresolvable. They never
-# tolerate a new limitation, hidden ledger payloads, withheld review categories, dropped
-# challenges, or an insufficient-packet answer.
+# already-recorded limit must not make a repaired issue permanently unresolvable. Review selection
+# is included for the same reason (issue #904): every review of a long session runs over a reduced
+# reference scope, and a later review under that same bound saw no less than the one that raised
+# the issue. They never tolerate a new limitation, hidden ledger payloads, withheld review
+# categories, dropped challenges, truncated payloads, or an insufficient-packet answer.
 # The task-statement gaps (issue #908) join them on the same terms: a review that lacked the
 # user's request may prove absence only for an issue raised by a review that lacked it the same
 # way, never for one raised with the statement in hand.
 SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS: Final = (
     _HOST_OBSERVATION_GAPS
+    | REVIEW_SELECTION_GAPS
     | frozenset({"content_capture_unavailable", SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP})
     | TASK_STATEMENT_GAPS
 )
@@ -379,6 +423,44 @@ def _semantic_freshness_proven(
     )
 
 
+def _material_changes(
+    finding: Finding,
+    finding_source_frontier: int,
+    check: CheckRecordedPayload,
+    state: ProjectionState,
+) -> Iterator[tuple[str, str]]:
+    """Yield ``(logical ref, source event ref)`` for each material row counted as a change."""
+
+    low = finding_source_frontier
+    high = check.subject_frontier.sequence
+
+    def changed(row: object) -> bool:
+        # An unreadable (redacted) record cannot show what changed, so it proves nothing.
+        source = getattr(row, "source_frontier", 0)
+        readable = getattr(row, "payload", None) is not None
+        return readable and type(source) is int and low < source <= high
+
+    for rows in (state.actions, state.results, state.evidence):
+        for key, row in rows.items():
+            if changed(row):
+                yield str(key), str(row.source_event_id)
+    subjects = frozenset(str(ref) for ref in finding.subject_refs)
+    for key, row in state.obligations.items():
+        if (str(key) in subjects or str(row.source_event_id) in subjects) and changed(row):
+            yield str(key), str(row.source_event_id)
+    for key, row in state.claims.items():
+        if not changed(row):
+            continue
+        payload = row.payload
+        supersedes = getattr(payload, "supersedes_claim_refs", ()) if payload is not None else ()
+        if (
+            str(key) in subjects
+            or str(row.source_event_id) in subjects
+            or any(str(ref) in subjects for ref in supersedes)
+        ):
+            yield str(key), str(row.source_event_id)
+
+
 def _semantic_subject_changed(
     finding: Finding,
     finding_source_frontier: int,
@@ -397,34 +479,72 @@ def _semantic_subject_changed(
 
     if state is None or state.frontier < check.subject_frontier.sequence:
         return False
-    low = finding_source_frontier
-    high = check.subject_frontier.sequence
+    return any(True for _ in _material_changes(finding, finding_source_frontier, check, state))
 
-    def changed(row: object) -> bool:
-        # An unreadable (redacted) record cannot show what changed, so it proves nothing.
-        source = getattr(row, "source_frontier", 0)
-        readable = getattr(row, "payload", None) is not None
-        return readable and type(source) is int and low < source <= high
 
-    for rows in (state.actions, state.results, state.evidence):
-        if any(changed(row) for row in rows.values()):
-            return True
-    subjects = frozenset(str(ref) for ref in finding.subject_refs)
-    for key, row in state.obligations.items():
-        if (str(key) in subjects or str(row.source_event_id) in subjects) and changed(row):
-            return True
-    for key, row in state.claims.items():
-        if not changed(row):
+def _response_repair_refs(finding: Finding, state: ProjectionState) -> frozenset[str] | None:
+    """The repair material the finding's latest response links, or None when it is unreadable.
+
+    This is the #898 repair-evidence relation: evidence cited directly, and the evidence of a
+    cited result (the result itself when it cites none). No response links nothing. A redacted or
+    unknown response, result or evidence row cannot be shown to have been in view, so it is None.
+    """
+
+    response = state.responses.get(finding.finding_id)
+    if response is None:
+        return frozenset()
+    if response.payload is None or response.redacted:
+        return None
+    refs: set[str] = set()
+    for cited in response.payload.evidence_refs:
+        value = str(cited)
+        evidence = state.evidence.get(cast(EvidenceId, value))
+        if evidence is not None:
+            if evidence.payload is None or evidence.redacted:
+                return None
+            refs.add(value)
             continue
-        payload = row.payload
-        supersedes = getattr(payload, "supersedes_claim_refs", ()) if payload is not None else ()
-        if (
-            str(key) in subjects
-            or str(row.source_event_id) in subjects
-            or any(str(ref) in subjects for ref in supersedes)
-        ):
-            return True
-    return False
+        result = state.results.get(cast(ResultId, value))
+        if result is None or result.payload is None or result.redacted:
+            return None
+        linked = tuple(str(ref) for ref in result.payload.evidence_refs)
+        for ref in linked:
+            row = state.evidence.get(cast(EvidenceId, ref))
+            if row is None or row.payload is None or row.redacted:
+                return None
+        refs.update(linked or (value,))
+    return frozenset(refs)
+
+
+def _reduced_scope_repair_in_view(
+    finding: Finding,
+    finding_source_frontier: int,
+    check: CheckRecordedPayload,
+    state: ProjectionState | None,
+) -> bool:
+    """Whether a reduced review packet provably sent the material this finding depends on.
+
+    The check must record the frontier references whose own content item survived in the packet
+    actually sent (issue #904). Every subject of the finding and every repair reference its
+    response links must be among them, and so must at least one material change made after the
+    finding: the repair the later review is credited with judging. A missing record, an unreadable
+    response or linked row, or any relevant reference that was only mentioned, linked, omitted or
+    withheld is no proof, so the reduced scope keeps blocking.
+    """
+
+    included_refs = check.semantic_included_refs
+    if included_refs is None or state is None or state.frontier < check.subject_frontier.sequence:
+        return False
+    included = frozenset(included_refs)
+    if any(str(ref) not in included for ref in finding.subject_refs):
+        return False
+    linked = _response_repair_refs(finding, state)
+    if linked is None or not linked <= included:
+        return False
+    return any(
+        key in included or source in included
+        for key, source in _material_changes(finding, finding_source_frontier, check, state)
+    )
 
 
 # A check carrying either code may have left an unruled AI-powered finding unassessed (#905).
@@ -488,6 +608,7 @@ def qualifying_check_resolves(
     proof_state: ProjectionState | None = None,
     raised_before_task_statement: bool = False,
     check_change_raised_files: CheckChangeShownFiles | None = None,
+    raised_under_reduced_scope: bool = False,
 ) -> bool:
     """True when *check* proves the issue *finding* reports is absent from the state it tested.
 
@@ -497,6 +618,9 @@ def qualifying_check_resolves(
     returned the same issue re-fired it rather than proving it gone.
     ``check_change_raised_files`` is what the review that raised an AI-powered *finding* saw of
     the check-time change (``None`` while unknown); see ``check_change_limits_tolerated``.
+    returned the same issue re-fired it rather than proving it gone. ``raised_under_reduced_scope``
+    is the replay-derived fact that the check which raised *finding* recorded a reduced review
+    reference scope (``FindingProjectionRecord.reduced_scope_raising_check_event_id``).
     """
 
     if type(finding) is not Finding or type(check) is not CheckRecordedPayload:
@@ -511,6 +635,7 @@ def qualifying_check_resolves(
         proof_state=proof_state,
         raised_before_task_statement=raised_before_task_statement,
         check_change_raised_files=check_change_raised_files,
+        raised_under_reduced_scope=raised_under_reduced_scope,
     )
 
 
@@ -569,6 +694,25 @@ def unverified_resolution_finding_ids(
     )
 
 
+def _raises_under_reduced_scope(check: CheckRecordedPayload, finding: Finding) -> bool:
+    """Whether *check* is the review that raised *finding* under a reduced reference scope.
+
+    This feeds the lifecycle fallback for AI-powered findings recorded before the raise-time stamp
+    existed (issue #904): their own coverage never carries ``semantic_reference_scope_reduced``,
+    while the raising check's recorded coverage does. The raising check is the one whose completed
+    review produced the finding: same tested frontier and same AI-powered review attempt.
+    """
+
+    return (
+        finding.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+        and SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP in check.coverage.known_gaps
+        and finding.subject_frontier == check.subject_frontier
+        and finding.provenance is not None
+        and check.semantic_provenance is not None
+        and finding.provenance.semantic_attempt_id == check.semantic_provenance.semantic_attempt_id
+    )
+
+
 def resolution_blockers(
     finding: Finding,
     finding_source_frontier: int,
@@ -578,6 +722,7 @@ def resolution_blockers(
     proof_state: ProjectionState | None = None,
     raised_before_task_statement: bool = False,
     check_change_raised_files: CheckChangeShownFiles | None = None,
+    raised_under_reduced_scope: bool = False,
 ) -> tuple[str, ...]:
     """Explain the exact qualification predicate without weakening its proof requirements.
 
@@ -610,8 +755,18 @@ def resolution_blockers(
         if check.semantic_conclusion == "insufficient_packet" and not ruled_fixed:
             reasons.append("semantic_packet_insufficient")
         original_gaps = frozenset(finding.coverage.known_gaps)
+        if raised_under_reduced_scope:
+            # Lifecycle fallback (issue #904): a finding recorded before the raise-time stamp
+            # lacks the scope code its raising check recorded. That recorded check coverage
+            # supplies this one baseline code; the finding's own coverage is never rewritten.
+            original_gaps |= {SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP}
         baseline_tolerated = _SEMANTIC_PROOF_TOLERATED_GAPS | _SEMANTIC_BASELINE_CAPTURE_GAPS
-        baseline_readable = original_gaps <= baseline_tolerated and _semantic_freshness_proven(
+        # A limitation outside the baseline set that the raising review ran under keeps its
+        # baseline unreadable only while that limitation lasts (issue #904): a later check that
+        # carries none of those codes saw at least as much as the raising one. A later check that
+        # still carries one keeps blocking, and unproven original freshness is never rehabilitated.
+        beyond_baseline = original_gaps - baseline_tolerated
+        baseline_readable = not (beyond_baseline & gaps) and _semantic_freshness_proven(
             finding.coverage.ledger_freshness, original_gaps, baseline_tolerated
         )
         if (
@@ -634,9 +789,23 @@ def resolution_blockers(
             check, check_change_raised_files
         ):
             tolerated |= CHECK_TIME_CHANGE_GAPS
+        changed = _semantic_subject_changed(finding, finding_source_frontier, check, proof_state)
+        if (
+            changed
+            and SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP in gaps & tolerated
+            and not _reduced_scope_repair_in_view(
+                finding, finding_source_frontier, check, proof_state
+            )
+        ):
+            # An unchanged reduced scope is a baseline only for a later review whose packet
+            # provably carried this finding's subjects, its linked repair material and the change
+            # itself (issue #904, PR930-F1). Otherwise the same code says nothing about whether
+            # the repair was in view, so it keeps blocking.
+            tolerated -= {SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP}
+            reasons.append("finding_material_outside_reduced_review_scope")
         if not _semantic_freshness_proven(check.coverage.ledger_freshness, gaps, tolerated):
             reasons.append("freshness_unproven")
-        if not _semantic_subject_changed(finding, finding_source_frontier, check, proof_state):
+        if not changed:
             # A stochastic reviewer that merely does not repeat an issue proves nothing; the
             # issue may only close over state that changed materially after it was raised.
             reasons.append("no_material_change_since_finding")
@@ -937,6 +1106,7 @@ def _finding_resolution_explanation(
             finding_record.payload, first_task_statement_sequence_of(records)
         ),
         check_change_raised_files=_record_raised_files(finding_record),
+        raised_under_reduced_scope=finding_record.reduced_scope_raising_check_event_id is not None,
     )
     returned_again = "issue_returned_again" in reasons
     relation = "Returned again" if returned_again else "Not returned; absence remains unproven"
@@ -1079,9 +1249,10 @@ def apply_check_resolution(
     """Fold one recorded check into the resolution facts of the findings it could speak to.
 
     Every finding the check returned becomes current again, whatever an earlier check proved.
-    If any returned finding is unreadable, the check cannot prove which issues it re-fired, so it
-    resolves nothing. Otherwise each readable, still-current finding that the qualification
-    relation admits is marked resolved by this check.
+    An AI-powered finding this check's review raised under a reduced reference scope records this
+    check as its raising check (issue #904). If any returned finding is unreadable, the check
+    cannot prove which issues it re-fired, so it resolves nothing. Otherwise each readable,
+    still-current finding that the qualification relation admits is marked resolved by this check.
     """
 
     returned_keys: set[IssueKey] = set()
@@ -1097,6 +1268,7 @@ def apply_check_resolution(
                 record,
                 resolved_by_check_event_id=None,
                 resolution_depends_on_check_event_ids=(),
+                resolution_raising_check_event_id=None,
             )
         if payload.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED and (
             check.semantic_conclusion is not None or _raised_by(check, payload)
@@ -1104,6 +1276,10 @@ def apply_check_resolution(
             # ADR-031: every review that raised or re-raised the issue adds what it was shown;
             # a repair must then have seen at least what each of them saw.
             record = _with_raising_check(record, check, check_event_id)
+        if record.reduced_scope_raising_check_event_id is None and _raises_under_reduced_scope(
+            check, payload
+        ):
+            record = replace(record, reduced_scope_raising_check_event_id=check_event_id)
         findings[returned_id] = record
     if not readable:
         return
@@ -1118,7 +1294,8 @@ def apply_check_resolution(
         ):
             continue
         raised_files = _record_raised_files(record)
-        if qualifying_check_resolves(
+        raising = record.reduced_scope_raising_check_event_id
+        if not qualifying_check_resolves(
             record.payload,
             record.source_frontier,
             check,
@@ -1128,20 +1305,41 @@ def apply_check_resolution(
                 record.payload, first_task_statement_sequence
             ),
             check_change_raised_files=raised_files,
+            raised_under_reduced_scope=raising is not None,
         ):
-            # A check-time limit on this check was tolerated only through the raising checks'
-            # recorded files; redacting any of those checks must reopen the finding.
-            depends_on = (
-                record.check_change_raising_check_event_ids
-                if record.payload.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
-                and set(check.coverage.known_gaps) & CHECK_TIME_CHANGE_GAPS
-                else ()
+            continue
+        # A check-time limit on this check was tolerated only through the raising checks'
+        # recorded files; redacting any of those checks must reopen the finding.
+        depends_on = (
+            record.check_change_raising_check_event_ids
+            if record.payload.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+            and set(check.coverage.known_gaps) & CHECK_TIME_CHANGE_GAPS
+            else ()
+        )
+        # A proof that qualified only through the raising check's recorded scope also reads that
+        # check, so redacting it must reopen the row just as redacting this check would (#904).
+        relied_on = (
+            raising
+            if raising is not None
+            and not qualifying_check_resolves(
+                record.payload,
+                record.source_frontier,
+                check,
+                frozen_keys,
+                proof_state=proof_state,
+                raised_before_task_statement=_raised_before_task_statement(
+                    record.payload, first_task_statement_sequence
+                ),
+                check_change_raised_files=raised_files,
             )
-            findings[current_id] = replace(
-                record,
-                resolved_by_check_event_id=check_event_id,
-                resolution_depends_on_check_event_ids=depends_on,
-            )
+            else None
+        )
+        findings[current_id] = replace(
+            record,
+            resolved_by_check_event_id=check_event_id,
+            resolution_depends_on_check_event_ids=depends_on,
+            resolution_raising_check_event_id=relied_on,
+        )
 
 
 OPEN_REVIEW_VERDICTS: Final = frozenset({"answered_not_fixed", "still_present", "unassessable"})
@@ -1190,8 +1388,10 @@ def apply_check_rulings(
             findings[current_id] = replace(
                 record,
                 resolved_by_check_event_id=None,
-                # A resolution this ruling outranks keeps no check-time dependency (ADR-031).
+                # A resolution this ruling outranks keeps no check-time dependency (ADR-031) and
+                # no reduced-scope reliance (#904).
                 resolution_depends_on_check_event_ids=(),
+                resolution_raising_check_event_id=None,
                 rejection_accepted_by_check_event_id=check_event_id,
             )
             continue
@@ -1241,22 +1441,30 @@ def reopen_findings_resolved_by(
     findings: dict[FindingId, FindingProjectionRecord],
     event_ids: frozenset[EventId],
 ) -> None:
-    """Drop resolution whose proving check was redacted: unreadable proof is no proof.
+    """Drop resolution whose proof was redacted: unreadable proof is no proof.
 
-    The same holds for a ``rejection_accepted`` latch whose withdrawing check was redacted.
-    A redacted raising check likewise leaves the check-time change files unknown (ADR-031), and a
+    The proof is the proving check and, for a resolution that qualified only through it, the
+    raising check whose recorded reduced scope supplied the baseline (issue #904). A redacted
+    raising check also no longer supplies that fallback to any later check. The same holds
+    for a ``rejection_accepted`` latch whose withdrawing check was redacted. A redacted
+    raising check likewise leaves the check-time change files unknown (ADR-031), and a
     resolution that tolerated check-time limits only through those files is dropped with it.
     """
 
     for current_id, record in tuple(findings.items()):
-        if record.resolved_by_check_event_id in event_ids or (
-            event_ids & set(record.resolution_depends_on_check_event_ids)
+        if (
+            record.resolved_by_check_event_id in event_ids
+            or record.resolution_raising_check_event_id in event_ids
+            or event_ids & set(record.resolution_depends_on_check_event_ids)
         ):
             record = replace(
                 record,
                 resolved_by_check_event_id=None,
                 resolution_depends_on_check_event_ids=(),
+                resolution_raising_check_event_id=None,
             )
+        if record.reduced_scope_raising_check_event_id in event_ids:
+            record = replace(record, reduced_scope_raising_check_event_id=None)
         if record.rejection_accepted_by_check_event_id in event_ids:
             record = replace(record, rejection_accepted_by_check_event_id=None)
         if event_ids & set(record.check_change_raising_check_event_ids):

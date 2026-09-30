@@ -160,6 +160,7 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "schema_name",
         "schema_version",
         "semantic_conclusion",
+        "semantic_included_refs",
         "scope",
         "scope_description",
         "scope_exclusions",

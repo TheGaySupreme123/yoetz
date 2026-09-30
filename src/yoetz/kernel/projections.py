@@ -330,6 +330,15 @@ class DecisionProjectionRecord(ProjectionRecord[DecisionRecordedPayload]):
                 raise _invalid() from exc
 
 
+# Optional finding-record event references, each emitted in a snapshot only when set.
+_FINDING_RESOLUTION_EVENT_FIELDS: Final = (
+    "resolved_by_check_event_id",
+    "rejection_accepted_by_check_event_id",
+    "reduced_scope_raising_check_event_id",
+    "resolution_raising_check_event_id",
+)
+
+
 @dataclass(frozen=True, slots=True)
 class FindingProjectionRecord(ProjectionRecord[Finding]):
     """One recorded finding plus its proof-based resolution fact.
@@ -355,6 +364,16 @@ class FindingProjectionRecord(ProjectionRecord[Finding]):
     carried without a record, or a contributing check since redacted).
     ``resolution_depends_on_check_event_ids`` are those checks when the resolving check's
     check-time limits were tolerated only because of those files; redacting any reopens it.
+
+    ``reduced_scope_raising_check_event_id`` names the ``check_recorded`` event whose completed
+    AI-powered review raised this finding when that check's recorded coverage carried
+    ``semantic_reference_scope_reduced`` (issue #904). It is the replay-derived lifecycle fallback
+    for findings recorded before the raise-time stamp: the finding's own recorded coverage is never
+    rewritten. Redacting that check clears it.
+
+    ``resolution_raising_check_event_id`` names that same raising check when the resolution named
+    by ``resolved_by_check_event_id`` qualified only through its recorded reduced scope. Redacting
+    it reopens the finding exactly like redacting the proving check: unreadable proof is no proof.
     """
 
     resolved_by_check_event_id: EventId | None = None
@@ -363,12 +382,14 @@ class FindingProjectionRecord(ProjectionRecord[Finding]):
     check_change_raising_check_event_ids: tuple[EventId, ...] = ()
     check_change_raised_files: CheckChangeShownFiles | None = None
     resolution_depends_on_check_event_ids: tuple[EventId, ...] = ()
+    reduced_scope_raising_check_event_id: EventId | None = None
+    resolution_raising_check_event_id: EventId | None = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.payload is not None and type(self.payload) is not Finding:
             raise _invalid()
-        for name in ("resolved_by_check_event_id", "rejection_accepted_by_check_event_id"):
+        for name in _FINDING_RESOLUTION_EVENT_FIELDS:
             value = getattr(self, name)
             if value is None:
                 continue
@@ -403,6 +424,11 @@ class FindingProjectionRecord(ProjectionRecord[Finding]):
         ):
             raise _invalid()
         if self.resolution_depends_on_check_event_ids and self.resolved_by_check_event_id is None:
+            raise _invalid()
+        if (
+            self.resolution_raising_check_event_id is not None
+            and self.resolved_by_check_event_id is None
+        ):
             raise _invalid()
 
 
@@ -1101,6 +1127,13 @@ def _record_snapshot(record: _ProjectionRecordLike) -> dict[str, JsonValue]:
             result["resolution_depends_on_check_event_ids"] = list(
                 record.resolution_depends_on_check_event_ids
             )
+        # Likewise emitted only when a raising check recorded a reduced reference scope (#904).
+        if record.reduced_scope_raising_check_event_id is not None:
+            result["reduced_scope_raising_check_event_id"] = (
+                record.reduced_scope_raising_check_event_id
+            )
+        if record.resolution_raising_check_event_id is not None:
+            result["resolution_raising_check_event_id"] = record.resolution_raising_check_event_id
     return result
 
 
@@ -1388,8 +1421,7 @@ def _record_from_snapshot(
     elif collection == "findings":
         optional = frozenset(
             {
-                "rejection_accepted_by_check_event_id",
-                "resolved_by_check_event_id",
+                *_FINDING_RESOLUTION_EVENT_FIELDS,
                 "review_rounds",
                 "check_change_raising_check_event_ids",
                 "check_change_raised_files",
@@ -1485,8 +1517,7 @@ def _record_from_snapshot(
         )
     if collection == "findings":
         for name in (
-            "resolved_by_check_event_id",
-            "rejection_accepted_by_check_event_id",
+            *_FINDING_RESOLUTION_EVENT_FIELDS,
             "check_change_raising_check_event_ids",
             "check_change_raised_files",
             "resolution_depends_on_check_event_ids",
@@ -1528,6 +1559,12 @@ def _record_from_snapshot(
             check_change_raised_files=raised_files,
             resolution_depends_on_check_event_ids=event_ids(
                 "resolution_depends_on_check_event_ids"
+            ),
+            reduced_scope_raising_check_event_id=cast(
+                EventId | None, source.get("reduced_scope_raising_check_event_id")
+            ),
+            resolution_raising_check_event_id=cast(
+                EventId | None, source.get("resolution_raising_check_event_id")
             ),
         )
     return ProjectionRecord(

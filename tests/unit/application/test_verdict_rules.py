@@ -568,6 +568,8 @@ def test_judgment_rejection_preserves_the_truncation_disclosure() -> None:
         ),
         withheld_review_categories=("obligation_text",),
         case_content_over_item_limit=True,
+        case_reference_scope_reduced=True,
+        case_included_refs=frozenset({"evt_20000000-0000-4000-8000-000000000001"}),
         case_content_gaps=("captured_object_unavailable",),
     )
 
@@ -577,3 +579,62 @@ def test_judgment_rejection_preserves_the_truncation_disclosure() -> None:
     assert rejected.case_content_over_item_limit is True
     assert rejected.case_content_gaps == ("captured_object_unavailable",)
     assert rejected.withheld_review_categories == ("obligation_text",)
+    assert rejected.case_reference_scope_reduced is True
+    assert rejected.case_included_refs == succeeded.case_included_refs
+
+
+def test_only_a_completed_reduced_review_records_its_included_references() -> None:
+    """Issue #904: the check records what a reduced packet included, and nothing it cannot bound."""
+
+    from yoetz.application.check import (
+        _judgment_rejected_evaluation,  # pyright: ignore[reportPrivateUsage]
+        semantic_included_refs,
+    )
+    from yoetz.domain.events import MAX_SEMANTIC_INCLUDED_REFS
+    from yoetz.domain.findings import SamplingParams, SemanticDispatchKind, SemanticProvenance
+    from yoetz.ports.semantic import SemanticJudgment
+
+    digest = "sha256:" + "a" * 64
+    refs = frozenset(
+        {"obl_20000000-0000-4000-8000-000000000002", "evt_20000000-0000-4000-8000-000000000001"}
+    )
+    succeeded = FinalSemanticEvaluation(
+        SemanticStatus.SUCCEEDED,
+        SemanticReason.SEMANTIC_COMPLETED,
+        judgment=SemanticJudgment("no_material_discrepancy", ()),
+        provenance=SemanticProvenance(
+            provider="fake",
+            endpoint_profile_id="fake",
+            endpoint_profile_version="1.0.0",
+            model="fake/model",
+            sdk_version="1.0.0",
+            prompt_digest=digest,
+            schema_digest=digest,
+            policy_digest=digest,
+            privacy_policy_digest=digest,
+            sampling_params=SamplingParams(128),
+            latency_ms=1,
+            semantic_attempt_id="att_20000000-0000-4000-8000-000000000001",
+            dispatch_kind=SemanticDispatchKind.EXTERNAL,
+            privacy_receipt_id="egr_20000000-0000-4000-8000-000000000001",
+            status=SemanticStatus.SUCCEEDED,
+            reason=SemanticReason.SEMANTIC_COMPLETED,
+            provider_request_id="fake-1",
+            egress_authorization_id="aut_20000000-0000-4000-8000-000000000001",
+            request_commitment="hmac-sha256:" + "b" * 64,
+        ),
+        case_reference_scope_reduced=True,
+        case_included_refs=refs,
+    )
+
+    assert semantic_included_refs(succeeded) == tuple(sorted(refs, key=str.encode))
+    # Nothing to record: no reduced scope, no conclusion, or no bounded selection.
+    assert semantic_included_refs(_judgment_rejected_evaluation(succeeded)) is None
+    assert semantic_included_refs(replace(succeeded, case_included_refs=frozenset())) is None
+    oversized = frozenset(
+        f"evt_20000000-0000-4000-8000-{number:012x}"
+        for number in range(MAX_SEMANTIC_INCLUDED_REFS + 1)
+    )
+    assert semantic_included_refs(replace(succeeded, case_included_refs=oversized)) is None
+    # An unreduced review sent its whole frontier and records nothing.
+    assert semantic_included_refs(replace(succeeded, case_reference_scope_reduced=False)) is None

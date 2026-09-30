@@ -289,6 +289,7 @@ class _Ledger:
         prior_finding_verdicts: tuple[object, ...] = (),
         missing_for_assessment: tuple[MissingForAssessmentItem, ...] = (),
         check_change_files: CheckChangeShownFiles | None = None,
+        semantic_included_refs: tuple[str, ...] | None = None,
     ) -> CheckCommitResult:
         assert frozen == self.frozen
         self.last_verdicts = prior_finding_verdicts

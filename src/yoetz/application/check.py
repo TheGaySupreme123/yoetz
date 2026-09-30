@@ -14,7 +14,12 @@ from yoetz.application.missing_for_assessment import (
     review_missing_for_assessment,
 )
 from yoetz.domain.coordination import CoordinationError, CoordinationErrorCode
-from yoetz.domain.events import CheckChangeShownFiles, LedgerRecord
+from yoetz.domain.events import (
+    MAX_SEMANTIC_INCLUDED_REFS,
+    SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP,
+    CheckChangeShownFiles,
+    LedgerRecord,
+)
 from yoetz.domain.findings import (
     FINDING_KIND_TRAITS,
     MAX_RECORDED_VERDICTS,
@@ -76,7 +81,10 @@ from yoetz.kernel.deterministic_checks import (
     finding_basis_to_json,
     render_deterministic_finding_text,
 )
-from yoetz.kernel.finding_resolution import SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS
+from yoetz.kernel.finding_resolution import (
+    SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS,
+    SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP,
+)
 from yoetz.kernel.finding_todo import (
     DEFAULT_FINDING_ATTEMPT_BUDGET,
     FindingTodoState,
@@ -152,6 +160,7 @@ from yoetz.protocol.models import (
 from yoetz.version import ENGINE_VERSION
 
 __all__ = [
+    "SEMANTIC_CASE_CONTENT_GAPS",
     "SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM",
     "SEMANTIC_REJECTED_REF_OUTSIDE_CASE",
     "SEMANTIC_REJECTED_SUBJECTS_OVER_LIMIT",
@@ -208,6 +217,25 @@ _WORK_KINDS = frozenset(
 SEMANTIC_REJECTED_REF_OUTSIDE_CASE: Final = "ref_outside_case"
 SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM: Final = "hidden_source_claim"
 SEMANTIC_REJECTED_SUBJECTS_OVER_LIMIT: Final = "subject_refs_over_limit"
+# The closed packet content gaps a semantic evaluation may carry into check coverage. Each is
+# classified for finding resolution in ``kernel/finding_resolution.py`` (issue #904); adding one
+# here without deciding its resolution class is caught by that module's tests.
+SEMANTIC_CASE_CONTENT_GAPS: Final = frozenset(
+    {
+        "captured_object_unavailable",
+        "content_capture_unavailable",
+        "truncated_payload",
+        "content_unselected",
+        "content_redacted",
+        SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
+    }
+)
+# Every packet gap an evaluation may report: the content gaps above plus the codes whose resolution
+# rules live beside their own features (#905 prior findings, #908 task statement, ADR-031 check-time
+# change).
+_SEMANTIC_EVALUATION_GAPS: Final = SEMANTIC_CASE_CONTENT_GAPS | frozenset(
+    {SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP, *TASK_STATEMENT_GAPS, *CHECK_TIME_CHANGE_GAPS}
+)
 
 
 class SemanticJudgmentRejected(ValueError):
@@ -1121,6 +1149,10 @@ class FinalSemanticEvaluation:
     # rather than let the shortening pass as material the author chose not to send.
     case_content_over_item_limit: bool = False
     case_reference_scope_reduced: bool = False
+    # The frontier references whose own content item the exact sent review packet carried, after
+    # envelope bounding and privacy minimization (issue #904); None when no packet was sent or it
+    # could not be read. The check records them only for a completed reduced review.
+    case_included_refs: frozenset[str] | None = None
     case_content_gaps: tuple[str, ...] = ()
     # Missing-item kinds the effective review selection or channel can never carry (issue #907).
     # Computed where the case is composed, so the check can classify what a reviewer names.
@@ -1147,18 +1179,12 @@ class FinalSemanticEvaluation:
         if (
             type(self.case_content_gaps) is not tuple
             or self.case_content_gaps != tuple(sorted(set(self.case_content_gaps)))
-            or not set(self.case_content_gaps)
-            <= {
-                "captured_object_unavailable",
-                "content_capture_unavailable",
-                "truncated_payload",
-                "content_unselected",
-                "content_redacted",
-                SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
-                SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
-                *TASK_STATEMENT_GAPS,
-                *CHECK_TIME_CHANGE_GAPS,
-            }
+            or not set(self.case_content_gaps) <= _SEMANTIC_EVALUATION_GAPS
+        ):
+            raise _invalid("semantic_judgment_invalid")
+        if self.case_included_refs is not None and (
+            type(self.case_included_refs) is not frozenset
+            or any(type(ref) is not str for ref in self.case_included_refs)
         ):
             raise _invalid("semantic_judgment_invalid")
         if (
@@ -2208,17 +2234,41 @@ def _admit_prior_verdicts(
 
 
 def semantic_capture_baseline_gaps(result: FinalSemanticEvaluation) -> frozenset[str]:
-    """The closed native capture limits a completed review ran under (issue #884).
+    """The closed native capture limits a completed review ran under (issues #884, #904).
 
-    These are the same codes the commit path adds to check coverage from the semantic case. Only
-    this closed set becomes a finding's baseline; every other packet limitation stays check-only
-    and keeps blocking semantic absence proof.
+    These are the same codes the commit path adds to check coverage from the semantic case,
+    including the reduced reference scope of a bounded review packet. Only this closed set becomes
+    a finding's baseline; every other packet limitation, such as a truncated payload, stays
+    check-only and keeps blocking semantic absence proof.
     """
 
     gaps = set(result.case_content_gaps) & SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS
     if result.case_content_over_item_limit:
         gaps.add(SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP)
+    if result.case_reference_scope_reduced:
+        gaps.add(SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP)
     return frozenset(gaps)
+
+
+def semantic_included_refs(result: FinalSemanticEvaluation) -> tuple[str, ...] | None:
+    """The check record of what a completed reduced review's sent packet carried (issue #904).
+
+    Only a completed review that reached a conclusion and ran over a reduced reference scope
+    records them: the frontier references whose own content item survived envelope bounding and
+    privacy minimization. An unreadable, empty or oversized set records none; the check then
+    carries ``semantic_included_refs_not_recorded`` and no AI-powered finding resolves through it.
+    """
+
+    refs = result.case_included_refs
+    if (
+        refs is None
+        or not result.case_reference_scope_reduced
+        or result.status is not SemanticStatus.SUCCEEDED
+        or result.judgment is None
+        or not 1 <= len(refs) <= MAX_SEMANTIC_INCLUDED_REFS
+    ):
+        return None
+    return tuple(sorted(refs, key=str.encode))
 
 
 def validate_semantic_judgment(
@@ -2674,6 +2724,7 @@ def _judgment_rejected_evaluation(
         # The rejection restates the outcome, not the case: a truncated case stays truncated.
         case_content_over_item_limit=result.case_content_over_item_limit,
         case_reference_scope_reduced=result.case_reference_scope_reduced,
+        case_included_refs=result.case_included_refs,
         case_content_gaps=result.case_content_gaps,
     )
 
@@ -3032,7 +3083,15 @@ async def execute_check_commit(
         if semantic_result.case_content_over_item_limit:
             declared_gaps.add(SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP)
         if semantic_result.case_reference_scope_reduced:
-            declared_gaps.add("semantic_reference_scope_reduced")
+            declared_gaps.add(SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP)
+            if (
+                semantic_result.status is SemanticStatus.SUCCEEDED
+                and semantic_result.judgment is not None
+                and semantic_included_refs(semantic_result) is None
+            ):
+                # The reduced review completed but its sent content could not be recorded, so
+                # no AI-powered finding can be resolved by it; say so rather than fail silently.
+                declared_gaps.add(SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP)
         new_gaps = declared_gaps - set(coverage.known_gaps)
         if new_gaps:
             gaps = set(coverage.known_gaps) | new_gaps
@@ -3108,6 +3167,7 @@ async def execute_check_commit(
                 review.verdicts if semantic_result.status is SemanticStatus.SUCCEEDED else ()
             ),
             missing_for_assessment=missing.items,
+            semantic_included_refs=semantic_included_refs(semantic_result),
         )
         preview = _lineage_preview(lineage_evaluation, frozen.case.frontier)
         projected = committed if preview is None else replace(committed, children=preview)

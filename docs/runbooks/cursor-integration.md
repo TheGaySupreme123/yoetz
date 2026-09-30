@@ -1312,9 +1312,17 @@ fresh installed native Cursor dogfood run.
 
 This host uses the shared service status snapshot cache and bounded AI-powered review reference
 selection. A reduced reference scope reports `semantic_reference_scope_reduced`; it is not full-task
-AI-powered review coverage. `failed/case_capacity_exceeded` and `semantic_case_capacity_exceeded`
-mean the required packet could not fit before any provider attempt. Select a smaller
-claim/obligation scope for a new check. Shorter prose alone need not fix structural capacity.
+AI-powered review coverage, and check, status and receipts keep saying so. It does not stop a
+repaired local finding from resolving. An AI-powered finding raised under the same bound can
+resolve after repair and a later completed review whose sent packet carried the content of the
+finding's subjects, its response-linked repair evidence and a change made after it; otherwise
+`finding_material_outside_reduced_review_scope` is named. `semantic_included_refs_not_recorded`
+means what that review sent could not be recorded; run one new check, and disclose the finding if
+the code repeats. A newly reduced scope or a `truncated_payload` gap still blocks it (#904). Cross-host dogfood of this resolution rule on macOS, Linux and WSL 2
+has not been run yet; owner #904. `failed/case_capacity_exceeded` and
+`semantic_case_capacity_exceeded` mean the required packet could not fit before any provider
+attempt. Select a smaller claim/obligation scope for a new check. Shorter prose alone need not fix
+structural capacity.
 
 For `coordinator_failure`, use the check's original request ID with
 `yoetz service diagnostics --request-id req_…` to read bounded failure stages. Dispatch entry can
