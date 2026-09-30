@@ -1651,3 +1651,62 @@ def test_a_bad_cursor_is_the_one_typed_caller_error(adapter: str) -> None:
                 PrivacyReceiptQuery(cursor="AAAA"), PrivacyReceiptAudience.TRUSTED_LOCAL_CONTROL
             )
         )
+
+
+def test_skipped_row_diagnostics_are_bounded_per_page_while_the_page_names_every_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A heavily corrupt audit listed again and again must not flood the diagnostics ring."""
+
+    import yoetz.observability.diagnostics as diagnostics_module
+
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+    db = _database()
+    audit = CatalogPrivacyAudit(db, _UnusedObjects(), _Key(), _Clock())  # type: ignore[arg-type]
+    stored = [_stored_projection(audit, index) for index in range(1, 9)]
+    for receipt in stored:
+        db.execute(
+            "UPDATE privacy_audit_records SET receipt_canonical = ? WHERE receipt_id = ?",
+            (b"[]", receipt.receipt_id),
+        )
+
+    page = asyncio.run(
+        audit.list_receipts(PrivacyReceiptQuery(), PrivacyReceiptAudience.TRUSTED_LOCAL_CONTROL)
+    )
+
+    assert page.receipts == ()
+    assert page.undecodable_count == 8
+    assert page.undecodable_receipt_ids == tuple(receipt.receipt_id for receipt in stored)
+    records = (tmp_path / "service.diagnostics.jsonl").read_text().splitlines()
+    assert [json.loads(line)["request_id"] for line in records] == [
+        receipt.request_id for receipt in stored[:5]
+    ]
+
+
+def test_a_malformed_position_in_a_cursor_this_store_minted_is_a_store_fault() -> None:
+    """Only this store can mint a cursor whose MAC and query digest verify, so a bad position
+    inside one is the store's integrity fault -- never the caller's ``invalid_request``."""
+
+    db = _database()
+    audit = CatalogPrivacyAudit(db, _UnusedObjects(), _Key(), _Clock())  # type: ignore[arg-type]
+    for index in range(1, 4):
+        _stored_projection(audit, index)
+    first = asyncio.run(
+        audit.list_receipts(
+            PrivacyReceiptQuery(limit=1), PrivacyReceiptAudience.TRUSTED_LOCAL_CONTROL
+        )
+    )
+    assert first.next_cursor is not None
+    payload = dict(audit._decode_cursor(first.next_cursor))  # pyright: ignore[reportPrivateUsage]
+    payload["after_at"] = "not-a-timestamp"
+    minted = audit._encode_cursor(payload)  # pyright: ignore[reportPrivateUsage]
+
+    with pytest.raises(PrivacyAuditUnreadable) as raised:
+        asyncio.run(
+            audit.list_receipts(
+                PrivacyReceiptQuery(limit=1, cursor=minted),
+                PrivacyReceiptAudience.TRUSTED_LOCAL_CONTROL,
+            )
+        )
+
+    assert raised.value.reason == "privacy_audit_page_invariant_violated"

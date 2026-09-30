@@ -3161,26 +3161,29 @@ ready service answers them rather than `method_forbidden` (issue #730). Their bo
 optional `cursor` and answers `snapshot_generation`, `receipts`, and `next_cursor` only when
 another page exists. Each wrapper names its `kind` (`local_disclosure` or `network_egress`) and
 carries the receipt in the `privacy/egress-receipt-1.0.0` vocabulary: every counter and version
-is a decimal string, optional fields are absent rather than null. `counts.final_bytes` is bounded
-by that vocabulary's 262,144 in the domain too (`MAX_RECEIPT_FINAL_BYTES`), not by the 512 KiB
+is a decimal string, optional fields are absent rather than null. `counts.final_bytes` is bounded by
+that vocabulary's 262,144 in the domain too (`MAX_RECEIPT_FINAL_BYTES`), not by the 512 KiB
 outbound-document bound, so the store can no longer hold a receipt the wire refuses. Unknown or
-malformed keys, filters, page sizes, cursors, and receipt IDs are `invalid_request`; a cursor
-minted for a different query is the same non-retryable rejection, and `invalid_request` is
-reserved for those caller mistakes (issue #921). Stored rows are read one at a time: a row that
-cannot be read back -- it does not decode, its receipt fails the domain bounds (for example a
-`final_bytes` above 262,144 written by an older build), or its own bytes disagree with the indexed
+malformed keys, filters, page sizes, cursors, and receipt IDs are `invalid_request`; a cursor minted
+for a different query is the same non-retryable rejection, and `invalid_request` is reserved for
+those caller mistakes (issue #921). Stored rows are read one at a time: a row that cannot be read
+back -- it does not decode, its receipt fails the domain bounds (for example a `final_bytes` above
+262,144 written by an older build), or its own bytes disagree with the indexed
 `receipt_id`/`receipt_finished_at` the page is ordered by -- is skipped, never allowed to fail the
-page. The skip is counted and named: the 2.9 result carries `undecodable_count` (decimal, 1-100)
-and `undecodable_receipt_ids` (the structural ids of the skipped rows whose id is intact) together
-and only on a partial page, so a complete page keeps its exact bytes; each skipped row also leaves
-an owner-only `privacy_receipts_list_row_skipped` diagnostic whose reason names its destination
-kind and whose `request_id` is the row's own. The cursor still advances past skipped rows, so
-paging neither repeats nor loses one. A failure of the store itself -- an unreadable row fetched
-by `get`, an ordering or uniqueness violation among rows that did decode, an unavailable snapshot
-generation -- is the closed, non-retryable control reason `privacy_audit_unreadable` (public code
-`STORAGE_CORRUPT`, exit 40, continuation `privacy_audit_review`) with a correlation id the
-diagnostic sink resolves; the client reports a frame it validated but cannot decode into receipts
-the same way. The CLI prints a partial page in full and exits 40 with the count and ids on stderr. Both audit adapters project stored network
+page. The skip is counted and named: the 2.9 result carries `undecodable_count` (decimal, 1-100) and
+`undecodable_receipt_ids` (the structural ids of the skipped rows whose id is intact) together and
+only on a partial page, so a complete page keeps its exact bytes; the first five skipped rows of a
+page also each leave an owner-only `privacy_receipts_list_row_skipped` diagnostic whose reason names
+the destination kind and whose `request_id` is the row's own, so a heavily corrupt audit listed
+repeatedly cannot evict unrelated records from the bounded diagnostics ring. The cursor still
+advances past skipped rows, so paging neither repeats nor loses one. A failure of the store itself
+-- an unreadable row fetched by `get`, an ordering or uniqueness violation among rows that did
+decode, an unavailable snapshot generation, a malformed position inside a cursor whose MAC and query
+digest verified (only this store could mint it) -- is the closed, non-retryable control reason
+`privacy_audit_unreadable` (public code `STORAGE_CORRUPT`, exit 40, continuation
+`privacy_audit_review`) with a correlation id the diagnostic sink resolves; the client reports a
+frame it validated but cannot decode into receipts the same way. The CLI prints a partial page in
+full and exits 40 with the count and ids on stderr. Both audit adapters project stored network
 egress receipts as well as local disclosure receipts, so a completed subscription review is
 retrievable by its recorded receipt ID and listable by `channel`, `provider_id`, or
 `endpoint_profile_id`.

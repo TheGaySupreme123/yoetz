@@ -354,6 +354,11 @@ def _receipt_view_from_row(destination_kind: object, canonical: object) -> Priva
     raise ValueError("privacy_audit_row_corrupt")
 
 
+# At most this many skipped rows on one page each leave a diagnostic; the page's own count and
+# ids name every one. The owner-only diagnostics file is a bounded ring, so an audit with many
+# unreadable rows that is listed repeatedly must not evict unrelated failures from it.
+_MAX_SKIPPED_ROW_DIAGNOSTICS_PER_PAGE: Final = 5
+
 _UNDECODABLE_ROW_REASONS: Final = {
     "local": "privacy_audit_local_row_undecodable",
     "network": "privacy_audit_network_row_undecodable",
@@ -2603,7 +2608,10 @@ class CatalogPrivacyAudit:
                 after_at = parse_rfc3339_millis(cursor["after_at"])
                 after_id = validate_id(IdKind.EGRESS_RECEIPT, cursor["after_id"])
             except (KeyError, TypeError, ValueError) as exc:
-                raise PrivacyReceiptCursorInvalid("privacy_receipt_cursor_invalid") from exc
+                # The MAC and the query digest verified, so only this store could have minted this
+                # cursor, and it minted the position from its own row columns: a malformed position
+                # is the store's integrity fault, not something the caller could have fixed.
+                raise PrivacyAuditUnreadable("privacy_audit_page_invariant_violated") from exc
         clauses = ["receipt_id IS NOT NULL", "receipt_finished_at <= ?"]
         parameters: list[apsw.SQLiteValue] = [format_rfc3339_millis(snapshot_at)]
         fields = (
@@ -2656,7 +2664,8 @@ class CatalogPrivacyAudit:
                 structural_id = _structural_receipt_id(receipt_id)
                 if structural_id is not None and structural_id not in undecodable_ids:
                     undecodable_ids.append(structural_id)
-                _record_skipped_receipt_row(exc.reason, request_id)
+                if undecodable_count <= _MAX_SKIPPED_ROW_DIAGNOSTICS_PER_PAGE:
+                    _record_skipped_receipt_row(exc.reason, request_id)
         next_cursor = None
         if len(rows) > query.limit and selected:
             last = selected[-1]
