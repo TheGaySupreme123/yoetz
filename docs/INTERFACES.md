@@ -435,6 +435,14 @@ service is admitting, or recently refused before admission, carries a structural
 (see "Check admission stage"); an `absent` page without it is a request this service knows nothing
 about. Lookups are scoped to the authenticated task. A request from another task is reported as
 absent.
+Every `status view=findings` item carries `finding_frontier` (status result schema 1.4.0; omitted,
+never null, only by older producers): the sequence of the ledger event that carries the finding's
+current record and that event's own entry digest as `head_digest` (issue #917). It is identical for
+deterministic, AI-powered review and observation-origin findings, follows the item's
+`subject_frontier` (which names the tested state and precedes the record), and `respond` accepts it
+as `finding_frontier` as-is; any later in-chain frontier remains accepted. The CLI and terminal
+interface print it under each finding, and the MCP text summary lists bounded
+`finding frontiers:` pairs.
 MCP `publish_work` performs the same envelope-first operation lookup when the supplied body fails
 schema validation (so a malformed retry body can still recover a committed operation) — except
 under a declared `dry_run: true`, which appends nothing, so no prior-operation lookup can change
@@ -4884,7 +4892,38 @@ host failure or denial in either phase, or the post-event of `start`, `publish_w
 `respond`. The pre-event of every Yoetz-owned call and the post-event of a non-failed `status`,
 `receipt`, or `read_guidance` stay local, and Yoetz-owned tool input/output is never captured as
 content. Codex hooks are the paired carrier: `tool_call_id` is scoped to source, session, and
-generation, and an orphan post retains `unpaired_event` until explicitly repaired. The currently
+generation, and an orphan post retains `unpaired_event` until explicitly repaired. That sticky
+record is disclosed coverage, not stale acquisition (issue #917): it stays on the observation
+store, check coverage, `status` coverage and the receipt, through resume and service restart, but
+it no longer raises the `observation_gap_or_stale` / `refresh_observation` advisory or keeps the
+observation lifecycle `degraded`. That advisory is reserved for conditions that can recover in
+session (source lag, a stale cursor, drain backlog, service unavailable, vault locked, plus the
+unchanged unsupported-record codes), names the live cause first in its evidence references
+(`cause:<gap>` or `cause:lifecycle_<state>`), and clears when the cause recovers. Instead, the
+first orphan in each new `(source, session, source generation)` scope queues one local
+`UnpairedScopeNotice`; the next eligible hook `PostToolUse` context delivers it once ("Yoetz notice
+(no response needed)"), and a delivered scope is never announced again, across restart. The notice
+is not a ledger record or finding, so it never counts as unanswered, never adds
+`findings_unanswered` to closure readiness, and cannot be answered or supersede a check. A later
+new scope gets its own notice. A recorded one-time acknowledgement of a notice waits for #905's
+`acknowledged_not_done` disposition; until then no acknowledgement is requested, and the gap is
+disclosed on the receipt whether or not the agent acts.
+One host call is one ledger action (issue #917). A paired profile keys the pending action of an
+individually delivered `PreToolUse` on the host call itself (`pre:<lane>:<session>:<generation>:
+<correlation>:<family>`), which is the identity its `PostToolUse` action already used, so both
+phases, and their hook and session-stream copies, name one action and one action event. Whichever
+phase reaches the task ledger first records the action; the service appends the later phase
+without the action draft only when the task ledger already projects that exact action event
+(`projected_action_event`), so its result and captured evidence link to the committed action.
+Both committed shapes stay lookup candidates, so replay after a lost acknowledgement, restart or
+reattach resolves to the committed operation. A pre committed before this change keeps its
+`pre-event:` identity and its operation digest, so its redelivery replays that operation and a
+call spanning the upgrade keeps its historical second action instead of a third; history is never
+rewritten. A Codex code-mode `exec` cell (the rollout `custom_tool_call` named `exec` and its
+output) is a container that fires no hook: while the Codex hook carrier has admitted input for the
+host session, the session-stream reader retains the cell rows locally and does not deliver them,
+because the nested calls' own hook rows are the ledger record of the cell. They are not counted as
+intentionally omitted input. The currently
 installed Claude and Cursor native profiles are post-only carriers: their post observations never
 diagnose a missing pre-event. A post with an actual tool-call identity, such as Claude's
 `tool_use_id`, can materialize an observed action/result pair with a distinct post-only action

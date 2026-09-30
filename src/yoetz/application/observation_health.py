@@ -20,11 +20,13 @@ __all__ = [
     "qualifying_progress_monotonic",
 ]
 
+# ``unpaired_event`` is deliberately absent (#917): a lost pairing is a standing,
+# disclosed coverage record, not current acquisition health, so it never keeps
+# the lifecycle DEGRADED after drain and reconcile are healthy.
 _MATERIAL_GAPS: Final = frozenset(
     {
         ObservationGapCode.SERVICE_UNAVAILABLE.value,
         ObservationGapCode.VAULT_LOCKED.value,
-        ObservationGapCode.UNPAIRED_EVENT.value,
         ObservationGapCode.UNSUPPORTED_EVENT.value,
         ObservationGapCode.SOURCE_LAG.value,
         ObservationGapCode.CURSOR_STALE.value,

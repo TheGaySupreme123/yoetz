@@ -719,6 +719,35 @@ def test_observation_gap_or_stale() -> None:
     assert "observation_gap_or_stale" in rules
 
 
+def test_standing_unpaired_record_raises_no_stale_advisory() -> None:
+    """#917: only conditions that can recover in session raise ``refresh_observation``."""
+
+    standing = ObservationAdviceContext(
+        envelopes=(),
+        lifecycle=ObservationLifecycle.ACTIVE,
+        gaps=(ObservationGapCode.UNPAIRED_EVENT.value,),
+    )
+    assert "observation_gap_or_stale" not in _rules(standing)
+    for transient in (
+        ObservationGapCode.SOURCE_LAG,
+        ObservationGapCode.CURSOR_STALE,
+        ObservationGapCode.SERVICE_UNAVAILABLE,
+        ObservationGapCode.VAULT_LOCKED,
+    ):
+        candidates = observation_advice_findings(
+            replace(standing, gaps=(ObservationGapCode.UNPAIRED_EVENT.value, transient.value))
+        )
+        gap = [item for item in candidates if item.rule_code == "observation_gap_or_stale"]
+        assert len(gap) == 1, transient
+        # The live cause leads the refs; the standing record is never named as one.
+        assert gap[0].evidence_refs[0] == f"cause:{transient.value}"
+        assert "cause:unpaired_event" not in gap[0].evidence_refs
+    stale = observation_advice_findings(replace(standing, lifecycle=ObservationLifecycle.STALE))
+    assert [
+        item.evidence_refs[0] for item in stale if item.rule_code == "observation_gap_or_stale"
+    ] == ["cause:lifecycle_stale"]
+
+
 def test_provider_not_ready() -> None:
     rules = _rules(
         ObservationAdviceContext(

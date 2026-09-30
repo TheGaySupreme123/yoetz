@@ -160,6 +160,7 @@ __all__ = [
     "PendingSessionLifecycle",
     "ReadProtection",
     "STREAM_MAPPING_VERSION",
+    "UnpairedScopeNotice",
     "YOETZ_OWNED_TOOL_NAMES",
     "YOETZ_READ_TOOL_NAMES",
     "YOETZ_TOOL_NAMES",
@@ -1250,6 +1251,74 @@ class _GapState:
 
 
 @dataclass(frozen=True, slots=True)
+class UnpairedScopeNotice:
+    """One not-yet-delivered standing-limitation notice for a new orphan scope (#917).
+
+    A scope is one (source, host session, source generation) lane that has at
+    least one paired-profile orphan post. The notice is informational only: it
+    is never a finding, needs no response, and a delivered scope is never
+    announced again, across restart and resume.
+    """
+
+    lane: str
+    source: str
+    session_commitment: str
+    source_generation: int
+    delivered: bool = False
+
+
+def _unpaired_notice_lane(
+    *, source: ObservationSource, session_commitment: str, source_generation: int
+) -> str:
+    return canonical_digest(
+        JsonObject(
+            {
+                "kind": "observation-orphan-scope",
+                "source": source.value,
+                "session_commitment": session_commitment,
+                "source_generation": source_generation,
+            }
+        )
+    )
+
+
+def _unpaired_notices_from_json(raw: object) -> dict[str, UnpairedScopeNotice]:
+    """Read the bounded notice map, dropping any malformed entry."""
+
+    notices: dict[str, UnpairedScopeNotice] = {}
+    if not isinstance(raw, Mapping):
+        return notices
+    for lane, value in cast(Mapping[object, object], raw).items():
+        if type(lane) is not str or not isinstance(value, Mapping):
+            continue
+        entry = cast(Mapping[str, object], value)
+        source = entry.get("source")
+        session = entry.get("session_commitment")
+        generation = entry.get("source_generation")
+        delivered = entry.get("delivered")
+        if (
+            type(source) is not str
+            or source not in {item.value for item in ObservationSource}
+            or type(session) is not str
+            or not session
+            or type(generation) is not int
+            or generation < 0
+            or type(delivered) is not bool
+        ):
+            continue
+        if lane != _unpaired_notice_lane(
+            source=ObservationSource(source),
+            session_commitment=session,
+            source_generation=generation,
+        ):
+            continue
+        notices[lane] = UnpairedScopeNotice(lane, source, session, generation, delivered)
+        if len(notices) >= _MAX_UNPAIRED_SCOPES:
+            break
+    return notices
+
+
+@dataclass(frozen=True, slots=True)
 class _OpenPre:
     """Durable identity for an accepted pre event awaiting its post.
 
@@ -1615,6 +1684,9 @@ class _WorkspaceState:
     frontier_motion_recency: int = 0
     open_pre: dict[str, _OpenPre] | None = None
     unpaired_scopes: set[str] | None = None
+    # One informational notice per new (source, session, generation) orphan
+    # scope, keyed by that lane; kept after delivery so a scope is announced once.
+    unpaired_notices: dict[str, UnpairedScopeNotice] | None = None
     # True when a state was written by a pre-/11 reader that could not retain
     # scoped pairing provenance. It is deliberately sticky: a later save must
     # not turn unknown history into proof that a gap was false.
@@ -1755,6 +1827,8 @@ class _WorkspaceState:
             self.open_pre = {}
         if self.unpaired_scopes is None:
             self.unpaired_scopes = set()
+        if self.unpaired_notices is None:
+            self.unpaired_notices = {}
         if type(self.pairing_state_unknown) is not bool:
             raise ProtocolValueError("invalid_event_value_type")
         if self.stream_cursors is None:
@@ -2320,6 +2394,7 @@ def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
         frontier_motion_delivered=dict(state.frontier_motion_delivered or {}),
         open_pre=dict(state.open_pre or {}),
         unpaired_scopes=set(state.unpaired_scopes or ()),
+        unpaired_notices=dict(state.unpaired_notices or {}),
         pairing_state_unknown=state.pairing_state_unknown,
         stream_cursors=dict(state.stream_cursors or {}),
         stream_partials=dict(state.stream_partials or {}),
@@ -4809,6 +4884,12 @@ class LocalObservationStore:
         with self._lock:
             state = self._load(workspace)
             assert state.unpaired_scopes is not None
+            self._note_unpaired_notice(
+                state,
+                source=source,
+                session_commitment=session_commitment,
+                source_generation=source_generation,
+            )
             scope = _orphan_scope_key(
                 source=source,
                 session_commitment=session_commitment,
@@ -4824,6 +4905,58 @@ class LocalObservationStore:
                     return
                 state.unpaired_scopes.add(scope)
             self._note_gap_state(state, ObservationGapCode.UNPAIRED_EVENT.value)
+            self._save(workspace, state)
+
+    @staticmethod
+    def _note_unpaired_notice(
+        state: _WorkspaceState,
+        *,
+        source: ObservationSource,
+        session_commitment: str,
+        source_generation: int,
+    ) -> None:
+        """Queue one informational notice the first time an orphan scope appears (#917).
+
+        Repeated orphans in a known scope add nothing. When the bounded map is
+        full, no notice is queued; the aggregate gap is still disclosed.
+        """
+
+        assert state.unpaired_notices is not None
+        lane = _unpaired_notice_lane(
+            source=source,
+            session_commitment=session_commitment,
+            source_generation=source_generation,
+        )
+        if lane in state.unpaired_notices or len(state.unpaired_notices) >= _MAX_UNPAIRED_SCOPES:
+            return
+        state.unpaired_notices[lane] = UnpairedScopeNotice(
+            lane, source.value, session_commitment, source_generation
+        )
+
+    @_read_mostly
+    def peek_unpaired_notice(
+        self, workspace: str, session_commitment: str
+    ) -> UnpairedScopeNotice | None:
+        """Return the oldest undelivered orphan-scope notice for one host session."""
+
+        with self._reading():
+            state = self._load(workspace)
+            for notice in (state.unpaired_notices or {}).values():
+                if notice.session_commitment == session_commitment and not notice.delivered:
+                    return notice
+            return None
+
+    def commit_unpaired_notice_delivery(self, workspace: str, lane: str) -> None:
+        """Mark one notice delivered after its bytes reached the host; it never repeats."""
+
+        with self._lock:
+            state = self._load(workspace)
+            notices = state.unpaired_notices or {}
+            current = notices.get(lane)
+            if current is None or current.delivered:
+                return
+            notices[lane] = dataclasses.replace(current, delivered=True)
+            state.unpaired_notices = notices
             self._save(workspace, state)
 
     def set_advice_snapshot(self, workspace: str, snapshot: AdviceSnapshot | None) -> None:
@@ -5547,6 +5680,20 @@ class LocalObservationStore:
             state.last_stream_reconcile_mono_ms = int(current * 1000)
             state.monotonic_epoch = self._boot_epoch()
             self._save(workspace, state)
+
+    @_read_mostly
+    def codex_hook_observes_session(self, workspace: str, session_commitment: str) -> bool:
+        """Whether the Codex hook carrier has admitted any input for one host session.
+
+        The per-source cursor is the authoritative ingest record, so this survives
+        restart. The session-stream reader uses it to keep a code-mode ``exec``
+        cell wrapper local while the cell's nested calls are hook-observed (#917).
+        """
+
+        with self._reading():
+            state = self._load(workspace)
+            assert state.cursors is not None
+            return _cursor_key(ObservationSource.CODEX_HOOK, session_commitment) in state.cursors
 
     @_read_mostly
     def last_stream_reconcile_mono(self, workspace: str) -> float | None:
@@ -10876,6 +11023,24 @@ class LocalObservationStore:
             payload["envelopes_truncated"] = True
         if state.unpaired_scopes:
             payload["unpaired_scopes"] = tuple(sorted(state.unpaired_scopes, key=str.encode))
+        if state.unpaired_notices:
+            # Optional and tolerated in both directions like every /15 key: an
+            # older reader ignores it and would at most announce a scope again.
+            payload["unpaired_notices"] = JsonObject(
+                {
+                    lane: JsonObject(
+                        {
+                            "source": notice.source,
+                            "session_commitment": notice.session_commitment,
+                            "source_generation": notice.source_generation,
+                            "delivered": notice.delivered,
+                        }
+                    )
+                    for lane, notice in sorted(
+                        state.unpaired_notices.items(), key=lambda item: item[0].encode()
+                    )
+                }
+            )
         if state.pending_lifecycles:
             payload["pending_lifecycles"] = tuple(
                 JsonObject(
@@ -11780,6 +11945,7 @@ class LocalObservationStore:
             frontier_motion_recency=frontier_motion_recency,
             open_pre=open_pre,
             unpaired_scopes=unpaired_scopes,
+            unpaired_notices=_unpaired_notices_from_json(raw.get("unpaired_notices")),
             pairing_state_unknown=pairing_state_unknown,
             stream_cursors=stream_cursors,
             stream_partials=stream_partials,

@@ -435,3 +435,61 @@ share (2,048 rows at `largest`). Two measures keep that affordable and drained:
   idle interval are unchanged and remain non-configurable.
 
 Loss at real ceilings is still counted in `unrecoverable_input_count` and reported by status.
+
+## Amendment — one action per host call and the standing orphan record (2026-09-30, #917)
+
+The maintainer acknowledged this design-gated scope on issue #917 on 2026-09-30. Codex sessions
+recorded about 1.8 `action_recorded` rows per real tool call: a pre that was delivered on its own
+minted a pending action keyed on its envelope, its post minted a second action keyed on the call,
+and each code-mode `exec` cell added an independent action beside its nested calls. Separately,
+the append-only `unpaired_event` record kept raising a "wait for drain to recover" advisory that no
+wait could clear.
+
+### One action per host call
+
+A paired profile's individually delivered pre now keys its pending action on the host call
+(lane, session, source generation, correlation, family), the identity the post's action already
+used. The phase that reaches the task ledger first records the action. The service appends the
+later phase without the action draft only when the task ledger already projects that exact action
+event, so its result and captured evidence link to the committed action; any other state appends
+the full batch as before. This is a delay, not a drop: an individually flushed pre still becomes a
+pending action at its five-second deadline, a post whose pre never reached the ledger (for example
+a Yoetz-owned call, #564) still records its own action, and no post or its outcome is dropped. The
+dropped duplicate is not an input omission and is not counted as one.
+
+The materialization mapping version stays `obs-ledger/1.7.0`: every other identity, including
+every Claude Code and Cursor post-only record, is byte-identical. The pre's operation digest is
+unchanged, so a pre committed before the upgrade replays its committed operation; a call spanning
+the upgrade keeps its historical second action, never a third, and no history is rewritten.
+
+A Codex code-mode `exec` cell fires no hook of its own; each nested `tools.*` call fires its hooks.
+While the Codex hook carrier has admitted input for the host session, the session-stream reader
+keeps the cell's call and output rows in the local store and does not deliver them. The nested
+hook rows are the ledger's record of the cell. The option of recording the cell as the explicit
+parent of its nested actions was not taken: nested hook payloads carry no cell identity to link.
+
+### The standing `unpaired_event` record (decisions for the set)
+
+- **B1.** The durable record is unchanged: an orphan post keeps `unpaired_event` in the observation
+  store, check coverage, `status` coverage and the receipt, through resume and restart. It is no
+  longer a stale-observation cause: it does not raise `observation_gap_or_stale` and does not keep
+  the lifecycle `degraded`. The advisory remains for source lag, cursor stale, drain backlog,
+  service unavailable and vault locked (and the unchanged unsupported-record codes), names its
+  live cause first (`cause:<gap>`), and clears on recovery. `host_outcome_unavailable` is a ledger
+  coverage code that never fed the advisory; it stays disclosed either way.
+- **B2.** A distinct new gap is a new `(source, session, source generation)` orphan scope. The first
+  orphan in it queues one local notice, delivered once in hook `PostToolUse` context and never
+  repeated, across restart. It is informational, not a ledger record or finding: it never counts
+  as unanswered, never adds `findings_unanswered`, and cannot be answered or supersede a check.
+  Count growth inside a scope is not re-announced.
+- **B3.** The optional one-time acknowledgement depends on #905's `acknowledged_not_done`
+  disposition, which has not landed. Until it does, no acknowledgement is requested; the standing
+  gap is disclosed on the receipt whether or not the agent acts. Receipt naming stays with #913.
+- **`finding_frontier`.** Every `status view=findings` item carries the frontier of the ledger event
+  that carries the finding's current record (sequence plus that event's entry digest), for every
+  origin. `respond` accepts it as-is (status result schema 1.4.0, golden vector CAN-013). #911 owns
+  the matching guidance and `respond` error text.
+- **Deferred.** The optional disclosure-only orphan count and last-seen time in observe status and
+  receipt coverage needs a control-schema revision and is not part of this amendment. The advice
+  policy version is unchanged so existing advice finding identities do not churn; the historical
+  advisory finding already in older ledgers is #911's.

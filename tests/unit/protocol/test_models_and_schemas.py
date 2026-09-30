@@ -319,7 +319,7 @@ _EXPECTED_RESULT_PATTERN_COUNTS: dict[tuple[str, str | None], int] = {
     ("status", "candidate_findings"): 32,
     ("status", "compact"): 46,
     ("status", "evidence"): 18,
-    ("status", "findings"): 103,
+    ("status", "findings"): 105,
     ("status", "history"): 12,
     ("status", "lineage"): 16,
     ("status", "obligations"): 33,
@@ -425,7 +425,7 @@ _RESULT_SUPPORT_MODEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("StatusEvidenceItemModel", "operations/status-result-1.1.0.schema.json", "evidence_item"),
     ("StatusEvidencePageModel", "operations/status-result-1.1.0.schema.json", "evidence_page"),
     ("StatusFindingBasisModel", "operations/status-result-1.1.0.schema.json", "finding_basis"),
-    ("StatusFindingItemModel", "operations/status-result-1.1.0.schema.json", "finding_item"),
+    ("StatusFindingItemModel", "operations/status-result-1.4.0.schema.json", "finding_item"),
     ("StatusFindingsPageModel", "operations/status-result-1.1.0.schema.json", "findings_page"),
     ("StatusHistoryItemModel", "operations/status-result-1.1.0.schema.json", "history_item"),
     ("StatusHistoryPageModel", "operations/status-result-1.1.0.schema.json", "history_page"),
@@ -2390,7 +2390,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     rules = cast(tuple[Any, ...], getattr(models, "_RESULT_LEAF_RULES"))
 
     derived_patterns = _derived_result_success_patterns(catalog)
-    assert len(derived_patterns) == 1145
+    assert len(derived_patterns) == 1147
 
     derived_counts = {
         context: sum(1 for method, view, _ in derived_patterns if (method, view) == context)
@@ -2399,7 +2399,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert derived_counts == _EXPECTED_RESULT_PATTERN_COUNTS
 
     assert type(rules) is tuple
-    assert len(rules) == 1170
+    assert len(rules) == 1172
     assert rules == tuple(sorted(rules, key=_test_rule_sort_key))
 
     rule_keys = {
@@ -2408,7 +2408,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert len(rule_keys) == len(rules)
 
     registry_patterns = {(rule.method, rule.status_view, rule.segments) for rule in rules}
-    assert len(registry_patterns) == 1145
+    assert len(registry_patterns) == 1147
     assert registry_patterns == derived_patterns
 
     content_rules = _expected_nonpublish_content_rules(models)
@@ -3080,7 +3080,7 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     root = resources.files("yoetz").joinpath("resources", "schemas")
     manifest_bytes = root.joinpath("manifest.json").read_bytes()
     assert catalog.manifest_digest == f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
-    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 6_783
+    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 6_784
 
 
 def test_schema_name_derivation_and_version_maps_are_exact() -> None:

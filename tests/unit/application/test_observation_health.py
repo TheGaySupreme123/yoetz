@@ -75,3 +75,25 @@ def test_degraded_with_pending_outbox_or_gap() -> None:
         now_monotonic=110.0,
     )
     assert gap is ObservationLifecycle.DEGRADED
+
+
+def test_standing_unpaired_record_is_not_degraded_health() -> None:
+    """#917: a sticky orphan record is disclosed coverage, not current acquisition health."""
+
+    thresholds = ObservationHealthThresholds(freshness_seconds=60.0, lag_event_cap=8)
+    assert (
+        compute_observation_lifecycle(
+            _signals(gaps=("unpaired_event",)), now_monotonic=110.0, thresholds=thresholds
+        )
+        is ObservationLifecycle.ACTIVE
+    )
+    # Transient acquisition conditions still degrade the lifecycle beside it.
+    for transient in ("source_lag", "cursor_stale", "service_unavailable", "vault_locked"):
+        assert (
+            compute_observation_lifecycle(
+                _signals(gaps=("unpaired_event", transient)),
+                now_monotonic=110.0,
+                thresholds=thresholds,
+            )
+            is ObservationLifecycle.DEGRADED
+        ), transient
