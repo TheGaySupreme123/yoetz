@@ -29,7 +29,8 @@ reverse-chronological released versions.
   `yoetz --privacy`, whose approval screen marks the higher count as a widening. `yoetz privacy
   show` and `yoetz --privacy` show your current limits beside the proposed ones. A review packet
   with more excerpts or bytes than the policy allows is refused as `policy_denied` and is never
-  trimmed. Choosing Assisted, or proposing the earlier limits, takes you back to 16 without a new
+  trimmed. A case that would exceed the per-case ceiling is planned with fewer excerpts, and says
+  so, instead of being refused. Resuming a stored review rechecks the current limits. Choosing Assisted, or proposing the earlier limits, takes you back to 16 without a new
   approval. Semantic-case diagnostics now record the approved excerpt count and byte limits beside
   what was selected (#907).
 

@@ -65,6 +65,7 @@ _FIELD_ORDER: Final = (
     "semantic_excerpt_bytes_selected",
     "semantic_excerpt_count_limit",
     "semantic_excerpt_byte_limit",
+    "semantic_excerpt_ceiling_rounds",
     # Admits the loop-health connection count into _CALLER_FIELDS/_COUNT_FIELDS below, so a
     # bounded-counts caller can report how much work was in flight during a stall.
     "operation_count",

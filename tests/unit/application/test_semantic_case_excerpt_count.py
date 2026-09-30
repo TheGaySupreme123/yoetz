@@ -38,7 +38,7 @@ from yoetz.protocol.models import MAX_REVIEW_EXCERPTS
 _ITEMS = 40
 
 
-def _case(count: int = _ITEMS) -> DeterministicCase:
+def _case(count: int = _ITEMS, *, description: str | None = None) -> DeterministicCase:
     evidence: dict[EvidenceId, EvidenceProjectionRecord] = {}
     for index in range(1, count + 1):
         ref = evd(index)
@@ -48,7 +48,7 @@ def _case(count: int = _ITEMS) -> DeterministicCase:
                 evidence_kind=EvidenceKind.TEST_RESULT,
                 strength=EvidenceImmutability.METADATA_ONLY,
                 observed_at=timestamp_from_string("2026-07-01T00:00:00.000Z"),
-                description=f"test run {index}: 12 passed, 0 failed",
+                description=description or f"test run {index}: 12 passed, 0 failed",
             ),
             index + 3,
         )

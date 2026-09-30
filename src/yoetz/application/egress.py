@@ -996,6 +996,15 @@ class PrivacyCoordinator:
                     privacy_proposal_id=proposal.privacy_proposal_id,
                 )
             effective, authority_digest = activated
+        if _exceeds_current_limits(proposal, effective):
+            # A proposal prepared before the policy narrowed must not reach a provider on resume:
+            # its excerpts and bytes answer to the policy in force now (issue #907 Phase 1b).
+            return SemanticEgressBlocked(
+                request_id,
+                PrivacyOutcome.BLOCKED_BY_POLICY,
+                PrivacyReason.POLICY_DENIED,
+                privacy_proposal_id=proposal.privacy_proposal_id,
+            )
         if status == "authorized":
             auth_id = state.authorization_id
             if type(auth_id) is not str:
@@ -2170,6 +2179,26 @@ class PrivacyCoordinator:
             reason,
             1,
         )
+
+
+def _exceeds_current_limits(
+    proposal: DisclosureProposal, effective: EffectivePrivacyPolicy
+) -> bool:
+    """Whether a stored review proposal is outside the excerpt limits or byte ceiling now."""
+
+    if proposal.purpose != _SEMANTIC_PURPOSE:
+        return False
+    if not _within_excerpt_limits(proposal.prepared_bytes, effective.policy.review_selection):
+        return True
+    llm = next(
+        (
+            channel
+            for channel in effective.policy.channel_policies
+            if channel.channel is EgressChannel.LLM_INFERENCE
+        ),
+        None,
+    )
+    return llm is not None and 0 < llm.max_bytes < len(proposal.prepared_bytes)
 
 
 def _within_excerpt_limits(prepared: bytes, selection: ReviewSelectionPolicy) -> bool:

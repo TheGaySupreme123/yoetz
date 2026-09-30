@@ -847,6 +847,12 @@ bytes, so the count constant was the real limit.
   1.2.0 preset (64) lets `max_total_excerpt_bytes` bind, and a policy approved under 1.1.0 still
   stops at 16. One item per slot: excerpts are never concatenated to fit a count.
 - `semantic_case_built` diagnostics add `semantic_excerpt_count_limit` and
-  `semantic_excerpt_byte_limit` beside the selected counts, so a reader can tell which limit bound.
+  `semantic_excerpt_byte_limit` (the limits the case was built with) beside the selected counts,
+  so a reader can tell which limit bound. `semantic_excerpt_ceiling_rounds` counts the rebuilds
+  that planning below the channel ceiling used.
+- Composition (`service/semantic_ceiling.py`) plans the case below the channel ceiling as
+  described in the ADR-009 amendment. The first rebuild carries no excerpts, to measure the fixed
+  part of the packet. Later rebuilds size the excerpt budget from the prepared bytes each excerpt
+  byte actually cost, since JSON escaping can multiply it. The case builder itself is unchanged.
 - The privacy side (consent, re-approval, egress denial) is recorded in the ADR-009 amendment of
   the same date.

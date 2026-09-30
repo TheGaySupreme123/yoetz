@@ -609,21 +609,35 @@ def _privacy_policy_change_text(preview: PrivacyPolicyDecisionPreview) -> str:
     return "\n".join(lines)
 
 
-def _task_statement_change_note(change: PrivacyPolicyChange) -> str | None:
+def _task_statement_change_note(
+    change: PrivacyPolicyChange, changes: tuple[PrivacyPolicyChange, ...] = ()
+) -> str | None:
     """Plain words for adding or removing the ``task_statement`` review section (issue #908).
 
     An approval given for the agent's plan never covers the user's own words, so the ceremony
     names this content explicitly instead of leaving it to one token in a section list. A change
-    to the excerpt count gets its own plain words too (issue #907 Phase 1b).
+    to the excerpt count gets its own plain words too (issue #907 Phase 1b); ``changes`` is the
+    whole screen, so the words never claim the byte limits stay when another row raises them.
     """
 
     if (change.area, change.field) == ("review", "max_excerpts"):
-        if change.widens:
+        if not change.widens:
+            return "max_excerpts: fewer excerpts will be sent in one review."
+        bytes_widen = any(
+            other.area == "review"
+            and other.field in {"max_excerpt_bytes", "max_total_excerpt_bytes"}
+            and other.widens
+            for other in changes
+        )
+        if bytes_widen:
             return (
                 "max_excerpts: more excerpts may be sent in one review; each stays within the "
-                "per-excerpt and total byte limits, which this change does not raise."
+                "per-excerpt and total byte limits shown on this screen."
             )
-        return "max_excerpts: fewer excerpts will be sent in one review."
+        return (
+            "max_excerpts: more excerpts may be sent in one review; each stays within the "
+            "per-excerpt and total byte limits, which this change does not raise."
+        )
     if (change.area, change.field) != ("review", "sections"):
         return None
     before = "task_statement" in change.before.labels
@@ -658,7 +672,7 @@ def _append_privacy_change_lines(
             before = _change_value_text(change, change.before)
             after = _change_value_text(change, change.after)
             lines.append(f"  {marker} {_change_line_label(change)}: {before}{_ARROW}{after}")
-            note = _task_statement_change_note(change)
+            note = _task_statement_change_note(change, changes)
             if note is not None:
                 lines.append(f"      {note}")
     if len(placed) != len(changes):

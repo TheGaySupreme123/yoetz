@@ -504,7 +504,8 @@ free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from code
   `MAX_SEMANTIC_CASE_BYTES = 262_144` (256 KiB), measured over canonical minimized case bytes.
 - AI-powered review structure: `MAX_REVIEW_TEXT_BYTES = 4_096`,
   `MAX_REVIEW_TIMELINE_ITEMS = 64`, `MAX_REVIEW_ASSESSMENTS = 64`,
-  `MAX_REVIEW_CHANGE_OBSERVATIONS = 32`, `MAX_REVIEW_EXCERPTS = 16`,
+  `MAX_REVIEW_CHANGE_OBSERVATIONS = 32`, `MAX_REVIEW_EXCERPTS = 64` (a protocol maximum; the
+  privacy-policy 1.0.0/1.1.0 wires cap `max_excerpts` at 16, see "Excerpt count"),
   `MAX_REVIEW_OMISSIONS = 64`, and `MAX_REVIEW_CHALLENGES = 3`.
 - MCP transport cap (`adapters/mcp_stdio.py`): `MAX_JSON_FRAME_BYTES = 1_048_576` payload bytes
   excluding the single LF. This is adapter-owned and is not exported or mirrored by
@@ -6990,7 +6991,19 @@ plan. Names and contracts:
 - The case item bound `_MAX_CASE_ITEMS` (`ports/semantic.py`) is `256 + MAX_REVIEW_EXCERPTS - 16`
   (304), and outbound-case 1.2.0 `content_items` allows 305.
 - The `semantic_case_built` counters add `semantic_excerpt_count_limit` and
-  `semantic_excerpt_byte_limit` (the effective limits).
+  `semantic_excerpt_byte_limit` (the limits the case was built with) and
+  `semantic_excerpt_ceiling_rounds`.
+- `service/semantic_ceiling.py`: `channel_prepared_limit(policy)` is the narrower of the LLM
+  channel's `max_bytes` and `max_tokens × 4` (zero is unset). `plan_under_channel_ceiling` rebuilds
+  an over-ceiling case with a smaller `max_total_excerpt_bytes` (and `max_excerpt_bytes`), or no
+  excerpts. It stops after at most `MAX_CEILING_PLANNING_ROUNDS` (4) rebuilds, and every rebuild
+  adds `content_unselected`. It is deterministic, so a recovered case keeps its digest.
+- Resume (`PrivacyCoordinator._resume_admitted`) denies a stored `semantic-review` proposal outside
+  the current policy's excerpt limits or LLM `max_bytes` with `blocked_by_policy` /
+  `policy_denied` before dispatch.
+- TUI: `PrivacyPosture.recipe_outdated` is true when the approved selection is an earlier version
+  of its recipe. The privacy screen then offers the newer recipe instead of saying "already on the
+  recommended privacy policy".
 - CLI: `policy_excerpt_limits_disclosure` renders the approved limits and, when the current recipe
   for the profile differs, the proposed ones. `yoetz privacy show` on a terminal prints it as
   "Excerpt limits: …". `yoetz --privacy` prints "Current excerpt limits: …" and the draft's

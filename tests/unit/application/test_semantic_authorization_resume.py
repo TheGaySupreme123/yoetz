@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import cast
@@ -359,3 +360,86 @@ async def test_consumed_attempt_recovery_is_terminal_unknown_without_dispatch() 
     assert isinstance(result, SemanticEgressAttemptUnknown)
     assert result.request_id == _REQUEST
     assert result.privacy_proposal_id == _PROPOSAL
+
+
+def _packet_with_excerpts(count: int) -> bytes:
+    from yoetz.protocol.canonical import JsonValue, canonical_encode
+
+    rows = [
+        {"content_bytes": 32, "item_id": f"excerpt-{index:03d}", "section": "excerpt"}
+        for index in range(count)
+    ]
+    return canonical_encode(
+        cast(JsonValue, {"items": rows, "schema": "yoetz.review-packet-case/1"})
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("prepared", "max_bytes"),
+    [(_packet_with_excerpts(17), 262_144), (b'{"p":"' + b"x" * 2_048 + b'"}', 1_024)],
+    ids=["over_excerpt_count", "over_channel_bytes"],
+)
+async def test_resume_rechecks_the_current_limits_before_dispatch(
+    prepared: bytes, max_bytes: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #907 Phase 1b: a stored proposal answers to the policy in force at resume."""
+
+    proposal = replace(_proposal(expires_at=_NOW + timedelta(minutes=5)), prepared_bytes=prepared)
+    current = _effective()
+    narrowed = replace(
+        current.policy,
+        channel_policies=tuple(
+            replace(channel, max_bytes=max_bytes)
+            if channel.provider_binding is not None
+            else channel
+            for channel in current.policy.channel_policies
+        ),
+    )
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_effective",
+        lambda: EffectivePrivacyPolicy(narrowed, current.generation, current.effective_digest),
+    )
+    coordinator = _coordinator(
+        "approved", expires_at=_NOW + timedelta(minutes=5), proposal=proposal
+    )
+    dispatched: list[object] = []
+
+    async def dispatch(self: PrivacyCoordinator, *args: object, **kwargs: object) -> object:
+        del self, kwargs
+        dispatched.append(args)
+        return object()
+
+    monkeypatch.setattr(PrivacyCoordinator, "_dispatch_approved", dispatch)
+
+    result = await coordinator.resume(_REQUEST, _CASE_DIGEST, _deadline())
+
+    assert isinstance(result, SemanticEgressBlocked)
+    assert result.outcome is PrivacyOutcome.BLOCKED_BY_POLICY
+    assert result.reason is PrivacyReason.POLICY_DENIED
+    assert dispatched == []
+
+
+@pytest.mark.anyio
+async def test_resume_within_the_current_limits_still_dispatches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proposal = replace(
+        _proposal(expires_at=_NOW + timedelta(minutes=5)),
+        prepared_bytes=_packet_with_excerpts(16),
+    )
+    coordinator = _coordinator(
+        "approved", expires_at=_NOW + timedelta(minutes=5), proposal=proposal
+    )
+    dispatched: list[object] = []
+
+    async def dispatch(self: PrivacyCoordinator, *args: object, **kwargs: object) -> object:
+        del self, kwargs
+        dispatched.append(args)
+        return object()
+
+    monkeypatch.setattr(PrivacyCoordinator, "_dispatch_approved", dispatch)
+
+    await coordinator.resume(_REQUEST, _CASE_DIGEST, _deadline())
+    assert len(dispatched) == 1

@@ -571,3 +571,56 @@ async def test_excerpt_bytes_over_the_approved_budget_are_policy_denied() -> Non
     unreadable, _ = await _evaluate(current, b"not a review packet")
     assert isinstance(unreadable, SemanticEgressBlocked)
     assert unreadable.reason is PrivacyReason.POLICY_DENIED
+
+
+@pytest.mark.anyio
+async def test_a_packet_over_the_channel_ceiling_is_denied_whatever_its_excerpt_count() -> None:
+    """Issue #907 acceptance 1: more than 16 excerpts inside the approved excerpt budget, plus a
+    large (100 KB) non-excerpt row, still exceed the channel ceiling and are never dispatched.
+
+    The ceiling is narrowed to 200,000 bytes because a prepared disclosure can never exceed
+    262,144 bytes by construction, so the shipped ceiling cannot be crossed in a unit fixture.
+    """
+
+    from yoetz.application.egress import (
+        _within_excerpt_limits,  # pyright: ignore[reportPrivateUsage]
+    )
+    from yoetz.protocol.canonical import canonical_encode
+
+    policy = replace(
+        _expanded("1.2.0"),
+        channel_policies=tuple(
+            replace(channel, max_bytes=200_000)
+            if channel.channel is EgressChannel.LLM_INFERENCE
+            else channel
+            for channel in _expanded("1.2.0").channel_policies
+        ),
+    )
+    rows: list[dict[str, JsonValue]] = [
+        {
+            "content": "x" * 3_000,
+            "content_bytes": 3_000,
+            "item_id": f"excerpt-{index:03d}",
+            "section": "excerpt",
+        }
+        for index in range(40)
+    ]
+    rows.append(
+        {
+            "content": "t" * 100_000,
+            "content_bytes": 100_000,
+            "item_id": "timeline-1",
+            "section": "timeline",
+        }
+    )
+    prepared = canonical_encode(
+        cast(JsonValue, {"items": rows, "schema": "yoetz.review-packet-case/1"})
+    )
+    assert len(prepared) > 200_000
+    assert _within_excerpt_limits(prepared, policy.review_selection)
+
+    result, audit = await _evaluate(policy, prepared)
+
+    assert isinstance(result, SemanticEgressBlocked)
+    assert result.reason is PrivacyReason.POLICY_DENIED
+    assert audit.prepared == []

@@ -194,3 +194,40 @@ def test_the_approval_draft_shows_the_count_it_would_approve(
         "  Maximum: 64 excerpts, 16 KiB each, 128 KiB in total; 256 KiB / 4096 tokens per case"
         in capsys.readouterr().out
     )
+
+
+def test_a_move_that_also_raises_the_byte_limits_never_claims_they_stay() -> None:
+    goal_aware = replace(
+        minimal_external_policy(),
+        review_context_profile=ReviewContextProfile.GOAL_AWARE,
+        review_selection=ReviewSelectionPolicy.for_profile(ReviewContextProfile.GOAL_AWARE),
+    )
+    changes = privacy_policy_changes(goal_aware, _expanded())
+    assert any(
+        change.field in {"max_excerpt_bytes", "max_total_excerpt_bytes"} and change.widens
+        for change in changes
+    )
+    text = _privacy_policy_change_text(
+        PrivacyPolicyDecisionPreview("pending-1", "sha256:" + "b" * 64, changes)
+    )
+    assert "which this change does not raise" not in text
+    assert (
+        "max_excerpts: more excerpts may be sent in one review; each stays within the "
+        "per-excerpt and total byte limits shown on this screen." in text
+    )
+
+
+def test_limits_that_are_not_whole_kib_print_exact_bytes() -> None:
+    custom = replace(
+        _expanded(),
+        review_context_profile=ReviewContextProfile.CUSTOM,
+        review_selection=replace(
+            ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED),
+            max_excerpts=3,
+            max_excerpt_bytes=1_000,
+            max_total_excerpt_bytes=2_500,
+        ),
+    )
+    assert policy_excerpt_limits_disclosure(custom) == (
+        "3 excerpts, 1,000 bytes each, 2,500 bytes in total"
+    )

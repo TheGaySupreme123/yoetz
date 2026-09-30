@@ -290,6 +290,7 @@ from yoetz.ports.secret_memory import (
 )
 from yoetz.ports.semantic import (
     Deadline,
+    SemanticCase,
     SemanticResultInvalid,
     SemanticResultLate,
     SemanticResultRefused,
@@ -339,6 +340,11 @@ from yoetz.service.bundle_upgrade_effects import BundleUpgradeFencedLedger
 from yoetz.service.import_publication_authority import ImportPublicationAuthority
 from yoetz.service.project_coordination_authority import ProjectCoordinationGrantAuthority
 from yoetz.service.semantic_attention import SemanticAttentionTracker
+from yoetz.service.semantic_ceiling import (
+    channel_prepared_limit,
+    plan_under_channel_ceiling,
+    with_ceiling_planning_gap,
+)
 from yoetz.service.vault import ProviderCredentialBinding, provider_credential_profile_binding
 from yoetz.version import build_version_manifest, version_manifest_json
 
@@ -4255,20 +4261,34 @@ def _privacy_gated_semantic_evaluator(
                         )
                         captured_content_gaps = ("content_capture_unavailable",)
                         captured_local_fence_required = False
-            try:
-                semantic_case = build_semantic_case(
-                    case_id=recovered_case_id or ids.new(IdKind.OUTBOUND_CASE),
+            semantic_case_id = recovered_case_id or ids.new(IdKind.OUTBOUND_CASE)
+
+            def build_case(selection: ReviewSelectionPolicy, gaps: tuple[str, ...]) -> SemanticCase:
+                return build_semantic_case(
+                    case_id=semantic_case_id,
                     frozen_case=frozen.case,
                     dependency_digest=frozen.lease.dependency_digest,
                     findings=typed_findings,
                     review_context_profile=review_profile,
-                    review_selection=review_selection,
+                    review_selection=selection,
                     policy_id=policy_id,
                     policy_version=policy_version,
                     lineage_evaluation=lineage_evaluation,
                     captured_content=captured_content,
                     captured_content_scope=captured_content_scope,
-                    captured_content_gaps=captured_content_gaps,
+                    captured_content_gaps=gaps,
+                )
+
+            try:
+                # Plan below the channel ceiling before egress would refuse the whole packet: a
+                # smaller excerpt budget is a narrowing of the approved selection (issue #907).
+                semantic_case, planned_selection, ceiling_rounds = plan_under_channel_ceiling(
+                    build_case(review_selection, tuple(captured_content_gaps)),
+                    review_selection,
+                    channel_prepared_limit(policy),
+                    lambda selection: build_case(
+                        selection, with_ceiling_planning_gap(captured_content_gaps)
+                    ),
                 )
             except LineageSemanticCapacityExceeded:
                 # Same pre-dispatch contract as an envelope that cannot be reduced: local
@@ -4311,8 +4331,9 @@ def _privacy_gated_semantic_evaluator(
                     ),
                     # The approved limits beside what was selected, so a reader can tell which
                     # one bound: the excerpt count or the byte budget (issue #907 Phase 1b).
-                    "semantic_excerpt_count_limit": review_selection.max_excerpts,
-                    "semantic_excerpt_byte_limit": review_selection.max_total_excerpt_bytes,
+                    "semantic_excerpt_count_limit": planned_selection.max_excerpts,
+                    "semantic_excerpt_byte_limit": planned_selection.max_total_excerpt_bytes,
+                    "semantic_excerpt_ceiling_rounds": ceiling_rounds,
                 },
             )
             if captured_local_fence_required and captured_content_scope is not None:

@@ -983,12 +983,18 @@ async def _warn_if_agent_route_cannot_dispatch(policy: PrivacyPolicy) -> None:
     )
 
 
+def _byte_size_text(value: int) -> str:
+    """KiB when exact, otherwise the exact byte count, so a limit never reads as rounded down."""
+
+    return f"{value // 1024} KiB" if value % 1024 == 0 else f"{value:,} bytes"
+
+
 def _excerpt_limits_text(selection: ReviewSelectionPolicy) -> str:
     if selection.max_excerpts == 0:
         return "no excerpts are sent"
     return (
-        f"{selection.max_excerpts} excerpts, {selection.max_excerpt_bytes // 1024} KiB each, "
-        f"{selection.max_total_excerpt_bytes // 1024} KiB in total"
+        f"{selection.max_excerpts} excerpts, {_byte_size_text(selection.max_excerpt_bytes)} "
+        f"each, {_byte_size_text(selection.max_total_excerpt_bytes)} in total"
     )
 
 

@@ -112,6 +112,41 @@ def _host_admission_detail(provider: ProviderPosture) -> str:
     return summary
 
 
+def _review_recipe_outdated(policy_map: Mapping[str, object]) -> bool:
+    """Whether the approved review selection is an earlier version of its named recipe.
+
+    Such a policy stays valid and keeps its limits; the TUI only says a newer recipe exists and
+    that approving it goes through the trusted terminal (issue #907). Anything unreadable, and
+    Custom, reads as not outdated.
+    """
+
+    from yoetz.domain.privacy import ReviewContextProfile, ReviewSelectionPolicy
+
+    raw_profile = policy_map.get("review_context_profile")
+    selection = _mapping(policy_map.get("review_selection"))
+    if not isinstance(raw_profile, str) or not selection:
+        return False
+    try:
+        profile = ReviewContextProfile(raw_profile)
+    except ValueError:
+        return False
+    if profile is ReviewContextProfile.CUSTOM:
+        return False
+    current = ReviewSelectionPolicy.for_profile(profile)
+    for field in ReviewSelectionPolicy.__dataclass_fields__:
+        expected: object = getattr(current, field)
+        actual = selection.get(field)
+        if isinstance(expected, tuple):
+            wanted = sorted(str(item) for item in cast("tuple[object, ...]", expected))
+            if not isinstance(actual, (list, tuple)) or (
+                sorted(str(item) for item in cast("Sequence[object]", actual)) != wanted
+            ):
+                return True
+        elif actual != expected:
+            return True
+    return False
+
+
 def _mapping(value: object) -> Mapping[str, object]:
     """Narrow an untyped service payload to a string-keyed mapping, or nothing.
 
@@ -1027,6 +1062,7 @@ class YoetzRuntime:
         network_raw = policy_map.get("network_egress_permitted")
         network_egress = network_raw if type(network_raw) is bool else None
         return PrivacyPosture(
+            recipe_outdated=_review_recipe_outdated(policy_map),
             profile=profile if isinstance(profile, str) else None,
             llm_inference_enabled=llm_enabled,
             readable=True,
