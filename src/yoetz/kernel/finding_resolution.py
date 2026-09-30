@@ -60,6 +60,7 @@ __all__ = [
     "IssueKey",
     "apply_check_resolution",
     "check_change_limits_tolerated",
+    "check_change_resolution_unverified",
     "finding_is_resolved",
     "issue_key",
     "qualifying_check_resolves",
@@ -437,6 +438,24 @@ def check_change_limits_tolerated(
         return False
     repair = check.check_change_files
     return (_NO_CHECK_CHANGE_FILES if repair is None else repair).covers(raised_files)
+
+
+def check_change_resolution_unverified(record: FindingProjectionRecord) -> bool:
+    """Whether a resolution tolerated check-time limits through a legacy raising view (R945-02).
+
+    A raising view recorded before view commitments is compared by length and count only, so a
+    moved redaction or hunk could pass. Such a resolution still stands (backward compatibility)
+    but is never presented as content-verified: callers disclose it with
+    ``check_time_change_resolution_unverified``.
+    """
+
+    files = record.check_change_raised_files
+    return (
+        record.resolved_by_check_event_id is not None
+        and bool(record.resolution_depends_on_check_event_ids)
+        and files is not None
+        and files.has_unverified_views()
+    )
 
 
 def resolution_blockers(

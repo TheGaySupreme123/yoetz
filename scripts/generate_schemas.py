@@ -1305,6 +1305,9 @@ def _check_recorded_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
                 "redactions": {"maximum": 262144, "minimum": 0, "type": "integer"},
                 "section_admitted": {"type": "boolean"},
                 "shown_bytes": {"maximum": 262144, "minimum": 0, "type": "integer"},
+                # R945-02: keyed commitment to where the view's redactions and hunks lie.
+                # Optional only so a record written before it existed still decodes.
+                "view_commitment": {"pattern": "^hmac-sha256:[0-9a-f]{64}$", "type": "string"},
             },
             "required": [
                 "clean_bytes",

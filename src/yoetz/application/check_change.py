@@ -63,6 +63,7 @@ _MAX_REDACTION_PASSES: Final = 64
 # Keyed per-file commitments share the change_capture commitment key with a message prefix that
 # no stored change_capture object (canonical JSON, starting with ``{``) can begin with.
 _SHOWN_FILE_DOMAIN: Final = b"yoetz/check-change-shown-file/v1\x00"
+_SHOWN_VIEW_DOMAIN: Final = b"yoetz/check-change-shown-view/v1\x00"
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,12 +145,19 @@ async def check_change_shown_files(
         if file.whole:
             fully.add(commitment)
         else:
+            # The view's structure (where markers and hunks lie), under the same key: a repair
+            # covers this file in part only with an identical view (R945-02).
+            view_commitment = await runtime.objects.commitment_for(
+                _SHOWN_VIEW_DOMAIN + base + b"\x00" + file.identity + b"\x00" + file.view,
+                ObjectKind.CHANGE_CAPTURE,
+            )
             partially[commitment] = CheckChangePartialFile(
                 commitment,
                 file.shown_bytes,
                 file.redactions,
                 file.section_admitted,
                 file.clean_bytes,
+                view_commitment,
             )
     for commitment in fully:
         partially.pop(commitment, None)

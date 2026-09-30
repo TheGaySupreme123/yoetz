@@ -69,6 +69,7 @@ __all__ = [
     "CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP",
     "CHECK_TIME_CHANGE_GAPS",
     "CHECK_TIME_CHANGE_REDACTED_GAP",
+    "CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP",
     "CHECK_TIME_CHANGE_TRUNCATED_GAP",
     "CHECK_TIME_CHANGE_UNAVAILABLE_GAP",
     "CHECK_TIME_CHANGE_UNAVAILABLE_REASONS",
@@ -219,6 +220,11 @@ _CHECK_TIME_CHANGE_REASON_PREFIX: Final = CHECK_TIME_CHANGE_UNAVAILABLE_GAP + "_
 CHECK_TIME_CHANGE_UNAVAILABLE_REASON_GAPS: Final = frozenset(
     _CHECK_TIME_CHANGE_REASON_PREFIX + reason for reason in CHECK_TIME_CHANGE_UNAVAILABLE_REASONS
 )
+# A receipt-only disclosure (R945-02): an AI-powered finding was resolved by tolerating a repair
+# review's check-time limits against a raising view recorded before view commitments existed, so
+# only lengths and counts were compared. The resolution stands; it is never presented as
+# content-verified. It is not a check coverage code and never tolerates anything.
+CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP: Final = "check_time_change_resolution_unverified"
 CHECK_TIME_CHANGE_GAPS: Final = frozenset(
     {
         CHECK_TIME_CHANGE_UNAVAILABLE_GAP,
@@ -239,8 +245,14 @@ def check_time_change_unavailable_reason_gap(reason: str) -> str:
 
 
 def check_time_change_gap_sentence(code: str) -> str | None:
-    """One plain sentence for a check-time unavailability reason code; ``None`` otherwise."""
+    """One plain sentence for a check-time reason or resolution code; ``None`` otherwise."""
 
+    if code == CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP:
+        return (
+            "An AI-powered finding was resolved against a raising review recorded before file "
+            "view commitments existed, so only the lengths and counts of what each review saw "
+            "were compared, not where redactions and hunks lay."
+        )
     if code not in CHECK_TIME_CHANGE_UNAVAILABLE_REASON_GAPS:
         return None
     text = CHECK_TIME_CHANGE_UNAVAILABLE_REASONS[code[len(_CHECK_TIME_CHANGE_REASON_PREFIX) :]]

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -27,6 +28,7 @@ from yoetz.application.semantic_case import (
     CapturedContentScope,
     CapturedSemanticContent,
     CheckTimeChange,
+    CheckTimeChangeShownFile,
     build_semantic_case,
     check_time_change_parts_carried,
     check_time_change_shown_files,
@@ -555,3 +557,98 @@ def test_every_adapter_reason_has_a_closed_sentence() -> None:
     assert check_time_change_gap_sentence(CHECK_TIME_CHANGE_UNAVAILABLE_GAP) is None
     with pytest.raises(ValueError):
         check_time_change_unavailable_reason_gap("not_a_reason")
+
+
+def _view_of(text: bytes, parts: int = 1) -> CheckTimeChangeShownFile:
+    change = _change(text).capture
+    selection = ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED)
+    (file,) = check_time_change_shown_files(change, selection, parts)
+    return file
+
+
+_SECTION = (
+    b"diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n"
+    b"@@ -1,3 +1,3 @@ def handler():\n"
+    b" keep = 1\n-token = [REDACTED]\n+value = 2\n"
+    b"@@ -20,2 +20,2 @@ def other():\n"
+    b"-old = 3\n+new = 4\n"
+)
+
+
+def test_view_binds_where_redactions_and_hunks_lie_not_only_their_counts() -> None:
+    """R945-02: equal lengths and counts, different positions, different views."""
+
+    base = _view_of(_SECTION)
+    moved_marker = _view_of(
+        _SECTION.replace(b"-token = [REDACTED]\n+value = 2\n", b"-token = 1\n+value = [REDACTED]\n")
+    )
+    moved_hunk = _view_of(_SECTION.replace(b"@@ -20,2 +20,2 @@", b"@@ -40,2 +40,2 @@"))
+
+    assert base.redactions == moved_marker.redactions == 1
+    assert base.shown_bytes == moved_marker.shown_bytes == moved_hunk.shown_bytes
+    assert base.view != moved_marker.view
+    assert base.view != moved_hunk.view
+    assert _view_of(_SECTION).view == base.view
+    assert b"token" not in base.view and b"value" not in base.view  # structure, not lines
+
+
+@pytest.mark.anyio
+async def test_partial_files_record_a_keyed_view_commitment_never_the_view() -> None:
+    from yoetz.application.check_change import check_change_shown_files
+
+    commitments: list[bytes] = []
+
+    class _Objects:
+        async def commitment_for(self, data: bytes, kind: object) -> str:
+            commitments.append(data)
+            return "hmac-sha256:" + hashlib.sha256(data).hexdigest()
+
+    class _Runtime:
+        objects = _Objects()
+
+    selection = ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED)
+    change = _change(_SECTION)
+    change = CheckTimeChange(
+        change.object_ref, replace(change.capture, base_commit="a" * 40, redacted=True)
+    )
+
+    files = await check_change_shown_files(cast(Any, _Runtime()), change, selection, 1)
+
+    (partial,) = files.partially_shown
+    assert partial.view_commitment is not None
+    assert partial.view_commitment != partial.commitment
+    assert any(data.startswith(b"yoetz/check-change-shown-view/v1\x00") for data in commitments)
+
+
+def test_shown_file_views_come_from_exactly_the_carried_envelope_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R945-02/R945-06: views and accounting share one source, the parts the envelope kept."""
+
+    import yoetz.application.semantic_case as semantic_case_module
+
+    text = b"".join(
+        _SECTION.replace(b"app.py", f"app{index:03d}.py".encode()) for index in range(300)
+    )
+    change = _change(text)
+    semantic = _build(_case_with_material(), change=change)
+    monkeypatch.setattr(semantic_case_module, "MAX_EGRESS_ENVELOPE_BYTES", 8_000)
+    carried = check_time_change_parts_carried(semantic)
+    assert 0 < carried < len(_change_items(semantic))
+    envelope = strict_json_parse(semantic_case_module.bounded_case_envelope(semantic))
+    assert isinstance(envelope, dict)
+    catalog = {
+        cast(dict[str, object], row)["item_id"]
+        for row in cast(list[object], envelope["item_catalog"])
+    }
+    carried_text = b"".join(
+        item.content.partition(b"\n")[2]
+        for item in sorted(semantic.items, key=lambda item: item.item_id)
+        if item.item_id in catalog and item.item_id.startswith(CHECK_TIME_CHANGE_ITEM_PREFIX)
+    )
+    selection = ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED)
+
+    shown = check_time_change_shown_files(change.capture, selection, carried)
+
+    assert carried_text == text[: len(carried_text)]
+    assert sum(file.shown_bytes for file in shown) == len(carried_text)

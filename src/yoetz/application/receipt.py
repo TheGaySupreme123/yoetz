@@ -26,6 +26,7 @@ from yoetz.domain.events import (
 )
 from yoetz.domain.receipts import (
     CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP,
+    CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP,
     ReceiptDocument,
     ReceiptVersionSlice,
     receipt_document_from_json,
@@ -46,7 +47,10 @@ from yoetz.domain.values import (
     timestamp_from_datetime,
 )
 from yoetz.kernel.deterministic_checks import CaseGap, build_deterministic_case, case_coverage
-from yoetz.kernel.finding_resolution import finding_is_resolved
+from yoetz.kernel.finding_resolution import (
+    check_change_resolution_unverified,
+    finding_is_resolved,
+)
 from yoetz.kernel.lineage import evaluate_recorded_lineage
 from yoetz.kernel.projections import ProjectionState
 from yoetz.kernel.receipt_builder import (
@@ -442,6 +446,26 @@ def _finding_states(projection: object) -> tuple[ReceiptFindingState, ...]:
     )
 
 
+def _check_change_resolution_gaps(
+    projection: ProjectionState, finding_states: tuple[ReceiptFindingState, ...]
+) -> list[CaseGap]:
+    """Disclose each resolution that compared a legacy raising view by length only (R945-02).
+
+    Such a resolution stands, but a receipt never presents it as content-verified.
+    """
+
+    return [
+        CaseGap(
+            f"check_change_resolution_unverified:{state.finding_id}",
+            CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP,
+            (),
+        )
+        for state in finding_states
+        if state.resolved
+        and check_change_resolution_unverified(projection.findings[state.finding_id])
+    ]
+
+
 def _context(
     projection: object,
     frontier: Frontier,
@@ -541,6 +565,7 @@ def _context(
         record = projection.findings[state.finding_id]
         assert record.payload is not None
         coverage = weakest(coverage, record.payload.coverage)
+    gaps.extend(_check_change_resolution_gaps(projection, finding_states))
 
     # Lineage is replay-only.  The coordinator may have read live children earlier, but a
     # receipt never does: it evaluates the aggregate manifest events already present in this

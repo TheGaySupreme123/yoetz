@@ -1702,3 +1702,116 @@ def test_merged_requirement_may_outgrow_one_event_row_up_to_its_own_bound() -> N
     }
     state = replace(empty_projection_state(), frontier=9, head_digest=_DIGEST, findings=findings)
     assert projection_from_snapshot(projection_snapshot(state)) == state
+
+
+# --- R945-02 (maintainer decision 2026-09-30): view commitments bind where spans and hunks lie --
+
+_VIEW_1 = "hmac-sha256:" + "1" * 64
+_VIEW_2 = "hmac-sha256:" + "2" * 64
+
+
+def _viewed(
+    shown: int, redactions: int, admitted: bool, clean: int, view: str | None
+) -> CheckChangePartialFile:
+    return CheckChangePartialFile(_FILE_A, shown, redactions, admitted, clean, view)
+
+
+def test_a_moved_redaction_with_equal_counts_is_not_covered() -> None:
+    """The reviewer's exact probe, now with the view commitment each check records."""
+
+    raised = CheckChangeShownFiles((), (_viewed(100, 1, False, 20, _VIEW_1),), True)
+    moved = CheckChangeShownFiles((), (_viewed(100, 1, False, 80, _VIEW_2),), True)
+    same = CheckChangeShownFiles((), (_viewed(100, 1, False, 20, _VIEW_1),), True)
+
+    assert not moved.covers(raised)
+    assert same.covers(raised)
+    assert CheckChangeShownFiles((_FILE_A,), (), True).covers(raised)  # whole still covers
+
+
+def test_a_moved_packet_edge_hunk_with_a_longer_view_is_not_covered() -> None:
+    raised = CheckChangeShownFiles((), (_viewed(995, 0, False, 995, _VIEW_1),), True)
+    longer = CheckChangeShownFiles((), (_viewed(4_322, 0, False, 4_322, _VIEW_2),), True)
+
+    assert not longer.covers(raised)
+
+
+def test_a_repair_record_without_a_view_never_covers_a_committed_raise() -> None:
+    raised = CheckChangeShownFiles((), (_viewed(100, 1, True, 20, _VIEW_1),), True)
+    legacy_repair = CheckChangeShownFiles((), (_viewed(100, 1, True, 20, None),), True)
+
+    assert not legacy_repair.covers(raised)
+
+
+def test_raises_with_different_views_merge_into_a_whole_file_requirement() -> None:
+    first = CheckChangeShownFiles((), (_viewed(500, 1, True, 20, _VIEW_1),), True)
+    second = CheckChangeShownFiles((), (_viewed(500, 1, True, 20, _VIEW_2),), True)
+
+    merged = first.merged(second)
+
+    assert merged == CheckChangeShownFiles((_FILE_A,), (), True)
+    assert first.merged(first) == first
+
+
+def test_legacy_raise_falls_back_and_is_reported_unverified() -> None:
+    legacy = CheckChangeShownFiles((), (_viewed(100, 1, False, 20, None),), True)
+    committed = CheckChangeShownFiles((), (_viewed(100, 1, False, 20, _VIEW_1),), True)
+    repair = CheckChangeShownFiles((), (_viewed(100, 1, False, 20, _VIEW_2),), True)
+
+    assert repair.covers(legacy)  # the old length/count comparison
+    assert legacy.has_unverified_views()
+    assert not committed.has_unverified_views()
+    assert not CheckChangeShownFiles((_FILE_A,), (), True).has_unverified_views()
+
+
+def test_view_commitment_round_trips_and_legacy_rows_still_decode() -> None:
+    from yoetz.domain.events import check_change_files_from_json, check_change_files_to_json
+
+    committed = CheckChangeShownFiles((), (_viewed(100, 1, False, 20, _VIEW_1),), True)
+    wire = check_change_files_to_json(committed)
+    assert check_change_files_from_json(wire) == committed
+    legacy = CheckChangeShownFiles((), (_viewed(100, 1, False, 20, None),), True)
+    legacy_wire = check_change_files_to_json(legacy)
+    partial = legacy_wire["partially_shown"]
+    assert isinstance(partial, tuple) and "view_commitment" not in partial[0]
+    assert check_change_files_from_json(legacy_wire) == legacy
+
+
+def test_resolution_through_a_legacy_raise_is_marked_unverified() -> None:
+    from yoetz.kernel.finding_resolution import check_change_resolution_unverified
+
+    legacy = _files(views=(_viewed(3_000, 1, True, 67, None),))
+    findings = _raise_reraise(legacy, legacy)
+    record = _repair_with(findings, _files(views=(_viewed(3_000, 1, True, 67, _VIEW_1),)))
+    assert record.resolved_by_check_event_id == evt(9)
+    assert check_change_resolution_unverified(record)
+
+    committed = _files(views=(_viewed(3_000, 1, True, 67, _VIEW_1),))
+    findings = _raise_reraise(committed, committed)
+    record = _repair_with(findings, committed)
+    assert record.resolved_by_check_event_id == evt(9)
+    assert not check_change_resolution_unverified(record)
+
+
+def test_receipt_discloses_a_resolution_through_a_legacy_raise() -> None:
+    from yoetz.application.receipt import (
+        _check_change_resolution_gaps,  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+    )
+    from yoetz.domain.receipts import (
+        CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP,
+        check_time_change_gap_sentence,
+    )
+    from yoetz.kernel.receipt_builder import ReceiptFindingState
+
+    legacy = _files(views=(_viewed(3_000, 1, True, 67, None),))
+    findings = _raise_reraise(legacy, legacy)
+    _repair_with(findings, _files(views=(_viewed(3_000, 1, True, 67, _VIEW_1),)))
+    projection = replace(
+        empty_projection_state(), frontier=20, head_digest=_DIGEST, findings=findings
+    )
+
+    gaps = _check_change_resolution_gaps(projection, (ReceiptFindingState(fnd(1), True),))
+
+    assert [gap.code for gap in gaps] == [CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP]
+    sentence = check_time_change_gap_sentence(CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP)
+    assert sentence is not None and "only the lengths and counts" in sentence
+    assert not _check_change_resolution_gaps(projection, (ReceiptFindingState(fnd(1), False),))

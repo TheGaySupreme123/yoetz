@@ -2216,8 +2216,11 @@ class CheckChangePartialFile:
     redaction markers included; ``redactions`` counts the ``[REDACTED]`` markers inside them;
     ``clean_bytes`` is where the first of those markers starts (``shown_bytes`` without one);
     ``section_admitted`` says the whole section reached the packet (it is partial only because
-    of a redaction). All are counts or flags, never content. A requirement merged from several
-    raising reviews uses only ``shown_bytes`` and ``redactions``.
+    of a redaction). ``view_commitment`` is a keyed commitment (the task bundle's object
+    commitment key, never content) over the view's structure: its shown length, whether the
+    whole section was admitted, the position of every redaction marker, and the position and
+    header of every hunk it showed (ADR-031 decision 9). ``None`` only on a record written before
+    view commitments existed. All are counts, flags or commitments, never content.
     """
 
     commitment: str
@@ -2225,9 +2228,12 @@ class CheckChangePartialFile:
     redactions: int
     section_admitted: bool
     clean_bytes: int
+    view_commitment: str | None = None
 
     def __post_init__(self) -> None:
         validate_commitment(self.commitment)
+        if self.view_commitment is not None:
+            validate_commitment(self.view_commitment)
         for name in ("shown_bytes", "redactions", "clean_bytes"):
             object.__setattr__(
                 self,
@@ -2238,12 +2244,19 @@ class CheckChangePartialFile:
             raise ProtocolValueError("invalid_event_value_type")
 
     def covers(self, raised: CheckChangePartialFile) -> bool:
-        """Whether this (repair) view shows at least what a raising view of n bytes and k spans did.
+        """Whether this (repair) view shows at least what a raising partial view did.
 
-        Length: it showed at least n bytes, or its whole current section. Redaction: it hid no
-        more spans, or its first n bytes were clean.
+        A raising view with a view commitment is covered only by a repair view with the same
+        commitment: the same shown length, the same redaction markers at the same positions and
+        the same hunks at the same positions. A redaction or a packet-edge hunk that moved is
+        therefore not covered, even with equal counts (R945-02). A raising view recorded before
+        view commitments falls back to the length and count comparison, which callers disclose
+        (``CheckChangeShownFiles.has_unverified_views``): it showed at least n bytes or its whole
+        current section, and hid no more spans or its first n bytes were clean.
         """
 
+        if raised.view_commitment is not None:
+            return self.view_commitment == raised.view_commitment
         return (self.shown_bytes >= raised.shown_bytes or self.section_admitted) and (
             self.redactions <= raised.redactions or self.clean_bytes >= raised.shown_bytes
         )
@@ -2286,6 +2299,11 @@ class CheckChangeShownFiles:
     def partial_files(self) -> Mapping[str, CheckChangePartialFile]:
         return {item.commitment: item for item in self.partially_shown}
 
+    def has_unverified_views(self) -> bool:
+        """Whether any file this record saw in part has no view commitment (a legacy record)."""
+
+        return any(item.view_commitment is None for item in self.partially_shown)
+
     def covers(self, raised: CheckChangeShownFiles) -> bool:
         """Whether this (repair) record proves it saw at least what *raised* saw (ADR-031).
 
@@ -2313,29 +2331,34 @@ class CheckChangeShownFiles:
         """The requirement of two reviews that both raised an issue: what each of them saw.
 
         Whole files are united; a file either saw whole needs to be seen whole. A file both saw
-        in part needs the larger length and the fewer redacted spans. ``None`` (unknown) when
-        either record is incomplete or the union outgrows ``MAX_CHECK_CHANGE_RAISED_FILES``.
+        in part through the same view commitment keeps that view. Two different views of one file
+        (or one committed and one legacy) cannot both be matched by one repair view, so that file
+        must be seen whole. Two legacy views keep the larger length and the fewer redacted spans.
+        ``None`` (unknown) when either record is incomplete or the union outgrows
+        ``MAX_CHECK_CHANGE_RAISED_FILES``.
         """
 
         if not self.complete or not other.complete:
             return None
-        full = frozenset(self.fully_shown) | frozenset(other.fully_shown)
+        full = set(self.fully_shown) | set(other.fully_shown)
         partial: dict[str, CheckChangePartialFile] = {}
         for item in (*self.partially_shown, *other.partially_shown):
             if item.commitment in full:
                 continue
             prior = partial.get(item.commitment)
-            partial[item.commitment] = (
-                item
-                if prior is None
-                else CheckChangePartialFile(
+            if prior is None:
+                partial[item.commitment] = item
+            elif prior.view_commitment is None and item.view_commitment is None:
+                partial[item.commitment] = CheckChangePartialFile(
                     item.commitment,
                     max(prior.shown_bytes, item.shown_bytes),
                     min(prior.redactions, item.redactions),
                     prior.section_admitted and item.section_admitted,
                     min(prior.clean_bytes, item.clean_bytes),
                 )
-            )
+            elif prior.view_commitment != item.view_commitment:
+                del partial[item.commitment]
+                full.add(item.commitment)
         if len(full) + len(partial) > MAX_CHECK_CHANGE_RAISED_FILES:
             return None
         return CheckChangeShownFiles(
@@ -2358,6 +2381,12 @@ def check_change_files_to_json(value: CheckChangeShownFiles) -> dict[str, object
                 "redactions": item.redactions,
                 "section_admitted": item.section_admitted,
                 "shown_bytes": item.shown_bytes,
+                # Emitted only when present, so a legacy record keeps its bytes.
+                **(
+                    {}
+                    if item.view_commitment is None
+                    else {"view_commitment": item.view_commitment}
+                ),
             }
             for item in value.partially_shown
         ),
@@ -2375,14 +2404,17 @@ def check_change_files_from_json(value: object) -> CheckChangeShownFiles:
             required=frozenset(
                 {"clean_bytes", "commitment", "redactions", "section_admitted", "shown_bytes"}
             ),
+            optional=frozenset({"view_commitment"}),
         )
         commitment = _field(item, "commitment")
         shown_bytes = _field(item, "shown_bytes")
         redactions = _field(item, "redactions")
         section_admitted = _field(item, "section_admitted")
         clean_bytes = _field(item, "clean_bytes")
+        view_commitment = item.get("view_commitment")
         if (
-            type(commitment) is not str
+            (view_commitment is not None and type(view_commitment) is not str)
+            or type(commitment) is not str
             or type(shown_bytes) is not int
             or type(redactions) is not int
             or type(section_admitted) is not bool
@@ -2391,7 +2423,12 @@ def check_change_files_from_json(value: object) -> CheckChangeShownFiles:
             raise ProtocolValueError("invalid_event_value_type")
         partial.append(
             CheckChangePartialFile(
-                commitment, shown_bytes, redactions, section_admitted, clean_bytes
+                commitment,
+                shown_bytes,
+                redactions,
+                section_admitted,
+                clean_bytes,
+                view_commitment,
             )
         )
     complete = _field(source, "complete")

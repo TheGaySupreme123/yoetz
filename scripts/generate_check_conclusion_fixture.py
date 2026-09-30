@@ -62,6 +62,7 @@ def document(root: Path) -> dict[str, Any]:
                 "redactions": 1,
                 "section_admitted": True,
                 "shown_bytes": 1024,
+                "view_commitment": "hmac-sha256:" + "4" * 64,
             }
         ],
     }

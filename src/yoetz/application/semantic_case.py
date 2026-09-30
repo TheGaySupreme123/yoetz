@@ -460,10 +460,44 @@ _CHECK_TIME_CHANGE_FILE_START: Final = re.compile(rb"^diff --git ", re.MULTILINE
 _CHECK_TIME_CHANGE_BINARY: Final = re.compile(rb"^Binary files ", re.MULTILINE)
 _CHECK_TIME_CHANGE_DELETED: Final = re.compile(rb"^deleted file mode ", re.MULTILINE)
 _REDACTION_MARKER: Final = b"[REDACTED]"
+_CHECK_TIME_CHANGE_HUNK: Final = re.compile(rb"^@@ [^\n]*", re.MULTILINE)
+_VIEW_DOMAIN: Final = b"yoetz/check-change-view/v1\x00"
+
+
+def _check_time_change_view(
+    text: bytes, start: int, visible_end: int, marker_limit: int, section_admitted: bool
+) -> bytes:
+    """Length-prefixed structure of one file's shown view: where markers and hunks lie."""
+
+    parts: list[bytes] = [
+        _VIEW_DOMAIN,
+        (visible_end - start).to_bytes(4, "big"),
+        b"\x01" if section_admitted else b"\x00",
+    ]
+    markers: list[int] = []
+    position = text.find(_REDACTION_MARKER, start, marker_limit)
+    while position >= 0:
+        markers.append(position - start)
+        position = text.find(_REDACTION_MARKER, position + 1, marker_limit)
+    parts.append(len(markers).to_bytes(4, "big"))
+    parts.extend(offset.to_bytes(4, "big") for offset in markers)
+    hunks = [
+        (match.start() - start, text[match.start() : min(match.end(), visible_end)])
+        for match in _CHECK_TIME_CHANGE_HUNK.finditer(text, start, visible_end)
+    ]
+    parts.append(len(hunks).to_bytes(4, "big"))
+    for offset, header in hunks:
+        parts.extend((offset.to_bytes(4, "big"), len(header).to_bytes(4, "big"), header))
+    return b"".join(parts)
 
 
 class CheckTimeChangeShownFile(NamedTuple):
-    """One changed file whose diff reached a review packet (ADR-031); counts, never content."""
+    """One changed file whose diff reached a review packet (ADR-031); counts, never content.
+
+    ``view`` is the canonical structure of what reached the packet, for a keyed commitment only
+    and never stored: the shown length, whether the whole section was admitted, the offset of
+    every redaction marker, and the offset and header line of every hunk shown (R945-02).
+    """
 
     identity: bytes
     whole: bool
@@ -471,6 +505,7 @@ class CheckTimeChangeShownFile(NamedTuple):
     redactions: int
     section_admitted: bool
     clean_bytes: int
+    view: bytes
 
 
 def check_time_change_shown_files(
@@ -525,6 +560,9 @@ def check_time_change_shown_files(
                 redactions=redactions,
                 section_admitted=section_admitted,
                 clean_bytes=visible_end - start if first_marker < 0 else first_marker - start,
+                view=_check_time_change_view(
+                    text, start, visible_end, marker_limit, section_admitted
+                ),
             )
         )
     return tuple(files)
