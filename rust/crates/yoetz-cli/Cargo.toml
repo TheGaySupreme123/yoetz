@@ -1,0 +1,15 @@
+[package]
+name = "yoetz-cli"
+description = "Native Yoetz command-line utilities built on yoetz-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "yoetz-rs"
+path = "src/main.rs"
+
+[dependencies]
+yoetz-core.workspace = true

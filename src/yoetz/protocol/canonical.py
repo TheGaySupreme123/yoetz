@@ -450,3 +450,106 @@ def _encode_string(value: str) -> str:
             parts.append(character)
     parts.append('"')
     return "".join(parts)
+
+
+# The optional Rust accelerator (``yoetz._native``) carries byte- and error-identical twins of
+# the functions above. Rebinding the public names here means every importer, including ones
+# that bound a name with ``from ... import``, reaches the twin; without the accelerator the
+# pure-Python definitions above stay in place unchanged.
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions(
+        "bind_canonical_fragment",
+        "canonical_fragment_parts",
+        "container_levels",
+        "canonical_encode",
+        "canonical_digest",
+        "canonical_text",
+        "strict_json_parse",
+        "ensure_canonical_value",
+        "ensure_canonical_set",
+        "canonical_integer_string",
+        "parse_canonical_integer_string",
+        "request_digest",
+        "validate_string",
+        "encode_string",
+    )
+    if resolved is None:
+        return
+    (
+        bind_fragment,
+        fragment_parts,
+        native_container_levels,
+        native_encode,
+        native_digest,
+        native_text,
+        native_parse,
+        native_ensure_value,
+        native_ensure_set,
+        native_integer_string,
+        native_parse_integer_string,
+        native_request_digest,
+        native_validate_string,
+        native_encode_string,
+    ) = resolved
+    bind_fragment(CanonicalFragment)
+
+    def native_canonical_fragment(value: JsonValue | CanonicalFragment) -> CanonicalFragment:
+        """Validate and encode *value* once, returning a splice-ready fragment."""
+
+        if type(value) is CanonicalFragment:
+            return value
+        text, levels = fragment_parts(value)
+        return CanonicalFragment(text, levels, _token=_FRAGMENT_TOKEN)
+
+    def native_entry_digest(preimage: JsonValue) -> str:
+        """Digest an accepted-entry preimage after its exact top-level envelope gate."""
+
+        if not _is_actual_mapping(preimage):
+            raise ProtocolValueError("not_an_accepted_envelope")
+        source = cast(Mapping[str, JsonValue], preimage)
+        try:
+            if frozenset(source) != _ACCEPTED_ENTRY_PREIMAGE_KEYS:
+                raise ProtocolValueError("not_an_accepted_envelope")
+            protocol = source["protocol"]
+        except ProtocolValueError:
+            raise
+        except Exception as exc:
+            raise ProtocolValueError("not_an_accepted_envelope") from exc
+
+        if type(protocol) is not str or protocol != "yoetz.event":
+            raise ProtocolValueError("not_an_accepted_envelope")
+        return native_digest(source)
+
+    python_strict_json_parse = strict_json_parse
+    stdlib_loads = json.loads
+
+    def native_strict_json_parse(data: bytes | bytearray, *, validate: bool = True) -> JsonValue:
+        """Parse strict wire JSON into the Yoetz JSON profile."""
+
+        # The reference delegates scanning to ``json.loads``; a replaced ``json.loads`` is an
+        # observation point the native scanner cannot honor, so it defers to the reference.
+        if json.loads is stdlib_loads:
+            return cast(JsonValue, native_parse(data, validate=validate))
+        return python_strict_json_parse(data, validate=validate)
+
+    globals().update(
+        canonical_fragment=native_canonical_fragment,
+        container_levels=native_container_levels,
+        canonical_encode=native_encode,
+        canonical_digest=native_digest,
+        strict_json_parse=native_strict_json_parse,
+        ensure_canonical_value=native_ensure_value,
+        ensure_canonical_set=native_ensure_set,
+        canonical_integer_string=native_integer_string,
+        parse_canonical_integer_string=native_parse_integer_string,
+        request_digest=native_request_digest,
+        entry_digest=native_entry_digest,
+        _canonical_text=native_text,
+        _validate_string=native_validate_string,
+        _encode_string=native_encode_string,
+    )
+
+
+_bind_native()
