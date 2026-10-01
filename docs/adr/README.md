@@ -35,9 +35,9 @@ ADR wins; when an ADR and the code disagree, that is a bug in one of them and wo
 | [028](ADR-028-instance-identity-and-runtime-pinned-roots.md) | Instance identity and runtime-pinned isolated roots |
 | [029](ADR-029-smart-observation-selection.md) | Smart observation selection and bounded observation budgets (proposed; amended for #828 capacity policy) |
 | [030](ADR-030-typed-recovery-directives.md) | Typed recovery directives for public errors (proposed) |
-| [031](ADR-031-remote-service-mode.md) | Optional remote service mode (proposed; exposure stays deferred) |
 | [031](ADR-031-check-time-change-capture.md) | The service captures the check-time change as one reviewed object |
 | [032](ADR-032-closure-readiness-checklist-and-material-dependency-coverage.md) | Closure readiness as a checklist, and material-dependency coverage (proposed) |
+| [033](ADR-033-remote-service-mode.md) | Optional remote service mode (proposed; local record only, exposure stays deferred) |
 
 Unresolved gates are centralized in [`docs/OPEN_QUESTIONS.md`](../OPEN_QUESTIONS.md), not scattered
 through individual ADRs.

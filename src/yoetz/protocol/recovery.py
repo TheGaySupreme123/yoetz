@@ -556,6 +556,24 @@ _DIRECTIVES: Final = (
         nudge="config.toml is nonsecret; provision credentials through the credential command.",
     ),
     RecoveryDirective(
+        token="remote_forwarding_closed",
+        directive=(
+            "Remote forwarding is not authorized, so this command opened no connection. Ledger "
+            "content stays on this machine. Clear a stored endpoint with yoetz remote disconnect, "
+            "or keep using the local service."
+        ),
+        nudge="No API key is stored or sent by this command.",
+    ),
+    RecoveryDirective(
+        token="remote_request_correction",
+        directive=(
+            "The remote endpoint was refused before any connection. Use https with a host and no "
+            "user, password, path, query, or fragment, or ssh as [user@]host[:port], with "
+            "credential kind api_key."
+        ),
+        nudge="The endpoint is configuration, not a credential.",
+    ),
+    RecoveryDirective(
         token="instance_identity_repair",
         directive=(
             "This runtime, its pin, and the root's instance marker do not name one trusted "
@@ -727,6 +745,10 @@ _LOCAL_REASON_CONTINUATIONS: Final[Mapping[str, str]] = MappingProxyType(
         "storage_unsafe": "local_state_repair",
         "unsafe_root": "storage_root_unsafe",
         "workspace_unresolvable": "storage_root_unsafe",
+        "remote_egress_not_authorized": "remote_forwarding_closed",
+        "remote_endpoint_invalid": "remote_request_correction",
+        "remote_credential_unsupported": "remote_request_correction",
+        "remote_state_invalid": "local_state_repair",
         # Observation capacity owner choices (issue #828).
         "capacity_no_cap_unsupported": "capacity_request_correction",
     }

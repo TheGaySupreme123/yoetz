@@ -119,6 +119,7 @@ Type `/` to open the filtered command list.
 | `/privacy` | choose what may leave this computer |
 | `/provider` | configure optional deeper review |
 | `/service` | manage the protected local service |
+| `/remote` | show or record an optional remote endpoint; forwarding stays off |
 | `/observe` | show observation selection and change local retention capacity |
 | `/doctor` | diagnose installation problems |
 | `/help` | show what Yoetz can do here |
@@ -286,6 +287,16 @@ next steps. When policy permits package update checks and a newer release is
 known, the package line is optional with remediation `uv tool upgrade yoetz`; when the check is
 allowed but fails, the line is unproven with "could not check for updates." **It never changes
 anything.**
+
+### `/remote`
+
+`/remote` shows whether an optional remote endpoint is recorded on this computer. The service line
+stays local, and forwarding stays off. You can record an HTTPS origin (`https://host` or
+`https://host:port`, with no user, password, path, query, or fragment) or an SSH target
+(`[user@]host[:port]`). The credential kind is `api_key`; this screen does not ask for or store the
+key. Clearing the endpoint returns you to local mode. Choosing connect refuses before any
+connection is opened. The shell equivalents are `yoetz remote status`, `yoetz remote configure`,
+`yoetz remote disconnect`, and `yoetz remote connect`.
 
 ### `/observe`
 

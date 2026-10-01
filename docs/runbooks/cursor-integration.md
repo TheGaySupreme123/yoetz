@@ -1856,3 +1856,9 @@ metadata evidence without `unpaired_event`. The opt-in ordinary profile
 (`cursor-ordinary-observation-v1`) is on the conservative paired contract, so a paired pre and post
 share one action and an orphan scope yields one informational notice rather than a recurring
 advisory. Cursor has no code-mode cell, so the stream wrapper rule does not apply.
+
+## Remote service mode (ADR-033)
+
+Cursor is not a remote-service integration. Hooks and the MCP bridge stay clients of the local
+service. `yoetz remote connect` records nothing on the network and opens no connection. Remote
+forwarding stays deferred until the founder questions in ADR-033 are accepted.

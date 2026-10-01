@@ -399,6 +399,23 @@ REMEDIATION_MESSAGES: Final = MappingProxyType(
             "a service still holds that root's singleton and did not release it within the "
             "bounded stop window; stop it with that runtime's 'yoetz service stop', then retry"
         ),
+        "remote_egress_not_authorized": (
+            "remote forwarding is not authorized, so Yoetz opened no connection and sent nothing; "
+            "ledger content stays on this machine"
+        ),
+        "remote_endpoint_invalid": (
+            "the remote endpoint was refused before any connection; use an https origin with a "
+            "host and no user, password, path, query, or fragment, or an ssh target of "
+            "[user@]host[:port]"
+        ),
+        "remote_credential_unsupported": (
+            "only the api_key credential kind is accepted, and this slice does not store or send "
+            "the key; OAuth is not available"
+        ),
+        "remote_state_invalid": (
+            "the local remote-mode record is malformed; run 'yoetz remote disconnect' and "
+            "configure the endpoint again"
+        ),
     }
 )
 

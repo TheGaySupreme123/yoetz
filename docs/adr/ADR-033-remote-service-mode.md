@@ -1,9 +1,12 @@
-# ADR-031 — Optional remote service mode
+# ADR-033 — Optional remote service mode
 
-**Status:** Proposed for issue #903. The maintainer requested this design record on 2026-10-01.
-It is not an implementation authorization. Remote service exposure stays deferred in
+**Status:** Proposed for issue #903. The maintainer requested this design record on 2026-10-01
+and requested the local contract the same day. Remote forwarding stays deferred in
 [`docs/OPEN_QUESTIONS.md`](../OPEN_QUESTIONS.md) until the founder questions below are accepted
 in that ledger.
+**Implemented by:** `src/yoetz/application/remote_mode.py`, `yoetz remote` in
+`src/yoetz/cli/app.py`, `/remote` in `src/yoetz/tui/app.py`, and the local recovery tokens in
+`src/yoetz/protocol/recovery.py`.
 **Relates to:** ADR-001, ADR-002, ADR-008, ADR-009, ADR-011, ADR-018, and issue #903.
 
 ## Context
@@ -16,7 +19,7 @@ HTTPS or SSH, so the ledger, checks, AI-powered review, and receipt composition 
 
 That request crosses the local trust boundary and the egress boundary. This record fixes the parts
 the existing authorities already determine, and lists the parts that remain a maintainer decision.
-No schema, fixture, adapter, or command is added here.
+The local record and its commands exist. No wire schema, fixture, or remote adapter is added.
 
 ## Decisions
 
@@ -27,8 +30,10 @@ No schema, fixture, adapter, or command is added here.
 
 2. **Agent-facing processes stay clients.** Hooks, the MCP bridge, the CLI, and the TUI keep
    talking to the trusted local service over the authenticated local control channel (ADR-001,
-   ADR-008). They do not open the remote connection, hold the remote credential, or choose the
-   remote endpoint. The local service is the only process that may forward a workflow request.
+   ADR-008). They do not open the remote connection or hold the remote credential. The owner
+   records an endpoint with `yoetz remote` or `/remote`; those commands write a local file and
+   do not ask the service to forward. The local service is the only process that may forward a
+   workflow request, and this slice does not give it that ability.
 
 3. **What stays on the machine.** Host registration, hook and MCP intake, the CLI, the TUI, and
    structural subject-state capture (ADR-011) stay local. Capture remains a client-local support
@@ -51,21 +56,25 @@ No schema, fixture, adapter, or command is added here.
    private key Yoetz stores are secret material. They enter through the existing confidential
    secret path, live in the local vault, and never appear in config, argv, environment, logs,
    hook output, or MCP frames. Plain HTTP is refused. HTTPS requires TLS. SSH uses a client key
-   the server has authorized and a server host key the client has verified. The first slice, when
-   implementation is later authorized, ships an API-key credential only. The credential type is
-   pluggable so a later OAuth credential can replace the API key for that remote. The two are
-   not used together.
+   the server has authorized and a server host key the client has verified. The credential type
+   is pluggable so a later OAuth credential can replace the API key for that remote. The two are
+   not used together. The local slice records the label `api_key` and does not accept, store, or
+   send the secret, so the vault secret path is not wired until enrollment is accepted.
 
 7. **The route ceiling does not move.** ADR-018's strict MCP route still refuses to request
    AI-powered review. Forwarding a check to a remote server does not bypass that ceiling.
 
-8. **Reverse operations are part of the feature.** A later implementation includes configure,
-   connect, status, and disconnect through the CLI and the TUI. Disconnect returns the
-   installation to local mode under decision 1. This ADR adds none of those commands.
+8. **Reverse operations exist locally and do not forward.** `yoetz remote configure`, `status`,
+   `disconnect`, and `connect`, and the terminal command `/remote`, record or clear an endpoint
+   on this machine. `connect` fails closed with `remote_egress_not_authorized` and opens no
+   socket. Disconnect returns the installation to local mode under decision 1. An HTTPS endpoint
+   is stored as `https://host[:port]` with no user, password, path, query, or fragment. An SSH
+   target is `[user@]host[:port]`. The on-disk document uses the schema string
+   `yoetz.remote-mode/1`. That string is not a wire contract under `schemas/`.
 
 9. **Receipts will name the producing service.** A later schema slice records whether the local
    service or a remote server produced the receipt, and which transport was used. No receipt
-   field is added here.
+   field is added in this slice, because the producing service is always the local one.
 
 10. **Out of scope for this decision.** Multi-tenant hosting, a hosted Yoetz service, ledger
     sync, making remote mode the default, concurrent independent writers, and a client that
@@ -90,17 +99,20 @@ captured repository state off the machine until they are accepted in `docs/OPEN_
 - ADR-001's deferral of distributed service access and TCP/network control stands for the
   shipping product. This record is the proposed shape of the exception, and it does not lift
   the deferral.
-- Local clients gain no new trust by the existence of this proposal. A hook or MCP process that
-  opened its own remote socket would violate ADR-008.
-- Implementation starts with an accepted egress and disconnect decision, then a schema and
-  fixtures for the remote connection contract, then a transport adapter inside the local
-  service. Host runbooks record a decision per host at that time.
+- Local clients gain no new trust from the local record. A hook or MCP process that opened its
+  own remote socket would violate ADR-008.
+- Status always reports `service: local` and `forwarding: false`. `yoetz remote connect` performs
+  no network I/O.
+- A transport adapter still waits on an accepted egress channel and the other founder questions,
+  then a schema and fixtures for the remote connection contract. Host runbooks record that Codex,
+  Claude Code, and Cursor stay on the local service.
 
 ## Alternatives considered
 
 | Approach | Result | Reason |
 |---|---|---|
 | Design record now, transport after the founder questions | **Selected** | The trust and egress choices change the protocol. Coding a client first would freeze them by accident. |
+| Local record now, `connect` fails closed | **Selected** for the local slice | Configure, status, and disconnect are reversible and send nothing. Connect does not choose an egress channel. |
 | MCP and hooks dial the remote server directly | Rejected | Those processes are untrusted clients. Putting the credential there breaks ADR-008. |
 | Reuse `update_checks` or `llm_inference` as the remote channel | Rejected | Those channels have different payloads and consent. Remote ledger traffic is not a version check and not a provider call. |
 | Replace the local service | Rejected | ADR-001's local singleton is the default, and #903 keeps local mode when no remote is connected. |
