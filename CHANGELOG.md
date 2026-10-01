@@ -142,6 +142,19 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- A repaired AI-powered finding can now resolve in a long session. A recheck over a bounded review
+  scope used to require every item the reviewer cited to be shown again, but the repair's own work
+  pushed those early items out of the review's recent-history window, and correcting the criticised
+  claim (as reviewers ask) replaced it, so no repaired finding resolved and agents looped on
+  `work_open_findings`. The recheck must now have shown the finding itself, the repair evidence the
+  response cites and a later change, and account for each cited item: shown again (an evidence
+  excerpt or claim also counts for the event that recorded it), replaced by a corrected claim it
+  showed, or an early event the window evicted. An omitted repair or change still blocks, and the
+  receipt still discloses `semantic_reference_scope_reduced`. The rule is replay-derived and needs
+  no new field, so existing ledgers re-evaluate on upgrade. A finding's resolution explanation now
+  reads the latest check that could have resolved it rather than a later scoped or local-only one
+  (#947).
+
 - A cached 100-row `status` page no longer costs ~2 s. Every page was schema-validated about eleven
   times on its way from the service to the host, each time walking every row of every non-matching
   page shape. Valid results are now decided without rebuilding diagnostics, and repeated

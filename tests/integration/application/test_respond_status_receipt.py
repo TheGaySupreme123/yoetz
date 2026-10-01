@@ -4728,7 +4728,13 @@ async def test_succeeded_review_records_assessable_conclusion_durably(
     assert Frontier(rebuilt.frontier, rebuilt.head_digest) == checked.result_frontier
 
 
-def _semantic_challenge_evaluator(claim_ref: str) -> Callable[..., Awaitable[object]]:
+def _semantic_challenge_evaluator(
+    claim_ref: str, *, subjects: tuple[str, ...] = ()
+) -> Callable[..., Awaitable[object]]:
+    """Raise one AI-powered challenge about *claim_ref*, also citing any further *subjects*."""
+
+    cited = tuple(sorted({claim_ref, *subjects}, key=str.encode))
+
     async def evaluate(
         frozen: object,
         findings: object,
@@ -4739,7 +4745,7 @@ def _semantic_challenge_evaluator(claim_ref: str) -> Callable[..., Awaitable[obj
         challenge = ReviewerChallenge(
             FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE,
             "The completion claim has no readable support.",
-            (claim_ref,),
+            cited,
             "The claim cites only an open obligation.",
             "The work may be done but unrecorded.",
             "Record the result that supports the claim.",
@@ -5182,6 +5188,7 @@ def _scripted_semantic_evaluator(
     over_item_limit: bool,
     scope_reduced: list[bool] | None = None,
     omitted_refs: list[tuple[str, ...]] | None = None,
+    subjects: tuple[str, ...] = (),
 ) -> Callable[..., Awaitable[object]]:
     """Answer each check with the next scripted conclusion under the same capture limits.
 
@@ -5199,7 +5206,7 @@ def _scripted_semantic_evaluator(
     ) -> object:
         raised = cast(
             FinalSemanticEvaluation,
-            await _semantic_challenge_evaluator(claim_ref)(frozen, findings),
+            await _semantic_challenge_evaluator(claim_ref, subjects=subjects)(frozen, findings),
         )
         conclusion = conclusions.pop(0)
         judgment = (
@@ -7744,6 +7751,7 @@ def _sent_packet_evaluator(
     sent: list[tuple[SemanticCase, ReviewPacketDisclosure]],
     *,
     withhold_excerpts_of: frozenset[str] = frozenset(),
+    subjects: tuple[str, ...] = (),
 ) -> Callable[..., Awaitable[object]]:
     """A reduced review whose record is what the real sent packet carried (#904).
 
@@ -7767,6 +7775,7 @@ def _sent_packet_evaluator(
                 case_gaps=("content_unselected",),
                 over_item_limit=False,
                 scope_reduced=[True],
+                subjects=subjects,
             )(frozen, findings),
         )
         case = cast(FrozenCase, frozen).case
@@ -8034,3 +8043,205 @@ async def test_a_reduced_review_does_not_credit_a_record_it_withheld() -> None:
     row = next(item for item in view.items if item.finding_id == finding.finding_id)
     assert row.resolved is False
     assert "finding_material_outside_reduced_review_scope" in str(row.detail)
+
+
+def _claim_correction(
+    event: str, claim: str, supersedes: str, support: str, obligation: str
+) -> dict[str, JsonValue]:
+    draft = _draft(
+        event,
+        "claim_recorded",
+        {
+            "claim_id": claim,
+            "claim_kind": "completion",
+            "statement": "The exercise is complete; the repair run is recorded.",
+            "supporting_refs": (support,),
+            "limitation_refs": (),
+            "supersedes_claim_refs": (supersedes,),
+            "obligation_refs": (obligation,),
+        },
+    )
+    return {**draft, "schema": {"name": "claim_recorded", "version": "1.1.0"}}
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+async def test_a_long_session_repair_that_evicted_the_subjects_resolves_the_finding(
+    ledger_backend: Literal["memory", "sqlite"],
+) -> None:
+    """Issue #947, the goreleaser shape, through the real packet, check, replay and receipts.
+
+    The reviewer cites an early action event, an early evidence event and the completion claim.
+    The agent then works on (well over 64 more recorded events), corrects the claim as asked, and
+    answers with the repair evidence. The third review's real packet no longer carries the early
+    events in its history window, nor the superseded claim, yet it carried the finding's own row,
+    the corrected claim, the repair evidence and later changes: the finding resolves, while status
+    and every receipt rendering keep disclosing the reduced reference scope. Replay equals live.
+    """
+
+    seed = 6700
+    obligation, obligation_event = protocol_id("obl_", seed + 1), protocol_id("evt_", seed + 2)
+    old_claim, old_claim_event = protocol_id("clm_", seed + 5), protocol_id("evt_", seed + 4)
+    old_action, old_action_event = protocol_id("act_", seed + 6), protocol_id("evt_", seed + 7)
+    old_evidence, old_evidence_event = protocol_id("evd_", seed + 8), protocol_id("evt_", seed + 9)
+    conclusions = ["challenges_returned", "no_material_discrepancy", "no_material_discrepancy"]
+    sent: list[tuple[SemanticCase, ReviewPacketDisclosure]] = []
+    app, runtime, _ = _build_app(
+        seed_offset=67,
+        semantic="optional",
+        ledger_backend=ledger_backend,
+        semantic_evaluator=_sent_packet_evaluator(
+            old_claim, conclusions, sent, subjects=(old_action_event, old_evidence_event)
+        ),
+    )
+    started = await app.start(start_request(seed, title="Long-session repair"))
+    first = await _publish_drafts(
+        app,
+        started,
+        seed + 10,
+        started.frontier,
+        (
+            _draft(
+                obligation_event,
+                "obligation_published",
+                {
+                    "obligation_id": obligation,
+                    "description": "Release archives carry the checksum file.",
+                    "acceptance_criteria": "The release test passes.",
+                    "evidence_expectation": "A recorded test run.",
+                    "status": "open",
+                },
+            ),
+            _draft(
+                old_action_event,
+                "action_recorded",
+                {"action_id": old_action, "action_kind": "edit", "description": "First attempt"},
+            ),
+            _draft(
+                old_evidence_event,
+                "evidence_recorded",
+                {
+                    "evidence_id": old_evidence,
+                    "evidence_kind": "test_result",
+                    "strength": "mutable_reference",
+                    "observed_at": "2026-07-19T12:00:03.000Z",
+                    "description": "release test: 3 passed",
+                    "reference": "ci-run-6701",
+                },
+            ),
+            _draft(
+                old_claim_event,
+                "claim_recorded",
+                {
+                    "claim_id": old_claim,
+                    "claim_kind": "completion",
+                    "statement": "The exercise is complete.",
+                    "supporting_refs": (old_evidence,),
+                    "obligation_refs": (obligation,),
+                },
+            ),
+        ),
+    )
+    raised = await _semantic_recheck(app, started, seed + 20, first.result_frontier)
+    finding = next(
+        item for item in raised.findings if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    )
+    assert {old_claim, old_action_event, old_evidence_event} <= set(finding.subject_refs)
+    assert _SCOPE_REDUCED in finding.coverage.known_gaps
+
+    # An unchanged recheck proves nothing.
+    unchanged = await _semantic_recheck(app, started, seed + 21, raised.result_frontier)
+    view = await _findings_view(app, started, seed + 22, include_resolved=True)
+    row = next(item for item in view.items if item.finding_id == finding.finding_id)
+    assert row.resolved is False
+    assert "no_material_change_since_finding" in str(row.detail)
+
+    # Long work: far more recorded events than the 64-row history window holds.
+    frontier: Frontier | FrontierModel = unchanged.result_frontier
+    for batch in range(2):
+        drafts = tuple(
+            _draft(
+                protocol_id("evt_", seed + 1000 + 100 * batch + number),
+                "action_recorded",
+                {
+                    "action_id": protocol_id("act_", seed + 1000 + 100 * batch + number),
+                    "action_kind": "edit",
+                    "description": f"Work step {batch}-{number}",
+                },
+            )
+            for number in range(60)
+        )
+        frontier = (
+            await _publish_drafts(app, started, seed + 30 + batch, frontier, drafts)
+        ).result_frontier
+
+    repair_evidence = protocol_id("evd_", seed + 40)
+    corrected_claim = protocol_id("clm_", seed + 41)
+    repaired = await _publish_drafts(
+        app,
+        started,
+        seed + 42,
+        frontier,
+        (
+            _draft(
+                protocol_id("evt_", seed + 43),
+                "evidence_recorded",
+                {
+                    "evidence_id": repair_evidence,
+                    "evidence_kind": "test_result",
+                    "strength": "mutable_reference",
+                    "observed_at": "2026-07-19T12:00:03.000Z",
+                    "description": "release test: 4 passed; checksum file present",
+                    "reference": "ci-run-6744",
+                },
+            ),
+            _claim_correction(
+                protocol_id("evt_", seed + 44),
+                corrected_claim,
+                old_claim,
+                repair_evidence,
+                obligation,
+            ),
+        ),
+    )
+    answered = await app.respond(
+        RespondRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 50)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(repaired.result_frontier),
+                "finding_id": finding.finding_id,
+                "finding_frontier": _frontier(raised.result_frontier),
+                "disposition": "acknowledged",
+                "reason": "Added the checksum file and corrected the completion claim.",
+                "evidence_refs": (repair_evidence,),
+            }
+        )
+    )
+    third = await _semantic_recheck(app, started, seed + 60, answered.result_frontier)
+    assert conclusions == []
+    assert finding.finding_id not in {item.finding_id for item in third.findings}
+    assert _SCOPE_REDUCED in third.coverage.known_gaps
+
+    ledger, _objects = next(iter(runtime.resources.values()))
+    records = tuple([item async for item in ledger.load_events(started.session_id)])
+    [check] = [
+        item.payload
+        for item in records
+        if isinstance(item.payload, CheckRecordedPayload)
+        and item.payload.subject_frontier.sequence == third.subject_frontier.sequence
+    ]
+    included = set(check.semantic_included_refs or ())
+    # None of the cited material was re-sent: the window evicted the early events and the claim
+    # was superseded. The finding's own row, the correction and the repair were.
+    assert not {old_claim, old_claim_event, old_action_event, old_evidence_event} & included
+    assert {finding.finding_id, corrected_claim, repair_evidence} <= included
+
+    view = await _findings_view(app, started, seed + 61, include_resolved=True)
+    row = next(item for item in view.items if item.finding_id == finding.finding_id)
+    assert row.resolved is True, row.detail
+    rebuilt = replay(records)
+    assert finding_is_resolved(rebuilt, finding.finding_id)
+    stored = await ledger.load_projection(started.session_id, ProjectionView.CANDIDATE_FINDINGS)
+    assert stored is not None and stored.state == rebuilt
+    await _assert_reduced_scope_disclosed(app, started, seed + 70, third.result_frontier)

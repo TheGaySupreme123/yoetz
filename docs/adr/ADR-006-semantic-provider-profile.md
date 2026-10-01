@@ -914,32 +914,55 @@ a bounded scope. Its effect on resolution is now decided (interim step, by maint
   1.3.0 as `semantic_included_refs`, the frontier references the exact packet sent to the reviewer
   carried. The set is read from the prepared document after envelope bounding and privacy
   minimization, and carried with the selected attempt's durable response so recovery and resume
-  record the same set. A reference counts in three ways:
+  record the same set. A reference counts in four ways:
   - it is the `source_ref` of a carried content item;
   - it is a part of a carried multi-part captured evidence excerpt (an `evd_` reference linked to
     the lead excerpt whose bytes combine it), so any part may be cited;
-  - it is a result or evidence record whose recording event travelled as a history item with its
-    recorded payload, which is how records travel when recorded history is available. Whether the
-    payload travelled is read from the item's own content, never from omission rows, which the
-    selection cap may drop; an item replaced by the size-bound marker carries no payload. Evidence
-    with a captured object never counts this way. Its payload only describes bytes the reviewer
-    must see, so it counts only when its own excerpt was carried.
+  - it is an action, result, evidence, claim or obligation record whose recording event travelled
+    as a history item with its recorded payload, which is how records travel when recorded history
+    is available (#947 added actions, claims and obligations; a superseded claim travels only this
+    way). Whether the payload travelled is read from the item's own content, never from omission
+    rows, which the selection cap may drop; an item replaced by the size-bound marker carries no
+    payload. Evidence with a captured object never counts this way. Its payload only describes
+    bytes the reviewer must see, so it counts only when its own excerpt was carried;
+  - it is an earlier finding whose structural prior-finding row was carried (#947). Its prose rows
+    alone do not count, and a `not_recorded` omission on that prose (a finding recorded before
+    challenge fields existed) does not remove it, because the row is all the ledger holds.
 
   A mention inside another item, any other typed link, the citable-reference list, or an omission
   row does not count. A reference that any omission row names is excluded even when a structural
-  item for it survived. The third way does not apply when an omission row names the record itself
-  for any reason other than `not_recorded`. For a record without a captured object, that reason
-  means the ledger holds nothing more readable than its recorded payload, as for digest-only
-  evidence. The builder also emits `not_recorded` for captured evidence whose bytes were not
-  resolved. The captured-object rule above keeps that case uncredited without a new omission
-  reason, because the omission vocabulary is part of the released outbound-case contract. The field
-  appears only beside the recorded conclusion and the `semantic_reference_scope_reduced` code. It
-  holds at most 576 references: one source per case item (256), the combined captured parts (64),
-  and one record per carried history event.
-  The unchanged baseline code is tolerated only when that record contains every subject of the
-  finding, every repair reference the finding's latest response links (cited evidence, and the
-  evidence of a cited result, or the result when it cites none), and at least one material change
-  recorded after the finding (by its logical row or its source event). Otherwise
+  item for it survived, except an earlier finding as described above. The third way does not apply
+  when an omission row names the record itself for any reason other than `not_recorded`. For a
+  record without a captured object, that reason means the ledger holds nothing more readable than
+  its recorded payload, as for digest-only evidence. The builder also emits `not_recorded` for
+  captured evidence whose bytes were not resolved. The captured-object rule above keeps that case
+  uncredited without a new omission reason, because the omission vocabulary is part of the released
+  outbound-case contract. The field appears only beside the recorded conclusion and the
+  `semantic_reference_scope_reduced` code. It holds at most 576 references: one source per case item
+  (256), the combined captured parts (64), and one record per carried history event. The event that
+  recorded a carried record is not recorded in the set; resolution derives it from the projection
+  the check ran over (#947), so aliasing never pushes a valid set past the bound and
+  `check_recorded` is unchanged.
+  The unchanged baseline code is tolerated only when that record contains the finding's own
+  prior-finding row, accounts for every subject of the finding (below), and contains
+  every repair reference the finding's latest response links (cited evidence, and the evidence of
+  a cited result, or the result when it cites none) and at least one material change recorded
+  after the finding (by its logical row or its source event). A subject is accounted when:
+  - the packet sent it, or sent the action, result, evidence, claim or obligation record whose
+    current content the subject event recorded (a reviewer cites by `evt_`, the packet carries an
+    excerpt or a claim under its own id);
+  - it is a claim, or the event that recorded one, that a sent claim superseded, directly or
+    through a chain of `claim_recorded` 1.1.0 corrections;
+  - it is the recording event of an action, result or evidence record older than every history row
+    the packet carried (the recording events of actions, results, evidence, claims, findings and
+    responses in the set), and it is among the first eight subjects, which the sent row lists.
+    The bounded history window evicted it; the reviewer was shown the finding's statement, its
+    subject list and the agent's answer instead. A subject inside the carried window that the
+    packet left out, an obligation or effective claim it left out, or a subject past the row's
+    eight-reference list is not accounted. When no history row was carried, nothing counts as
+    evicted.
+
+  Otherwise
   `coverage:semantic_reference_scope_reduced` stays and the explanation adds
   `finding_material_outside_reduced_review_scope`. That applies to a missing record, an unreadable
   response or linked row, and any relevant reference the packet only mentioned, linked, omitted or
@@ -995,17 +1018,38 @@ pure kernel replay, the same on every host and supported operating system.
 Resolution of a `semantic_model_derived` finding against a later completed, assessable review that
 did not return it, after material change:
 
-| Later check coverage | Finding baseline has the scope code (stamp or raising-check fallback) | Sent content covers subjects, linked repair and a change | Result |
+| Later check coverage | Finding baseline has the scope code (stamp or raising-check fallback) | Sent content holds the finding's row, accounts for every subject, and carries the linked repair and a change | Result |
 |---|---|---|---|
 | no `semantic_reference_scope_reduced` | either | not needed | resolves if every other rule holds |
 | `semantic_reference_scope_reduced` | no | any | blocked: `coverage:semantic_reference_scope_reduced` |
 | `semantic_reference_scope_reduced` | yes | yes | resolves; the receipt still discloses the reduced scope |
-| `semantic_reference_scope_reduced` | yes | no | blocked: `finding_material_outside_reduced_review_scope`, `coverage:semantic_reference_scope_reduced` |
+| `semantic_reference_scope_reduced` | yes | yes, with subjects evicted from the history window or superseded by a sent claim (#947) | resolves; the receipt still discloses the reduced scope |
+| `semantic_reference_scope_reduced` | yes | no: the finding's own row was not sent | blocked: `finding_material_outside_reduced_review_scope`, `coverage:semantic_reference_scope_reduced` |
+| `semantic_reference_scope_reduced` | yes | no: a subject inside the carried window, or past the row's eight listed subjects, was left out | blocked: as above |
+| `semantic_reference_scope_reduced` | yes | no: the linked repair or every post-finding change was left out (PR930-F1) | blocked: as above |
 | `semantic_reference_scope_reduced`, `semantic_included_refs_not_recorded` | yes | no record | blocked: as above plus `coverage:semantic_included_refs_not_recorded`; one new check records its own sent set, otherwise disclose the open finding |
 | `truncated_payload` (any scope) | any | any | blocked: `coverage:truncated_payload` |
 
 A local finding tolerates `semantic_reference_scope_reduced` and
 `semantic_included_refs_not_recorded` without any sent-content record.
+
+**Amendment (2026-10-01, #947).** The first relevance rule required every finding subject to be
+re-sent. A repair in a long session makes that impossible: its own recorded work pushes the cited
+events out of the 63-row history window, and correcting the criticised claim, as reviewers ask,
+supersedes it, while effective claims are the only claims the packet carries. No repaired
+AI-powered finding resolved on the re-run sessions. The rule now asks what the recheck needs to
+judge the repair rather than whether the previous account was re-sent: the finding's own row, each
+subject accounted as above, the linked repair and a post-finding change. PR930-F1's property is
+kept: an omitted repair, an omitted change or an omitted row still blocks. Silence still proves
+absence only as it does for an unreduced review, and the receipt keeps disclosing the reduced
+scope. The rule is replay-derived from `semantic_included_refs` and the pre-check projection, so
+it applies to every recorded reduced check on replay, including checks recorded before it; it
+reads no new field. The `status` and receipt explanation of an open finding now reads the newest
+later check that could resolve it (its policy completed over a scope covering the subject and, for
+an AI-powered finding, a completed review), names a newer check that could not, and falls back to
+the newest check. Case-wide capture-failure vetoes (`truncated_payload`, `content_redacted`),
+per-finding ruling requirements and a distinct "repaired but unprovable" state stay open on #904,
+#905 and #913.
 
 
 ### Repair evidence selection for rechecks (2026-09-28, #884)

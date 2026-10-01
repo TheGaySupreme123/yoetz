@@ -23,6 +23,7 @@ from typing import Final, Literal, cast
 
 from yoetz.domain.coordination import CoordinationGapCode
 from yoetz.domain.events import (
+    MAX_PRIOR_FINDING_LISTED_REFS,
     SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP,
     SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP,
     CheckChangeShownFiles,
@@ -56,7 +57,7 @@ from yoetz.domain.receipts import (
     SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
 )
 from yoetz.domain.task_statement import TASK_STATEMENT_GAPS, may_carry_task_statement
-from yoetz.domain.values import EventId, EvidenceId, FindingId, ResultId
+from yoetz.domain.values import ClaimId, EventId, EvidenceId, FindingId, ResultId
 from yoetz.kernel.claims import effective_claim_items
 from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.projections import (
@@ -516,6 +517,118 @@ def _response_repair_refs(finding: Finding, state: ProjectionState) -> frozenset
     return frozenset(refs)
 
 
+def _recording_records(state: ProjectionState) -> Iterator[tuple[str, ProjectionRecord[object]]]:
+    """Every current ledger record the review packet can carry, keyed by its logical id."""
+
+    for rows in (state.actions, state.results, state.evidence, state.claims, state.obligations):
+        for key, row in rows.items():
+            yield str(key), cast(ProjectionRecord[object], row)
+
+
+def _with_recording_events(included: frozenset[str], state: ProjectionState) -> frozenset[str]:
+    """*included* plus the event that recorded each readable record it carried (issue #947).
+
+    A reviewer cites ledger material by the ``evt_`` id that recorded it, while the packet carries
+    an excerpt, a claim or an obligation under its own logical id. The recording event's payload is
+    that record, so a carried record credits the event that recorded its current content. Only that
+    direction is derived here, from the projection the check ran over: a carried history row
+    credits its record at check time, where the packet shows whether the row held the payload
+    (``sent_ledger_refs``). An unreadable record credits nothing.
+    """
+
+    events = {
+        str(row.source_event_id)
+        for key, row in _recording_records(state)
+        if key in included and row.payload is not None and not row.redacted
+    }
+    return included | frozenset(events)
+
+
+# Record families a review packet carries only as recent ledger history (or, for evidence, a
+# bounded excerpt): their recording events leave the packet once the session outgrows its window.
+def _history_families(state: ProjectionState) -> Iterator[ProjectionRecord[object]]:
+    for rows in (state.actions, state.results, state.evidence):
+        for row in rows.values():
+            yield cast(ProjectionRecord[object], row)
+
+
+def _oldest_carried_history_sequence(
+    included: frozenset[str], state: ProjectionState
+) -> int | None:
+    """The lowest ledger sequence among history rows the packet carried, if any (issue #947).
+
+    Read from the recorded set itself (never its aliases): the recording events of actions,
+    results, evidence, claims, findings and responses reach the packet only as history rows.
+    Decisions, plans and the task statement travel in their own sections under event ids and are
+    not counted, so an old decision never stretches the window. None means no history row was
+    carried, so no event can be shown to be older than the window.
+    """
+
+    rows: list[ProjectionRecord[object]] = list(_history_families(state))
+    for family in (state.claims, state.findings, state.responses):
+        rows.extend(cast(ProjectionRecord[object], row) for row in family.values())
+    return min(
+        (row.source_frontier for row in rows if str(row.source_event_id) in included),
+        default=None,
+    )
+
+
+def _superseded_by_sent_claim(ref: str, sent: frozenset[str], state: ProjectionState) -> bool:
+    """Whether claim *ref* was replaced, directly or through a chain, by a claim the packet sent.
+
+    The edge is the durable ``superseded_by_claim_id`` the projection records on the replaced
+    claim (as ``effective_claim_ids`` reads it). The reviewer saw the correction, which is the
+    claim the agent now stands behind; the replaced claim is no longer part of the account.
+    """
+
+    current = state.claims.get(cast(ClaimId, ref))
+    seen: set[str] = {ref}
+    while current is not None and (successor := current.superseded_by_claim_id) is not None:
+        following = str(successor)
+        if following in seen:
+            return False
+        if following in sent:
+            return True
+        seen.add(following)
+        current = state.claims.get(successor)
+    return False
+
+
+def _subject_accounted(
+    ref: str,
+    listed: bool,
+    sent: frozenset[str],
+    state: ProjectionState,
+    oldest_carried: int | None,
+) -> bool:
+    """Whether a reduced recheck accounts for one finding subject (issue #947).
+
+    A subject is accounted when the packet sent it (a carried record counts for the event that
+    recorded it), when it is a claim, or the event that recorded one, that a sent claim superseded,
+    or when it is the recording event of an action, result or evidence older than every history
+    row the packet carried and the sent prior-finding row listed it. The last case is the bounded
+    window evicting the old account: the reviewer was shown the finding's statement, its subject
+    list and the agent's answer, and must still have been sent the repair and a later change.
+    """
+
+    if ref in sent:
+        return True
+    claim = ref
+    if ref.startswith("evt_"):
+        claim = next(
+            (str(key) for key, row in state.claims.items() if str(row.source_event_id) == ref),
+            "",
+        )
+    if claim.startswith("clm_") and _superseded_by_sent_claim(claim, sent, state):
+        return True
+    if not listed or oldest_carried is None or not ref.startswith("evt_"):
+        return False
+    return any(
+        str(row.source_event_id) == ref and row.source_frontier < oldest_carried
+        for row in _history_families(state)
+    )
+
+
 def _reduced_scope_repair_in_view(
     finding: Finding,
     finding_source_frontier: int,
@@ -525,18 +638,31 @@ def _reduced_scope_repair_in_view(
     """Whether a reduced review packet provably sent the material this finding depends on.
 
     The check must record the frontier references whose own content item survived in the packet
-    actually sent (issue #904). Every subject of the finding and every repair reference its
-    response links must be among them, and so must at least one material change made after the
-    finding: the repair the later review is credited with judging. A missing record, an unreadable
-    response or linked row, or any relevant reference that was only mentioned, linked, omitted or
-    withheld is no proof, so the reduced scope keeps blocking.
+    actually sent (issue #904). That record must hold the finding's own prior-finding row, so the
+    reviewer saw what was found, the subjects it named and the agent's answer, and every subject
+    must be accounted (``_subject_accounted``, issue #947): a long session's repair pushes the
+    subjects out of the bounded history window and supersedes the claim the reviewer criticised,
+    so requiring the previous account itself would make every real repair unprovable. Every repair
+    reference the response links must be sent, and so must at least one material change made after
+    the finding: the repair the later review is credited with judging (PR930-F1). A missing record,
+    an unreadable response or linked row, or any relevant reference that was only mentioned,
+    linked, omitted or withheld is no proof, so the reduced scope keeps blocking.
     """
 
     included_refs = check.semantic_included_refs
     if included_refs is None or state is None or state.frontier < check.subject_frontier.sequence:
         return False
     included = frozenset(included_refs)
-    if any(str(ref) not in included for ref in finding.subject_refs):
+    if str(finding.finding_id) not in included:
+        return False
+    sent = _with_recording_events(included, state)
+    oldest_carried = _oldest_carried_history_sequence(included, state)
+    if not all(
+        _subject_accounted(
+            str(ref), position < MAX_PRIOR_FINDING_LISTED_REFS, sent, state, oldest_carried
+        )
+        for position, ref in enumerate(finding.subject_refs)
+    ):
         return False
     linked = _response_repair_refs(finding, state)
     if linked is None or not linked <= included:
@@ -970,7 +1096,11 @@ def finding_resolution_explanation(
     *,
     proof_state_cache: ProofStateCache | None = None,
 ) -> str:
-    """A bounded presentation derived from the latest recorded candidate, never response prose.
+    """A bounded presentation derived from recorded checks, never response prose.
+
+    An unresolved finding is explained against the newest later check that could resolve it (a
+    completed matching review over its subject), falling back to the newest later check, and names
+    a newer check that could not (issue #947).
 
     A current observation-authored, non-actionable row (``is_observation_limitation``) also says
     that it is a disclosed limitation rather than response work (issue #911); its resolution
@@ -1051,15 +1181,13 @@ def _finding_resolution_explanation(
                 "material recorded after the finding; retained as history."
             )
         return f"Resolved by qualifying check {resolving}; retained as history."
-    candidate = next(
-        (
-            row
-            for row in reversed(records)
-            if row.schema.name == "check_recorded"
-            and finding_record.source_frontier < row.ledger.ingestion_sequence <= state.frontier
-        ),
-        None,
+    later_checks = tuple(
+        row
+        for row in reversed(records)
+        if row.schema.name == "check_recorded"
+        and finding_record.source_frontier < row.ledger.ingestion_sequence <= state.frontier
     )
+    candidate = next(iter(later_checks), None)
     if superseded is not None:
         candidate_sequence = (
             None if candidate is None else _check_subject_sequence(records, candidate.event_id)
@@ -1072,6 +1200,17 @@ def _finding_resolution_explanation(
             )
     if candidate is None:
         return "Unresolved: no later recorded check is available for an absence proof."
+    newest = candidate
+    # Explain the newest check that could have resolved this finding (issue #947), not merely the
+    # newest one: a later scoped or local-only check would otherwise hide the blockers that matter.
+    candidate = next(
+        (
+            row
+            for row in later_checks
+            if _could_resolve(state, row, finding_record.payload, finding_record.source_frontier)
+        ),
+        newest,
+    )
     check = candidate.payload
     if (
         not isinstance(check, CheckRecordedPayload)
@@ -1119,10 +1258,46 @@ def _finding_resolution_explanation(
             detail.encode("utf-8")[:4900].decode("utf-8", errors="ignore")
             + "... (additional requirements omitted; inspect recorded check coverage)"
         )
+    later = (
+        ""
+        if candidate is newest
+        else (
+            f" Later check {newest.event_id} did not run a completed matching review over this "
+            "finding's subject, so it cannot resolve it."
+        )
+    )
     return (
         f"{relation} in check {candidate.event_id} of subject frontier "
-        f"{check.subject_frontier.sequence}. Resolution requirements not met: {detail}. "
+        f"{check.subject_frontier.sequence}. Resolution requirements not met: {detail}."
+        f"{later} "
         "Acknowledgement is not repair evidence; an unchanged recheck cannot remove durable proof limits."
+    )
+
+
+def _could_resolve(
+    state: ProjectionState, row: LedgerRecord, finding: Finding, finding_source_frontier: int
+) -> bool:
+    """Whether a recorded check is one that could ever resolve *finding* (issue #947).
+
+    It must be readable, test a frontier that holds the finding, run the finding's policy to
+    completion over a scope that covers its subject and, for an AI-powered finding, complete an
+    AI-powered review. Every other proof requirement is what the explanation then reports.
+    """
+
+    check = row.payload
+    return (
+        isinstance(check, CheckRecordedPayload)
+        and f"redacted_event:{row.event_id}" not in state.coverage_gaps
+        and check.subject_frontier.sequence >= finding_source_frontier
+        and _policy_completed(check, finding)
+        and _scope_covers(check, finding)
+        and (
+            finding.origin is not FindingOrigin.SEMANTIC_MODEL_DERIVED
+            or (
+                check.semantic_status is SemanticStatus.SUCCEEDED
+                and check.semantic_reason is SemanticReason.SEMANTIC_COMPLETED
+            )
+        )
     )
 
 

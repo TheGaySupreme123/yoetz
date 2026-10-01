@@ -185,19 +185,24 @@ with `semantic_reference_scope_reduced`. That limitation stays on every check, s
 receipt. It does not stop a repaired local finding from resolving, because the local check still
 reads the whole record. An AI-powered finding raised under the same bounded review can resolve
 once you repair it and a later AI-powered review completes without returning it. That review
-must have actually sent the reviewer the content of the finding's subject, of the repair evidence
-your response cites, and of the change you made. A mention, a link, or a note that the item was
-left out or withheld does not count; a record shown through the event that recorded it, or any
-part of a multi-part captured excerpt, does. Captured tool output counts only when its own excerpt
-was shown. Cite your repair's evidence rather than only a result:
+must have actually sent the reviewer the finding itself (what was found, what it named and your
+answer), the repair evidence your response cites, and the change you made. Each item the finding
+named must also be accounted for: shown again, replaced by a corrected claim the review was shown,
+or an early record that long work pushed out of the review's recent-history window. Correcting the
+claim a reviewer criticised therefore does not keep the finding open. A mention, a link, or a note
+that the item was left out or withheld does not count; a record shown through the event that
+recorded it, or any part of a multi-part captured excerpt, does. Captured tool output counts only
+when its own excerpt was shown. Cite your repair's evidence rather than only a result:
 a result without evidence stays in a bounded review only while it is recent, while cited evidence
 is selected first. If it did not send them, the finding stays current and names
 `finding_material_outside_reduced_review_scope`. If the check also shows
 `semantic_included_refs_not_recorded`, Yoetz could not record what that review sent. Make sure the
 repair evidence is recorded and cited in your response, then run one new check. If it shows the
-same code again, stop rechecking, keep the finding open and disclose it. A review whose scope became bounded only
-after the finding was raised, or a clipped payload (`truncated_payload`), still leaves the finding
-current.
+same code again, stop rechecking, keep the finding open and disclose it. While a finding stays
+open, its explanation names the latest check that could have resolved it; a later check scoped to
+other work, or one without a completed AI-powered review, cannot. A review whose scope became
+bounded only after the finding was raised, or a clipped payload (`truncated_payload`), still leaves
+the finding current.
 
 A resolved finding is not erased. Status still lists it (`resolved: true`, shown when
 `include_resolved` is requested), the receipt still carries it as history, and the receipt wording

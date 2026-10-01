@@ -256,7 +256,11 @@ def _sent_refs(case: SemanticCase, approved: set[str]) -> frozenset[str]:
     return refs
 
 
-def _blockers(included: frozenset[str], case: DeterministicCase | None = None) -> tuple[str, ...]:
+def _blockers(
+    included: frozenset[str],
+    case: DeterministicCase | None = None,
+    finding: Finding | None = None,
+) -> tuple[str, ...]:
     """What a completed reduced review that sent exactly *included* proves about ``fnd(1)``."""
 
     case = _case() if case is None else case
@@ -285,7 +289,13 @@ def _blockers(included: frozenset[str], case: DeterministicCase | None = None) -
         semantic_conclusion="no_material_discrepancy",
         semantic_included_refs=tuple(sorted(included, key=str.encode)) or None,
     )
-    return resolution_blockers(_finding(), 4, check, frozenset(), proof_state=case.projection)
+    return resolution_blockers(
+        _finding() if finding is None else finding,
+        4,
+        check,
+        frozenset(),
+        proof_state=case.projection,
+    )
 
 
 def test_a_repair_the_packet_actually_sent_resolves_the_finding() -> None:
@@ -617,3 +627,157 @@ def test_a_history_item_replaced_by_the_size_marker_carries_no_payload() -> None
         )
         == frozenset()
     )
+
+
+# Issue #947: references a reviewer cites and references a packet carries are aliased both ways.
+
+
+def test_the_finding_counts_as_sent_through_its_structural_prior_finding_row() -> None:
+    """The row names the finding's subjects and the agent's answer; prose rows alone do not.
+
+    A ``not_recorded`` omission on its prose (a finding recorded before challenge fields existed)
+    leaves the row as all the ledger holds, so it still counts; a withholding omission does not.
+    """
+
+    from yoetz.application.semantic_case import review_packet_disclosure
+    from yoetz.protocol.canonical import JsonValue, canonical_encode
+
+    finding = str(fnd(1))
+
+    def carried(item_ids: tuple[str, ...], reason: str | None = None) -> frozenset[str]:
+        document: dict[str, JsonValue] = {
+            "schema": "yoetz.review-packet-case/2",
+            "frontier_refs": [finding],
+            "items": [
+                {"item_id": item_id, "section": "prior_finding", "source_ref": finding}
+                for item_id in item_ids
+            ],
+            "review_packet": {
+                "omissions": []
+                if reason is None
+                else [{"subject_ref": finding, "category": "finding_summary", "reason": reason}]
+            },
+        }
+        read = review_packet_disclosure(canonical_encode(cast(JsonValue, document)))
+        assert read is not None
+        return read.carried
+
+    row, prose = f"prior-finding-{finding}", f"prior-finding-summary-{finding}"
+    assert carried((row, prose)) == {finding}
+    assert carried((row,), "not_recorded") == {finding}
+    assert carried((prose,)) == frozenset()
+    assert carried((row, prose), "not_selected") == frozenset()
+
+    # The real packet: the legacy finding's prose is ``not_recorded``, its row was carried.
+    semantic = _expanded()
+    sent = _sent_refs(semantic, _offered(semantic))
+    assert finding in sent
+    assert _blockers(sent - {finding}) == _OUTSIDE
+
+
+def test_a_carried_excerpt_credits_the_event_that_recorded_it() -> None:
+    """A reviewer cites evidence by its ``evt_``; the packet carried it as its ``evd_`` excerpt."""
+
+    semantic = _expanded()
+    sent = _sent_refs(semantic, _offered(semantic))
+    recording = str(evt(6))
+    assert _REPAIR in sent and recording not in sent
+    cites_event = replace(_finding(), subject_refs=(recording,))  # type: ignore[arg-type]
+    assert _blockers(sent, finding=cites_event) == ()
+    # Without the excerpt nothing stands in for the event: it is neither sent nor evicted.
+    excerpts = {
+        item.item_id
+        for item in semantic.items
+        if item.section == "excerpt" and item.source_ref == _REPAIR
+    }
+    dropped = _sent_refs(semantic, _offered(semantic) - excerpts)
+    assert _blockers(dropped, finding=cites_event) == _OUTSIDE
+
+
+def test_a_history_row_with_its_payload_credits_its_action_and_claim_records() -> None:
+    """The reverse direction is recorded at check time, for every record family a row carries.
+
+    The superseded claim the reviewer criticised travels only as its history row (claims are
+    carried as items only while effective), so the row is what shows it to the reviewer.
+    """
+
+    from builders.policy_cases import claim_record
+    from yoetz.application.semantic_case import review_packet_disclosure, sent_ledger_refs
+    from yoetz.domain.events import (
+        ClaimRecordedPayloadV1_1,
+        encode_payload,
+    )
+    from yoetz.kernel.deterministic_checks import FrozenHistoryEvent
+
+    base = _history_case(
+        EvidenceRecordedPayload(
+            _REPAIR,
+            EvidenceKind.TEST_RESULT,
+            EvidenceImmutability.METADATA_ONLY,
+            timestamp_from_string("2026-07-01T00:00:00.000Z"),
+            description="test output: 12 passed, offsets rejected when negative",
+        )
+    )
+    projection = base.projection
+    original = projection.claims[clm(1)]
+    corrected = claim_record(
+        ClaimRecordedPayloadV1_1(
+            clm(2),
+            ClaimKind.COMPLETION,
+            "Offsets are validated and tested",
+            (_REPAIR,),
+            obligation_refs=(obl(1),),
+            supersedes_claim_refs=(clm(1),),
+        ),
+        9,
+    )
+    claims = {clm(1): replace(original, superseded_by_claim_id=clm(2)), clm(2): corrected}
+    case = make_case(
+        plans=projection.plans,
+        obligations=projection.obligations,
+        claims=claims,
+        findings=projection.findings,
+        actions=projection.actions,
+        evidence=projection.evidence,
+        results=projection.results,
+        responses=projection.responses,
+        extra_refs=tuple(evt(900 + number) for number in range(8)),
+    )
+    claim_rows = tuple(
+        FrozenHistoryEvent(
+            event_id=row.source_event_id,
+            schema_name="claim_recorded",
+            schema_version="1.1.0" if key == clm(2) else "1.0.0",
+            ingestion_sequence=row.source_frontier,
+            occurred_at="2026-07-01T00:00:00.000Z",
+            accepted_at=None,
+            occurred_at_consistency=None,
+            payload_digest=row.payload_digest,
+            content_visibility="available",
+            payload=encode_payload(row.payload),  # type: ignore[arg-type]
+        )
+        for key, row in claims.items()
+    )
+    history = tuple(sorted((*base.history, *claim_rows), key=lambda item: item.ingestion_sequence))
+    case = replace(case, history=history, history_availability="available")
+
+    semantic = build_semantic_case(
+        case_id="cas_10000000-0000-4000-8000-000000000947",
+        frozen_case=case,
+        dependency_digest="sha256:" + "b" * 64,
+        findings=(),
+        review_context_profile=ReviewContextProfile.CUSTOM,
+        # No excerpts and no omission rows: every record reaches the reviewer as its history row.
+        review_selection=_selection(excerpts=False, max_omissions=0),
+        policy_id="pvy_10000000-0000-4000-8000-000000000001",
+        policy_version="1",
+    )
+    disclosure = review_packet_disclosure(
+        semantic_case_to_prepared_payload(semantic, _offered(semantic))
+    )
+    assert disclosure is not None
+    sent = sent_ledger_refs(disclosure, case.projection)
+    assert str(evt(3)) in disclosure.payload_events and str(evt(5)) in disclosure.payload_events
+    assert str(clm(1)) not in disclosure.carried and str(clm(1)) in sent
+    assert str(act(9)) not in disclosure.carried and str(act(9)) in sent
+    assert _blockers(sent, case) == ()

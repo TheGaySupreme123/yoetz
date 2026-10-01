@@ -24,6 +24,7 @@ from yoetz.application.check import (
 )
 from yoetz.application.missing_for_assessment import supplied_since
 from yoetz.domain.events import (
+    MAX_PRIOR_FINDING_LISTED_REFS,
     ActionKind,
     ClaimRecordedPayload,
     ClaimRecordedPayloadV1_1,
@@ -209,7 +210,7 @@ _PACKET_ID_LIST_KEYS: Final = (
 MAX_PRIOR_FINDINGS: Final = 8
 MAX_PRIOR_FINDING_SECTION_BYTES: Final = 48 * 1024
 # Refs listed per structural row; the full counts travel beside them.
-_MAX_PRIOR_FINDING_LISTED_REFS: Final = 8
+_MAX_PRIOR_FINDING_LISTED_REFS: Final = MAX_PRIOR_FINDING_LISTED_REFS
 _CANONICAL_PACKS: Final = ("research-evidence/0.1.0", "work-integrity/0.1.0")
 # The question set leads with the review phase, taken from the same pure selector that picks the
 # check's budget profile, so the reviewer judges in-progress work as in progress and a completion
@@ -4550,12 +4551,13 @@ class ReviewPacketDisclosure:
     ``carried`` holds the frontier references whose own content item survived: the ``source_ref``
     of a carried item, plus the member evidence of a carried multi-part evidence excerpt (its
     ``evd_`` linked references, whose bytes that excerpt combines). Every reference any omission row
-    names is removed. ``withheld`` holds the references an omission row names for a reason other
-    than ``not_recorded``: that reason means the ledger had no more readable content for the record
-    than its own recorded payload. ``payload_events`` are the carried ``evt_`` history items whose
-    own content holds the event's recorded payload, read from the item itself: a structural-only
-    item or one replaced by the size-bound marker is not one, whatever omission rows survived the
-    omission cap.
+    names is removed, except that an earlier finding whose structural prior-finding row was carried
+    stays unless an omission row withholds it (issue #947). ``withheld`` holds the references an
+    omission row names for a reason other than ``not_recorded``: that reason means the ledger had no
+    more readable content for the record than its own recorded payload. ``payload_events`` are the
+    carried ``evt_`` history items whose own content holds the event's recorded payload, read from
+    the item itself: a structural-only item or one replaced by the size-bound marker is not one,
+    whatever omission rows survived the omission cap.
     """
 
     carried: frozenset[str]
@@ -4600,8 +4602,17 @@ def review_packet_disclosure(prepared: bytes) -> ReviewPacketDisclosure | None:
             withheld.add(subject)
     carried: set[str] = set()
     payload_events: set[str] = set()
+    finding_rows: set[str] = set()
     for row in cast(list[JsonValue], items_raw):
         if not isinstance(row, dict) or type(source := row.get("source_ref")) is not str:
+            continue
+        if row.get("section") == "prior_finding":
+            # An earlier finding counts as sent only through its structural row, which names its
+            # subjects, the requested step and the agent's answer (issue #947); its prose rows
+            # alone do not. A ``not_recorded`` omission on its prose (a finding recorded before
+            # challenge fields existed) leaves that row as everything the ledger holds for it.
+            if row.get("item_id") == f"prior-finding-{source}":
+                finding_rows.add(source)
             continue
         carried.add(source)
         category = row.get("category")
@@ -4622,7 +4633,7 @@ def review_packet_disclosure(prepared: bytes) -> ReviewPacketDisclosure | None:
                 for ref in cast(list[JsonValue], linked)
                 if type(ref) is str and ref.startswith("evd_")
             )
-    kept = frozenset((carried & frontier) - omitted)
+    kept = frozenset(((carried & frontier) - omitted) | ((finding_rows & frontier) - withheld))
     return ReviewPacketDisclosure(
         carried=kept,
         withheld=frozenset(withheld & frontier),
@@ -4654,18 +4665,27 @@ def sent_ledger_refs(
 ) -> frozenset[str]:
     """The ledger references a sent packet carried, including records carried by their event.
 
-    With recorded history, a result or evidence record usually travels as the history item of the
-    event that recorded it, keyed by that ``evt_`` id. Such a record counts as sent when that item
-    carried its recorded payload and no omission row withholds the record itself (a
-    ``not_recorded`` omission does not: the payload is all the ledger holds for it). Evidence with
-    a captured object never counts this way: its payload only describes bytes the reviewer needs
-    to see, so it counts only when its own excerpt was carried, whatever the omission rows say. An
-    unreadable record never counts.
+    With recorded history, an action, result, evidence, claim or obligation record usually travels
+    as the history item of the event that recorded it, keyed by that ``evt_`` id; a superseded
+    claim travels only that way (issue #947). Such a record counts as sent when that item carried
+    its recorded payload and no omission row withholds the record itself (a ``not_recorded``
+    omission does not: the payload is all the ledger holds for it). Evidence with a captured object
+    never counts this way: its payload only describes bytes the reviewer needs to see, so it counts
+    only when its own excerpt was carried, whatever the omission rows say. An unreadable record
+    never counts. Each history item credits at most its one record, so the recorded set stays
+    within ``MAX_SEMANTIC_INCLUDED_REFS``. The reverse direction, a carried record crediting the
+    event that recorded it, is derived when a finding is resolved, from the same projection.
     """
 
     extra: set[str] = set()
-    for rows in (projection.results, projection.evidence):
-        for key, row in rows.items():
+    for family in (
+        projection.actions,
+        projection.results,
+        projection.evidence,
+        projection.claims,
+        projection.obligations,
+    ):
+        for key, row in family.items():
             ref = str(key)
             if (
                 ref in disclosure.carried

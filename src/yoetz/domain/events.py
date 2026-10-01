@@ -300,10 +300,17 @@ MAX_REQUESTED_ITEMS: Final = 64
 MAX_ALTERNATIVES: Final = 16
 # The frontier references a reduced AI-powered review packet carried, recorded on its check (issue
 # #904): one source per case item (at most 256), the combined parts of captured evidence excerpts
-# (at most 64), and the result or evidence record of each carried history event (at most one per
-# item). A valid sent set therefore never exceeds 576. A check whose set cannot be recorded carries
-# SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP instead, and its reduced scope keeps blocking resolution.
+# (at most 64), and the one action, result, evidence, claim or obligation record each carried
+# history event recorded (at most one per item). A valid sent set therefore never exceeds 576. The
+# event that recorded a carried record is credited when a finding is resolved, never recorded here,
+# so that aliasing cannot push a valid set past this bound (issue #947). A check whose set cannot
+# be recorded carries SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP instead, and its reduced scope keeps
+# blocking resolution.
 MAX_SEMANTIC_INCLUDED_REFS: Final = 576
+# How many of a finding's subject refs its prior-finding row lists to a later reviewer, in the
+# finding's own canonical order (issues #905, #947). Shared by the case builder that writes the row
+# and the kernel rule that credits a subject the row listed.
+MAX_PRIOR_FINDING_LISTED_REFS: Final = 8
 SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP: Final = "semantic_reference_scope_reduced"
 SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP: Final = "semantic_included_refs_not_recorded"
 
