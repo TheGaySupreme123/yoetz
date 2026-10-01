@@ -32,6 +32,11 @@ the twin. Without the accelerator the Python definitions stay in place unchanged
 The variable sits outside the `YOETZ_` namespace on purpose: strict configuration loading rejects
 unknown `YOETZ_*` variables.
 
+`require` is inherited by child processes. Tests that provision an independent runtime from a
+freshly built wheel (`tests/subprocess/test_release_runtime_replacement.py`, `tests/packaging/`)
+run a Python environment without the accelerator by design, so run those suites with `YZ_NATIVE`
+unset: the checkout's own processes still auto-detect and use the accelerator.
+
 Build and install into the checkout's virtual environment:
 
 ```text
