@@ -7320,8 +7320,11 @@ prepared packet carried, read after envelope bounding and privacy minimization. 
 attempt's durable response carries the same set, so recovery and resume record it too. A reference
 counts when it is the `source_ref` of a carried content item, or a part of a carried multi-part
 captured evidence excerpt (an `evd_` reference linked to the lead excerpt that combines its bytes).
-A result or evidence record also counts when the history item of the event that recorded it was
-carried with its recorded payload, which is how records travel when recorded history is available.
+An action, result, evidence, claim or obligation record also counts when the history item of the
+event that recorded it was carried with its recorded payload, which is how records travel when
+recorded history is available (#947 added actions, claims and obligations; a superseded claim
+travels only this way). An earlier finding counts when its structural prior-finding row was carried;
+its prose rows alone do not, and a `not_recorded` omission on its prose does not remove it.
 The payload's presence is read from the item's own content, never from omission rows, which the
 selection cap may drop. That does not apply when an omission row names the record for a reason
 other than `not_recorded` (for a record without a captured object, nothing more readable than the
@@ -7329,20 +7332,33 @@ payload exists, as for digest-only evidence). Evidence with a captured object ne
 its recording event: it counts only when its own excerpt was carried, so bytes that were never
 resolved or were left out are never credited, whatever omission rows survive. Mentions
 in other items, other typed links, the citable-reference list and omission rows do not count, and
-a reference named by any omission row is excluded even when a structural item for it survived. The
-record holds typed ledger references only, ASCII-sorted, 1 to 576 of them: one source per case item
-(256), the combined captured parts (64), and one record per carried history event. It appears only
-on `check_recorded` 1.3.0 beside `semantic_conclusion` and the `semantic_reference_scope_reduced`
-coverage code. The record must contain every finding subject and every repair reference linked by
-the finding's latest readable response. Cited evidence counts, and so does the evidence of a cited
-result, or the result itself when it cites no evidence. The record must also contain at least one
-material change after the finding, named by its logical row or by its source event. Otherwise the
-code stays a blocker and the explanation adds `finding_material_outside_reduced_review_scope`. An
-unreadable response or linked row cannot be shown to have been sent. When nothing changed
-materially, only `no_material_change_since_finding` is named. The response event itself is not
-required; an acknowledgement is not repair evidence. A result citing no evidence travels only
-through its recording event in the recent history window, so citing the repair's evidence, which
-rechecks select first, keeps a long session's repair in view.
+a reference named by any omission row is excluded even when a structural item for it survived
+(except an earlier finding, above). The record holds typed ledger references only, ASCII-sorted, 1
+to 576 of them: one source per case item (256), the combined captured parts (64), and one record per
+carried history event. The event that recorded a carried record is never written into it;
+resolution derives that alias from the pre-check projection (#947), so the bound holds. It appears
+only on `check_recorded` 1.3.0 beside `semantic_conclusion` and the
+`semantic_reference_scope_reduced` coverage code. The record must contain the finding's own
+prior-finding row (its `fnd_` id) and account for every finding subject (#947). A subject is
+accounted when the record holds it or the record of the content it recorded, when it is a claim
+(or the event that recorded one) that a claim in the record superseded directly or through a chain
+of corrections, or when it is the recording event of an action, result or evidence record older
+than every history row the record holds and among the first eight subjects, which the prior-finding
+row lists (`MAX_PRIOR_FINDING_LISTED_REFS`). The record must also contain every repair reference
+linked by the finding's latest readable response. Cited evidence counts, and so does the evidence of
+a cited result, or the result itself when it cites no evidence. The record must also contain at
+least one material change after the finding, named by its logical row or by its source event.
+Otherwise the code stays a blocker and the explanation adds
+`finding_material_outside_reduced_review_scope`. An unreadable response or linked row cannot be
+shown to have been sent. When nothing changed materially, only `no_material_change_since_finding` is
+named. The response event itself is not required; an acknowledgement is not repair evidence. A
+result citing no evidence travels only through its recording event in the recent history window, so
+citing the repair's evidence, which rechecks select first, keeps a long session's repair in view.
+The rule reads no new field, so it applies on replay to every recorded reduced check. The findings
+status view and the receipt explain an open finding against the newest later check that could
+resolve it (its policy completed over a scope covering the subject and, for an AI-powered finding, a
+completed review), name a newer check that could not, and otherwise fall back to the newest later
+check.
 
 When a completed reduced review's sent set cannot be recorded, the check records no field and
 carries the coverage gap `semantic_included_refs_not_recorded`. Causes: the prepared document is
