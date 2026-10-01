@@ -2285,8 +2285,9 @@ def _in_view(*refs: str) -> tuple[str, ...]:
     return tuple(sorted(set(refs), key=str.encode))
 
 
-# What an ordinary reduced packet carried: the finding's subject and ``_changed_state``'s repair.
-_REPAIR_IN_VIEW: tuple[str, ...] = (obl(1), act(9))
+# What an ordinary reduced packet carried: the finding's own prior-finding row, its subject and
+# ``_changed_state``'s repair.
+_REPAIR_IN_VIEW: tuple[str, ...] = (obl(1), act(9), fnd(1))
 
 
 def _review_check(
@@ -2806,12 +2807,15 @@ def test_a_reduced_review_without_the_repair_in_view_cannot_resolve_a_semantic_f
     assert _blockers(unstamped, unrecorded, raised_under_reduced_scope=True) == omitted
 
     # The recorded packet must carry the finding's subject and the change made after it.
-    repair_omitted = _review_check(*_LONG_SESSION_REVIEW_GAPS, included=(obl(1), obl(2)))
+    repair_omitted = _review_check(*_LONG_SESSION_REVIEW_GAPS, included=(obl(1), obl(2), fnd(1)))
     assert _blockers(original, repair_omitted) == omitted
-    subject_omitted = _review_check(*_LONG_SESSION_REVIEW_GAPS, included=(act(9),))
+    subject_omitted = _review_check(*_LONG_SESSION_REVIEW_GAPS, included=(act(9), fnd(1)))
     assert _blockers(original, subject_omitted) == omitted
+    # The finding's own prior-finding row must have been sent (issue #947).
+    row_omitted = _review_check(*_LONG_SESSION_REVIEW_GAPS, included=(obl(1), act(9)))
+    assert _blockers(original, row_omitted) == omitted
     # The change may be named by its logical row or by the event that recorded it.
-    by_event = _review_check(*_LONG_SESSION_REVIEW_GAPS, included=(obl(1), evt(5)))
+    by_event = _review_check(*_LONG_SESSION_REVIEW_GAPS, included=(obl(1), evt(5), fnd(1)))
     assert _blockers(original, by_event) == ()
     assert _blockers(original, _review_check(*_LONG_SESSION_REVIEW_GAPS)) == ()
 
@@ -2892,3 +2896,227 @@ def test_an_unrecorded_sent_packet_is_disclosed_and_blocks_only_semantic_proof()
         "coverage:" + SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP,
         "coverage:" + _SCOPE_REDUCED,
     )
+
+
+# Issue #947: a long session's repair evicts the finding's subjects from the bounded review
+# packet. The recheck saw the finding's own row (its statement, subject list and the agent's
+# answer), the repair and a change made after the finding; a subject is then accounted when it was
+# sent (a record's carried content counts for the event that recorded it), was superseded by a sent
+# claim, or is an action, result or evidence event older than every history row the packet carried
+# and listed by ref in that sent row.
+_LISTED = 8
+
+
+def _evicted_state(
+    *,
+    extra_actions: dict[str, int] | None = None,
+    claim_superseded: bool = True,
+) -> ProjectionState:
+    """A long session at frontier 14 whose finding ``fnd(1)`` (recorded at 5) has evicted subjects.
+
+    Subjects: the action ``act(1)`` recorded by ``evt(2)`` (old), the evidence ``evd(3)`` recorded
+    by ``evt(3)`` (old), and the claim ``clm(1)`` recorded by ``evt(4)``, which ``clm(2)`` at 12
+    corrects when ``claim_superseded``. The repair after the finding: action ``act(9)``
+    (``evt(10)``), evidence ``evd(7)`` (``evt(11)``), result ``res(7)`` (``evt(13)``) and a response
+    citing ``evd(7)`` (``evt(14)``).
+    """
+
+    from builders.policy_cases import claim_record, evd, evidence_record, record, res
+    from yoetz.domain.events import (
+        ActionKind,
+        ActionRecordedPayload,
+        ClaimKind,
+        ClaimRecordedPayload,
+        ClaimRecordedPayloadV1_1,
+        EvidenceKind,
+        EvidenceRecordedPayload,
+        ResponseRecordedPayload,
+        ResultOutcome,
+        ResultRecordedPayload,
+    )
+    from yoetz.domain.findings import ResponseDisposition
+    from yoetz.domain.values import timestamp_from_string
+
+    observed = timestamp_from_string("2026-01-01T00:00:00.000Z")
+
+    def evidence(number: int, at: int, reference: str) -> object:
+        return evidence_record(
+            EvidenceRecordedPayload(
+                evd(number),
+                EvidenceKind.TEST_RESULT,
+                EvidenceImmutability.METADATA_ONLY,
+                observed,
+                reference=reference,
+            ),
+            at,
+        )
+
+    actions = {
+        act(1): record(ActionRecordedPayload(act(1), ActionKind.EDIT, "First attempt"), 2),
+        act(9): record(ActionRecordedPayload(act(9), ActionKind.EDIT, "Repair"), 10),
+    }
+    for name, at in (extra_actions or {}).items():
+        number = int(name)
+        actions[act(number)] = record(
+            ActionRecordedPayload(act(number), ActionKind.EDIT, "Other"), at
+        )
+    claims = {
+        clm(1): claim_record(
+            ClaimRecordedPayload(clm(1), ClaimKind.COMPLETION, "Done", (evd(3),)),
+            4,
+            superseded_by_claim_id=clm(2) if claim_superseded else None,
+        ),
+    }
+    if claim_superseded:
+        claims[clm(2)] = claim_record(
+            ClaimRecordedPayloadV1_1(
+                clm(2),
+                ClaimKind.COMPLETION,
+                "Done, corrected",
+                (evd(7),),
+                supersedes_claim_refs=(clm(1),),
+            ),
+            12,
+        )
+    response = record(
+        ResponseRecordedPayload(
+            finding_id=fnd(1),
+            finding_frontier=Frontier(4, _DIGEST),
+            disposition=ResponseDisposition.ACKNOWLEDGED,
+            evidence_refs=(evd(7),),
+        ),
+        14,
+    )
+    return replace(
+        empty_projection_state(),
+        frontier=14,
+        head_digest=_DIGEST,
+        actions=actions,
+        evidence={evd(3): evidence(3, 3, "first-log"), evd(7): evidence(7, 11, "repair-log")},
+        results={
+            res(7): record(
+                ResultRecordedPayload(
+                    res(7), act(9), ResultOutcome.SUCCESS, 0, evidence_refs=(evd(7),)
+                ),
+                13,
+            )
+        },
+        claims=claims,
+        responses={fnd(1): response},
+    )
+
+
+# What the recheck sent: the finding's row, the old evidence excerpt, the corrected claim and the
+# recent history window (the events at 10 to 14) with the records those rows carried.
+def _evicted_sent() -> tuple[str, ...]:
+    from builders.policy_cases import evd, res
+
+    return (
+        fnd(1), evd(3), clm(2), act(9), evd(7), res(7),
+        evt(10), evt(11), evt(12), evt(13), evt(14),
+    )  # fmt: skip
+
+
+def _evicted_blockers(
+    included: tuple[str, ...],
+    *,
+    subjects: tuple[object, ...] = (evt(2), evt(3), clm(1)),
+    state: ProjectionState | None = None,
+) -> tuple[str, ...]:
+    from yoetz.kernel.finding_resolution import resolution_blockers
+
+    original = replace(
+        _semantic_finding(
+            "content_unselected", "host_outcome_unavailable", _SCOPE_REDUCED, "unpaired_event"
+        ),
+        subject_refs=tuple(sorted(subjects, key=lambda ref: str(ref).encode())),
+    )
+    check = _review_check(*_LONG_SESSION_REVIEW_GAPS, tested=14, included=included)
+    return resolution_blockers(
+        original, 5, check, frozenset(), proof_state=_evicted_state() if state is None else state
+    )
+
+
+_OUTSIDE_SCOPE = ("finding_material_outside_reduced_review_scope", "coverage:" + _SCOPE_REDUCED)
+
+
+def test_a_repair_that_evicted_and_superseded_the_subjects_resolves_under_a_reduced_scope() -> None:
+    """Issue #947: the goreleaser shape. No subject was re-sent, yet each one is accounted."""
+
+    assert _evicted_blockers(_evicted_sent()) == ()
+
+
+def test_the_finding_row_must_have_been_sent() -> None:
+    sent = tuple(ref for ref in _evicted_sent() if ref != fnd(1))
+    assert _evicted_blockers(sent) == _OUTSIDE_SCOPE
+
+
+def test_an_evicted_subject_still_needs_the_linked_repair_in_the_packet() -> None:
+    """PR930-F1 holds: the evicted-subject rule never excuses an omitted repair."""
+
+    from builders.policy_cases import evd
+
+    sent = tuple(ref for ref in _evicted_sent() if ref not in {evd(7), evt(11)})
+    assert _evicted_blockers(sent) == _OUTSIDE_SCOPE
+
+
+def test_a_post_finding_change_must_still_be_in_the_packet() -> None:
+    """An evicted subject is excused only beside a change made after the finding (PR930-F1)."""
+
+    from builders.policy_cases import evd
+
+    unanswered = replace(_evicted_state(), responses={})
+    # The packet carried the row and only material from before the finding.
+    before = (fnd(1), evd(3), evt(3))
+    assert _evicted_blockers(before, subjects=(evt(2),), state=unanswered) == _OUTSIDE_SCOPE
+    assert _evicted_blockers((*before, evt(10)), subjects=(evt(2),), state=unanswered) == ()
+
+
+def test_a_subject_neither_sent_superseded_nor_evicted_blocks() -> None:
+    """An effective claim the packet left out is not accounted, however old."""
+
+    state = _evicted_state(claim_superseded=False)
+    sent = tuple(ref for ref in _evicted_sent() if ref not in {clm(2), evt(12)})
+    assert _evicted_blockers(sent, state=state) == _OUTSIDE_SCOPE
+    # With the claim itself sent, it is accounted.
+    assert _evicted_blockers((*sent, clm(1)), state=state) == ()
+
+
+def test_an_old_subject_inside_the_carried_window_is_not_excused() -> None:
+    """A history row older than the subject was carried: the subject was left out, not evicted."""
+
+    state = _evicted_state(extra_actions={"5": 1})
+    assert _evicted_blockers((*_evicted_sent(), evt(1)), state=state) == _OUTSIDE_SCOPE
+    # The same packet without that older row: the subject is older than every carried row.
+    assert _evicted_blockers(_evicted_sent(), state=state) == ()
+
+
+def test_an_evicted_subject_must_be_listed_by_the_sent_row() -> None:
+    """The row lists at most eight subjects; one past that bound was never named to the reviewer."""
+
+    # Subjects are ``evt_``, ``obl_`` or ``clm_`` refs, listed in ASCII order: ``clm_`` before
+    # ``evt_``. Sent effective claims pad the list ahead of the evicted event.
+    padding = tuple(clm(100 + number) for number in range(_LISTED))
+    listed = (evt(2), *padding[: _LISTED - 1])
+    sent = (*_evicted_sent(), *padding)
+    assert _evicted_blockers(sent, subjects=listed) == ()
+    unlisted = (*padding, evt(2))
+    assert _evicted_blockers(sent, subjects=unlisted) == _OUTSIDE_SCOPE
+
+
+def test_a_carried_record_credits_the_event_that_recorded_it() -> None:
+    """Record-to-event aliasing: a carried ``evd_`` excerpt counts for its recording ``evt_``.
+
+    Finding subjects are ``evt_``, ``obl_`` or ``clm_`` refs, so this is the direction a reviewer's
+    citation needs; the reverse (a history row crediting its record) is recorded at check time.
+    """
+
+    from builders.policy_cases import evd
+
+    # evt(3) is accounted only through its carried evidence record evd(3).
+    without_excerpt = tuple(ref for ref in _evicted_sent() if ref != evd(3))
+    # Without the excerpt, evt(3) at 3 is older than every carried history row.
+    assert _evicted_blockers(without_excerpt, subjects=(evt(3),)) == ()
+    # Carrying the old event's row puts it inside the window; it counts only if sent itself.
+    assert _evicted_blockers((*without_excerpt, evt(2)), subjects=(evt(3),)) == _OUTSIDE_SCOPE
+    assert _evicted_blockers((*without_excerpt, evt(2), evd(3)), subjects=(evt(3),)) == ()
