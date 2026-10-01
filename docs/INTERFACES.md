@@ -6759,6 +6759,11 @@ facade and are never MCP tools.
   `privacy_request_commitment(final_request_body, audit_mac: MacKeyHandle)`; raw MAC keys are never
   accepted.
 
+Remote service mode (ADR-031, issue #903) is proposed and deferred. It adds no identifier,
+schema field, method, or command. Hooks, MCP, the CLI, and the TUI remain clients of the local
+service. A later accepted design would let that service forward the existing public operations
+over HTTPS or SSH; those names are not registered here until a schema exists.
+
 ## 14. Version identities
 
 `version.py` exposes `VersionManifest`: package, protocol (`0.1`), local control protocol (`1.0`),

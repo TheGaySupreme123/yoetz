@@ -144,6 +144,8 @@ argument, environment, log, trace, transcript, or MCP frame.
 
 Persistent service and local IPC are in v0.1, not deferred. Distributed service access,
 cross-user/system-wide service mode, TCP/network control, concurrent independent writers, and
-client-side direct-storage fallback are out of scope. Native autostart integration may be added
+client-side direct-storage fallback are out of scope. ADR-031 proposes an optional remote mode
+and does not lift that deferral: the local singleton remains the shipping default until the
+founder questions in ADR-031 are accepted. Native autostart integration may be added
 only through explicit platform packaging specs; its absence must not weaken the foreground service
 contract.
