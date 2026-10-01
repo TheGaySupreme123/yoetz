@@ -3120,3 +3120,44 @@ def test_a_carried_record_credits_the_event_that_recorded_it() -> None:
     # Carrying the old event's row puts it inside the window; it counts only if sent itself.
     assert _evicted_blockers((*without_excerpt, evt(2)), subjects=(evt(3),)) == _OUTSIDE_SCOPE
     assert _evicted_blockers((*without_excerpt, evt(2), evd(3)), subjects=(evt(3),)) == ()
+
+
+def test_the_explanation_reads_the_newest_check_that_could_resolve_the_finding() -> None:
+    """Issue #947: a later scoped check must not hide the blockers of the review that mattered."""
+
+    from types import SimpleNamespace
+
+    from yoetz.domain.events import LedgerRecord
+    from yoetz.kernel.finding_resolution import finding_resolution_explanation
+
+    finding = _finding()
+    state = replace(
+        empty_projection_state(),
+        frontier=20,
+        head_digest=_DIGEST,
+        findings={fnd(1): finding_record(finding, 4)},
+    )
+
+    def row(sequence: int, check: CheckRecordedPayload) -> object:
+        return SimpleNamespace(
+            event_id=evt(sequence),
+            schema=SimpleNamespace(name="check_recorded"),
+            ledger=SimpleNamespace(ingestion_sequence=sequence),
+            payload=check,
+        )
+
+    whole = _check(tested=6, coverage=_coverage(gaps=("truncated_payload",)))
+    scoped = _check(tested=8, scope=CheckScopeModel(claim_ids=(), obligation_ids=(obl(2),)))
+    records = cast(tuple[LedgerRecord, ...], (row(6, whole), row(8, scoped)))
+    explanation = finding_resolution_explanation(state, fnd(1), records)
+    assert f"in check {evt(6)} of subject frontier 6" in explanation
+    assert "coverage:truncated_payload" in explanation
+    assert "subject_outside_checked_scope" not in explanation
+    assert f"Later check {evt(8)} did not run a completed matching review" in explanation
+
+    # With no check able to resolve it, the newest check is explained as before.
+    only_scoped = cast(tuple[LedgerRecord, ...], (row(8, scoped),))
+    explanation = finding_resolution_explanation(state, fnd(1), only_scoped)
+    assert f"in check {evt(8)}" in explanation
+    assert "subject_outside_checked_scope" in explanation
+    assert "Later check" not in explanation

@@ -1096,7 +1096,11 @@ def finding_resolution_explanation(
     *,
     proof_state_cache: ProofStateCache | None = None,
 ) -> str:
-    """A bounded presentation derived from the latest recorded candidate, never response prose.
+    """A bounded presentation derived from recorded checks, never response prose.
+
+    An unresolved finding is explained against the newest later check that could resolve it (a
+    completed matching review over its subject), falling back to the newest later check, and names
+    a newer check that could not (issue #947).
 
     A current observation-authored, non-actionable row (``is_observation_limitation``) also says
     that it is a disclosed limitation rather than response work (issue #911); its resolution
@@ -1177,15 +1181,13 @@ def _finding_resolution_explanation(
                 "material recorded after the finding; retained as history."
             )
         return f"Resolved by qualifying check {resolving}; retained as history."
-    candidate = next(
-        (
-            row
-            for row in reversed(records)
-            if row.schema.name == "check_recorded"
-            and finding_record.source_frontier < row.ledger.ingestion_sequence <= state.frontier
-        ),
-        None,
+    later_checks = tuple(
+        row
+        for row in reversed(records)
+        if row.schema.name == "check_recorded"
+        and finding_record.source_frontier < row.ledger.ingestion_sequence <= state.frontier
     )
+    candidate = next(iter(later_checks), None)
     if superseded is not None:
         candidate_sequence = (
             None if candidate is None else _check_subject_sequence(records, candidate.event_id)
@@ -1198,6 +1200,17 @@ def _finding_resolution_explanation(
             )
     if candidate is None:
         return "Unresolved: no later recorded check is available for an absence proof."
+    newest = candidate
+    # Explain the newest check that could have resolved this finding (issue #947), not merely the
+    # newest one: a later scoped or local-only check would otherwise hide the blockers that matter.
+    candidate = next(
+        (
+            row
+            for row in later_checks
+            if _could_resolve(state, row, finding_record.payload, finding_record.source_frontier)
+        ),
+        newest,
+    )
     check = candidate.payload
     if (
         not isinstance(check, CheckRecordedPayload)
@@ -1245,10 +1258,46 @@ def _finding_resolution_explanation(
             detail.encode("utf-8")[:4900].decode("utf-8", errors="ignore")
             + "... (additional requirements omitted; inspect recorded check coverage)"
         )
+    later = (
+        ""
+        if candidate is newest
+        else (
+            f" Later check {newest.event_id} did not run a completed matching review over this "
+            "finding's subject, so it cannot resolve it."
+        )
+    )
     return (
         f"{relation} in check {candidate.event_id} of subject frontier "
-        f"{check.subject_frontier.sequence}. Resolution requirements not met: {detail}. "
+        f"{check.subject_frontier.sequence}. Resolution requirements not met: {detail}."
+        f"{later} "
         "Acknowledgement is not repair evidence; an unchanged recheck cannot remove durable proof limits."
+    )
+
+
+def _could_resolve(
+    state: ProjectionState, row: LedgerRecord, finding: Finding, finding_source_frontier: int
+) -> bool:
+    """Whether a recorded check is one that could ever resolve *finding* (issue #947).
+
+    It must be readable, test a frontier that holds the finding, run the finding's policy to
+    completion over a scope that covers its subject and, for an AI-powered finding, complete an
+    AI-powered review. Every other proof requirement is what the explanation then reports.
+    """
+
+    check = row.payload
+    return (
+        isinstance(check, CheckRecordedPayload)
+        and f"redacted_event:{row.event_id}" not in state.coverage_gaps
+        and check.subject_frontier.sequence >= finding_source_frontier
+        and _policy_completed(check, finding)
+        and _scope_covers(check, finding)
+        and (
+            finding.origin is not FindingOrigin.SEMANTIC_MODEL_DERIVED
+            or (
+                check.semantic_status is SemanticStatus.SUCCEEDED
+                and check.semantic_reason is SemanticReason.SEMANTIC_COMPLETED
+            )
+        )
     )
 
 
