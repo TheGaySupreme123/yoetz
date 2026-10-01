@@ -26,3 +26,11 @@ debug = false
 
 [profile.dev]
 opt-level = 1
+
+# Fast iteration builds for parity work: optimized enough for the timing-ratio tests, without
+# fat LTO. `rust/build-native.sh --dev` uses it.
+[profile.native-dev]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true

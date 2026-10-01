@@ -613,3 +613,22 @@ pub fn strict_json_parse<'py>(py: Python<'py>, data: &Bound<'py, PyAny>, validat
     }
     Ok(value)
 }
+
+pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_function(wrap_pyfunction!(bind_canonical_fragment, module)?)?;
+    module.add_function(wrap_pyfunction!(canonical_encode, module)?)?;
+    module.add_function(wrap_pyfunction!(canonical_text, module)?)?;
+    module.add_function(wrap_pyfunction!(canonical_fragment_parts, module)?)?;
+    module.add_function(wrap_pyfunction!(canonical_digest, module)?)?;
+    module.add_function(wrap_pyfunction!(ensure_canonical_value, module)?)?;
+    module.add_function(wrap_pyfunction!(container_levels, module)?)?;
+    module.add_function(wrap_pyfunction!(validate_string, module)?)?;
+    module.add_function(wrap_pyfunction!(encode_string, module)?)?;
+    module.add_function(wrap_pyfunction!(ensure_canonical_set, module)?)?;
+    module.add_function(wrap_pyfunction!(canonical_integer_string, module)?)?;
+    module.add_function(wrap_pyfunction!(parse_canonical_integer_string, module)?)?;
+    module.add_function(wrap_pyfunction!(request_digest, module)?)?;
+    module.add_function(wrap_pyfunction!(sha256_prefixed, module)?)?;
+    module.add_function(wrap_pyfunction!(strict_json_parse, module)?)?;
+    Ok(())
+}
