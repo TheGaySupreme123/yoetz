@@ -34,7 +34,12 @@ from yoetz.adapters.keys.vault_passphrase import (
 )
 from yoetz.domain.values import validate_sha256_digest
 from yoetz.ports.secret_memory import SecretConsumer, SecretHandle, SecretPurpose
-from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
+from yoetz.protocol.canonical import (
+    JsonValue,
+    canonical_encode,
+    canonical_round_trip_proven,
+    strict_json_parse,
+)
 from yoetz.protocol.errors import ProtocolValueError
 
 __all__ = [
@@ -347,7 +352,10 @@ def _parse_artifact(data: bytes) -> _ParsedArtifact:
         raise InstallationRecoveryArtifactError("artifact_too_large")
     try:
         value = strict_json_parse(data)
-        if canonical_encode(value) != data or type(value) is not dict:
+        if (
+            not canonical_round_trip_proven(data, encode=canonical_encode, parse=strict_json_parse)
+            and canonical_encode(value) != data
+        ) or type(value) is not dict:
             raise InstallationRecoveryArtifactError("format_unsupported")
         source = cast(dict[str, JsonValue], value)
         if set(source) != {

@@ -24,7 +24,12 @@ from typing import Final, Literal, Protocol, cast
 
 from yoetz.domain.values import validate_commitment
 from yoetz.ports.objects import ObjectRef
-from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
+from yoetz.protocol.canonical import (
+    JsonValue,
+    canonical_encode,
+    canonical_round_trip_proven,
+    strict_json_parse,
+)
 
 __all__ = [
     "CHANGE_CAPTURE_UNAVAILABLE_REASONS",
@@ -232,6 +237,12 @@ def current_check_workspace_source() -> CheckWorkspaceSource | None:
     return _CHECK_WORKSPACE_SOURCE.get()
 
 
+def _round_trip_proven(data: bytes) -> bool:
+    # Proves `canonical_encode(strict_json_parse(data)) == data` in one pass over the
+    # bytes, only while this module's own canonical functions are the originals.
+    return canonical_round_trip_proven(data, encode=canonical_encode, parse=strict_json_parse)
+
+
 def encode_task_change_base(base: TaskChangeBase) -> bytes:
     if type(base) is not TaskChangeBase:
         raise _invalid()
@@ -250,7 +261,8 @@ def encode_task_change_base(base: TaskChangeBase) -> bytes:
 
 def decode_task_change_base(data: bytes) -> TaskChangeBase:
     parsed = strict_json_parse(data)
-    if canonical_encode(parsed) != data or type(parsed) is not dict:
+    round_trips = _round_trip_proven(data) or canonical_encode(parsed) == data
+    if not round_trips or type(parsed) is not dict:
         raise _invalid()
     source = cast(dict[str, object], parsed)
     if set(source) - {"origin"} != {"commit", "object_format", "schema"}:
@@ -287,7 +299,8 @@ def encode_check_change(capture: CheckChangeCapture) -> bytes:
 
 def decode_check_change(data: bytes) -> CheckChangeCapture:
     parsed = strict_json_parse(data)
-    if canonical_encode(parsed) != data or type(parsed) is not dict:
+    round_trips = _round_trip_proven(data) or canonical_encode(parsed) == data
+    if not round_trips or type(parsed) is not dict:
         raise _invalid()
     source = cast(dict[str, object], parsed)
     if set(source) - {"base_commit"} != {

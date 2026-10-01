@@ -36,7 +36,11 @@ from yoetz.domain.privacy import (
 from yoetz.domain.values import format_rfc3339_millis, validate_commitment, validate_sha256_digest
 from yoetz.ports.objects import ObjectKind, ObjectRef
 from yoetz.ports.semantic import Deadline, SemanticResult
-from yoetz.protocol.canonical import canonical_encode, strict_json_parse
+from yoetz.protocol.canonical import (
+    canonical_encode,
+    canonical_round_trip_proven,
+    strict_json_parse,
+)
 from yoetz.protocol.ids import IdKind, validate_id
 from yoetz.protocol.models import DataCategory
 
@@ -615,6 +619,8 @@ class AgentProjectionRequest:
         ):
             if type(value) is not bytes or not value or len(value) > 262_144:
                 raise _invalid()
+            if canonical_round_trip_proven(value, encode=canonical_encode, parse=strict_json_parse):
+                continue
             if canonical_encode(strict_json_parse(value)) != value:
                 raise _invalid()
         if type(self.scope) is not AuthorizationScope:
