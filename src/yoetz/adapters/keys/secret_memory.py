@@ -333,3 +333,98 @@ def _overwrite_mapping(mapping: mmap.mmap, size: int) -> None:
         mapping.seek(0)
     except BufferError, OSError, ValueError:
         pass
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions(
+        "secret_memory_lock",
+        "secret_memory_unlock",
+        "secret_memory_dontdump",
+        "secret_memory_zeroize",
+        "secret_memory_suppress_core_dumps",
+    )
+    if resolved is None:
+        return
+    native_lock, native_unlock, native_dontdump, native_zeroize, native_suppress = resolved
+    python_load_libc = _load_libc
+    python_lock = _lock_mapping
+    python_unlock = _unlock_mapping
+    python_exclude = _exclude_from_core_dump
+    python_suppress = _suppress_core_dumps
+    python_overwrite = _overwrite_mapping
+    original_cdll = ctypes.CDLL
+    original_getrlimit = None if resource is None else resource.getrlimit
+    original_setrlimit = None if resource is None else resource.setrlimit
+
+    # The libc the module loaded stays a real ``ctypes.CDLL`` (so a replaced loader or
+    # ``ctypes.CDLL`` is still honored at construction); the twins only skip the per-call
+    # ``ctypes`` marshalling, and anything unusual takes the reference path.
+    def native_ready(libc: object, mapping: object, size: object) -> bool:
+        return (
+            type(libc) is original_cdll
+            and type(mapping) is mmap.mmap
+            and type(size) is int
+            and size >= 0
+        )
+
+    def native_lock_mapping(libc: ctypes.CDLL | None, mapping: mmap.mmap, size: int) -> bool:
+        if libc is None:
+            return False
+        if not native_ready(libc, mapping, size):
+            return python_lock(libc, mapping, size)
+        locked = native_lock(mapping, size)
+        return python_lock(libc, mapping, size) if locked is None else locked
+
+    def native_unlock_mapping(libc: ctypes.CDLL | None, mapping: mmap.mmap, size: int) -> None:
+        if libc is None:
+            return
+        if not native_ready(libc, mapping, size) or not native_unlock(mapping, size):
+            python_unlock(libc, mapping, size)
+
+    def native_exclude_from_core_dump(mapping: mmap.mmap, size: int) -> None:
+        if sys.platform != "linux":
+            return
+        # The reference loads a fresh ``CDLL(None)`` here on every allocation; with the loader
+        # and ``ctypes.CDLL`` untouched that load always yields the process libc.
+        if (
+            _load_libc is not python_load_libc
+            or ctypes.CDLL is not original_cdll
+            or type(mapping) is not mmap.mmap
+            or type(size) is not int
+            or size < 0
+        ):
+            python_exclude(mapping, size)
+            return
+        if not native_dontdump(mapping, size):
+            python_exclude(mapping, size)
+
+    def native_suppress_core_dumps() -> bool:
+        if (
+            resource is None
+            or resource.getrlimit is not original_getrlimit
+            or resource.setrlimit is not original_setrlimit
+        ):
+            return python_suppress()
+        return native_suppress()
+
+    def native_overwrite_mapping(mapping: mmap.mmap, size: int) -> None:
+        if (
+            type(mapping) is not mmap.mmap
+            or type(size) is not int
+            or size < 0
+            or not native_zeroize(mapping, size)
+        ):
+            python_overwrite(mapping, size)
+
+    globals().update(
+        _lock_mapping=native_lock_mapping,
+        _unlock_mapping=native_unlock_mapping,
+        _exclude_from_core_dump=native_exclude_from_core_dump,
+        _suppress_core_dumps=native_suppress_core_dumps,
+        _overwrite_mapping=native_overwrite_mapping,
+    )
+
+
+_bind_native()

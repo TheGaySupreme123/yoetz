@@ -10,6 +10,7 @@ pub mod domain;
 pub mod importers;
 pub mod observability;
 pub mod fswalks;
+pub mod objects;
 pub mod protocol;
 pub mod shlex;
 
