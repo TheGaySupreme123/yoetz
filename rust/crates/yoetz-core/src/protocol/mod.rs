@@ -2,3 +2,4 @@
 
 pub mod canonical;
 pub mod json;
+pub mod json_compat;

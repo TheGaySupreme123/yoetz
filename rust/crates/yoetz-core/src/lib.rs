@@ -7,6 +7,7 @@
 
 pub mod application;
 pub mod domain;
+pub mod importers;
 pub mod observability;
 pub mod protocol;
 pub mod shlex;

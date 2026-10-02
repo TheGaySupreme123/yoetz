@@ -112,6 +112,38 @@ def _gap_from_json(value: object) -> ImportGap:
     )
 
 
+def _batch_partition(
+    candidates: tuple[ImportEventCandidate, ...],
+    line_outcomes: tuple[ImportLineOutcome, ...],
+    gaps: tuple[ImportGap, ...],
+    draft_count: int,
+    batch_size: int,
+) -> list[tuple[tuple[ImportLineOutcome, ...], tuple[ImportGap, ...]]]:
+    """Select each batch's line outcomes and overlapping gaps, in input order.
+
+    Batch ``n`` holds ``candidates[n * batch_size:(n + 1) * batch_size]`` (bounded by
+    ``draft_count``); it keeps every outcome naming one of its candidate indexes and every gap
+    whose byte span overlaps one of its candidates' spans.
+    """
+
+    partition: list[tuple[tuple[ImportLineOutcome, ...], tuple[ImportGap, ...]]] = []
+    for start in range(0, draft_count, batch_size):
+        end = min(start + batch_size, draft_count)
+        batch_candidates = candidates[start:end]
+        indexes = {candidate.candidate_index for candidate in batch_candidates}
+        outcomes = tuple(
+            outcome for outcome in line_outcomes if indexes.intersection(outcome.candidate_indexes)
+        )
+        ranges = tuple((candidate.byte_start, candidate.byte_end) for candidate in batch_candidates)
+        selected_gaps = tuple(
+            gap
+            for gap in gaps
+            if any(not (gap.byte_end <= left or gap.byte_start >= right) for left, right in ranges)
+        )
+        partition.append((outcomes, selected_gaps))
+    return partition
+
+
 class CodexImportPlans:
     """Prepare and read encrypted batch plans through the owning object-store port."""
 
@@ -211,25 +243,20 @@ class CodexImportPlans:
         references: list[ObjectRef] = []
         candidates: list[ImportEventCandidate] = []
         request_ids: list[RequestId] = []
-        for start in range(0, len(materialized.event_drafts), MAX_EVENTS_PER_BATCH):
+        partition = _batch_partition(
+            materialized.candidates,
+            materialized.line_outcomes,
+            materialized.gaps,
+            len(materialized.event_drafts),
+            MAX_EVENTS_PER_BATCH,
+        )
+        for start, (outcomes, gaps) in zip(
+            range(0, len(materialized.event_drafts), MAX_EVENTS_PER_BATCH),
+            partition,
+            strict=True,
+        ):
             end = min(start + MAX_EVENTS_PER_BATCH, len(materialized.event_drafts))
             batch_candidates = materialized.candidates[start:end]
-            indexes = {candidate.candidate_index for candidate in batch_candidates}
-            outcomes = tuple(
-                outcome
-                for outcome in materialized.line_outcomes
-                if indexes.intersection(outcome.candidate_indexes)
-            )
-            ranges = tuple(
-                (candidate.byte_start, candidate.byte_end) for candidate in batch_candidates
-            )
-            gaps = tuple(
-                gap
-                for gap in materialized.gaps
-                if any(
-                    not (gap.byte_end <= left or gap.byte_start >= right) for left, right in ranges
-                )
-            )
             coverage = context.coverage
             for candidate in batch_candidates:
                 coverage = weakest(coverage, candidate.coverage)
@@ -304,3 +331,36 @@ class CodexImportPlans:
             gaps=tuple(_gap_from_json(item) for item in cast(tuple[object, ...], parsed["gaps"])),
             coverage=coverage_from_json(parsed["coverage"]),
         )
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions("codex_plan_batch_partition")
+    if resolved is None:
+        return
+    (batch_partition,) = resolved
+    python_batch_partition = _batch_partition
+
+    def native_batch_partition(
+        candidates: tuple[ImportEventCandidate, ...],
+        line_outcomes: tuple[ImportLineOutcome, ...],
+        gaps: tuple[ImportGap, ...],
+        draft_count: int,
+        batch_size: int,
+    ) -> list[tuple[tuple[ImportLineOutcome, ...], tuple[ImportGap, ...]]]:
+        """Select each batch's line outcomes and overlapping gaps, in input order."""
+
+        # The interval sweep reads only exact integers; anything else runs the reference.
+        if type(draft_count) is int and type(batch_size) is int:
+            partition = batch_partition(candidates, line_outcomes, gaps, draft_count, batch_size)
+            if partition is not None:
+                return cast(
+                    list[tuple[tuple[ImportLineOutcome, ...], tuple[ImportGap, ...]]], partition
+                )
+        return python_batch_partition(candidates, line_outcomes, gaps, draft_count, batch_size)
+
+    globals().update(_batch_partition=native_batch_partition)
+
+
+_bind_native()
