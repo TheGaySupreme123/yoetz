@@ -6,7 +6,7 @@ import re
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import Final
+from typing import Final, cast
 
 from yoetz.domain.values import parse_rfc3339_millis, validate_commitment
 from yoetz.ports.keys import MacKeyHandle
@@ -616,3 +616,168 @@ def build_diagnostic_manifest(
     redacted["redaction_profile"] = profile.value
     assert_plaintext_safe(canonical_encode(redacted), "diagnostic_manifest")
     return redacted
+
+
+def _bind_native() -> None:
+    import os
+
+    from yoetz._native import NATIVE_ENV, native_functions
+
+    resolved = native_functions(
+        "bind_privacy_scan",
+        "privacy_scan_profile",
+        "privacy_scan",
+        "privacy_redact",
+        "privacy_redact_passes",
+        "privacy_scan_kinds",
+    )
+    if resolved is None:
+        return
+    (
+        bind_scan,
+        scan_profile,
+        native_scan,
+        native_redact,
+        native_redact_passes,
+        native_scan_kinds,
+    ) = resolved
+    # The native matchers are hand-derived from these exact regexes and markers; an edited
+    # pattern keeps the reference rather than silently diverging from it.
+    markers, sources = scan_profile()
+    patterns = (*_CREDENTIAL_PATTERNS, _URI_PASSWORD, _SECRET_ASSIGNMENT, _TOKEN_ASSIGNMENT)
+    if tuple(markers) != _PRIVATE_KEY_MARKERS or [
+        (pattern.pattern, pattern.flags) for pattern in patterns
+    ] != list(sources):
+        if os.environ.get(NATIVE_ENV, "") == "require":
+            raise ImportError("yoetz_native_privacy_profile_mismatch")
+        return
+    bind_scan(ScanFinding, Sensitivity.SECRET, Sensitivity.KEY_MATERIAL)
+
+    python_scan = scan_for_sensitive_content
+    python_redact = redact_sensitive_content
+    python_replace = _replace_sensitive_spans
+    # The native scanner reproduces these exact markers, patterns, and helpers. Replacing any of
+    # them is an observation point it cannot honor, so the wrappers then defer to the reference.
+    reference = (
+        _PRIVATE_KEY_MARKERS,
+        _CREDENTIAL_PATTERNS,
+        _URI_PASSWORD,
+        _SECRET_ASSIGNMENT,
+        _TOKEN_ASSIGNMENT,
+        _scan_chunks,
+        _append_finding,
+        ScanFinding,
+    )
+    max_limit = 2**62
+
+    def native_limits() -> tuple[int, int, int] | None:
+        """Read the scan limits at call time, or ``None`` when the reference must run."""
+
+        if (
+            _PRIVATE_KEY_MARKERS is not reference[0]
+            or _CREDENTIAL_PATTERNS is not reference[1]
+            or _URI_PASSWORD is not reference[2]
+            or _SECRET_ASSIGNMENT is not reference[3]
+            or _TOKEN_ASSIGNMENT is not reference[4]
+            or _scan_chunks is not reference[5]
+            or _append_finding is not reference[6]
+            or ScanFinding is not reference[7]
+        ):
+            return None
+        limit, chunk, overlap = _MAX_SCAN_FINDINGS, _SCAN_CHUNK_BYTES, _SCAN_OVERLAP_BYTES
+        if (
+            type(limit) is not int
+            or type(chunk) is not int
+            or type(overlap) is not int
+            or not -max_limit < limit < max_limit
+            or not 0 <= overlap < chunk < max_limit
+        ):
+            return None
+        return limit, chunk, overlap
+
+    def native_scan_for_sensitive_content(
+        data: bytes,
+        *,
+        canaries: tuple[bytes, ...] = (),
+    ) -> tuple[ScanFinding, ...]:
+        """Return bounded structural findings for known plaintext-sensitive patterns."""
+
+        limits = native_limits()
+        if limits is None:
+            return python_scan(data, canaries=canaries)
+        if type(data) is not bytes:
+            raise TypeError("scan_data_not_bytes")
+        if type(canaries) is not tuple or len(canaries) > _MAX_CANARIES:
+            raise PrivacyFenceError("scanner_input_invalid", "sensitive_content_scan")
+        if any(
+            type(canary) is not bytes or not canary or len(canary) > _MAX_CANARY_BYTES
+            for canary in canaries
+        ):
+            raise PrivacyFenceError("scanner_input_invalid", "sensitive_content_scan")
+        return cast(tuple[ScanFinding, ...], native_scan(data, canaries, *limits))
+
+    def native_scan_ready() -> tuple[int, int, int] | None:
+        """Limits for a fused native redaction, while the module still routes through it."""
+
+        if (
+            scan_for_sensitive_content is not native_scan_for_sensitive_content
+            or _replace_sensitive_spans is not python_replace
+        ):
+            return None
+        return native_limits()
+
+    def native_redact_sensitive_content(data: bytes) -> tuple[bytes, bool]:
+        """Replace every detected credential/key span without retaining the match."""
+
+        limits = native_scan_ready()
+        if limits is None:
+            return python_redact(data)
+        if type(data) is not bytes:
+            raise TypeError("scan_data_not_bytes")
+        return cast(tuple[bytes, bool], native_redact(data, *limits))
+
+    def native_redact_until_clean(data: bytes, passes: int) -> object:
+        """Run up to *passes* ``redact_sensitive_content`` passes until one finds nothing.
+
+        Returns ``(text, redacted)``, ``None`` when every pass still found something, or
+        ``NotImplemented`` when the caller must run its own loop over the reference.
+        """
+
+        if (
+            redact_sensitive_content is not native_redact_sensitive_content
+            or type(passes) is not int
+        ):
+            return NotImplemented
+        limits = native_scan_ready()
+        if limits is None:
+            return NotImplemented
+        if passes <= 0:
+            return None
+        if type(data) is not bytes:
+            raise TypeError("scan_data_not_bytes")
+        return native_redact_passes(data, min(passes, max_limit), *limits)
+
+    def native_sensitive_kinds(data: bytes) -> object:
+        """``(private_key_marker, credential_pattern)`` presence for a canary-free scan.
+
+        Returns ``NotImplemented`` when the caller must scan through the reference.
+        """
+
+        if scan_for_sensitive_content is not native_scan_for_sensitive_content:
+            return NotImplemented
+        limits = native_limits()
+        if limits is None:
+            return NotImplemented
+        if type(data) is not bytes:
+            raise TypeError("scan_data_not_bytes")
+        return native_scan_kinds(data, *limits)
+
+    globals().update(
+        scan_for_sensitive_content=native_scan_for_sensitive_content,
+        redact_sensitive_content=native_redact_sensitive_content,
+        _native_redact_until_clean=native_redact_until_clean,
+        _native_sensitive_kinds=native_sensitive_kinds,
+    )
+
+
+_bind_native()
