@@ -15,7 +15,8 @@ struct Redactor<'py> {
     py: Python<'py>,
     redact: Bound<'py, PyAny>,
     /// Set when the redaction function returned something other than `(bytes, ...)` whose
-    /// bytes decode as UTF-8; only then can the reference's final tree check refuse.
+    /// bytes decode as UTF-8, so its Python `.decode` produced the text; only then can the
+    /// reference's final tree check refuse (an exact `str` holding a lone surrogate included).
     unusual: bool,
 }
 
@@ -34,9 +35,9 @@ impl<'py> Redactor<'py> {
         let options = PyDict::new(py);
         options.set_item("errors", "strict")?;
         let decoded = redacted.call_method("decode", ("utf-8",), Some(&options))?;
-        if unsafe { ffi::PyUnicode_CheckExact(decoded.as_ptr()) } == 0 {
-            self.unusual = true;
-        }
+        // Whatever `.decode` returned (a `str` subclass, a non-`str`, or an exact `str` with a
+        // lone surrogate) is vouched for only by the reference's `_validate_json_tree`.
+        self.unusual = true;
         Ok(decoded)
     }
 
