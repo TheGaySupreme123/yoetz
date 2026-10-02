@@ -183,31 +183,49 @@ impl Drop for Fd {
     }
 }
 
-/// `openat(dir_fd, path, flags | O_CLOEXEC)`, retrying `EINTR` like `os.open`.
-pub fn open_at(dir_fd: c_int, path: &CStr, flags: c_int) -> Result<Fd, i32> {
+/// One `openat(dir_fd, path, flags | O_CLOEXEC)` call. An `EINTR` is returned like any other
+/// errno, as `opendir` (and so `os.scandir`) reports it.
+pub fn open_at_once(dir_fd: c_int, path: &CStr, flags: c_int) -> Result<Fd, i32> {
+    let fd = unsafe { libc::openat(dir_fd, path.as_ptr(), flags | libc::O_CLOEXEC) };
+    if fd >= 0 {
+        return Ok(Fd(fd));
+    }
+    Err(last_errno())
+}
+
+/// `os.open(path, flags, dir_fd=dir_fd)`: `openat` retried on `EINTR` after `checkpoint` runs,
+/// as PEP 475 runs `PyErr_CheckSignals`. A checkpoint error (a pending `KeyboardInterrupt`)
+/// is the outer `Err`; the open's own errno is the inner one.
+pub fn open_at<E>(
+    dir_fd: c_int,
+    path: &CStr,
+    flags: c_int,
+    checkpoint: &mut dyn FnMut() -> Result<(), E>,
+) -> Result<Result<Fd, i32>, E> {
     loop {
-        let fd = unsafe { libc::openat(dir_fd, path.as_ptr(), flags | libc::O_CLOEXEC) };
-        if fd >= 0 {
-            return Ok(Fd(fd));
-        }
-        let errno = last_errno();
-        if errno != libc::EINTR {
-            return Err(errno);
+        match open_at_once(dir_fd, path, flags) {
+            Err(libc::EINTR) => checkpoint()?,
+            result => return Ok(result),
         }
     }
 }
 
-/// `os.read(fd, n)`, retrying `EINTR`.
-fn read_some(fd: c_int, buffer: &mut [u8]) -> Result<usize, i32> {
+/// `os.read(fd, n)`: `read` retried on `EINTR` after `checkpoint` runs (PEP 475).
+fn read_some<E>(
+    fd: c_int,
+    buffer: &mut [u8],
+    checkpoint: &mut dyn FnMut() -> Result<(), E>,
+) -> Result<Result<usize, i32>, E> {
     loop {
         let count = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
         if count >= 0 {
-            return Ok(count as usize);
+            return Ok(Ok(count as usize));
         }
         let errno = last_errno();
         if errno != libc::EINTR {
-            return Err(errno);
+            return Ok(Err(errno));
         }
+        checkpoint()?;
     }
 }
 
@@ -283,6 +301,44 @@ pub struct TreeLimits {
     pub expected_uid: u32,
 }
 
+/// The absolute path lengths the reference walk hands the kernel.
+///
+/// The reference scans `os.scandir(<absolute directory>)` and stats each entry with
+/// `DirEntry.stat(follow_symlinks=False)`, an `lstat` of the absolute `DirEntry.path`; the
+/// descriptor-relative walk passes shorter paths. A path whose length reaches `PATH_MAX` (which
+/// counts the terminating NUL) fails with `ENAMETOOLONG` there, so the walk refuses it the same way.
+struct ReferencePaths {
+    root_len: usize,
+    separator: usize,
+}
+
+impl ReferencePaths {
+    fn new(root: &[u8]) -> Self {
+        // `DirEntry.path` joins with `/` unless the scanned path already ends with one.
+        ReferencePaths {
+            root_len: root.len(),
+            separator: usize::from(!root.ends_with(b"/")),
+        }
+    }
+
+    /// The length of the reference's absolute path for `relative_dir` joined with `name`
+    /// (either may be empty, but not both).
+    fn length(&self, relative_dir: &[u8], name: &[u8]) -> usize {
+        let inner = match (relative_dir.is_empty(), name.is_empty()) {
+            (true, _) => name.len(),
+            (false, true) => relative_dir.len(),
+            (false, false) => relative_dir.len() + 1 + name.len(),
+        };
+        self.root_len + self.separator + inner
+    }
+
+    fn too_long(&self, relative_dir: &[u8], name: &[u8]) -> bool {
+        #[allow(clippy::unnecessary_cast)]
+        let path_max = libc::PATH_MAX as usize;
+        self.length(relative_dir, name) >= path_max
+    }
+}
+
 /// `GitSubjectStateAdapter._reject_unsafe_tree_entries` after `_collect_ignored_prefixes`.
 ///
 /// `checkpoint` runs before each directory is read; an `Err` aborts the walk (the binding uses
@@ -294,24 +350,29 @@ pub fn reject_unsafe_tree_entries<E>(
     checkpoint: &mut dyn FnMut() -> Result<(), E>,
 ) -> Result<(), Stop<E>> {
     let root_path = c_path(root).map_err(|_| Failure::UnsafeRoot)?;
-    let root_fd = open_at(
+    // `os.scandir` opens with `opendir`, which does not retry `EINTR`.
+    let root_fd = open_at_once(
         libc::AT_FDCWD,
         &root_path,
         libc::O_RDONLY | libc::O_DIRECTORY,
     )
     .map_err(|_| Failure::UnsafeRoot)?;
+    let reference_paths = ReferencePaths::new(root);
     let mut pending: Vec<Vec<u8>> = vec![Vec::new()];
     let mut entries_seen: u64 = 0;
     let mut path_bytes_seen: u64 = 0;
     while let Some(relative_dir) = pending.pop() {
         checkpoint().map_err(Stop::Abort)?;
         let mut directory = if relative_dir.is_empty() {
-            let fd = open_at(root_fd.raw(), c".", libc::O_RDONLY | libc::O_DIRECTORY);
+            let fd = open_at_once(root_fd.raw(), c".", libc::O_RDONLY | libc::O_DIRECTORY);
             fd.and_then(Dir::from_fd)
         } else {
+            if reference_paths.too_long(&relative_dir, b"") {
+                return Err(Failure::UnsafeRoot.into());
+            }
             c_path(&relative_dir)
                 .and_then(|path| {
-                    open_at(
+                    open_at_once(
                         root_fd.raw(),
                         &path,
                         libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
@@ -330,6 +391,9 @@ pub fn reject_unsafe_tree_entries<E>(
             }
             if path_bytes_seen > limits.path_output_limit {
                 return Err(Failure::ReadLimit.into());
+            }
+            if reference_paths.too_long(&relative_dir, &name) {
+                return Err(Failure::UnsafeRoot.into());
             }
             let c_name = c_path(&name).map_err(|_| Failure::UnsafeRoot)?;
             let facts = lstat_at(directory.fd(), &c_name).map_err(|_| Failure::UnsafeRoot)?;
@@ -495,8 +559,14 @@ pub fn hash_untracked<E>(
         }
         previous = Some(path);
         let c_path = c_path(path).map_err(|_| Failure::SymlinkNotObserved)?;
-        let fd = open_at(dir_fd, &c_path, libc::O_RDONLY | libc::O_NOFOLLOW)
-            .map_err(|_| Failure::SymlinkNotObserved)?;
+        let fd = open_at(
+            dir_fd,
+            &c_path,
+            libc::O_RDONLY | libc::O_NOFOLLOW,
+            checkpoint,
+        )
+        .map_err(Stop::Abort)?
+        .map_err(|_| Failure::SymlinkNotObserved)?;
         let before = fstat(fd.raw()).map_err(|_| Failure::SymlinkNotObserved)?;
         if !before.is_reg() || before.uid != limits.expected_uid || before.nlink != 1 {
             return Err(Failure::SymlinkUnsupported.into());
@@ -515,7 +585,8 @@ pub fn hash_untracked<E>(
             // min(_READ_CHUNK, size - file_bytes + 1) never goes below zero: the loop stops as
             // soon as file_bytes reaches size + 1 because the next request is for 0 bytes.
             let wanted = (size + 1).saturating_sub(file_bytes).min(chunk as u128) as usize;
-            let count = read_some(fd.raw(), &mut buffer[..wanted])
+            let count = read_some(fd.raw(), &mut buffer[..wanted], checkpoint)
+                .map_err(Stop::Abort)?
                 .map_err(|_| Failure::SymlinkNotObserved)?;
             if count == 0 {
                 break;
@@ -575,5 +646,217 @@ mod tests {
         assert_eq!(check_index_entries(&entries), Err(Failure::UnsafeRoot));
         let entries: Vec<&[u8]> = vec![b"100644 a 0\tx\ty"];
         assert_eq!(check_index_entries(&entries), Ok(vec![&b"x\ty"[..]]));
+    }
+
+    #[test]
+    fn reference_path_lengths_join_like_direntry_path() {
+        let paths = ReferencePaths::new(b"/repo");
+        assert_eq!(paths.length(b"", b"a"), "/repo/a".len());
+        assert_eq!(paths.length(b"d/e", b""), "/repo/d/e".len());
+        assert_eq!(paths.length(b"d/e", b"f"), "/repo/d/e/f".len());
+        let slash = ReferencePaths::new(b"/");
+        assert_eq!(slash.length(b"", b"a"), "/a".len());
+        assert_eq!(slash.length(b"d", b"f"), "/d/f".len());
+        #[allow(clippy::unnecessary_cast)]
+        let path_max = libc::PATH_MAX as usize;
+        let name = vec![b'n'; path_max - "/repo/".len()];
+        assert!(paths.too_long(b"", &name));
+        assert!(!paths.too_long(b"", &name[1..]));
+    }
+
+    /// A private scratch directory beneath the temporary directory, removed on drop.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Scratch {
+            use std::os::unix::fs::PermissionsExt;
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let unique = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path =
+                std::env::temp_dir().join(format!("yz-gss-{tag}-{}-{unique}", std::process::id()));
+            std::fs::create_dir(&path).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            Scratch(path)
+        }
+
+        fn bytes(&self) -> Vec<u8> {
+            use std::os::unix::ffi::OsStrExt;
+            self.0.as_os_str().as_bytes().to_vec()
+        }
+    }
+
+    /// Remove everything beneath `dir_fd` through descriptors (the tree may exceed `PATH_MAX`).
+    fn clear(dir_fd: c_int) {
+        let Ok(fd) = open_at_once(dir_fd, c".", libc::O_RDONLY | libc::O_DIRECTORY) else {
+            return;
+        };
+        let Ok(mut dir) = Dir::from_fd(fd) else {
+            return;
+        };
+        for name in dir.names().unwrap_or_default() {
+            let name = CString::new(name).unwrap();
+            if unsafe { libc::unlinkat(dir.fd(), name.as_ptr(), 0) } == 0 {
+                continue;
+            }
+            if let Ok(child) = open_at_once(
+                dir.fd(),
+                &name,
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+            ) {
+                clear(child.raw());
+            }
+            unsafe { libc::unlinkat(dir.fd(), name.as_ptr(), libc::AT_REMOVEDIR) };
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            if let Ok(root) = CString::new(self.bytes()) {
+                if let Ok(fd) = open_at_once(libc::AT_FDCWD, &root, libc::O_RDONLY) {
+                    clear(fd.raw());
+                }
+            }
+            let _ = std::fs::remove_dir(&self.0);
+        }
+    }
+
+    /// Build `root/d.../leaf` through descriptors so the leaf's absolute path is `target` bytes.
+    fn deep_leaf(root: &[u8], target: usize, directory_leaf: bool) {
+        let root_c = CString::new(root).unwrap();
+        let mut current = open_at_once(libc::AT_FDCWD, &root_c, libc::O_RDONLY).unwrap();
+        let mut length = root.len();
+        let segment = CString::new(vec![b'd'; 200]).unwrap();
+        while length + 1 + 255 < target {
+            assert_eq!(
+                unsafe { libc::mkdirat(current.raw(), segment.as_ptr(), 0o700) },
+                0
+            );
+            current = open_at_once(current.raw(), &segment, libc::O_RDONLY).unwrap();
+            length += 201;
+        }
+        let name_len = target - length - 1;
+        assert!((1..=255).contains(&name_len));
+        let name = CString::new(vec![b'f'; name_len]).unwrap();
+        if directory_leaf {
+            assert_eq!(
+                unsafe { libc::mkdirat(current.raw(), name.as_ptr(), 0o700) },
+                0
+            );
+        } else {
+            let fd = unsafe {
+                libc::openat(
+                    current.raw(),
+                    name.as_ptr(),
+                    libc::O_CREAT | libc::O_WRONLY | libc::O_CLOEXEC,
+                    0o600 as libc::c_uint,
+                )
+            };
+            assert!(fd >= 0);
+            drop(Fd(fd));
+        }
+    }
+
+    fn walk(root: &[u8]) -> Result<(), Failure> {
+        let limits = TreeLimits {
+            max_files: 1_000_000,
+            path_output_limit: 1 << 30,
+            expected_uid: unsafe { libc::geteuid() },
+        };
+        let mut never = || Ok::<(), ()>(());
+        reject_unsafe_tree_entries(root, &HashSet::new(), &limits, &mut never).map_err(|stop| {
+            match stop {
+                Stop::Fail(failure) => failure,
+                Stop::Abort(()) => unreachable!(),
+            }
+        })
+    }
+
+    #[test]
+    fn tree_walk_refuses_absolute_paths_that_reach_path_max() {
+        #[allow(clippy::unnecessary_cast)]
+        let path_max = libc::PATH_MAX as usize;
+        // A file leaf is stat-ed at its own length; a directory leaf is also scanned, and is
+        // empty, so only its own lstat can reach the bound.
+        for (offset, expected) in [(2, Ok(())), (1, Ok(())), (0, Err(Failure::UnsafeRoot))] {
+            for directory_leaf in [false, true] {
+                let scratch = Scratch::new("pm");
+                let root = scratch.bytes();
+                deep_leaf(&root, path_max - offset, directory_leaf);
+                assert_eq!(
+                    walk(&root),
+                    expected,
+                    "offset {offset} dir {directory_leaf}"
+                );
+            }
+        }
+    }
+
+    extern "C" fn ignore_signal(_: c_int) {}
+
+    #[test]
+    fn untracked_open_delivers_checkpoint_on_eintr() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        // A handler installed without SA_RESTART (as CPython installs its own) makes the
+        // blocked FIFO open fail with EINTR.
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = ignore_signal as extern "C" fn(c_int) as libc::sighandler_t;
+            libc::sigemptyset(&mut action.sa_mask);
+            action.sa_flags = 0;
+            assert_eq!(
+                libc::sigaction(libc::SIGUSR1, &action, std::ptr::null_mut()),
+                0
+            );
+        }
+        let scratch = Scratch::new("fifo");
+        let root = CString::new(scratch.bytes()).unwrap();
+        let root_fd = open_at_once(libc::AT_FDCWD, &root, libc::O_RDONLY).unwrap();
+        assert_eq!(
+            unsafe { libc::mkfifoat(root_fd.raw(), c"p".as_ptr(), 0o600) },
+            0
+        );
+
+        let target = unsafe { libc::pthread_self() };
+        let done = Arc::new(AtomicBool::new(false));
+        let helper_done = Arc::clone(&done);
+        let fifo = scratch.0.join("p");
+        let helper = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !helper_done.load(Ordering::SeqCst) {
+                if Instant::now() > deadline {
+                    // Never leave the test blocked: a writer unblocks the open.
+                    let _ = std::fs::OpenOptions::new().write(true).open(&fifo);
+                    return;
+                }
+                unsafe { libc::pthread_kill(target, libc::SIGUSR1) };
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let limits = UntrackedLimits {
+            max_hash_bytes: 1 << 20,
+            already_hashed: 0,
+            read_chunk: 4096,
+            expected_uid: unsafe { libc::geteuid() },
+        };
+        // The first checkpoint runs before the path; the next one runs on the EINTR.
+        let mut checkpoints = 0;
+        let mut interrupt = || {
+            checkpoints += 1;
+            if checkpoints == 1 {
+                Ok(())
+            } else {
+                Err("interrupted")
+            }
+        };
+        let paths: Vec<&[u8]> = vec![b"p"];
+        let result = hash_untracked(root_fd.raw(), b"domain", &paths, &limits, &mut interrupt);
+        done.store(true, Ordering::SeqCst);
+        helper.join().unwrap();
+        assert!(matches!(result, Err(Stop::Abort("interrupted"))));
+        assert_eq!(checkpoints, 2);
     }
 }
