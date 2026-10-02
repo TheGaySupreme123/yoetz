@@ -39,6 +39,7 @@ mod deterministic_checks;
 mod observation_advice;
 mod work_integrity;
 mod events;
+mod semantic_case;
 
 #[pymodule]
 fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -73,5 +74,6 @@ fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     observation_advice::register(module)?;
     work_integrity::register(module)?;
     events::register(module)?;
+    semantic_case::register(module)?;
     Ok(())
 }
