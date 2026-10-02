@@ -19,6 +19,7 @@ mod observation_selection;
 mod shlex;
 mod jsonframes;
 mod control_protocol;
+mod control_pipeline;
 mod ids;
 mod models;
 mod service;

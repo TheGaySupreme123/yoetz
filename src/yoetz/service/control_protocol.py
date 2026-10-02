@@ -1015,14 +1015,60 @@ def public_error_code_for_control_reason(reason: str) -> PublicErrorCode:
 def _bind_native() -> None:
     from yoetz._native import native_functions
 
-    resolved = native_functions("control_bind_plain_wire_value", "control_plain_wire_value")
+    resolved = native_functions(
+        "control_bind_plain_wire_value",
+        "control_plain_wire_value",
+        "control_bind_pipeline",
+        "control_validated_wire",
+        "control_validate_request",
+        "control_validate_result",
+        "control_decode_control_payload",
+        "control_encode_control_frame",
+        "control_plain_mapping_for_model",
+    )
     if resolved is None:
         return
-    bind_reference, native_plain_wire_value = resolved
+    (
+        bind_reference,
+        native_plain_wire_value,
+        bind_pipeline,
+        native_validated_wire,
+        native_validate_request,
+        native_validate_result,
+        native_decode_control_payload,
+        native_encode_control_frame,
+        native_plain_mapping_for_model,
+    ) = resolved
     # The twin walks exact containers itself and hands every other node to the reference, which
     # recurses through this module global and so returns to the twin for its members.
     bind_reference(_plain_wire_value)
-    globals().update(_plain_wire_value=native_plain_wire_value)
+    # The pipeline twins call every dependency through this module's globals at call time, so a
+    # patched global still sees each call; they skip only work whose result is already decided,
+    # and only while the globals involved are still these originals.
+    bind_pipeline(
+        globals(),
+        ControlProtocolError,
+        struct.error,
+        _validated_wire,
+        {
+            "_plain_wire_value": native_plain_wire_value,
+            "_validated_wire": native_validated_wire,
+            "freeze_json": freeze_json,
+            "canonical_encode": canonical_encode,
+            "strict_json_parse": strict_json_parse,
+            "validate_schema_instance": validate_schema_instance,
+            "_validate_frame_size": _validate_frame_size,
+        },
+    )
+    globals().update(
+        _plain_wire_value=native_plain_wire_value,
+        _validated_wire=native_validated_wire,
+        validate_request=native_validate_request,
+        validate_result=native_validate_result,
+        _decode_control_payload=native_decode_control_payload,
+        encode_control_frame=native_encode_control_frame,
+        _plain_mapping_for_model=native_plain_mapping_for_model,
+    )
 
 
 _bind_native()
