@@ -13,3 +13,4 @@ hex.workspace = true
 itoa.workspace = true
 memchr.workspace = true
 regex.workspace = true
+libc.workspace = true

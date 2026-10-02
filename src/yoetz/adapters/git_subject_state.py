@@ -1194,3 +1194,175 @@ def _closed_result(
         0,
         (detail,) if detail is not None else (),
     )
+
+
+def _native_failure(code: str, observed: int, limit: int) -> BaseException:
+    """Build the exception the reference raises for one native walk failure code."""
+
+    if code == "unsafe_root":
+        return _CaptureFailure(SubjectStateLimitation.UNSAFE_ROOT)
+    if code in {"tree_file_limit", "untracked_file_limit"}:
+        bound = (
+            SubjectStateBound.UNSAFE_TREE_ENTRIES
+            if code == "tree_file_limit"
+            else SubjectStateBound.UNTRACKED_FILE_COUNT
+        )
+        return _CaptureFailure(
+            SubjectStateLimitation.FILE_LIMIT_EXCEEDED,
+            SubjectStateStatus.UNSUPPORTED,
+            detail=SubjectStateLimitDetail(bound, observed, limit),
+        )
+    if code == "read_limit":
+        return _CaptureFailure(
+            SubjectStateLimitation.READ_LIMIT_EXCEEDED, SubjectStateStatus.UNSUPPORTED
+        )
+    if code == "symlink_unsupported":
+        return _CaptureFailure(
+            SubjectStateLimitation.SYMLINK_UNSUPPORTED, SubjectStateStatus.UNSUPPORTED
+        )
+    if code == "symlink_not_observed":
+        return _CaptureFailure(SubjectStateLimitation.SYMLINK_UNSUPPORTED)
+    if code == "submodule_present":
+        return _CaptureFailure(
+            SubjectStateLimitation.SUBMODULE_PRESENT, SubjectStateStatus.UNSUPPORTED
+        )
+    if code == "input_changed":
+        return _CaptureFailure(
+            SubjectStateLimitation.INPUT_CHANGED, SubjectStateStatus.CHANGED_DURING_CAPTURE
+        )
+    if code == "os_error":
+        return OSError(observed, os.strerror(observed))
+    return _GitProcessFailure()
+
+
+def _bind_native() -> None:
+    from functools import partial
+
+    from yoetz._native import native_functions
+
+    if os.name != "posix":
+        return
+    resolved = native_functions(
+        "git_reject_tree_entries",
+        "git_reject_unsupported_index_entries",
+        "git_hash_untracked",
+    )
+    if resolved is None:
+        return
+    native_tree, native_index, native_untracked = resolved
+    module = globals()
+    # Every dependency the reference walks reach through an ``os`` attribute or a module global.
+    # A patched one is an observation point the native walk cannot honor, so the reference runs.
+    os_names = ("close", "fsencode", "fstat", "geteuid", "open", "read", "scandir", "stat")
+    watched_os = tuple((name, getattr(os, name)) for name in os_names)
+    runner_run = _GitRunner.run
+    module_names = (
+        "os",
+        "stat",
+        "hashlib",
+        "_GitRunner",
+        "_CaptureFailure",
+        "_GitProcessFailure",
+        "_collect_ignored_prefixes",
+        "_nul_entries",
+        "_overwrite",
+        "_validate_relative_git_path",
+        "_verify_untracked_file",
+        "_same_file_snapshot",
+    )
+    watched_module = tuple((name, module[name]) for name in module_names)
+
+    def unpatched(adapter: GitSubjectStateAdapter) -> bool:
+        runner = adapter._runner  # pyright: ignore[reportPrivateUsage]
+        if type(runner) is not _GitRunner or _GitRunner.run is not runner_run:
+            return False
+        if any(module.get(name) is not original for name, original in watched_module):
+            return False
+        if any(getattr(os, name, None) is not original for name, original in watched_os):
+            return False
+        return (
+            type(_PATH_OUTPUT_LIMIT) is int
+            and _PATH_OUTPUT_LIMIT >= 0
+            and type(_READ_CHUNK) is int
+            and _READ_CHUNK > 0
+            and type(_UNTRACKED_DOMAIN) is bytes
+        )
+
+    python_tree = GitSubjectStateAdapter._reject_unsafe_tree_entries  # pyright: ignore[reportPrivateUsage]
+    python_index = GitSubjectStateAdapter._reject_unsupported_index_entries  # pyright: ignore[reportPrivateUsage]
+    python_untracked = GitSubjectStateAdapter._hash_untracked  # pyright: ignore[reportPrivateUsage]
+
+    def _reject_unsafe_tree_entries(
+        self: GitSubjectStateAdapter, workspace: _WorkspaceDescriptor
+    ) -> None:
+        if not unpatched(self):
+            return python_tree(self, workspace)
+        runner = self._runner  # pyright: ignore[reportPrivateUsage]
+        ignored_prefixes = _collect_ignored_prefixes(workspace.root, runner)
+        limit = self._max_files  # pyright: ignore[reportPrivateUsage]
+        native_tree(
+            partial(_native_failure, limit=limit),
+            os.fsencode(workspace.root),
+            ignored_prefixes,
+            limit,
+            _PATH_OUTPUT_LIMIT,
+            os.geteuid(),
+        )
+
+    def _reject_unsupported_index_entries(
+        self: GitSubjectStateAdapter, workspace: _WorkspaceDescriptor
+    ) -> None:
+        if not unpatched(self):
+            return python_index(self, workspace)
+        _, staged = self._runner.run(  # pyright: ignore[reportPrivateUsage]
+            workspace.root,
+            ("ls-files", "--stage", "-z"),
+            stdout_limit=_PATH_OUTPUT_LIMIT,
+        )
+        limit = self._max_files  # pyright: ignore[reportPrivateUsage]
+        native_index(
+            partial(_native_failure, limit=limit),
+            staged,
+            workspace.descriptor,
+        )
+
+    def _hash_untracked(
+        self: GitSubjectStateAdapter, workspace: _WorkspaceDescriptor, already_hashed: int
+    ) -> tuple[str, int, int]:
+        if (
+            not unpatched(self)
+            or type(already_hashed) is not int
+            or not 0 <= already_hashed < 1 << 64
+        ):
+            return python_untracked(self, workspace, already_hashed)
+        _, inventory = self._runner.run(  # pyright: ignore[reportPrivateUsage]
+            workspace.root,
+            ("ls-files", "--others", "--exclude-standard", "-z"),
+            stdout_limit=_PATH_OUTPUT_LIMIT,
+        )
+        limit = self._max_files  # pyright: ignore[reportPrivateUsage]
+        return cast(
+            tuple[str, int, int],
+            native_untracked(
+                partial(_native_failure, limit=limit),
+                inventory,
+                workspace.descriptor,
+                _UNTRACKED_DOMAIN,
+                limit,
+                self._max_hash_bytes,  # pyright: ignore[reportPrivateUsage]
+                already_hashed,
+                _READ_CHUNK,
+                os.geteuid(),
+            ),
+        )
+
+    setattr(GitSubjectStateAdapter, "_reject_unsafe_tree_entries", _reject_unsafe_tree_entries)  # noqa: B010
+    setattr(  # noqa: B010
+        GitSubjectStateAdapter,
+        "_reject_unsupported_index_entries",
+        _reject_unsupported_index_entries,
+    )
+    setattr(GitSubjectStateAdapter, "_hash_untracked", _hash_untracked)  # noqa: B010
+
+
+_bind_native()
