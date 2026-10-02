@@ -18,6 +18,8 @@ mod observation;
 mod observation_selection;
 mod shlex;
 mod jsonframes;
+mod observation_local;
+mod codex_session_stream;
 
 #[pymodule]
 fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -32,5 +34,7 @@ fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     observation_selection::register(module)?;
     missing_for_assessment::register(module)?;
     jsonframes::register(module)?;
+    observation_local::register(module)?;
+    codex_session_stream::register(module)?;
     Ok(())
 }

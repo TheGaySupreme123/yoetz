@@ -2956,18 +2956,7 @@ class _EnvelopeCodec:
             if cached is not None and cached[0] is envelope:
                 self._dedup.move_to_end(key)
                 return cached[1]
-        digest = canonical_digest(
-            JsonObject(
-                {
-                    "workspace_commitment": workspace,
-                    "session_commitment": envelope.session_commitment,
-                    "source": envelope.source.value,
-                    "source_identity": envelope.source_identity,
-                    "event_kind": envelope.event_kind,
-                    "cursor": observation_cursor_to_json(envelope.cursor),
-                }
-            )
-        )
+        digest = _dedup_digest(workspace, envelope)
         with self._guard:
             self._dedup[key] = (envelope, digest)
             while len(self._dedup) > self._capacity:
@@ -3091,8 +3080,49 @@ def _quarantine_entry_fragment(
     )
 
 
+def _envelope_fragments(
+    envelopes: Iterable[ObservationEnvelope],
+) -> tuple[CanonicalFragment, ...]:
+    return tuple(_envelope_fragment(envelope) for envelope in envelopes)
+
+
+def _outbox_row_fragments(rows: Iterable[ObservationOutboxRow]) -> tuple[CanonicalFragment, ...]:
+    return tuple(_outbox_row_fragment(row) for row in rows)
+
+
+def _quarantine_entry_fragments(
+    entries: Iterable[tuple[str, ObservationEnvelope, str, Timestamp]],
+) -> tuple[CanonicalFragment, ...]:
+    return tuple(_quarantine_entry_fragment(entry) for entry in entries)
+
+
+def _dedup_digest(workspace: str, envelope: ObservationEnvelope) -> str:
+    """Return the durable dedup identity of one envelope in one workspace."""
+
+    return canonical_digest(
+        JsonObject(
+            {
+                "workspace_commitment": workspace,
+                "session_commitment": envelope.session_commitment,
+                "source": envelope.source.value,
+                "source_identity": envelope.source_identity,
+                "event_kind": envelope.event_kind,
+                "cursor": observation_cursor_to_json(envelope.cursor),
+            }
+        )
+    )
+
+
 def _dedup_key(workspace: str, envelope: ObservationEnvelope) -> str:
     return _CODEC.dedup_key(workspace, envelope)
+
+
+def _dedup_sessions(
+    dedup_lanes: Mapping[str, str], dedup_order: list[str]
+) -> tuple[str | None, ...]:
+    """Return the lane recorded for each ordered dedup key (``None`` when it has none)."""
+
+    return tuple(dedup_lanes.get(key) for key in dedup_order)
 
 
 def _prime_codec(state: _WorkspaceState) -> None:
@@ -3102,14 +3132,10 @@ def _prime_codec(state: _WorkspaceState) -> None:
     lists here needs no lock.
     """
 
-    for envelope in state.envelopes or ():
-        _envelope_fragment(envelope)
-    for row in state.pending_outbox or ():
-        _outbox_row_fragment(row)
-    for entry in state.quarantine or ():
-        _quarantine_entry_fragment(entry)
-    for item in state.admission_buffer.inputs:
-        _envelope_fragment(item.envelope)
+    _envelope_fragments(state.envelopes or ())
+    _outbox_row_fragments(state.pending_outbox or ())
+    _quarantine_entry_fragments(state.quarantine or ())
+    _envelope_fragments(item.envelope for item in state.admission_buffer.inputs)
 
 
 def _outbox_row_to_spliced_json(row: ObservationOutboxRow) -> JsonValue:
@@ -11394,9 +11420,7 @@ class LocalObservationStore:
             ),
             # Immutable members are spliced from cached canonical fragments;
             # the encoded bytes are identical to inline encoding (#689).
-            "envelopes": cast(
-                JsonValue, tuple(_envelope_fragment(item) for item in state.envelopes)
-            ),
+            "envelopes": cast(JsonValue, _envelope_fragments(state.envelopes)),
             "gaps": tuple(sorted(state.gaps, key=str.encode)),
             "gap_history": JsonObject(
                 {
@@ -11469,14 +11493,8 @@ class LocalObservationStore:
             "monotonic_epoch_ms": (
                 None if state.monotonic_epoch is None else round(state.monotonic_epoch * 1000)
             ),
-            "pending_outbox": cast(
-                JsonValue,
-                tuple(_outbox_row_fragment(row) for row in (state.pending_outbox or ())),
-            ),
-            "quarantine": cast(
-                JsonValue,
-                tuple(_quarantine_entry_fragment(entry) for entry in (state.quarantine or ())),
-            ),
+            "pending_outbox": cast(JsonValue, _outbox_row_fragments(state.pending_outbox or ())),
+            "quarantine": cast(JsonValue, _quarantine_entry_fragments(state.quarantine or ())),
             "quarantine_evicted_count": state.quarantine_evicted_count,
             "quarantine_reclaimed_count": state.quarantine_reclaimed_count,
             "quarantine_evicted_commitment": state.quarantine_evicted_commitment,
@@ -11692,7 +11710,7 @@ class LocalObservationStore:
                     }
                 )
         if state.dedup_lanes:
-            payload["dedup_sessions"] = tuple(state.dedup_lanes.get(key) for key in dedup_order)
+            payload["dedup_sessions"] = _dedup_sessions(state.dedup_lanes, dedup_order)
         if state.session_gaps:
             payload["session_gaps"] = JsonObject(
                 {
@@ -11841,8 +11859,10 @@ class LocalObservationStore:
             else ()
         )
         dedup_order: list[str] = []
+        dedup_seen: set[str] = set()
         for value in dedup_values:
-            if type(value) is str and value not in dedup_order:
+            if type(value) is str and value not in dedup_seen:
+                dedup_seen.add(value)
                 dedup_order.append(value)
         dedup_lanes: dict[str, str] = {}
         dedup_sessions_raw = raw.get("dedup_sessions") or ()
@@ -12648,3 +12668,270 @@ def session_commitment_from_codex_id(key_material: bytes, codex_session_id: str)
         hashlib.sha256,
     ).hexdigest()
     return f"hmac-sha256:{digest}"
+
+
+def _bind_native() -> None:
+    """Bind the accelerator's twins for this module's pure hot steps.
+
+    Store orchestration, locks, clocks, and every ``_MAX_*`` limit stay here; the twins only
+    replace pure computations. Each wrapper defers to the Python reference whenever a
+    collaborator it would bypass (``canonical_digest``, ``JsonObject``,
+    ``observation_cursor_to_json``, ``_ordered_dedup_keys``) is no longer the bound original, and
+    whenever a twin reports input it does not model.
+    """
+
+    from yoetz._native import native_functions
+
+    resolved = native_functions(
+        "IdentityMemo",
+        "observation_local_ordered_dedup_keys",
+        "observation_local_dedup_eviction_key",
+        "observation_local_dedup_sessions",
+        "observation_local_flat_digest",
+        "observation_local_dedup_digest",
+    )
+    if resolved is None:
+        return
+    (
+        memo_type,
+        native_ordered_keys,
+        native_eviction_key,
+        native_dedup_sessions,
+        native_flat_digest,
+        native_dedup_digest,
+    ) = resolved
+
+    bound_digest = canonical_digest
+    bound_json_object = JsonObject
+    bound_cursor_to_json = observation_cursor_to_json
+    python_ordered_keys = LocalObservationStore._ordered_dedup_keys  # noqa: SLF001
+    python_eviction_key = LocalObservationStore._select_dedup_eviction_key  # noqa: SLF001
+    python_dedup_sessions = _dedup_sessions
+    python_dedup_digest = _dedup_digest
+    python_pairing_key = _pairing_key
+    python_orphan_scope_key = _orphan_scope_key
+    python_unpaired_notice_lane = _unpaired_notice_lane
+    python_code_mode_cell_key = _code_mode_cell_key
+    python_evicted_open_call_key = _evicted_open_call_key
+    python_capture_reservation_key = _capture_reservation_key
+
+    def digest_intact() -> bool:
+        return canonical_digest is bound_digest and JsonObject is bound_json_object
+
+    def flat_digest(items: tuple[tuple[str, object], ...]) -> str | None:
+        return cast(str | None, native_flat_digest(items, bound_json_object))
+
+    def native_pairing_key(
+        *,
+        source: ObservationSource,
+        session_commitment: str,
+        source_generation: int,
+        correlation_id: str,
+    ) -> str:
+        if digest_intact():
+            digest = flat_digest(
+                (
+                    ("kind", "observation-pairing"),
+                    ("source", source.value),
+                    ("session_commitment", session_commitment),
+                    ("source_generation", source_generation),
+                    ("correlation_id", correlation_id),
+                )
+            )
+            if digest is not None:
+                return digest
+        return python_pairing_key(
+            source=source,
+            session_commitment=session_commitment,
+            source_generation=source_generation,
+            correlation_id=correlation_id,
+        )
+
+    def native_orphan_scope_key(
+        *,
+        source: ObservationSource,
+        session_commitment: str,
+        source_generation: int,
+        source_identity: str,
+    ) -> str:
+        if digest_intact():
+            digest = flat_digest(
+                (
+                    ("kind", "observation-orphan"),
+                    ("source", source.value),
+                    ("session_commitment", session_commitment),
+                    ("source_generation", source_generation),
+                    ("source_identity", source_identity),
+                )
+            )
+            if digest is not None:
+                return digest
+        return python_orphan_scope_key(
+            source=source,
+            session_commitment=session_commitment,
+            source_generation=source_generation,
+            source_identity=source_identity,
+        )
+
+    def native_unpaired_notice_lane(
+        *, source: ObservationSource, session_commitment: str, source_generation: int
+    ) -> str:
+        if digest_intact():
+            digest = flat_digest(
+                (
+                    ("kind", "observation-orphan-scope"),
+                    ("source", source.value),
+                    ("session_commitment", session_commitment),
+                    ("source_generation", source_generation),
+                )
+            )
+            if digest is not None:
+                return digest
+        return python_unpaired_notice_lane(
+            source=source,
+            session_commitment=session_commitment,
+            source_generation=source_generation,
+        )
+
+    def native_code_mode_cell_key(session_commitment: str, call_id: str) -> str:
+        if digest_intact():
+            digest = flat_digest(
+                (
+                    ("kind", "codex-code-mode-cell"),
+                    ("session_commitment", session_commitment),
+                    ("call_id", call_id),
+                )
+            )
+            if digest is not None:
+                return digest
+        return python_code_mode_cell_key(session_commitment, call_id)
+
+    def native_evicted_open_call_key(session_commitment: str, call_id: str) -> str:
+        if digest_intact():
+            digest = flat_digest(
+                (
+                    ("kind", "codex-evicted-open-call"),
+                    ("session_commitment", session_commitment),
+                    ("call_id", call_id),
+                )
+            )
+            if digest is not None:
+                return digest
+        return python_evicted_open_call_key(session_commitment, call_id)
+
+    def native_capture_reservation_key(ticket_id: str, task_id: str) -> str:
+        if digest_intact():
+            digest = flat_digest((("task_id", task_id), ("ticket_id", ticket_id)))
+            if digest is not None:
+                return digest
+        return python_capture_reservation_key(ticket_id, task_id)
+
+    def native_dedup_digest_fn(workspace: str, envelope: ObservationEnvelope) -> str:
+        if digest_intact() and observation_cursor_to_json is bound_cursor_to_json:
+            digest = cast(str | None, native_dedup_digest(workspace, envelope))
+            if digest is not None:
+                return digest
+        return python_dedup_digest(workspace, envelope)
+
+    def native_ordered_dedup_keys(state: _WorkspaceState) -> list[str]:
+        ordered = native_ordered_keys(state.dedup_order or [], state.dedup)
+        if ordered is None:
+            return python_ordered_keys(state)
+        return cast(list[str], ordered)
+
+    def native_select_dedup_eviction_key(state: _WorkspaceState) -> str | None:
+        # The reference reaches the ring order through the class attribute; a replaced
+        # ``_ordered_dedup_keys`` is an observation point the fused twin cannot honor.
+        if LocalObservationStore._ordered_dedup_keys is native_ordered_dedup_keys:  # noqa: SLF001
+            handled, key = native_eviction_key(
+                state.dedup_order or [], state.dedup, state.dedup_lanes
+            )
+            if handled:
+                return cast(str | None, key)
+        return python_eviction_key(state)
+
+    def native_dedup_sessions_fn(
+        dedup_lanes: Mapping[str, str], dedup_order: list[str]
+    ) -> tuple[str | None, ...]:
+        sessions = native_dedup_sessions(dedup_lanes, dedup_order)
+        if sessions is None:
+            return python_dedup_sessions(dedup_lanes, dedup_order)
+        return cast(tuple[str | None, ...], sessions)
+
+    class _NativeEnvelopeCodec(_EnvelopeCodec):
+        """The codec with its identity memos held natively (identical LRU behavior)."""
+
+        def __init__(self, capacity: int) -> None:
+            super().__init__(capacity)
+            self._fragments = memo_type(capacity)
+            dedup_memo = memo_type(capacity)
+            facts_memo = memo_type(capacity, lru=False)
+            self.pressure_facts = facts_memo.bind(_pressure_facts_of)  # type: ignore[method-assign]
+            self.dedup_key = dedup_memo.bind_tagged(_dedup_digest_of)  # type: ignore[method-assign]
+
+        def fragment(self, item: object, build: Callable[[], JsonValue]) -> CanonicalFragment:
+            cached = self._fragments.get(item)
+            if cached is not None:
+                return cast(CanonicalFragment, cached)
+            fragment = canonical_fragment(build())
+            self._fragments.put(item, fragment)
+            return fragment
+
+    def _pressure_facts_of(envelope: ObservationEnvelope) -> tuple[int, bool]:
+        size = _envelope_fragment(envelope).byte_length
+        return size, _outbox_row_is_protected(envelope)
+
+    def _dedup_digest_of(workspace: str, envelope: ObservationEnvelope) -> str:
+        return _dedup_digest(workspace, envelope)
+
+    def _build_envelope_fragment(envelope: ObservationEnvelope) -> CanonicalFragment:
+        return canonical_fragment(observation_envelope_to_json(envelope))
+
+    def _build_outbox_row_fragment(row: ObservationOutboxRow) -> CanonicalFragment:
+        return canonical_fragment(_outbox_row_to_spliced_json(row))
+
+    def _build_quarantine_entry_fragment(
+        entry: tuple[str, ObservationEnvelope, str, Timestamp],
+    ) -> CanonicalFragment:
+        return canonical_fragment(
+            cast(
+                JsonValue,
+                {
+                    "codex_session_id": entry[0],
+                    "envelope": _envelope_fragment(entry[1]),
+                    "reason": entry[2],
+                    "quarantined_at": entry[3].wire,
+                },
+            )
+        )
+
+    codec = _NativeEnvelopeCodec(_CODEC_MEMO_ENTRIES)
+    # One shared LRU over envelopes, outbox rows, and quarantine entries, like the reference.
+    envelope_fragment = codec._fragments.bind(_build_envelope_fragment)  # noqa: SLF001
+    outbox_row_fragment = codec._fragments.bind(_build_outbox_row_fragment)  # noqa: SLF001
+    quarantine_entry_fragment = codec._fragments.bind(_build_quarantine_entry_fragment)  # noqa: SLF001
+
+    LocalObservationStore._ordered_dedup_keys = staticmethod(native_ordered_dedup_keys)  # noqa: SLF001  # type: ignore[method-assign]
+    LocalObservationStore._select_dedup_eviction_key = staticmethod(  # noqa: SLF001  # type: ignore[method-assign]
+        native_select_dedup_eviction_key
+    )
+    globals().update(
+        _CODEC=codec,
+        _envelope_fragment=envelope_fragment,
+        _outbox_row_fragment=outbox_row_fragment,
+        _quarantine_entry_fragment=quarantine_entry_fragment,
+        _envelope_fragments=envelope_fragment.many,
+        _outbox_row_fragments=outbox_row_fragment.many,
+        _quarantine_entry_fragments=quarantine_entry_fragment.many,
+        _dedup_sessions=native_dedup_sessions_fn,
+        _dedup_digest=native_dedup_digest_fn,
+        _pairing_key=native_pairing_key,
+        _orphan_scope_key=native_orphan_scope_key,
+        _unpaired_notice_lane=native_unpaired_notice_lane,
+        _code_mode_cell_key=native_code_mode_cell_key,
+        _evicted_open_call_key=native_evicted_open_call_key,
+        _capture_reservation_key=native_capture_reservation_key,
+    )
+
+
+_bind_native()
