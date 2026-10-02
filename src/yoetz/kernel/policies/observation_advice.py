@@ -1055,7 +1055,9 @@ def _bind_native() -> None:
                     FindingKind.FAILED_WORK_OMITTED,
                     "failed_command_unresolved",
                     "resolve_failed_command",
-                    (identity,),
+                    # The scan hands the envelope's identity through unchecked, so the reference
+                    # ``_candidate`` orders it (and refuses a non-ASCII one) exactly as it does.
+                    [identity],
                     f"failed:{cause_digest.removeprefix('sha256:')}",
                 )
             )

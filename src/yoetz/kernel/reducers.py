@@ -1848,7 +1848,6 @@ def _bind_native() -> None:
         "reducers_index_invariants",
         "reducers_secondary_effects",
         "reducers_missing_gaps",
-        "reducers_identical_prefix",
     )
     if resolved is None:
         return
@@ -1858,15 +1857,11 @@ def _bind_native() -> None:
         native_index_invariants,
         native_secondary_effects,
         native_missing_gaps,
-        native_identical_prefix,
     ) = resolved
-    python_build_replay_index = build_replay_index
-    python_replay_with_index = replay_with_index
-    # One entry each: the last accepted prefix indexed or replayed, with its result. Records are
-    # frozen and both folds are pure functions of the record objects, so a later prefix that
-    # starts with the identical objects continues from the retained result instead of genesis.
-    built: list[tuple[tuple[LedgerRecord, ...], ReplayIndex] | None] = [None]
-    replayed: list[tuple[tuple[LedgerRecord, ...], ProjectionState, ReplayIndex] | None] = [None]
+    # No twin keeps anything between calls: records carry decrypted payload plaintext, and a
+    # module-level reuse cache would keep the last ledger alive after every caller (and any vault
+    # lock or redaction) dropped it. Neither the records nor the projection can be weakly
+    # referenced, so reuse across calls belongs to callers that own a retention policy.
     python_carry_trusted = _carry_trusted
     python_carry_id_set = _carry_id_set
     python_index_invariants = _index_invariants
@@ -1917,18 +1912,18 @@ def _bind_native() -> None:
         observation_source: frozenset[EventId],
         observation_trusted: frozenset[EventId] | None,
     ) -> frozenset[EventId]:
-        # Every refusal here is the same ``projection_corrupt``, so copying the observation ids
-        # before the remaining checks cannot change which error the reference reports.
-        observation_findings = ReplayIndex._copy_observation_findings(  # pyright: ignore[reportPrivateUsage]
-            observation_source, observation_trusted
-        )
+        # The twin copies the observation ids through the reference's own copier only once every
+        # earlier invariant holds, as the reference does: a refusal before that point is a bare
+        # ``projection_corrupt`` and never runs the event-id validator.
         verdict = native_index_invariants(
             frontier,
             payloads,
             evidence,
             roots,
             observed_event_ids,
-            observation_findings,
+            ReplayIndex._copy_observation_findings,  # pyright: ignore[reportPrivateUsage]
+            observation_source,
+            observation_trusted,
             EvidenceObjectSource,
         )
         if verdict is None:
@@ -1941,9 +1936,9 @@ def _bind_native() -> None:
                 observation_source,
                 observation_trusted,
             )
-        if not verdict:
+        if verdict is False:
             raise _corrupt()
-        return observation_findings
+        return cast(frozenset[EventId], verdict)
 
     def native_secondary_effects_twin(
         plans: dict[int, PlanProjectionRecord],
@@ -2018,43 +2013,7 @@ def _bind_native() -> None:
             coordination_dispositions,
         )
 
-    def native_build_replay_index(events: tuple[LedgerRecord, ...]) -> ReplayIndex:
-        """Build an immutable reverse index from one exact accepted prefix in linear time."""
-
-        if type(events) is not tuple:
-            raise _corrupt()
-        cached = built[0]
-        if cached is None or not native_identical_prefix(cached[0], events):
-            index = python_build_replay_index(events)
-        elif len(cached[0]) == len(events):
-            index = cached[1]
-        else:
-            index = _build_replay_index_from(events, (len(cached[0]), cached[1]))
-        built[0] = (events, index)
-        return index
-
-    def native_replay_with_index(
-        events: Iterable[LedgerRecord],
-    ) -> tuple[ProjectionState, ReplayIndex]:
-        """Fold an accepted prefix and retain the immutable reverse index used by the fold."""
-
-        if type(events) is not tuple:
-            return python_replay_with_index(events)
-        records = cast(tuple[LedgerRecord, ...], events)
-        cached = replayed[0]
-        if cached is None or not native_identical_prefix(cached[0], records):
-            state, index = python_replay_with_index(records)
-        else:
-            state, index = cached[1], cached[2]
-            for event in records[len(cached[0]) :]:
-                index = extend_replay_index(index, event)
-                state = reduce_event(state, event, index)
-        replayed[0] = (records, state, index)
-        return state, index
-
     globals().update(
-        build_replay_index=native_build_replay_index,
-        replay_with_index=native_replay_with_index,
         _carry_trusted=native_carry_trusted,
         _carry_id_set=native_carry_id_set_twin,
         _index_invariants=native_index_invariants_twin,

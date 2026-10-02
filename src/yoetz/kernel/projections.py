@@ -1868,12 +1868,6 @@ def _bind_native() -> None:
     native_trusted, native_positional = resolved
     python_carry_trusted = _carry_trusted
     python_carry_positional = _carry_positional
-    python_projection_digest = projection_digest
-    python_projection_snapshot = projection_snapshot
-    python_record_snapshot = _record_snapshot
-    python_encode_payload = encode_payload
-    bound_canonical_digest = canonical_digest
-    from yoetz.protocol import canonical as canonical_module
 
     def native_carry_trusted(
         source: Mapping[Any, object],
@@ -1897,45 +1891,13 @@ def _bind_native() -> None:
                 return cast(dict[object, object], carried)
         return python_carry_positional(source, trusted, admit)
 
-    # Records are frozen, so a record object's snapshot never changes. Each digest keeps the
-    # canonical fragment of every record it rendered, keyed by identity (the entry holds the
-    # record, so the identity cannot be reused while cached); the next digest splices those
-    # fragments for the records it carries unchanged. Canonical encoding is compositional, so
-    # the digest is byte-identical to encoding the plain snapshot.
-    fragments: list[dict[int, tuple[object, object]]] = [{}]
-
-    def native_projection_digest(state: ProjectionState) -> str:
-        """Digest the exact canonical projection snapshot."""
-
-        if (
-            projection_snapshot is not python_projection_snapshot
-            or _record_snapshot is not python_record_snapshot
-            or encode_payload is not python_encode_payload
-            or canonical_digest is not bound_canonical_digest
-        ):
-            return python_projection_digest(state)
-        previous = fragments[0]
-        current: dict[int, tuple[object, object]] = {}
-        make_fragment = canonical_module.canonical_fragment
-
-        def record_value(record: _ProjectionRecordLike) -> JsonValue:
-            identity = id(record)
-            entry = previous.get(identity)
-            if entry is not None and entry[0] is record:
-                fragment = entry[1]
-            else:
-                fragment = make_fragment(python_record_snapshot(record))
-            current[identity] = (record, fragment)
-            return cast(JsonValue, fragment)
-
-        snapshot = _projection_snapshot(state, record_value)
-        fragments[0] = current
-        return bound_canonical_digest(snapshot)
-
+    # ``projection_digest`` keeps no per-record fragment cache between calls: the fragments are
+    # the projection's canonical text (decrypted payload plaintext included) and a module-level
+    # cache would outlive every caller's reference to the projection. Records and projections
+    # cannot be weakly referenced, so the digest re-encodes (through the native canonical encoder).
     globals().update(
         _carry_trusted=native_carry_trusted,
         _carry_positional=native_carry_positional,
-        projection_digest=native_projection_digest,
     )
 
 
