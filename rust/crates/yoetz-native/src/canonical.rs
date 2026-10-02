@@ -220,11 +220,11 @@ impl<'py> Encoder<'py> {
     }
 }
 
+/// A mapping's validated keys and their member values, in insertion order.
+type MappingMembers<'py> = (Vec<Bound<'py, PyString>>, Vec<Bound<'py, PyAny>>);
+
 /// Collect a mapping's members, validating every key in insertion order first.
-fn mapping_members<'py>(
-    py: Python<'py>,
-    value: &Bound<'py, PyAny>,
-) -> PyResult<(Vec<Bound<'py, PyString>>, Vec<Bound<'py, PyAny>>)> {
+fn mapping_members<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResult<MappingMembers<'py>> {
     let capacity = if is_exact(value, ffi::PyDict_CheckExact) {
         unsafe { value.cast_unchecked::<PyDict>() }.len()
     } else {

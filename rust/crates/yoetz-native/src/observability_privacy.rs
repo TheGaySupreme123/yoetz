@@ -34,11 +34,12 @@ pub fn bind_privacy_scan(
     SEVERITY_KEY_MATERIAL.set(key_material.unbind());
 }
 
+/// Marker bytes and `(regex source, flags)` pairs.
+type ScanProfile<'py> = (Vec<Bound<'py, PyBytes>>, Vec<(Bound<'py, PyBytes>, u32)>);
+
 /// The marker bytes and `(regex source, flags)` pairs the native scanner implements.
 #[pyfunction]
-pub fn privacy_scan_profile<'py>(
-    py: Python<'py>,
-) -> (Vec<Bound<'py, PyBytes>>, Vec<(Bound<'py, PyBytes>, u32)>) {
+pub fn privacy_scan_profile<'py>(py: Python<'py>) -> ScanProfile<'py> {
     let markers = PRIVATE_KEY_MARKERS.iter().map(|marker| PyBytes::new(py, marker)).collect();
     let patterns = PATTERN_SOURCES
         .iter()
