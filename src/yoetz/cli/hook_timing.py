@@ -832,3 +832,148 @@ def hook_pass_timing_text(summary: Mapping[str, JsonValue]) -> str:
         f"in-process from console entry since {summary.get('since')}; "
         "percentiles are histogram bucket bounds; " + "; ".join(parts) + dropped_note
     )
+
+
+# The optional Rust accelerator (``yoetz._native``) carries byte-identical twins of the stored
+# document's decode + validation and of the fold that re-encodes it. With them the writer hands
+# the stored bytes straight to the fold (bytes in, bytes out) instead of building and
+# re-serializing the document in Python. Every wrapper runs the Python reference when a
+# function the reference calls through a module global has been replaced, or when the twin
+# answers ``NotImplemented`` (bytes ``json.loads`` decodes differently, such as UTF-16 or a
+# duplicate key). Limits are read from the module at call time.
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions("hook_timing_fold", "hook_timing_document")
+    if resolved is None:
+        return
+    native_fold, native_document = resolved
+    stdlib_loads = json.loads
+    python_current_document = _current_document
+    python_updated_document = _updated_document
+    references = (
+        _valid_document,
+        _valid_entry,
+        _valid_histogram,
+        _is_count,
+        _is_moment,
+        _bucket,
+        _bounded,
+        _observe,
+        _empty_histogram,
+    )
+
+    def native_applies() -> bool:
+        return json.loads is stdlib_loads and references == (
+            _valid_document,
+            _valid_entry,
+            _valid_histogram,
+            _is_count,
+            _is_moment,
+            _bucket,
+            _bounded,
+            _observe,
+            _empty_histogram,
+        )
+
+    def descriptor_bytes(descriptor: int) -> bytes | None:
+        facts = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(facts.st_mode)
+            or facts.st_uid != os.geteuid()
+            or facts.st_mode & 0o077
+            or facts.st_size > _MAX_FILE_BYTES
+        ):
+            return None
+        raw = os.pread(descriptor, _MAX_FILE_BYTES + 1, 0)
+        return raw or None
+
+    def python_document(raw: bytes) -> dict[str, object] | None:
+        try:
+            parsed: object = json.loads(raw)
+        except UnicodeError, ValueError:
+            return None
+        return _valid_document(parsed)
+
+    def native_read_descriptor(descriptor: int) -> dict[str, object] | None:
+        """Return the validated document behind an open owner-only descriptor, or None."""
+
+        raw = descriptor_bytes(descriptor)
+        if raw is None:
+            return None
+        if native_applies():
+            document = native_document(raw, _MAX_ENTRIES)
+            if document is not NotImplemented:
+                return cast(dict[str, object] | None, document)
+        return python_document(raw)
+
+    def native_current_document(directory: Path) -> tuple[bool, object]:
+        """Return whether the aggregate may be replaced, and its stored bytes (None restarts)."""
+
+        if (
+            _updated_document is not native_updated_document
+            or _read_descriptor is not native_read_descriptor
+        ):
+            return python_current_document(directory)
+        try:
+            descriptor = os.open(directory / _FILE_NAME, _open_flags(write=False))
+        except FileNotFoundError:
+            return True, None
+        except OSError:
+            return False, None
+        try:
+            facts = os.fstat(descriptor)
+            if not stat.S_ISREG(facts.st_mode) or facts.st_uid != os.geteuid():
+                return False, None
+            os.fchmod(descriptor, 0o600)
+            # The fold decodes and validates these bytes itself.
+            return True, descriptor_bytes(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def native_updated_document(
+        document: object,
+        host: str,
+        event_token: str,
+        path: str,
+        outcome: str,
+        sample: int,
+        now_ms: int,
+    ) -> tuple[bytes | None, bool]:
+        """Fold one sample into *document* and encode it; the caller holds the lock."""
+
+        if document is None or type(document) is bytes:
+            if native_applies():
+                folded = native_fold(
+                    document,
+                    host,
+                    event_token,
+                    path,
+                    outcome,
+                    sample,
+                    now_ms,
+                    _MAX_ENTRIES,
+                    _MAX_FILE_BYTES,
+                )
+                if folded is not NotImplemented:
+                    return cast(tuple[bytes | None, bool], folded)
+            if document is not None:
+                document = python_document(cast(bytes, document))
+        return python_updated_document(
+            cast(dict[str, object] | None, document),
+            host,
+            event_token,
+            path,
+            outcome,
+            sample,
+            now_ms,
+        )
+
+    globals().update(
+        _read_descriptor=native_read_descriptor,
+        _current_document=native_current_document,
+        _updated_document=native_updated_document,
+    )
+
+
+_bind_native()
