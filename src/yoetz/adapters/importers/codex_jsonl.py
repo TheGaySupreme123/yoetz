@@ -1423,3 +1423,38 @@ def sanitize_codex_argv(argv: Sequence[str]) -> SanitizedCodexArgv:
             omissions.add("argv_positional_removed")
         index += 1
     return SanitizedCodexArgv(tuple(output), tuple(sorted(omissions, key=str.encode)))
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions("codex_jsonl_accept_line")
+    if resolved is None:
+        return
+    (accept_line,) = resolved
+    python_parse_json_line = _parse_json_line
+    python_validate_json_tree = _validate_json_tree
+    python_pairs = _pairs
+    python_reject_constant = _reject_constant
+    stdlib_loads = json.loads
+
+    def native_parse_json_line(content: bytes) -> dict[str, object]:
+        # Accept-only: the native decoder returns the object only when ``json.loads`` with
+        # these hooks plus ``_validate_json_tree`` would return exactly that object; every
+        # other line (and any replaced observation point) runs the reference.
+        if (
+            type(content) is bytes
+            and json.loads is stdlib_loads
+            and _validate_json_tree is python_validate_json_tree
+            and _pairs is python_pairs
+            and _reject_constant is python_reject_constant
+        ):
+            parsed = accept_line(content, _MAX_JSON_DEPTH)
+            if parsed is not None:
+                return cast(dict[str, object], parsed)
+        return python_parse_json_line(content)
+
+    globals().update(_parse_json_line=native_parse_json_line)
+
+
+_bind_native()

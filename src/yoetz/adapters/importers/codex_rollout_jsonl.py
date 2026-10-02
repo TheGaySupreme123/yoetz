@@ -376,7 +376,7 @@ def parse_codex_rollout_jsonl_from_offset(
                 stream_gaps.add("unsupported_codex_profile")
             continue
         try:
-            value = _redact_json_tree(_parse_json_line(line.content))
+            value = _parse_redacted_line(line.content)
         except TypeError, ValueError, UnicodeError:
             statuses.append(ImportLineStatus.MALFORMED)
             reason = "malformed_line"
@@ -530,6 +530,12 @@ def _redact_json_tree(value: dict[str, object]) -> dict[str, object]:
     return result
 
 
+def _parse_redacted_line(content: bytes) -> dict[str, object]:
+    """Decode one rollout line and redact it: ``_redact_json_tree(_parse_json_line(...))``."""
+
+    return _redact_json_tree(_parse_json_line(content))
+
+
 def _admit_session_meta(
     value: dict[str, object], profile: CodexCapabilityProfile | None
 ) -> tuple[CodexCapabilityProfile | None, str]:
@@ -596,3 +602,45 @@ def _validate_wrapper(
         if semantic_type not in profile.item_types:
             return ImportLineStatus.UNKNOWN, semantic_type, "unknown_item_type"
     return ImportLineStatus.MAPPED, item_type, None
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions("codex_rollout_accept_redacted_line")
+    if resolved is None:
+        return
+    (accept_redacted_line,) = resolved
+    python_parse_redacted_line = _parse_redacted_line
+    python_parse_json_line = _parse_json_line
+    python_redact_json_tree = _redact_json_tree
+    python_validate_json_tree = _validate_json_tree
+    python_pairs = _pairs
+    python_reject_constant = _reject_constant
+    stdlib_loads = json.loads
+
+    def native_parse_redacted_line(content: bytes) -> dict[str, object]:
+        # Decoding is accept-only: ``None`` means the line does not decode natively, so the
+        # reference runs both steps (and makes every redaction call itself). Once decoded, the
+        # native walk calls the module's current ``redact_sensitive_content`` in the
+        # reference's order and raises the reference's redaction-step errors.
+        if (
+            type(content) is bytes
+            and json.loads is stdlib_loads
+            and _parse_json_line is python_parse_json_line
+            and _redact_json_tree is python_redact_json_tree
+            and _validate_json_tree is python_validate_json_tree
+            and _pairs is python_pairs
+            and _reject_constant is python_reject_constant
+        ):
+            redacted = accept_redacted_line(
+                content, _MAX_JSON_DEPTH, redact_sensitive_content, _validate_json_tree
+            )
+            if redacted is not None:
+                return cast(dict[str, object], redacted)
+        return python_parse_redacted_line(content)
+
+    globals().update(_parse_redacted_line=native_parse_redacted_line)
+
+
+_bind_native()
