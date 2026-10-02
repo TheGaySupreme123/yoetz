@@ -90,6 +90,13 @@ MCP entries, privacy widening, vault state, provider readiness — is enforced b
 and merely transcribed by the interface. The split makes that reviewable, because anything in
 `tui/` that reached past `runtime.py` would be visible as an import.
 
+The optional, experimental `yoetz_native` accelerator under `rust/` speeds up hot loops without
+becoming their authority: the Python definitions stay the reference. A module with native twins
+ends with `_bind_native()`, which binds them through `yoetz/_native.py` only when the accelerator
+is installed and current; the wheel stays pure Python and never depends on it. The unchanged test suite must pass with the accelerator required
+(`YZ_NATIVE=require`) and disabled (`YZ_NATIVE=0`); `rust/README.md` holds the parity rules, the
+ported surface, and the measured speedups.
+
 ## The six operations
 
 `start`, `publish_work`, `check`, `respond`, `status`, `receipt` — identical request and result
