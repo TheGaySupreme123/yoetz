@@ -33,6 +33,8 @@ mod sqlite_observation;
 mod hookcli;
 mod observation_local;
 mod codex_session_stream;
+mod kernel_projections;
+mod kernel_reducers;
 
 #[pymodule]
 fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -61,5 +63,7 @@ fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     hookcli::register(module)?;
     observation_local::register(module)?;
     codex_session_stream::register(module)?;
+    kernel_projections::register(module)?;
+    kernel_reducers::register(module)?;
     Ok(())
 }
