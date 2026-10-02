@@ -11,7 +11,7 @@ use std::hash::{BuildHasherDefault, Hash, Hasher};
 use pyo3::ffi;
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyFrozenSet, PyList, PyString, PyTuple};
+use pyo3::types::{PyBool, PyDict, PyFrozenSet, PyList, PyString, PyTuple};
 
 use crate::kernel_projections::{dict_items, trusted_dict};
 
@@ -143,21 +143,28 @@ fn reducers_carry_id_set<'py>(
     Ok(Some(PyFrozenSet::new(py, members.iter())?))
 }
 
-/// Twin of the checks in `reducers._index_invariants` once the observation-finding ids are
-/// copied: `Some(true)` when every invariant holds, `Some(false)` when the reference raises
-/// `projection_corrupt`, `None` for inputs outside the exact shapes a constructed index holds.
+/// Twin of `reducers._index_invariants`, in the reference's order: the whole-index checks, then
+/// `copy(observation_source, observation_trusted)` (the reference's own copier, whose refusals
+/// propagate unchanged), then membership of every copied id.
+///
+/// Returns `None` (before `copy` has run, so nothing observable happened) for inputs outside the
+/// exact shapes a constructed index holds, `False` when the reference raises a bare
+/// `projection_corrupt`, and otherwise the copied set.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-fn reducers_index_invariants(
-    frontier: &Bound<'_, PyAny>,
-    payloads: &Bound<'_, PyAny>,
-    evidence: &Bound<'_, PyAny>,
-    roots: &Bound<'_, PyAny>,
-    observed: &Bound<'_, PyAny>,
-    observation_findings: &Bound<'_, PyAny>,
-    association_type: &Bound<'_, PyAny>,
-) -> PyResult<Option<bool>> {
+fn reducers_index_invariants<'py>(
+    frontier: &Bound<'py, PyAny>,
+    payloads: &Bound<'py, PyAny>,
+    evidence: &Bound<'py, PyAny>,
+    roots: &Bound<'py, PyAny>,
+    observed: &Bound<'py, PyAny>,
+    copy: &Bound<'py, PyAny>,
+    observation_source: &Bound<'py, PyAny>,
+    observation_trusted: &Bound<'py, PyAny>,
+    association_type: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
     let py = frontier.py();
+    let refused = || Ok(Some(PyBool::new(py, false).to_owned().into_any()));
     let (Some(frontier), Some(payloads), Some(evidence), Some(roots)) = (
         exact_i64(frontier),
         exact_dict(payloads),
@@ -166,9 +173,6 @@ fn reducers_index_invariants(
     ) else {
         return Ok(None);
     };
-    if observation_findings.cast_exact::<PyFrozenSet>().is_err() {
-        return Ok(None);
-    }
     let payload_items = dict_items(payloads);
     let mut accepted: HashSet<StrKey, PassBuild> =
         HashSet::with_capacity_and_hasher(payload_items.len(), PassBuild::default());
@@ -179,7 +183,7 @@ fn reducers_index_invariants(
         accepted.insert(key);
     }
     if payload_items.len() as i64 != frontier || accepted.len() != payload_items.len() {
-        return Ok(Some(false));
+        return refused();
     }
     let evidence_name = intern!(py, "evidence_id");
     let source_name = intern!(py, "source_event_id");
@@ -203,7 +207,7 @@ fn reducers_index_invariants(
                 return Ok(None);
             };
             if !accepted.contains(&source_key) || !seen.insert((evidence_key, source_key)) {
-                return Ok(Some(false));
+                return refused();
             }
             held.push(evidence_id);
             held.push(source_event_id);
@@ -214,25 +218,47 @@ fn reducers_index_invariants(
             return Ok(None);
         };
         if !accepted.contains(&key) {
-            return Ok(Some(false));
+            return refused();
         }
     }
     if observed.cast_exact::<PyFrozenSet>().is_err() {
-        return Ok(Some(false));
+        return refused();
     }
-    for set in [observed, observation_findings] {
-        for item in set.try_iter()? {
-            let item = item?;
-            let Some(key) = StrKey::of(&item) else {
-                return Ok(None);
-            };
-            if !accepted.contains(&key) {
-                return Ok(Some(false));
-            }
+    for item in observed.try_iter()? {
+        let item = item?;
+        let Some(key) = StrKey::of(&item) else {
+            return Ok(None);
+        };
+        if !accepted.contains(&key) {
+            return refused();
         }
     }
     drop(held);
-    Ok(Some(true))
+    // From here on the reference's copier has run, so every outcome is decided here: an id that
+    // is not an exact `str` takes the reference's own `in` over the accepted ids.
+    let copied = copy.call1((observation_source, observation_trusted))?;
+    let mut accepted_set: Option<Bound<'py, PyFrozenSet>> = None;
+    for item in copied.try_iter()? {
+        let item = item?;
+        let known = match StrKey::of(&item) {
+            Some(key) => accepted.contains(&key),
+            None => {
+                let set = match &accepted_set {
+                    Some(set) => set.clone(),
+                    None => {
+                        let set = PyFrozenSet::new(py, payload_items.iter().map(|(_, v)| v))?;
+                        accepted_set = Some(set.clone());
+                        set
+                    }
+                };
+                set.as_any().contains(&item)?
+            }
+        };
+        if !known {
+            return refused();
+        }
+    }
+    Ok(Some(copied))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -932,29 +958,7 @@ fn reducers_missing_gaps<'py>(
     Ok(Some(PyTuple::new(py, gaps.markers.into_values())?))
 }
 
-/// Whether exact tuple *events* starts with the identical objects of exact tuple *prefix*.
-#[pyfunction]
-fn reducers_identical_prefix(prefix: &Bound<'_, PyAny>, events: &Bound<'_, PyAny>) -> bool {
-    let (Ok(prefix), Ok(events)) = (
-        prefix.cast_exact::<PyTuple>(),
-        events.cast_exact::<PyTuple>(),
-    ) else {
-        return false;
-    };
-    if prefix.as_ptr() == events.as_ptr() {
-        return true;
-    }
-    if prefix.len() > events.len() {
-        return false;
-    }
-    (0..prefix.len()).all(|index| unsafe {
-        ffi::PyTuple_GET_ITEM(prefix.as_ptr(), index as ffi::Py_ssize_t)
-            == ffi::PyTuple_GET_ITEM(events.as_ptr(), index as ffi::Py_ssize_t)
-    })
-}
-
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add_function(wrap_pyfunction!(reducers_identical_prefix, module)?)?;
     module.add_function(wrap_pyfunction!(reducers_carry_id_set, module)?)?;
     module.add_function(wrap_pyfunction!(reducers_index_invariants, module)?)?;
     module.add_function(wrap_pyfunction!(reducers_secondary_effects, module)?)?;
