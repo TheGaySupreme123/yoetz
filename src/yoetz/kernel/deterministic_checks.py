@@ -2457,10 +2457,49 @@ def _bind_native() -> None:
     python_ref_coverages = _ref_coverages
     python_fold_case_coverages = _fold_case_coverages
     python_fold_ref_coverages = _fold_ref_coverages
+    python_public_ref = _public_ref
+    # The twins validate ids through ``values.validate_id`` directly, where the reference reaches
+    # it through this module's typed helpers and ``values._validated_id``. When any of those is
+    # not the object bound here (a test patch, a rebinding), the reference runs instead so the
+    # replacement is called exactly as the reference calls it.
+    bound_event_id = event_id
+    bound_obligation_id = obligation_id
+    bound_claim_id = claim_id
+    bound_action_id = action_id
+    bound_result_id = result_id
+    bound_evidence_id = evidence_id
+    bound_finding_id = finding_id
+    bound_validated_id = values_module._validated_id  # pyright: ignore[reportPrivateUsage]
+    bound_validate_id = values_module.validate_id
+
+    def ids_bound() -> bool:
+        return (
+            event_id is bound_event_id
+            and obligation_id is bound_obligation_id
+            and claim_id is bound_claim_id
+            and action_id is bound_action_id
+            and result_id is bound_result_id
+            and evidence_id is bound_evidence_id
+            and finding_id is bound_finding_id
+            and values_module._validated_id is bound_validated_id  # pyright: ignore[reportPrivateUsage]
+            and values_module.validate_id is bound_validate_id
+        )
 
     def basis_ref(value: object) -> FindingBasisRef:
+        if not ids_bound():
+            return python_basis_ref(value)
         ref = native_basis_ref(value)
         return python_basis_ref(value) if ref is None else ref
+
+    def refs_bound() -> bool:
+        # ``_validated_ref_tuple`` and ``_case_ref_coverage`` reach ``_basis_ref`` (and the former
+        # ``_public_ref``/``_sorted_unique``) through this module's globals.
+        return (
+            _basis_ref is basis_ref
+            and _public_ref is python_public_ref
+            and _sorted_unique is sorted_unique
+            and ids_bound()
+        )
 
     def validated_ref_tuple(
         value: object,
@@ -2468,7 +2507,11 @@ def _bind_native() -> None:
         public_only: bool = False,
         allow_empty: bool = False,
     ) -> tuple[FindingBasisRef, ...] | tuple[PublicSubjectRef, ...]:
-        refs = native_validated_ref_tuple(value, public_only, allow_empty, MAX_REF_LIST)
+        refs = (
+            native_validated_ref_tuple(value, public_only, allow_empty, MAX_REF_LIST)
+            if refs_bound()
+            else None
+        )
         if refs is None:
             return python_validated_ref_tuple(
                 value, public_only=public_only, allow_empty=allow_empty
@@ -2489,7 +2532,11 @@ def _bind_native() -> None:
         allowed_ids: frozenset[FindingBasisRef],
         coverage_by_ref: Mapping[FindingBasisRef, Coverage],
     ) -> tuple[frozenset[FindingBasisRef], dict[FindingBasisRef, Coverage]]:
-        validated = native_case_ref_coverage(allowed_ids, coverage_by_ref, Coverage)
+        validated = (
+            native_case_ref_coverage(allowed_ids, coverage_by_ref, Coverage)
+            if refs_bound()
+            else None
+        )
         if validated is None:
             return python_case_ref_coverage(allowed_ids, coverage_by_ref)
         return validated
@@ -2516,7 +2563,11 @@ def _bind_native() -> None:
             unavailable_object_by_evidence,
             gap_codes_by_root,
         )
-        coverage = native_ref_coverages(*arguments, _weaken_ref_coverage, UnknownEvent)
+        coverage = (
+            native_ref_coverages(*arguments, _weaken_ref_coverage, UnknownEvent)
+            if ids_bound()
+            else None
+        )
         return python_ref_coverages(*arguments) if coverage is None else coverage
 
     def fold_case_coverages(
