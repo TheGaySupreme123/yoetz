@@ -1737,3 +1737,31 @@ class BundleUpgradeCoordinator:
         except Exception as exc:
             raise BundleUpgradeError(BundleUpgradeReason.HOLDER_CONFLICT, True) from exc
         return BundleUpgradeReport(tuple(migrated), tuple(already_current))
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions(
+        "bundle_bind_digests",
+        "bundle_cell_value",
+        "bundle_sorted_row_values",
+        "bundle_stream_rows_digest",
+    )
+    if resolved is None:
+        return
+    bind_digests, native_cell_value, native_sorted_row_values, native_stream_rows_digest = resolved
+    # The digest twins encode rows themselves, so they run only while this module's
+    # ``canonical_encode`` and ``_cell_value`` globals are still these originals; a patched
+    # dependency sends the call to the Python reference instead.
+    bind_digests(
+        globals(), canonical_encode, native_cell_value, _stream_rows_digest, _sorted_row_values
+    )
+    globals().update(
+        _cell_value=native_cell_value,
+        _sorted_row_values=native_sorted_row_values,
+        _stream_rows_digest=native_stream_rows_digest,
+    )
+
+
+_bind_native()

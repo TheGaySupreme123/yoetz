@@ -99,5 +99,6 @@ pub fn plain_wire_value<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyRe
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(bind_plain_wire_value, module)?)?;
     module.add_function(wrap_pyfunction!(plain_wire_value, module)?)?;
+    crate::control_pipeline::register(module)?;
     Ok(())
 }
