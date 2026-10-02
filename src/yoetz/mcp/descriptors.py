@@ -2197,6 +2197,184 @@ def _lint_compact_initialize_instructions() -> None:
         raise RuntimeError("compact_instructions_host_invalid")
 
 
+def _bind_native() -> None:
+    """Bind the native bundling twins; it runs before the import-time lints build any schema."""
+
+    from yoetz._native import native_functions
+
+    resolved = native_functions(
+        "mcp_thaw_json",
+        "mcp_rewrite_schema_refs",
+        "mcp_external_schema_documents",
+        "mcp_legacy_compatible_output_arrays",
+        "mcp_flatten_frontier_conditions",
+        "mcp_inline_local_defs",
+        "mcp_referenced_top_level_defs",
+        "mcp_presentation_description_strings",
+    )
+    if resolved is None:
+        return
+    (
+        native_thaw,
+        native_rewrite,
+        native_external,
+        native_legacy,
+        native_flatten,
+        native_inline,
+        native_referenced,
+        native_descriptions,
+    ) = resolved
+    python_mutable_json = _mutable_json
+    python_rewrite_schema_refs = _rewrite_schema_refs
+    python_legacy_compatible_output_arrays = _legacy_compatible_output_arrays
+    python_flatten_frontier_conditions = _flatten_frontier_conditions
+    python_inline_nested_local_defs = _inline_nested_local_defs
+    python_inline_presentation_refs = _inline_presentation_refs
+    python_referenced_top_level_defs = _referenced_top_level_defs
+    python_presentation_description_strings = _presentation_description_strings
+    original_bundle_key = _bundle_key
+    # Whole-call twins answer this when only the reference, run from the start, can decide.
+    undecided = object()
+
+    def native_mutable_json(value: JsonValue) -> JsonValue:
+        return cast(JsonValue, native_thaw(value, python_mutable_json))
+
+    def rewrite_fallback(
+        value: JsonValue, current_uri: str, root_uri: str, inline_uris: frozenset[str]
+    ) -> JsonValue:
+        return python_rewrite_schema_refs(
+            value, current_uri=current_uri, root_uri=root_uri, inline_uris=inline_uris
+        )
+
+    def inline_document(uri: str) -> dict[str, JsonValue]:
+        # The reference's inline branch, reading the catalog and the stripper at call time.
+        catalog = load_schema_catalog()
+        document = catalog.by_id.get(uri)
+        if document is None:
+            raise RuntimeError("mcp_schema_reference_unknown")
+        return _strip_schema_metadata(document.json_schema)
+
+    def native_rewrite_schema_refs(
+        value: JsonValue,
+        *,
+        current_uri: str,
+        root_uri: str,
+        inline_uris: frozenset[str] = frozenset(),
+    ) -> JsonValue:
+        if (
+            _bundle_key is not original_bundle_key
+            or type(current_uri) is not str
+            or type(root_uri) is not str
+            or type(SCHEMA_NAMESPACE) is not str
+        ):
+            return rewrite_fallback(value, current_uri, root_uri, inline_uris)
+        return cast(
+            JsonValue,
+            native_rewrite(
+                value,
+                current_uri,
+                root_uri,
+                inline_uris,
+                SCHEMA_NAMESPACE,
+                inline_document,
+                rewrite_fallback,
+            ),
+        )
+
+    def native_external_schema_documents(
+        value: JsonValue, *, project_ordinary_event_draft: bool = False
+    ) -> dict[str, Mapping[str, JsonValue]]:
+        def resolve(uri: str) -> Mapping[str, JsonValue]:
+            return _resolved_external_document(
+                uri, project_ordinary_event_draft=project_ordinary_event_draft
+            )
+
+        return cast(
+            dict[str, Mapping[str, JsonValue]],
+            native_external(
+                value,
+                SCHEMA_NAMESPACE,
+                _OPAQUE_EVENT_DRAFT_SCHEMA_ID,
+                bool(project_ordinary_event_draft),
+                resolve,
+            ),
+        )
+
+    def native_legacy_compatible_output_arrays(candidate: JsonValue) -> JsonValue:
+        return cast(JsonValue, native_legacy(candidate, python_legacy_compatible_output_arrays))
+
+    def thaw_is_native() -> bool:
+        # The twins below thaw natively where the reference calls the module's ``_mutable_json``.
+        return _mutable_json is native_mutable_json
+
+    def native_flatten_frontier_conditions(candidate: JsonValue) -> JsonValue:
+        if not thaw_is_native():
+            return python_flatten_frontier_conditions(candidate)
+        return cast(
+            JsonValue,
+            native_flatten(candidate, python_flatten_frontier_conditions, python_mutable_json),
+        )
+
+    def native_inline_nested_local_defs(parent_key: str, body: JsonValue) -> JsonValue:
+        if not isinstance(body, Mapping) or not thaw_is_native():
+            return python_inline_nested_local_defs(parent_key, body)
+        source = cast(Mapping[str, JsonValue], body)
+        nested = source.get("$defs")
+        if not isinstance(nested, Mapping):
+            return _mutable_json(source)
+        prefix = f"#/$defs/{parent_key}/$defs/"
+        resolved = native_inline(source, nested, prefix, None, python_mutable_json, undecided)
+        if resolved is undecided:
+            return python_inline_nested_local_defs(parent_key, body)
+        return cast(JsonValue, resolved)
+
+    def native_inline_presentation_refs(schema: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        raw_definitions = schema.get("$defs")
+        if not isinstance(raw_definitions, Mapping) or not thaw_is_native():
+            return python_inline_presentation_refs(schema)
+        definitions = cast(Mapping[str, JsonValue], raw_definitions)
+        retained = _event_payload_definitions(definitions)
+        resolved = native_inline(
+            schema, definitions, None, retained, python_mutable_json, undecided
+        )
+        if resolved is undecided:
+            return python_inline_presentation_refs(schema)
+        if not isinstance(resolved, dict):
+            raise RuntimeError("mcp_schema_invalid")
+        result = cast(dict[str, JsonValue], resolved)
+        if retained:
+            result["$defs"] = {
+                key: _mutable_json(definitions[key]) for key in definitions if key in retained
+            }
+        return result
+
+    def native_referenced_top_level_defs(value: JsonValue) -> set[str]:
+        found = native_referenced(value, undecided)
+        if found is undecided:
+            return python_referenced_top_level_defs(value)
+        return cast(set[str], found)
+
+    def native_presentation_description_strings(schema: Mapping[str, JsonValue]) -> tuple[str, ...]:
+        found = native_descriptions(schema, undecided)
+        if found is undecided:
+            return python_presentation_description_strings(schema)
+        return cast(tuple[str, ...], found)
+
+    globals().update(
+        _mutable_json=native_mutable_json,
+        _rewrite_schema_refs=native_rewrite_schema_refs,
+        _external_schema_documents=native_external_schema_documents,
+        _legacy_compatible_output_arrays=native_legacy_compatible_output_arrays,
+        _flatten_frontier_conditions=native_flatten_frontier_conditions,
+        _inline_nested_local_defs=native_inline_nested_local_defs,
+        _inline_presentation_refs=native_inline_presentation_refs,
+        _referenced_top_level_defs=native_referenced_top_level_defs,
+        _presentation_description_strings=native_presentation_description_strings,
+    )
+
+
+_bind_native()
+
 _lint_descriptor_sets()
 _lint_claude_code_instructions()
 _lint_compact_initialize_instructions()

@@ -28,6 +28,7 @@ from yoetz.protocol.canonical import (
     CanonicalFragment,
     JsonValue,
     canonical_encode,
+    canonical_round_trip_proven,
     strict_json_parse,
 )
 from yoetz.protocol.errors import ProtocolValueError
@@ -700,7 +701,12 @@ def _validate_references(
 def _plain_schema(data: bytes, *, digest_verified: bool = False) -> dict[str, JsonValue]:
     try:
         parsed = strict_json_parse(data)
-        if canonical_encode(parsed) != data:
+        # The accelerator proves the round trip in one pass over the bytes; without that proof
+        # (or with a replaced encoder or parser) the re-encoding comparison runs unchanged.
+        if (
+            not canonical_round_trip_proven(data, encode=canonical_encode, parse=strict_json_parse)
+            and canonical_encode(parsed) != data
+        ):
             _protocol_error("schema_bytes_invalid")
         schema = _as_plain_object(parsed, "schema_bytes_invalid")
     except ProtocolValueError as exc:
@@ -2092,6 +2098,63 @@ def _bind_native() -> None:
     if resolved is None:
         return
     globals()["_compile_schema_validity"] = resolved[0]
+
+    catalog = native_functions(
+        "schemas_freeze_json",
+        "schemas_uses_dynamic_reference",
+        "schemas_references_resolvable",
+    )
+    if catalog is None:
+        return
+    native_freeze, native_uses_dynamic, native_references_resolvable = catalog
+    python_freeze_json = _freeze_json
+    python_uses_dynamic_reference = _uses_dynamic_reference
+    python_validate_references = _validate_references
+    # What the reference loop reads through module globals; a replaced one keeps it in charge.
+    reference_dependencies = (
+        _walk_refs,
+        _build_registry,
+        _deny_retrieve,
+        urlsplit,
+        urldefrag,
+        Registry,
+        DRAFT202012,
+    )
+
+    def native_freeze_json(value: JsonValue) -> JsonValue:
+        # Nodes it does not reproduce (non-``str`` keys, lone surrogates, deep nesting) go to
+        # the reference, whose recursion re-enters this twin through the module global.
+        return cast(JsonValue, native_freeze(value, python_freeze_json))
+
+    def native_uses_dynamic_reference(value: JsonValue) -> bool:
+        return bool(native_uses_dynamic(value, python_uses_dynamic_reference))
+
+    def native_validate_references(
+        plain_by_id: Mapping[str, dict[str, JsonValue]], registry: SchemaRegistry
+    ) -> None:
+        # The native proof answers only "every reference is admissible and resolves" for the
+        # registry ``_build_registry`` makes from *plain_by_id* (the only one this module
+        # passes); anything it cannot prove runs the reference loop, which raises as before.
+        current = (
+            _walk_refs,
+            _build_registry,
+            _deny_retrieve,
+            urlsplit,
+            urldefrag,
+            Registry,
+            DRAFT202012,
+        )
+        if all(
+            each is original for each, original in zip(current, reference_dependencies, strict=True)
+        ) and native_references_resolvable(plain_by_id):
+            return
+        python_validate_references(plain_by_id, registry)
+
+    globals().update(
+        _freeze_json=native_freeze_json,
+        _uses_dynamic_reference=native_uses_dynamic_reference,
+        _validate_references=native_validate_references,
+    )
 
 
 _bind_native()

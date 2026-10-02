@@ -1698,6 +1698,28 @@ def _mutable_json(value: object) -> object:
     return value
 
 
+def _bind_native_mutable_json() -> None:
+    """Rebind ``_mutable_json`` to its native twin (``list_tools`` reads the module global)."""
+
+    from yoetz._native import native_functions
+
+    resolved = native_functions("mcp_thaw_json")
+    if resolved is None:
+        return
+    (native_thaw,) = resolved
+    python_mutable_json = _mutable_json
+
+    def native_mutable_json(value: object) -> object:
+        # Nodes it does not reproduce (custom mappings, sequence subclasses, deep nesting) go to
+        # the reference, whose recursion re-enters this twin through the module global.
+        return native_thaw(value, python_mutable_json, True)
+
+    globals()["_mutable_json"] = native_mutable_json
+
+
+_bind_native_mutable_json()
+
+
 def _holder_is_newer_than_bridge() -> bool:
     """True when the stamped holder runs a newer package: this bridge predates an update."""
 
