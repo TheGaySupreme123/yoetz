@@ -286,6 +286,7 @@ dependencies = [
  "memchr",
  "pyo3",
  "regex",
+ "regex-syntax",
  "sha2",
  "yoetz-core",
 ]

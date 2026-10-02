@@ -3,7 +3,11 @@
 //! Exact `dict`, exact `JsonObject`, exact `list`/`tuple`, and plain scalars are walked natively;
 //! they can be none of the reference's earlier cases (`Enum`, `ControlError`, `BaseModel`,
 //! dataclass). Every other node goes to the Python reference, which recurses through the module
-//! global and so comes back here for its members.
+//! global and so comes back here for its members, at the depth the walk had reached
+//! (`walk::call_python`). Past `NATIVE_RECURSION_LIMIT` the reference runs reference-only, so
+//! CPython's recursion guard decides deep nesting exactly as it does without the accelerator.
+//! An exact `dict` is iterated live: a member's reference that mutates it raises the
+//! reference's own `RuntimeError`.
 
 use pyo3::exceptions::PyTypeError;
 use pyo3::ffi;
@@ -12,7 +16,8 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::registry::Slot;
 use crate::walk::{
-    JSON_OBJECT, NATIVE_RECURSION_LIMIT, is_exact, is_plain_scalar, is_type, json_object_items,
+    DictItems, JSON_OBJECT, NATIVE_RECURSION_LIMIT, call_python, defer_deep, entry_depth, is_exact,
+    is_plain_scalar, is_type, json_object_items, reference_only,
 };
 
 static REFERENCE: Slot = Slot::new();
@@ -49,11 +54,12 @@ impl<'py> Walker<'py> {
             return Ok(value.clone());
         }
         if depth > NATIVE_RECURSION_LIMIT {
-            return self.reference.call1((value,));
+            return defer_deep(|| self.reference.call1((value,)));
         }
         if is_exact(value, ffi::PyDict_CheckExact) {
             let out = PyDict::new(self.py);
-            for (key, member) in unsafe { value.cast_unchecked::<PyDict>() }.iter() {
+            let mut items = DictItems::of(value);
+            while let Some((key, member)) = items.next_item()? {
                 self.member(&key, &member, &out, depth)?;
             }
             return Ok(out.into_any());
@@ -86,7 +92,7 @@ impl<'py> Walker<'py> {
             }
             return Ok(PyList::new(self.py, members)?.into_any());
         }
-        self.reference.call1((value,))
+        call_python(depth, || self.reference.call1((value,)))
     }
 }
 
@@ -105,12 +111,15 @@ pub fn plain_wire_value<'py>(
             "plain_wire_value_unbound",
         ));
     };
+    if reference_only() {
+        return reference.call1((value,));
+    }
     let walker = Walker {
         py,
         reference,
         json_object: JSON_OBJECT.get(py),
     };
-    walker.plain(value, 0)
+    walker.plain(value, entry_depth())
 }
 
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
