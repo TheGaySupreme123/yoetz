@@ -825,6 +825,11 @@ def _commitment_wire(value: object) -> str:
 
 
 def _timestamp_wire(value: object) -> str:
+    # Bound into the wire annotations at import; delegate so the native twin applies.
+    return _check_timestamp_wire(value)
+
+
+def _check_timestamp_wire(value: object) -> str:
     if type(value) is not str or _TIMESTAMP_PATTERN.fullmatch(value) is None:
         raise ProtocolValueError("invalid_timestamp")
     try:
@@ -1104,21 +1109,27 @@ class _ClosedModel(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _adapt_json_arrays_and_reject_forbidden_nulls(cls, value: object) -> object:
-        if isinstance(value, Mapping):
-            source = cast(Mapping[object, object], value)
-            for field_name in cls.optional_non_null_fields:
-                if field_name in source and source[field_name] is None:
-                    raise ValueError("optional_field_must_not_be_null")
-            adapted: dict[object, object] | None = None
-            for field_name, field in cls.model_fields.items():
-                raw = source.get(field_name)
-                if type(raw) is list and _annotation_accepts_tuple(field.annotation):
-                    if adapted is None:
-                        adapted = dict(source)
-                    adapted[field_name] = tuple(cast(list[object], raw))
-            if adapted is not None:
-                return adapted
-        return cast(object, value)
+        return _adapt_closed_model_input(cls, value)
+
+
+def _adapt_closed_model_input(cls: type[_ClosedModel], value: object) -> object:
+    """Reject forbidden explicit nulls and adapt JSON arrays for tuple-typed fields."""
+
+    if isinstance(value, Mapping):
+        source = cast(Mapping[object, object], value)
+        for field_name in cls.optional_non_null_fields:
+            if field_name in source and source[field_name] is None:
+                raise ValueError("optional_field_must_not_be_null")
+        adapted: dict[object, object] | None = None
+        for field_name, field in cls.model_fields.items():
+            raw = source.get(field_name)
+            if type(raw) is list and _annotation_accepts_tuple(field.annotation):
+                if adapted is None:
+                    adapted = dict(source)
+                adapted[field_name] = tuple(cast(list[object], raw))
+        if adapted is not None:
+            return adapted
+    return cast(object, value)
 
 
 def _strip_optional_non_null_fields(
@@ -5808,3 +5819,49 @@ def classify_result_leaf(
     if classification is None:
         raise ProtocolValueError("invalid_json_pointer")
     return classification
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions(
+        "models_bind_strip",
+        "models_strip_optional_non_null_fields",
+        "models_bind_classify",
+        "models_classify_result_leaf",
+        "models_bind_adapt",
+        "models_adapt_closed_input",
+        "models_timestamp_wire",
+    )
+    if resolved is None:
+        return
+    (
+        bind_strip,
+        native_strip,
+        bind_classify,
+        native_classify,
+        bind_adapt,
+        native_adapt,
+        native_timestamp_wire,
+    ) = resolved
+    bind_strip(BaseModel, _strip_optional_non_null_fields)
+    bind_adapt(_adapt_closed_model_input, _annotation_accepts_tuple)
+    # ``_classify_leaf_shape`` stays this module's lru_cache function; the twin looks it up in
+    # these globals on every call.
+    bind_classify(
+        globals(),
+        _RESULT_METHODS,
+        _STATUS_VIEWS,
+        _KNOWN_PUBLISH_EVENT_SELECTORS,
+        classify_result_leaf,
+        MAX_PROJECTION_POINTER_BYTES,
+    )
+    globals().update(
+        _strip_optional_non_null_fields=native_strip,
+        classify_result_leaf=native_classify,
+        _adapt_closed_model_input=native_adapt,
+        _check_timestamp_wire=native_timestamp_wire,
+    )
+
+
+_bind_native()

@@ -317,6 +317,10 @@ def _fact_key(fact: FindingFact) -> tuple[bytes, tuple[bytes, ...]]:
     return (_ascii_key(fact.fact_code), tuple(_ascii_key(ref) for ref in fact.subject_refs))
 
 
+def _sorted_facts(facts: Iterable[FindingFact]) -> tuple[FindingFact, ...]:
+    return tuple(sorted(facts, key=_fact_key))
+
+
 def _validate_fact_tuple(value: object, *, minimum: int) -> tuple[FindingFact, ...]:
     if type(value) is not tuple:
         raise _invalid_basis()
@@ -324,9 +328,7 @@ def _validate_fact_tuple(value: object, *, minimum: int) -> tuple[FindingFact, .
     if not minimum <= len(facts) <= 33 or any(type(fact) is not FindingFact for fact in facts):
         raise _invalid_basis()
     typed = cast(tuple[FindingFact, ...], facts)
-    if typed != tuple(sorted(typed, key=_fact_key)) or len(
-        {fact.fact_code for fact in typed}
-    ) != len(typed):
+    if typed != _sorted_facts(typed) or len({fact.fact_code for fact in typed}) != len(typed):
         raise _invalid_basis()
     return typed
 
@@ -863,6 +865,32 @@ class FrozenHistoryEvent:
             raise _invalid_case()
 
 
+def _case_ref_coverage(
+    allowed_ids: frozenset[FindingBasisRef],
+    coverage_by_ref: Mapping[FindingBasisRef, Coverage],
+) -> tuple[frozenset[FindingBasisRef], dict[FindingBasisRef, Coverage]]:
+    """Revalidate a case's allowed references and the coverage keyed by exactly those refs."""
+
+    try:
+        allowed = frozenset(_basis_ref(value) for value in allowed_ids)
+    except ValueError as exc:
+        raise _invalid_case() from exc
+    if not isinstance(cast(object, coverage_by_ref), Mapping):
+        raise _invalid_case()
+    coverage: dict[FindingBasisRef, Coverage] = {}
+    try:
+        for raw_ref, value in coverage_by_ref.items():
+            ref = _basis_ref(raw_ref)
+            if type(value) is not Coverage:
+                raise _invalid_case()
+            coverage[ref] = value
+    except ValueError as exc:
+        raise _invalid_case() from exc
+    if frozenset(coverage) != allowed:
+        raise _invalid_case()
+    return allowed, coverage
+
+
 @dataclass(frozen=True, slots=True)
 class DeterministicCase:
     projection: ProjectionState
@@ -903,23 +931,7 @@ class DeterministicCase:
             or type(self.allowed_ids) is not frozenset
         ):
             raise _invalid_case()
-        try:
-            allowed = frozenset(_basis_ref(value) for value in self.allowed_ids)
-        except ValueError as exc:
-            raise _invalid_case() from exc
-        if not isinstance(cast(object, self.coverage_by_ref), Mapping):
-            raise _invalid_case()
-        coverage: dict[FindingBasisRef, Coverage] = {}
-        try:
-            for raw_ref, value in self.coverage_by_ref.items():
-                ref = _basis_ref(raw_ref)
-                if type(value) is not Coverage:
-                    raise _invalid_case()
-                coverage[ref] = value
-        except ValueError as exc:
-            raise _invalid_case() from exc
-        if frozenset(coverage) != allowed:
-            raise _invalid_case()
+        allowed, coverage = _case_ref_coverage(self.allowed_ids, self.coverage_by_ref)
         if type(self.gaps) is not tuple or any(type(gap) is not CaseGap for gap in self.gaps):
             raise _invalid_case()
         ordered_gaps = tuple(
@@ -1529,6 +1541,54 @@ def _weaken_ref_coverage(
     )
 
 
+def _ref_coverages(
+    source_by_ref: Mapping[FindingBasisRef, EventId],
+    records_by_event: Mapping[EventId, LedgerRecord],
+    redacted_events: frozenset[EventId],
+    unavailable_events: frozenset[EventId],
+    missing_sources: set[EventId],
+    unknown_events: set[EventId],
+    redacted_object_by_evidence: Mapping[EvidenceId, set[ObjectId]],
+    unavailable_object_by_evidence: Mapping[EvidenceId, set[ObjectId]],
+    gap_codes_by_root: Mapping[EventId, set[str]],
+) -> dict[FindingBasisRef, Coverage]:
+    """Weaken each citable ref's source-event coverage by the frozen gaps on that source."""
+
+    coverage_by_ref: dict[FindingBasisRef, Coverage] = {}
+    for ref, source_event in source_by_ref.items():
+        source = records_by_event.get(source_event)
+        if source is None:
+            raise _invalid_case()
+        coverage_by_ref[ref] = _weaken_ref_coverage(
+            source.coverage,
+            redacted_event=source_event in redacted_events,
+            unavailable_event=source_event in unavailable_events,
+            redacted_object=(
+                (ref.startswith("evd_") and evidence_id(ref) in redacted_object_by_evidence)
+                or "redacted_object" in gap_codes_by_root.get(source_event, set())
+            ),
+            unavailable_object=(
+                (ref.startswith("evd_") and evidence_id(ref) in unavailable_object_by_evidence)
+                or "captured_object_unavailable" in gap_codes_by_root.get(source_event, set())
+            ),
+            missing_ref=source_event in missing_sources,
+            unknown_event=(
+                ref.startswith("evt_")
+                and event_id(ref) in unknown_events
+                and type(source) is UnknownEvent
+            ),
+            evidence_provenance_gaps=frozenset(
+                gap_codes_by_root.get(source_event, set())
+                & {
+                    "evidence_content_digest_only",
+                    "evidence_content_withheld",
+                    "evidence_digest_subject_legacy_unknown",
+                }
+            ),
+        )
+    return coverage_by_ref
+
+
 def _add_gap(
     gaps: dict[str, CaseGap],
     marker: str,
@@ -1964,38 +2024,17 @@ def build_deterministic_case(
             if root.startswith("evt_"):
                 gap_codes_by_root.setdefault(event_id(root), set()).add(gap.code)
 
-    coverage_by_ref: dict[FindingBasisRef, Coverage] = {}
-    for ref, source_event in source_by_ref.items():
-        source = records_by_event.get(source_event)
-        if source is None:
-            raise _invalid_case()
-        coverage_by_ref[ref] = _weaken_ref_coverage(
-            source.coverage,
-            redacted_event=source_event in redacted_events,
-            unavailable_event=source_event in unavailable_events,
-            redacted_object=(
-                (ref.startswith("evd_") and evidence_id(ref) in redacted_object_by_evidence)
-                or "redacted_object" in gap_codes_by_root.get(source_event, set())
-            ),
-            unavailable_object=(
-                (ref.startswith("evd_") and evidence_id(ref) in unavailable_object_by_evidence)
-                or "captured_object_unavailable" in gap_codes_by_root.get(source_event, set())
-            ),
-            missing_ref=source_event in missing_sources,
-            unknown_event=(
-                ref.startswith("evt_")
-                and event_id(ref) in unknown_events
-                and type(source) is UnknownEvent
-            ),
-            evidence_provenance_gaps=frozenset(
-                gap_codes_by_root.get(source_event, set())
-                & {
-                    "evidence_content_digest_only",
-                    "evidence_content_withheld",
-                    "evidence_digest_subject_legacy_unknown",
-                }
-            ),
-        )
+    coverage_by_ref = _ref_coverages(
+        source_by_ref,
+        records_by_event,
+        redacted_events,
+        unavailable_events,
+        missing_sources,
+        unknown_events,
+        redacted_object_by_evidence,
+        unavailable_object_by_evidence,
+        gap_codes_by_root,
+    )
 
     return DeterministicCase(
         projection=projection,
@@ -2067,16 +2106,23 @@ def healthy_storage_availability(
     )
 
 
+def _fold_case_coverages(coverage_by_ref: Mapping[FindingBasisRef, Coverage]) -> Coverage | None:
+    """Fold every frozen ref coverage in ref order, or ``None`` when the case cites nothing."""
+
+    ordered = tuple(coverage_by_ref[key] for key in sorted(coverage_by_ref, key=str))
+    if not ordered:
+        return None
+    result = ordered[0]
+    for coverage in ordered[1:]:
+        result = weakest(result, coverage)
+    return result
+
+
 def case_coverage(case: DeterministicCase, *, semantic: bool = False) -> Coverage:
     """Fold every frozen material dependency and explicit case gap conservatively."""
 
-    ordered = tuple(case.coverage_by_ref[key] for key in sorted(case.coverage_by_ref, key=str))
-    if ordered:
-        result = ordered[0]
-        for coverage in ordered[1:]:
-            result = weakest(result, coverage)
-    else:
-        result = coverage_for_channel(PublicationChannel.ENGINE_DERIVED)
+    folded = _fold_case_coverages(case.coverage_by_ref)
+    result = coverage_for_channel(PublicationChannel.ENGINE_DERIVED) if folded is None else folded
     gaps = set(result.known_gaps)
     gaps.update(gap.code for gap in case.gaps)
     channels = set(result.publication_channels)
@@ -2162,6 +2208,18 @@ def policy_source_availability(
     return FrozenSourceAvailability.AVAILABLE
 
 
+def _fold_ref_coverages(
+    coverage_by_ref: Mapping[FindingBasisRef, Coverage],
+    refs: tuple[FindingBasisRef, ...],
+) -> Coverage:
+    """Fold the frozen coverage of each ref in order; a ref outside the case is a ``KeyError``."""
+
+    current = coverage_by_ref[refs[0]]
+    for ref in refs[1:]:
+        current = weakest(current, coverage_by_ref[ref])
+    return current
+
+
 def _derived_finding_coverage(
     case: DeterministicCase,
     supporting_refs: tuple[FindingBasisRef, ...],
@@ -2169,9 +2227,7 @@ def _derived_finding_coverage(
     if not supporting_refs:
         raise _invalid_policy()
     try:
-        current = case.coverage_by_ref[supporting_refs[0]]
-        for ref in supporting_refs[1:]:
-            current = weakest(current, case.coverage_by_ref[ref])
+        current = _fold_ref_coverages(case.coverage_by_ref, supporting_refs)
     except KeyError as exc:
         raise _invalid_policy() from exc
     channels = tuple(
@@ -2210,8 +2266,8 @@ def build_policy_assessment(
     )
     if any(ref not in case.allowed_ids for ref in public_refs):
         raise _invalid_policy()
-    ordered_observed = tuple(sorted(observed_facts, key=_fact_key))
-    ordered_missing = tuple(sorted(required_but_missing_facts, key=_fact_key))
+    ordered_observed = _sorted_facts(observed_facts)
+    ordered_missing = _sorted_facts(required_but_missing_facts)
     supporting_refs = _sorted_unique(ref for fact in ordered_observed for ref in fact.subject_refs)
     coverage = _derived_finding_coverage(case, supporting_refs)
     basis = FindingBasis(
@@ -2347,3 +2403,196 @@ def run_deterministic_policies(
         )
     )
     return DeterministicPolicyResult(ordered)
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions(
+        "checks_bind",
+        "checks_basis_ref",
+        "checks_validated_ref_tuple",
+        "checks_sorted_unique",
+        "checks_sorted_facts",
+        "checks_case_ref_coverage",
+        "checks_ref_coverages",
+        "checks_fold_case_coverages",
+        "checks_fold_ref_coverages",
+    )
+    if resolved is None:
+        return
+    (
+        bind,
+        native_basis_ref,
+        native_validated_ref_tuple,
+        native_sorted_unique,
+        native_sorted_facts,
+        native_case_ref_coverage,
+        native_ref_coverages,
+        native_fold_case_coverages,
+        native_fold_ref_coverages,
+    ) = resolved
+    from yoetz.domain import values as values_module
+    from yoetz.protocol.ids import IdKind
+
+    bind(
+        (
+            IdKind.EVENT,
+            IdKind.OBLIGATION,
+            IdKind.CLAIM,
+            IdKind.ACTION,
+            IdKind.RESULT,
+            IdKind.EVIDENCE,
+            IdKind.FINDING,
+        ),
+        values_module,
+    )
+    # Every native twin either returns the reference's exact value or ``None``; on ``None`` the
+    # reference runs, so each refusal keeps its exception, chained cause, and Python frame.
+    python_basis_ref = _basis_ref
+    python_validated_ref_tuple = _validated_ref_tuple
+    python_sorted_unique = _sorted_unique
+    python_sorted_facts = _sorted_facts
+    python_case_ref_coverage = _case_ref_coverage
+    python_ref_coverages = _ref_coverages
+    python_fold_case_coverages = _fold_case_coverages
+    python_fold_ref_coverages = _fold_ref_coverages
+    python_public_ref = _public_ref
+    # The twins validate ids through ``values.validate_id`` directly, where the reference reaches
+    # it through this module's typed helpers and ``values._validated_id``. When any of those is
+    # not the object bound here (a test patch, a rebinding), the reference runs instead so the
+    # replacement is called exactly as the reference calls it.
+    bound_event_id = event_id
+    bound_obligation_id = obligation_id
+    bound_claim_id = claim_id
+    bound_action_id = action_id
+    bound_result_id = result_id
+    bound_evidence_id = evidence_id
+    bound_finding_id = finding_id
+    bound_validated_id = values_module._validated_id  # pyright: ignore[reportPrivateUsage]
+    bound_validate_id = values_module.validate_id
+
+    def ids_bound() -> bool:
+        return (
+            event_id is bound_event_id
+            and obligation_id is bound_obligation_id
+            and claim_id is bound_claim_id
+            and action_id is bound_action_id
+            and result_id is bound_result_id
+            and evidence_id is bound_evidence_id
+            and finding_id is bound_finding_id
+            and values_module._validated_id is bound_validated_id  # pyright: ignore[reportPrivateUsage]
+            and values_module.validate_id is bound_validate_id
+        )
+
+    def basis_ref(value: object) -> FindingBasisRef:
+        if not ids_bound():
+            return python_basis_ref(value)
+        ref = native_basis_ref(value)
+        return python_basis_ref(value) if ref is None else ref
+
+    def refs_bound() -> bool:
+        # ``_validated_ref_tuple`` and ``_case_ref_coverage`` reach ``_basis_ref`` (and the former
+        # ``_public_ref``/``_sorted_unique``) through this module's globals.
+        return (
+            _basis_ref is basis_ref
+            and _public_ref is python_public_ref
+            and _sorted_unique is sorted_unique
+            and ids_bound()
+        )
+
+    def validated_ref_tuple(
+        value: object,
+        *,
+        public_only: bool = False,
+        allow_empty: bool = False,
+    ) -> tuple[FindingBasisRef, ...] | tuple[PublicSubjectRef, ...]:
+        refs = (
+            native_validated_ref_tuple(value, public_only, allow_empty, MAX_REF_LIST)
+            if refs_bound()
+            else None
+        )
+        if refs is None:
+            return python_validated_ref_tuple(
+                value, public_only=public_only, allow_empty=allow_empty
+            )
+        return refs
+
+    def sorted_unique[T: str](values: Iterable[T]) -> tuple[T, ...]:
+        materialized = tuple(values)
+        ordered = native_sorted_unique(materialized)
+        return python_sorted_unique(materialized) if ordered is None else ordered
+
+    def sorted_facts(facts: Iterable[FindingFact]) -> tuple[FindingFact, ...]:
+        materialized = tuple(facts)
+        ordered = native_sorted_facts(materialized)
+        return python_sorted_facts(materialized) if ordered is None else ordered
+
+    def case_ref_coverage(
+        allowed_ids: frozenset[FindingBasisRef],
+        coverage_by_ref: Mapping[FindingBasisRef, Coverage],
+    ) -> tuple[frozenset[FindingBasisRef], dict[FindingBasisRef, Coverage]]:
+        validated = (
+            native_case_ref_coverage(allowed_ids, coverage_by_ref, Coverage)
+            if refs_bound()
+            else None
+        )
+        if validated is None:
+            return python_case_ref_coverage(allowed_ids, coverage_by_ref)
+        return validated
+
+    def ref_coverages(
+        source_by_ref: Mapping[FindingBasisRef, EventId],
+        records_by_event: Mapping[EventId, LedgerRecord],
+        redacted_events: frozenset[EventId],
+        unavailable_events: frozenset[EventId],
+        missing_sources: set[EventId],
+        unknown_events: set[EventId],
+        redacted_object_by_evidence: Mapping[EvidenceId, set[ObjectId]],
+        unavailable_object_by_evidence: Mapping[EvidenceId, set[ObjectId]],
+        gap_codes_by_root: Mapping[EventId, set[str]],
+    ) -> dict[FindingBasisRef, Coverage]:
+        arguments = (
+            source_by_ref,
+            records_by_event,
+            redacted_events,
+            unavailable_events,
+            missing_sources,
+            unknown_events,
+            redacted_object_by_evidence,
+            unavailable_object_by_evidence,
+            gap_codes_by_root,
+        )
+        coverage = (
+            native_ref_coverages(*arguments, _weaken_ref_coverage, UnknownEvent)
+            if ids_bound()
+            else None
+        )
+        return python_ref_coverages(*arguments) if coverage is None else coverage
+
+    def fold_case_coverages(
+        coverage_by_ref: Mapping[FindingBasisRef, Coverage],
+    ) -> Coverage | None:
+        folded = native_fold_case_coverages(coverage_by_ref, weakest)
+        return python_fold_case_coverages(coverage_by_ref) if folded is None else folded
+
+    def fold_ref_coverages(
+        coverage_by_ref: Mapping[FindingBasisRef, Coverage],
+        refs: tuple[FindingBasisRef, ...],
+    ) -> Coverage:
+        folded = native_fold_ref_coverages(coverage_by_ref, refs, weakest)
+        return python_fold_ref_coverages(coverage_by_ref, refs) if folded is None else folded
+
+    globals().update(
+        _basis_ref=basis_ref,
+        _validated_ref_tuple=validated_ref_tuple,
+        _sorted_unique=sorted_unique,
+        _sorted_facts=sorted_facts,
+        _case_ref_coverage=case_ref_coverage,
+        _ref_coverages=ref_coverages,
+        _fold_case_coverages=fold_case_coverages,
+        _fold_ref_coverages=fold_ref_coverages,
+    )
+
+
+_bind_native()

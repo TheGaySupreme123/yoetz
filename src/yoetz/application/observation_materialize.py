@@ -1891,3 +1891,102 @@ def approved_check_author() -> Actor:
 
 # Re-export for callers that stage objects.
 media_type_for_schema = media_type_for
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions(
+        "materialize_bind",
+        "materialize_stable_observation_id",
+        "materialize_logical_identity_digest",
+        "materialize_operation_digest",
+    )
+    if resolved is None:
+        return
+    bind, native_stable_id, native_logical_digest, native_operation_digest = resolved
+    bind(
+        _ID_DOMAIN,
+        _LOGICAL_IDENTITY_DOMAIN,
+        MATERIALIZATION_MAPPING_VERSION,
+        list(MATERIALIZATION_LEGACY_MAPPING_VERSIONS),
+        sorted(SESSION_BOUND_MAPPING_VERSIONS),
+    )
+    python_stable_id = stable_observation_id
+    python_logical_digest = _logical_identity_digest
+    python_operation_digest = observation_operation_digest
+    bound_request_digest = request_digest
+    bound_json_object = JsonObject
+
+    # Each twin answers only for inputs it digests byte-identically; anything else (a lone
+    # surrogate, an unsupported mapping version, a profile refusal) runs the reference, which
+    # raises its exact refusal from a frame of this module.
+    def native_stable_observation_id(
+        *,
+        kind: IdKind,
+        task_id: str,
+        source_identity: str,
+        mapping_version: str,
+        role: str,
+    ) -> str:
+        """Allocate a deterministic UUIDv4-shaped ID for observation materialization."""
+
+        allocated = native_stable_id(kind, task_id, source_identity, mapping_version, role)
+        if allocated is None:
+            return python_stable_id(
+                kind=kind,
+                task_id=task_id,
+                source_identity=source_identity,
+                mapping_version=mapping_version,
+                role=role,
+            )
+        return cast(str, allocated)
+
+    def native_logical_identity_digest(components: tuple[str, ...]) -> str:
+        digest = native_logical_digest(components)
+        if digest is None:
+            return python_logical_digest(components)
+        return cast(str, digest)
+
+    def native_observation_operation_digest(
+        *,
+        task_id: str,
+        logical_identity: str,
+        draft_roles: tuple[str, ...],
+        mapping_version: str = MATERIALIZATION_MAPPING_VERSION,
+        session_id: str | None = None,
+        writer_id: str | None = None,
+    ) -> str:
+        """Stable request digest for idempotent observation appends."""
+
+        # ``request_digest`` and ``JsonObject`` are observation points of the reference.
+        if request_digest is bound_request_digest and JsonObject is bound_json_object:
+            digest = native_operation_digest(
+                task_id, logical_identity, draft_roles, mapping_version, session_id, writer_id
+            )
+            if digest is not None:
+                return cast(str, digest)
+        return python_operation_digest(
+            task_id=task_id,
+            logical_identity=logical_identity,
+            draft_roles=draft_roles,
+            mapping_version=mapping_version,
+            session_id=session_id,
+            writer_id=writer_id,
+        )
+
+    for twin, reference in (
+        (native_stable_observation_id, python_stable_id),
+        (native_logical_identity_digest, python_logical_digest),
+        (native_observation_operation_digest, python_operation_digest),
+    ):
+        twin.__name__ = reference.__name__
+        twin.__qualname__ = reference.__qualname__
+    globals().update(
+        stable_observation_id=native_stable_observation_id,
+        _logical_identity_digest=native_logical_identity_digest,
+        observation_operation_digest=native_observation_operation_digest,
+    )
+
+
+_bind_native()

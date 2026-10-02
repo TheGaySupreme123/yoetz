@@ -4728,6 +4728,12 @@ def _catalog_item_ids(envelope: Mapping[str, JsonValue]) -> frozenset[str]:
     return frozenset(ids)
 
 
+def _catalog_item_ids_of(envelope: bytes) -> frozenset[str]:
+    """The catalogued item ids of one encoded case envelope."""
+
+    return _catalog_item_ids(cast(Mapping[str, JsonValue], strict_json_parse(envelope)))
+
+
 def _drop_catalog_row(envelope: dict[str, JsonValue]) -> bool:
     """Remove the lowest-priority catalog row and every reference that would dangle.
 
@@ -4957,7 +4963,12 @@ def bounded_case_envelope(case: SemanticCase) -> bytes:
     counted in ``selection_accounting`` so the packet and its receipt disclose minimization.
     """
 
-    envelope = _case_envelope_json(case)
+    return _bound_envelope(_case_envelope_json(case))
+
+
+def _bound_envelope(envelope: dict[str, JsonValue]) -> bytes:
+    """Bound one freshly built case envelope (see ``bounded_case_envelope``)."""
+
     reductions = {
         "assessment_links_stripped_count": 0,
         "catalog_dropped_count": 0,
@@ -5021,9 +5032,7 @@ def semantic_case_packet_view(case: SemanticCase) -> SemanticPacketView:
     if type(case) is not SemanticCase:
         raise TypeError("semantic_case_invalid")
     try:
-        catalogued = _catalog_item_ids(
-            cast(Mapping[str, JsonValue], strict_json_parse(bounded_case_envelope(case)))
-        )
+        catalogued = _catalog_item_ids_of(bounded_case_envelope(case))
     except SemanticCaseTooLarge:
         catalogued = frozenset(item.item_id for item in case.items)
     carried = frozenset(
@@ -5060,9 +5069,7 @@ def check_time_change_parts_carried(
     )
     if not admitted:
         return 0
-    catalogued = _catalog_item_ids(
-        cast(Mapping[str, JsonValue], strict_json_parse(bounded_case_envelope(case)))
-    )
+    catalogued = _catalog_item_ids_of(bounded_case_envelope(case))
     carried = 0
     while carried < admitted and f"{CHECK_TIME_CHANGE_ITEM_PREFIX}{carried + 1:03d}" in catalogued:
         carried += 1
@@ -5085,7 +5092,7 @@ def semantic_case_to_candidate_context(
     # removed from the catalog must not travel as a candidate item either. Offering content whose
     # catalog row is gone would get it approved by privacy and then silently discarded during
     # assembly — the packet would claim coverage it never had.
-    catalogued = _catalog_item_ids(cast(Mapping[str, JsonValue], strict_json_parse(envelope)))
+    catalogued = _catalog_item_ids_of(envelope)
 
     items: list[CandidateContextItem] = [
         CandidateContextItem(
@@ -5137,3 +5144,272 @@ def semantic_case_to_prepared_payload(
         content_by_id=content_by_id,
         included_item_ids=included_item_ids,
     )
+
+
+def _bind_native() -> None:
+    import json
+    import os
+
+    from yoetz._native import NATIVE_ENV, native_functions
+
+    resolved = native_functions(
+        "semantic_case_tables",
+        "bound_case_envelope",
+        "prepared_review_payload",
+        "assemble_review_packet",
+        "catalog_item_ids",
+        "clip_json_prose",
+        "head_tail",
+        "encoded_prefix",
+        "lineage_partition",
+    )
+    if resolved is None:
+        return
+    (
+        tables,
+        native_bound,
+        native_prepared,
+        native_assemble,
+        native_catalog_ids,
+        native_clip,
+        native_head_tail,
+        native_encoded_prefix,
+        native_partition,
+    ) = resolved
+    native = tables()
+    # The twins hard-code these; a drifted copy keeps Python.
+    if not (
+        native["_PACKET_SCHEMA"] == _PACKET_SCHEMA
+        and native["REVIEW_PACKET_ITEM_ID"] == REVIEW_PACKET_ITEM_ID
+        and native["SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP"]
+        == SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP
+        and native["_PACKET_ID_LIST_KEYS"] == _PACKET_ID_LIST_KEYS
+        and native["_SECTION_LABELS"] == dict(_SECTION_LABELS)
+        and native["_ELISION_MARKER"] == _ELISION_MARKER
+        and native["_MIN_HEAD_TAIL_SIDE_BYTES"] == _MIN_HEAD_TAIL_SIDE_BYTES
+        and native["_MIN_CLIPPABLE_PROSE_BYTES"] == _MIN_CLIPPABLE_PROSE_BYTES
+    ):
+        if os.environ.get(NATIVE_ENV, "") == "require":
+            raise ImportError("yoetz_native_table_mismatch")
+        return
+
+    module = globals()
+    stdlib_loads = json.loads
+
+    def intact(names: tuple[str, ...], originals: tuple[object, ...]) -> bool:
+        return all(
+            module[name] is original for name, original in zip(names, originals, strict=True)
+        )
+
+    # Every module global a twin reproduces instead of calling. Tests replace some of them to
+    # count or fault calls; a replaced one sends the call to the Python reference.
+    ladder_names = (
+        "canonical_encode",
+        "_set_selection_accounting",
+        "_drop_prior_finding_rows",
+        "_strip_assessment_links",
+        "_fit_packet_section",
+        "_drop_catalog_row",
+        "_sync_prior_finding_refs",
+        "_catalog_rows",
+    )
+    ladder_originals = tuple(module[name] for name in ladder_names)
+    assemble_names = ("canonical_encode", "_sync_prior_finding_refs")
+    assemble_originals = tuple(module[name] for name in assemble_names)
+    catalog_names = ("strict_json_parse", "_catalog_item_ids", "_catalog_rows")
+    catalog_originals = tuple(module[name] for name in catalog_names)
+    clip_names = (
+        "canonical_encode",
+        "canonical_digest",
+        "_clip_json_prose",
+        "_longest_prose_leaf",
+        "_replace_leaf",
+        "_structural_json",
+    )
+    clip_originals = tuple(module[name] for name in clip_names)
+    lineage_names = (
+        "canonical_encode",
+        "_lineage_encode",
+        "_lineage_part_bytes",
+        "_lineage_v2_body",
+    )
+    lineage_originals = tuple(module[name] for name in lineage_names)
+    python_elision_marker = _elision_marker
+    min_side = _MIN_HEAD_TAIL_SIDE_BYTES
+    min_clippable = _MIN_CLIPPABLE_PROSE_BYTES
+    marker_template = _ELISION_MARKER
+
+    def head_tail_constants() -> bool:
+        return (
+            _MIN_HEAD_TAIL_SIDE_BYTES == min_side
+            and _ELISION_MARKER == marker_template
+            and module["_elision_marker"] is python_elision_marker
+        )
+
+    def zero_reductions() -> dict[str, int]:
+        return {
+            "assessment_links_stripped_count": 0,
+            "catalog_dropped_count": 0,
+            "change_observations_dropped_count": 0,
+            "deterministic_assessments_dropped_count": 0,
+            "omissions_dropped_count": 0,
+            "targeted_excerpts_dropped_count": 0,
+        }
+
+    python_bound_envelope = _bound_envelope
+    python_prepared = semantic_case_to_prepared_payload
+    python_assemble = assemble_filtered_review_packet
+    python_catalog_ids_of = _catalog_item_ids_of
+    python_bounded_json = _bounded_json
+    python_head_tail = _head_tail
+    python_encoded_prefix = _encoded_prefix
+    python_partition = _lineage_partition
+
+    def native_bounded_case_envelope(case: SemanticCase) -> bytes:
+        """Canonical case envelope guaranteed to fit ``MAX_EGRESS_ENVELOPE_BYTES``."""
+
+        envelope = _case_envelope_json(case)
+        if not intact(ladder_names, ladder_originals):
+            return python_bound_envelope(envelope)
+        _set_selection_accounting(envelope, zero_reductions())
+        encoded = canonical_encode(cast(JsonValue, envelope))
+        if len(encoded) <= MAX_EGRESS_ENVELOPE_BYTES:
+            return encoded
+        # The ladder runs on one native tree read from this same dict, never re-encoding it.
+        status, bounded = native_bound(envelope, MAX_EGRESS_ENVELOPE_BYTES)
+        if status == 1:
+            return cast(bytes, bounded)
+        if status == 2:
+            raise SemanticCaseTooLarge("semantic_case_envelope_too_large")
+        return python_bound_envelope(envelope)
+
+    def native_assemble_filtered_review_packet(
+        envelope: Mapping[str, object],
+        *,
+        content_by_id: Mapping[str, bytes],
+        included_item_ids: frozenset[str] | set[str],
+    ) -> bytes:
+        """Assemble ``yoetz.review-packet-case/2`` from a builder envelope + approved content."""
+
+        if intact(assemble_names, assemble_originals):
+            packet = native_assemble(envelope, content_by_id, included_item_ids)
+            if packet is not None:
+                return cast(bytes, packet)
+        return python_assemble(
+            envelope, content_by_id=content_by_id, included_item_ids=included_item_ids
+        )
+
+    def native_semantic_case_to_prepared_payload(
+        case: SemanticCase,
+        included_item_ids: frozenset[str] | set[str],
+    ) -> bytes:
+        """Assemble the provider-facing review-packet document from privacy-approved items."""
+
+        if type(case) is not SemanticCase:
+            raise TypeError("semantic_case_invalid")
+        if not (
+            module["bounded_case_envelope"] is native_bounded_case_envelope
+            and module["assemble_filtered_review_packet"] is native_assemble_filtered_review_packet
+            and module["strict_json_parse"] is catalog_originals[0]
+            and json.loads is stdlib_loads
+            and intact(ladder_names, ladder_originals)
+            and intact(assemble_names, assemble_originals)
+        ):
+            return python_prepared(case, included_item_ids)
+        content_by_id = {item.item_id: item.content for item in case.items}
+        # One native tree, bounded and then projected; the envelope is never encoded and parsed
+        # back. Anything the twin does not reproduce, including an envelope the reference's
+        # encoder would refuse, is answered by the reference below.
+        status, payload = native_prepared(
+            _case_envelope_json(case), MAX_EGRESS_ENVELOPE_BYTES, content_by_id, included_item_ids
+        )
+        if status == 1:
+            return cast(bytes, payload)
+        if status == 2:
+            raise SemanticCaseTooLarge("semantic_case_envelope_too_large")
+        return python_prepared(case, included_item_ids)
+
+    def native_catalog_item_ids_of(envelope: bytes) -> frozenset[str]:
+        """The catalogued item ids of one encoded case envelope."""
+
+        if json.loads is stdlib_loads and intact(catalog_names, catalog_originals):
+            ids = native_catalog_ids(envelope)
+            if ids is not None:
+                return cast(frozenset[str], ids)
+        return python_catalog_ids_of(envelope)
+
+    def native_bounded_json(value: Mapping[str, JsonValue]) -> tuple[str, _BoundedFit]:
+        # ``_head_tail`` is checked against its own rebound twin: the clip reproduces it natively.
+        if not (
+            intact(clip_names, clip_originals)
+            and module["_head_tail"] is native_head_tail_text
+            and _MIN_CLIPPABLE_PROSE_BYTES == min_clippable
+            and head_tail_constants()
+        ):
+            return python_bounded_json(value)
+        encoded = canonical_encode(cast(JsonValue, dict(value)))
+        if len(encoded) <= MAX_REVIEW_TEXT_BYTES:
+            return encoded.decode("utf-8"), "whole"
+        status, clipped = native_clip(dict(value), MAX_REVIEW_TEXT_BYTES)
+        if status == 1:
+            return cast(bytes, clipped).decode("utf-8"), "clipped"
+        if status == 0:
+            return python_bounded_json(value)
+        marker = {
+            "content_digest": canonical_digest(cast(JsonValue, dict(value))),
+            "original_bytes": len(encoded),
+            "reason": OVER_CASE_ITEM_LIMIT_REASON,
+            "schema": "yoetz.bounded-content-omission/1",
+        }
+        return _structural_json(marker), "replaced"
+
+    def native_head_tail_text(raw: bytes, limit: int) -> str:
+        """Keep the head and the tail of ``raw`` within ``limit`` UTF-8 bytes and mark the cut."""
+
+        if head_tail_constants():
+            kept = native_head_tail(raw, limit)
+            if kept is not None:
+                return cast(str, kept)
+        return python_head_tail(raw, limit)
+
+    def native_encoded_prefix_text(text: str, budget: int) -> str:
+        """The longest prefix of ``text`` whose canonical JSON string encoding fits ``budget``."""
+
+        prefix = native_encoded_prefix(text, budget)
+        return python_encoded_prefix(text, budget) if prefix is None else cast(str, prefix)
+
+    def native_lineage_partition(
+        children: Sequence[Mapping[str, JsonValue]],
+        gaps: Sequence[Mapping[str, JsonValue]],
+        manifest_digest: str | None,
+    ) -> tuple[bytes, ...]:
+        """Split children and gaps into complete documents that each fit one item."""
+
+        if intact(lineage_names, lineage_originals):
+            status, parts = native_partition(
+                children,
+                gaps,
+                manifest_digest,
+                MAX_SEMANTIC_ITEM_BYTES,
+                _MAX_LINEAGE_PARTS,
+                _LINEAGE_INPUT_PART_SCHEMA,
+            )
+            if status == 1:
+                return cast(tuple[bytes, ...], parts)
+            if status == 2:
+                raise LineageSemanticCapacityExceeded("lineage_semantic_input_too_large")
+        return python_partition(children, gaps, manifest_digest)
+
+    module.update(
+        bounded_case_envelope=native_bounded_case_envelope,
+        assemble_filtered_review_packet=native_assemble_filtered_review_packet,
+        semantic_case_to_prepared_payload=native_semantic_case_to_prepared_payload,
+        _catalog_item_ids_of=native_catalog_item_ids_of,
+        _bounded_json=native_bounded_json,
+        _head_tail=native_head_tail_text,
+        _encoded_prefix=native_encoded_prefix_text,
+        _lineage_partition=native_lineage_partition,
+    )
+
+
+_bind_native()

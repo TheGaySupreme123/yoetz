@@ -256,3 +256,62 @@ def decode_object_envelope(data: bytes) -> ObjectEnvelope:
         ciphertext=data[nonce_end:ciphertext_end],
         tag=data[ciphertext_end:],
     )
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions(
+        "bind_object_envelope",
+        "object_envelope_created_at",
+        "object_envelope_header_valid",
+        "object_envelope_decode",
+    )
+    if resolved is None:
+        return
+    bind, native_created_at, native_header_valid, native_decode = resolved
+    import json
+
+    python_post_init = ObjectEnvelopeHeader.__post_init__
+
+    def native_post_init(self: ObjectEnvelopeHeader) -> None:
+        # The twin only accepts. Whatever it does not accept is judged, and refused with the
+        # exact exception chain, by the reference.
+        if not native_header_valid(self):
+            python_post_init(self)
+
+    native_post_init.__name__ = python_post_init.__name__
+    native_post_init.__qualname__ = python_post_init.__qualname__
+    bindings = {
+        "globals": globals(),
+        "header_class": ObjectEnvelopeHeader,
+        "envelope_class": ObjectEnvelope,
+        "kind_class": ObjectKind,
+        "stdlib_loads": json.loads,
+        "python_decode": decode_object_envelope,
+        "python_created_at": _created_at_from_wire,
+    }
+    ObjectEnvelopeHeader.__post_init__ = native_post_init  # type: ignore[method-assign]
+    globals().update(
+        decode_object_envelope=native_decode,
+        _created_at_from_wire=native_created_at,
+    )
+    # Replacing any attribute the reference consults routes calls back to the reference.
+    bind(
+        bindings,
+        (
+            "strict_json_parse",
+            "canonical_encode",
+            "validate_object_envelope",
+            "_header_from_json",
+            "_decode_wrapped_dek",
+            "_created_at_from_wire",
+            "ObjectMetadata",
+            "ObjectEnvelopeHeader",
+            "ObjectEnvelope",
+            "ObjectKind",
+        ),
+    )
+
+
+_bind_native()

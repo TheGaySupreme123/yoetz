@@ -646,3 +646,166 @@ __all__ = [
     "is_edit_tool_name",
     "is_routine_read_candidate",
 ]
+
+
+def _bind_native() -> None:
+    import os
+
+    from yoetz._native import NATIVE_ENV, native_functions
+    from yoetz.domain.values import JsonObject
+
+    resolved = native_functions(
+        "bind_observation_selection",
+        "observation_selection_tables",
+        "classify_observation",
+        "is_routine_read_candidate",
+        "envelope_outcome_state",
+        "is_edit_tool_name",
+    )
+    if resolved is None:
+        return
+    bind, tables, native_classify, native_candidate, native_outcome, native_edit = resolved
+    # The twins hard-code these tables and limits; a drifted copy keeps Python.
+    expected: dict[str, object] = {
+        "_MAX_RESULT_JSON_BYTES": _MAX_RESULT_JSON_BYTES,
+        "_MAX_COMMAND_CHARS": _MAX_COMMAND_CHARS,
+        "ROUTINE_READ_TOOLS": ROUTINE_READ_TOOLS,
+        "SHELL_TOOLS": SHELL_TOOLS,
+        "READ_ONLY_COMMANDS": READ_ONLY_COMMANDS,
+        "_PRE_EVENTS": _PRE_EVENTS,
+        "_POST_EVENTS": _POST_EVENTS,
+        "_SUCCESS_STATUSES": _SUCCESS_STATUSES,
+        "_PARTIAL_STATUSES": _PARTIAL_STATUSES,
+        "_RG_PRE_OPTIONS": _RG_PRE_OPTIONS,
+        "_GIT_SIDE_EFFECT_PREFIXES": frozenset(_GIT_SIDE_EFFECT_PREFIXES),
+        "_GIT_SIDE_EFFECT_OPTIONS": _GIT_SIDE_EFFECT_OPTIONS,
+        "_EDIT_TOOL_HINTS": _EDIT_TOOL_HINTS,
+        "_TEST_TOOL_HINTS": _TEST_TOOL_HINTS,
+        "_VERIFICATION_TOOL_HINTS": _VERIFICATION_TOOL_HINTS,
+        "_EDIT_COMMANDS": _EDIT_COMMANDS,
+        "_TEST_COMMANDS": _TEST_COMMANDS,
+        "_FAILURE_STATUSES": _FAILURE_STATUSES,
+    }
+    native_tables = cast(dict[str, object], tables())
+    actual = {
+        name: frozenset(cast(list[object], value)) if type(value) is list else value
+        for name, value in native_tables.items()
+    }
+    if actual != expected:
+        if os.environ.get(NATIVE_ENV, "") == "require":
+            raise ImportError("yoetz_native_table_mismatch")
+        return
+    import json
+
+    # Per twin, every module global its reference reads at call time that the twin reproduces
+    # instead of reading (helpers, classes, tables, limits, the parser), the builtins a module
+    # global could shadow, the stdlib callables behind them, and the one mutable table, whose
+    # contents must stay as bound. Any change sends the call to the Python reference.
+    edit_names = (
+        "_classification_token",
+        "ROUTINE_READ_TOOLS",
+        "SHELL_TOOLS",
+        "_is_edit_tool_token",
+        "_EDIT_TOOL_HINTS",
+    )
+    routine_names = (
+        *edit_names,
+        "_routine_facts",
+        "_routine_shell_facts",
+        "_routine_shell_reason",
+        "_RoutineFacts",
+        "Mapping",
+        "shlex",
+        "_MAX_COMMAND_CHARS",
+        "READ_ONLY_COMMANDS",
+        "_RG_PRE_OPTIONS",
+        "_GIT_SIDE_EFFECT_PREFIXES",
+        "_GIT_SIDE_EFFECT_OPTIONS",
+        "_TEST_TOOL_HINTS",
+        "_VERIFICATION_TOOL_HINTS",
+        "_EDIT_COMMANDS",
+        "_TEST_COMMANDS",
+    )
+    outcome_names = (
+        "_classification_token",
+        "_classification_outcome",
+        "_classification_result_mappings",
+        "_bounded_result_mapping",
+        "_OutcomeFacts",
+        "Mapping",
+        "ProtocolValueError",
+        "strict_json_parse",
+        "cast",
+        "_MAX_RESULT_JSON_BYTES",
+        "_SUCCESS_STATUSES",
+        "_FAILURE_STATUSES",
+        "_PARTIAL_STATUSES",
+    )
+    edit_builtins = ("type", "len", "any")
+    routine_builtins = (*edit_builtins, "isinstance", "ValueError")
+    outcome_builtins = (
+        "type",
+        "len",
+        "isinstance",
+        "any",
+        "all",
+        "dict",
+        "str",
+        "int",
+        "bool",
+        "TypeError",
+        "ValueError",
+        "UnicodeEncodeError",
+    )
+    routine_stdlib = ((shlex, "split"),)
+    outcome_stdlib = ((json, "loads"),)
+    guards = {
+        "classify_observation": (
+            (
+                *routine_names,
+                *outcome_names,
+                "_classification_phase",
+                "_PRE_EVENTS",
+                "_POST_EVENTS",
+                "_has_untrusted_routine_label",
+                "ObservationContentRole",
+                "ObservationClassification",
+            ),
+            (*outcome_builtins, "tuple"),
+            (*routine_stdlib, *outcome_stdlib),
+            ("_FAILURE_STATUSES",),
+        ),
+        "is_routine_read_candidate": (routine_names, routine_builtins, routine_stdlib, ()),
+        "envelope_outcome_state": (
+            outcome_names,
+            outcome_builtins,
+            outcome_stdlib,
+            ("_FAILURE_STATUSES",),
+        ),
+        "is_edit_tool_name": (edit_names, edit_builtins, (), ()),
+    }
+    # Every hard-coded table and limit is guarded by the twin that reproduces it.
+    if not set(expected) <= set(guards["classify_observation"][0]):
+        if os.environ.get(NATIVE_ENV, "") == "require":
+            raise ImportError("yoetz_native_guard_incomplete")
+        return
+    bind(
+        globals(),
+        ObservationClassification,
+        ObservationContentRole,
+        JsonObject,
+        classify_observation,
+        is_routine_read_candidate,
+        envelope_outcome_state,
+        is_edit_tool_name,
+        guards,
+    )
+    globals().update(
+        classify_observation=native_classify,
+        is_routine_read_candidate=native_candidate,
+        envelope_outcome_state=native_outcome,
+        is_edit_tool_name=native_edit,
+    )
+
+
+_bind_native()

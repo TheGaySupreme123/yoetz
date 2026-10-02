@@ -297,6 +297,10 @@ def _redacted(capture: CheckChangeCapture) -> CheckChangeCapture:
         raise ChangeCaptureUnavailable("redaction_incomplete")
     if not redacted:
         return capture
+    return _with_redacted_text(capture, text)
+
+
+def _with_redacted_text(capture: CheckChangeCapture, text: bytes) -> CheckChangeCapture:
     text = text.decode("utf-8", errors="replace").encode("utf-8")
     truncated = capture.truncated
     if len(text) > MAX_CHECK_CHANGE_TEXT_BYTES:
@@ -446,3 +450,39 @@ async def record_task_change_base(
             request_id=request_id,
         )
     return False
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+    from yoetz.observability import privacy as privacy_module
+
+    if native_functions("privacy_redact_passes") is None:
+        return
+    redact_until_clean = getattr(privacy_module, "_native_redact_until_clean", None)
+    if redact_until_clean is None:
+        return
+    shared_redact = redact_sensitive_content
+    python_redacted = _redacted
+
+    def native_redacted(capture: CheckChangeCapture) -> CheckChangeCapture:
+        """Apply native capture's redaction; the egress never-send scan still runs on every part.
+
+        All redaction passes run as one native call while this module still routes through the
+        shared ``redact_sensitive_content``; a replaced one is observed through the reference loop.
+        """
+
+        if redact_sensitive_content is shared_redact:
+            outcome = redact_until_clean(capture.text, _MAX_REDACTION_PASSES)
+            if outcome is not NotImplemented:
+                if outcome is None:
+                    raise ChangeCaptureUnavailable("redaction_incomplete")
+                text, redacted = cast(tuple[bytes, bool], outcome)
+                if not redacted:
+                    return capture
+                return _with_redacted_text(capture, text)
+        return python_redacted(capture)
+
+    globals().update(_redacted=native_redacted)
+
+
+_bind_native()

@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from types import MappingProxyType
-from typing import Final, cast
+from typing import Any, Final, cast
 
 from yoetz.domain.events import (
     LINEAGE_SERVICE_STAMPED_FAMILIES,
@@ -352,30 +352,15 @@ class ReplayIndex:
             self.redaction_root_by_object,
             None if prior is None else prior.redaction_root_by_object,
         )
-        accepted_event_ids = frozenset(payloads.values())
-        if len(payloads) != self.frontier or len(accepted_event_ids) != len(payloads):
-            raise _corrupt()
-        seen_associations: set[EvidenceObjectSource] = set()
-        for associations in evidence.values():
-            for association in associations:
-                if (
-                    association.source_event_id not in accepted_event_ids
-                    or association in seen_associations
-                ):
-                    raise _corrupt()
-                seen_associations.add(association)
-        if any(root not in accepted_event_ids for root in roots.values()):
-            raise _corrupt()
-        if type(self.observed_event_ids) is not frozenset or not (
-            self.observed_event_ids <= accepted_event_ids
-        ):
-            raise _corrupt()
-        observation_findings = self._copy_observation_findings(
+        observation_findings = _index_invariants(
+            self.frontier,
+            payloads,
+            evidence,
+            roots,
+            self.observed_event_ids,
             self.observation_finding_event_ids,
             None if prior is None else prior.observation_finding_event_ids,
         )
-        if any(item not in accepted_event_ids for item in observation_findings):
-            raise _corrupt()
         object.__setattr__(self, "payload_event_by_object", MappingProxyType(payloads))
         object.__setattr__(self, "evidence_sources_by_object", MappingProxyType(evidence))
         object.__setattr__(self, "redaction_root_by_object", MappingProxyType(roots))
@@ -391,7 +376,7 @@ class ReplayIndex:
         if type(cast(object, source)) is not frozenset:
             raise _corrupt()
         try:
-            return frozenset(event_id(item) for item in source)
+            return _carry_id_set(source, trusted)
         except ValueError as exc:
             raise _corrupt() from exc
 
@@ -400,72 +385,166 @@ class ReplayIndex:
         source: Mapping[ObjectId, EventId],
         trusted: Mapping[ObjectId, EventId] | None,
     ) -> dict[ObjectId, EventId]:
-        if not isinstance(cast(object, source), Mapping):
+        if not _is_exact_dict(source) and not isinstance(cast(object, source), Mapping):
             raise _corrupt()
-        result: dict[ObjectId, EventId] = {}
         try:
-            for raw_object, raw_event in source.items():
-                if trusted is not None and trusted.get(raw_object, _ABSENT) is raw_event:
-                    result[raw_object] = raw_event
-                    continue
-                result[object_id(raw_object)] = event_id(raw_event)
+            return cast(
+                dict[ObjectId, EventId],
+                _carry_trusted(source, trusted, _admit_event_by_object),
+            )
         except ValueError as exc:
             raise _corrupt() from exc
-        return result
 
     @staticmethod
     def _copy_evidence_sources(
         source: Mapping[ObjectId, tuple[EvidenceObjectSource, ...]],
         trusted: Mapping[ObjectId, tuple[EvidenceObjectSource, ...]] | None,
     ) -> dict[ObjectId, tuple[EvidenceObjectSource, ...]]:
-        if not isinstance(cast(object, source), Mapping):
+        if not _is_exact_dict(source) and not isinstance(cast(object, source), Mapping):
             raise _corrupt()
-        result: dict[ObjectId, tuple[EvidenceObjectSource, ...]] = {}
         try:
-            for raw_object, raw_sources in source.items():
-                if trusted is not None and trusted.get(raw_object, _ABSENT) is raw_sources:
-                    result[raw_object] = raw_sources
-                    continue
-                key = object_id(raw_object)
-                if type(raw_sources) is not tuple or any(
-                    type(item) is not EvidenceObjectSource for item in raw_sources
-                ):
-                    raise _corrupt()
-                ordered = tuple(
-                    sorted(
-                        raw_sources,
-                        key=lambda item: (
-                            _ascii_key(item.evidence_id),
-                            _ascii_key(item.source_event_id),
-                        ),
-                    )
-                )
-                if raw_sources != ordered or len(raw_sources) != len(set(raw_sources)):
-                    raise _corrupt()
-                result[key] = tuple(raw_sources)
+            return cast(
+                dict[ObjectId, tuple[EvidenceObjectSource, ...]],
+                _carry_trusted(source, trusted, _admit_evidence_sources),
+            )
         except ValueError as exc:
             if str(exc) == "projection_corrupt":
                 raise
             raise _corrupt() from exc
-        return result
 
     @staticmethod
     def _copy_redaction_roots(
         source: Mapping[ObjectId, EventId],
         trusted: Mapping[ObjectId, EventId] | None,
     ) -> dict[ObjectId, EventId]:
-        if not isinstance(cast(object, source), Mapping):
+        if not _is_exact_dict(source) and not isinstance(cast(object, source), Mapping):
             raise _corrupt()
-        result: dict[ObjectId, EventId] = {}
         try:
-            for raw_object, raw_event in source.items():
-                if trusted is not None and trusted.get(raw_object, _ABSENT) is raw_event:
-                    result[raw_object] = raw_event
-                    continue
-                result[object_id(raw_object)] = event_id(raw_event)
+            return cast(
+                dict[ObjectId, EventId],
+                _carry_trusted(source, trusted, _admit_event_by_object),
+            )
         except ValueError as exc:
             raise _corrupt() from exc
-        return result
+
+
+def _carry_trusted(
+    source: Mapping[Any, object],
+    trusted: Mapping[Any, object] | None,
+    admit: Callable[[object, object], tuple[object, object]],
+) -> dict[object, object]:
+    """Copy *source*, carrying entries the validated prior index holds by identity.
+
+    Every other entry goes through ``admit`` in source order, which validates it and returns the
+    key and value to store.
+    """
+
+    result: dict[object, object] = {}
+    for raw_key, raw_value in source.items():
+        if trusted is not None and trusted.get(raw_key, _ABSENT) is raw_value:
+            result[raw_key] = raw_value
+            continue
+        key, value = admit(raw_key, raw_value)
+        result[key] = value
+    return result
+
+
+def _is_exact_dict(value: object) -> bool:
+    """Whether *value* is exactly a ``dict`` (the shape the accelerated carries accept)."""
+
+    return type(value) is dict
+
+
+def _carry_id_set(
+    source: frozenset[EventId], trusted: frozenset[EventId] | None
+) -> frozenset[EventId]:
+    """Validate every event id of *source* in iteration order (``trusted`` is unused here).
+
+    The accelerated twin skips re-validating an exact ``str`` the validated prior already holds:
+    validation is a pure function of the text and returns that same object.
+    """
+
+    del trusted
+    return frozenset(event_id(item) for item in source)
+
+
+def _admit_event_by_object(raw_object: object, raw_event: object) -> tuple[object, object]:
+    # The reference stored ``result[object_id(raw_object)] = event_id(raw_event)``, which
+    # evaluates the value first.
+    value = event_id(raw_event)
+    return object_id(raw_object), value
+
+
+def _admit_evidence_sources(raw_object: object, raw_sources: object) -> tuple[object, object]:
+    key = object_id(raw_object)
+    if type(raw_sources) is not tuple or any(
+        type(item) is not EvidenceObjectSource for item in cast(tuple[object, ...], raw_sources)
+    ):
+        raise _corrupt()
+    sources = cast(tuple[EvidenceObjectSource, ...], raw_sources)
+    ordered = tuple(
+        sorted(
+            sources,
+            key=lambda item: (
+                _ascii_key(item.evidence_id),
+                _ascii_key(item.source_event_id),
+            ),
+        )
+    )
+    if sources != ordered or len(sources) != len(set(sources)):
+        raise _corrupt()
+    return key, tuple(sources)
+
+
+def _index_invariants(
+    frontier: int,
+    payloads: Mapping[ObjectId, EventId],
+    evidence: Mapping[ObjectId, tuple[EvidenceObjectSource, ...]],
+    roots: Mapping[ObjectId, EventId],
+    observed_event_ids: frozenset[EventId],
+    observation_source: frozenset[EventId],
+    observation_trusted: frozenset[EventId] | None,
+) -> frozenset[EventId]:
+    """Check the whole-index invariants and return the copied observation-finding ids."""
+
+    accepted_event_ids = frozenset(payloads.values())
+    if len(payloads) != frontier or len(accepted_event_ids) != len(payloads):
+        raise _corrupt()
+    seen_associations: set[EvidenceObjectSource] = set()
+    for associations in evidence.values():
+        for association in associations:
+            if (
+                association.source_event_id not in accepted_event_ids
+                or association in seen_associations
+            ):
+                raise _corrupt()
+            seen_associations.add(association)
+    if any(root not in accepted_event_ids for root in roots.values()):
+        raise _corrupt()
+    if type(cast(object, observed_event_ids)) is not frozenset or not (
+        observed_event_ids <= accepted_event_ids
+    ):
+        raise _corrupt()
+    observation_findings = ReplayIndex._copy_observation_findings(  # pyright: ignore[reportPrivateUsage]
+        observation_source, observation_trusted
+    )
+    if any(item not in accepted_event_ids for item in observation_findings):
+        raise _corrupt()
+    return observation_findings
+
+
+def _is_mapping_proxy(value: object) -> bool:
+    return type(value) is MappingProxyType
+
+
+def _dict_copy[K, V](source: Mapping[K, V]) -> dict[K, V]:
+    """``dict(source)``; a ``mappingproxy`` over a ``dict`` copies through the dict itself."""
+
+    if _is_mapping_proxy(source):
+        copied = cast(MappingProxyType[K, V], source).copy()
+        if _is_exact_dict(copied):
+            return copied
+    return dict(source)
 
 
 def empty_replay_index() -> ReplayIndex:
@@ -487,9 +566,9 @@ def extend_replay_index(index: ReplayIndex, event: LedgerRecord) -> ReplayIndex:
     if type(index) is not ReplayIndex:
         raise _corrupt()
     _next_record(index.frontier, index.head_digest, event)
-    payload_owners = dict(index.payload_event_by_object)
-    evidence_sources = dict(index.evidence_sources_by_object)
-    redaction_roots = dict(index.redaction_root_by_object)
+    payload_owners = _dict_copy(index.payload_event_by_object)
+    evidence_sources = _dict_copy(index.evidence_sources_by_object)
+    redaction_roots = _dict_copy(index.redaction_root_by_object)
 
     payload_object = event.payload_ref.object_id
     if payload_object in payload_owners:
@@ -1007,7 +1086,15 @@ def _recompute_secondary_effects(
     obligations: dict[ObligationId, ObligationProjectionRecord],
     decisions: dict[EventId, DecisionProjectionRecord],
     claims: Mapping[ClaimId, ClaimProjectionRecord],
+    prior_contradictions: Mapping[ContradictionKey, ContradictionRecord] | None = None,
 ) -> dict[ContradictionKey, ContradictionRecord]:
+    """Re-derive plan, obligation and decision supersession and the claim contradictions.
+
+    ``prior_contradictions`` (the prior projection's) is unused here; the accelerated twin keeps
+    every record whose derived fields are unchanged and reuses equal prior contradiction objects.
+    """
+
+    del prior_contradictions
     for key, record in tuple(plans.items()):
         plans[key] = replace(record, superseded_by_plan_version=None)
     for key, record in tuple(obligations.items()):
@@ -1234,20 +1321,20 @@ def reduce_event(
     """Fold one exact next accepted record without I/O or mutation."""
 
     _verify_exact_event(state, event, replay_index)
-    plans = dict(state.plans)
-    obligations = dict(state.obligations)
-    decisions = dict(state.decisions)
-    assignments = dict(state.assignments)
-    actions = dict(state.actions)
-    results = dict(state.results)
-    evidence = dict(state.evidence)
-    claims = dict(state.claims)
-    findings = dict(state.findings)
-    responses = dict(state.responses)
-    coordination_contexts = dict(state.coordination_contexts)
-    coordination_declarations = dict(state.coordination_declarations)
-    coordination_dispositions = dict(state.coordination_dispositions)
-    contradictions = dict(state.contradictions)
+    plans = _dict_copy(state.plans)
+    obligations = _dict_copy(state.obligations)
+    decisions = _dict_copy(state.decisions)
+    assignments = _dict_copy(state.assignments)
+    actions = _dict_copy(state.actions)
+    results = _dict_copy(state.results)
+    evidence = _dict_copy(state.evidence)
+    claims = _dict_copy(state.claims)
+    findings = _dict_copy(state.findings)
+    responses = _dict_copy(state.responses)
+    coordination_contexts = _dict_copy(state.coordination_contexts)
+    coordination_declarations = _dict_copy(state.coordination_declarations)
+    coordination_dispositions = _dict_copy(state.coordination_dispositions)
+    contradictions = _dict_copy(state.contradictions)
     gaps = set(state.coverage_gaps)
     latest = state.latest_tested_state
     pending_missing = state.pending_missing_for_assessment
@@ -1505,6 +1592,7 @@ def reduce_event(
             obligations,
             decisions,
             claims,
+            state.contradictions,
         )
         coverage_gaps = _recompute_missing_gaps(
             gaps,
@@ -1719,3 +1807,189 @@ def replay_extension(
         appended_records,
     )
     return state
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions(
+        "projection_carry_trusted",
+        "reducers_carry_id_set",
+        "reducers_index_invariants",
+        "reducers_secondary_effects",
+        "reducers_missing_gaps",
+    )
+    if resolved is None:
+        return
+    (
+        native_carry,
+        native_carry_id_set,
+        native_index_invariants,
+        native_secondary_effects,
+        native_missing_gaps,
+    ) = resolved
+    # No twin keeps anything between calls: records carry decrypted payload plaintext, and a
+    # module-level reuse cache would keep the last ledger alive after every caller (and any vault
+    # lock or redaction) dropped it. Neither the records nor the projection can be weakly
+    # referenced, so reuse across calls belongs to callers that own a retention policy.
+    python_carry_trusted = _carry_trusted
+    python_carry_id_set = _carry_id_set
+    python_index_invariants = _index_invariants
+    python_secondary_effects = _recompute_secondary_effects
+    python_missing_gaps = _recompute_missing_gaps
+    python_ascii_key = _ascii_key
+    python_target_visible = _target_visible
+    secondary_types = (
+        PlanProjectionRecord,
+        ObligationProjectionRecord,
+        DecisionProjectionRecord,
+        ClaimProjectionRecord,
+        PlanRevisedPayload,
+        DecisionRecordedPayload,
+        ClaimRecordedPayload,
+        ClaimRecordedPayloadV1_1,
+        ContradictionKey,
+        ContradictionRecord,
+    )
+    gap_types = (PlanPublishedPayload, PlanRevisedPayload, ClaimRecordedPayloadV1_1)
+
+    def native_carry_trusted(
+        source: Mapping[Any, object],
+        trusted: Mapping[Any, object] | None,
+        admit: Callable[[object, object], tuple[object, object]],
+    ) -> dict[object, object]:
+        if trusted is not None and _is_exact_dict(source):
+            carried = native_carry(source, trusted, admit)
+            if carried is not None:
+                return cast(dict[object, object], carried)
+        return python_carry_trusted(source, trusted, admit)
+
+    def native_carry_id_set_twin(
+        source: frozenset[EventId], trusted: frozenset[EventId] | None
+    ) -> frozenset[EventId]:
+        if trusted is not None:
+            carried = native_carry_id_set(source, trusted, event_id)
+            if carried is not None:
+                return cast(frozenset[EventId], carried)
+        return python_carry_id_set(source, trusted)
+
+    def native_index_invariants_twin(
+        frontier: int,
+        payloads: Mapping[ObjectId, EventId],
+        evidence: Mapping[ObjectId, tuple[EvidenceObjectSource, ...]],
+        roots: Mapping[ObjectId, EventId],
+        observed_event_ids: frozenset[EventId],
+        observation_source: frozenset[EventId],
+        observation_trusted: frozenset[EventId] | None,
+    ) -> frozenset[EventId]:
+        # The twin copies the observation ids through the reference's own copier only once every
+        # earlier invariant holds, as the reference does: a refusal before that point is a bare
+        # ``projection_corrupt`` and never runs the event-id validator.
+        verdict = native_index_invariants(
+            frontier,
+            payloads,
+            evidence,
+            roots,
+            observed_event_ids,
+            ReplayIndex._copy_observation_findings,  # pyright: ignore[reportPrivateUsage]
+            observation_source,
+            observation_trusted,
+            EvidenceObjectSource,
+        )
+        if verdict is None:
+            return python_index_invariants(
+                frontier,
+                payloads,
+                evidence,
+                roots,
+                observed_event_ids,
+                observation_source,
+                observation_trusted,
+            )
+        if verdict is False:
+            raise _corrupt()
+        return cast(frozenset[EventId], verdict)
+
+    def native_secondary_effects_twin(
+        plans: dict[int, PlanProjectionRecord],
+        obligations: dict[ObligationId, ObligationProjectionRecord],
+        decisions: dict[EventId, DecisionProjectionRecord],
+        claims: Mapping[ClaimId, ClaimProjectionRecord],
+        prior_contradictions: Mapping[ContradictionKey, ContradictionRecord] | None = None,
+    ) -> dict[ContradictionKey, ContradictionRecord]:
+        if _ascii_key is python_ascii_key:
+            contradictions = native_secondary_effects(
+                plans,
+                obligations,
+                decisions,
+                claims,
+                prior_contradictions,
+                replace,
+                secondary_types,
+            )
+            if contradictions is not None:
+                return cast(dict[ContradictionKey, ContradictionRecord], contradictions)
+        return python_secondary_effects(plans, obligations, decisions, claims, prior_contradictions)
+
+    def native_missing_gaps_twin(
+        retained_gaps: set[str],
+        plans: Mapping[int, PlanProjectionRecord],
+        obligations: Mapping[ObligationId, ObligationProjectionRecord],
+        decisions: Mapping[EventId, DecisionProjectionRecord],
+        assignments: Mapping[EventId, ProjectionRecord[AssignmentRecordedPayload]],
+        actions: Mapping[ActionId, ProjectionRecord[ActionRecordedPayload]],
+        results: Mapping[ResultId, ProjectionRecord[ResultRecordedPayload]],
+        evidence: Mapping[EvidenceId, EvidenceProjectionRecord],
+        claims: Mapping[ClaimId, ClaimProjectionRecord],
+        findings: Mapping[FindingId, FindingProjectionRecord],
+        responses: Mapping[FindingId, ProjectionRecord[ResponseRecordedPayload]],
+        coordination_dispositions: Mapping[
+            EventId, ProjectionRecord[CoordinationDispositionRecordedPayload]
+        ],
+    ) -> tuple[str, ...]:
+        if _target_visible is python_target_visible and _ascii_key is python_ascii_key:
+            gaps = native_missing_gaps(
+                retained_gaps,
+                (
+                    plans,
+                    obligations,
+                    decisions,
+                    assignments,
+                    actions,
+                    results,
+                    evidence,
+                    claims,
+                    findings,
+                    responses,
+                    coordination_dispositions,
+                ),
+                (obligation_id, action_id, result_id, evidence_id, claim_id, finding_id),
+                gap_types,
+            )
+            if gaps is not None:
+                return cast(tuple[str, ...], gaps)
+        return python_missing_gaps(
+            retained_gaps,
+            plans,
+            obligations,
+            decisions,
+            assignments,
+            actions,
+            results,
+            evidence,
+            claims,
+            findings,
+            responses,
+            coordination_dispositions,
+        )
+
+    globals().update(
+        _carry_trusted=native_carry_trusted,
+        _carry_id_set=native_carry_id_set_twin,
+        _index_invariants=native_index_invariants_twin,
+        _recompute_secondary_effects=native_secondary_effects_twin,
+        _recompute_missing_gaps=native_missing_gaps_twin,
+    )
+
+
+_bind_native()

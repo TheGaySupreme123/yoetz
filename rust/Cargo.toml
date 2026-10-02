@@ -1,0 +1,39 @@
+[workspace]
+resolver = "3"
+members = ["crates/yoetz-core", "crates/yoetz-native", "crates/yoetz-cli"]
+
+[workspace.package]
+version = "0.3.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.85"
+publish = false
+
+[workspace.dependencies]
+yoetz-core = { path = "crates/yoetz-core" }
+pyo3 = { version = "0.29" }
+sha2 = "0.10"
+hex = "0.4"
+itoa = "1"
+memchr = "2"
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode"] }
+regex-syntax = { version = "0.8", default-features = false, features = ["std", "unicode"] }
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "unwind"
+debug = false
+
+[profile.dev]
+opt-level = 1
+
+# Fast iteration builds for parity work: optimized enough for the timing-ratio tests, without
+# fat LTO. `rust/build-native.sh --dev` uses it.
+[profile.native-dev]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true

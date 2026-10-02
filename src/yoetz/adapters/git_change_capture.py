@@ -34,7 +34,7 @@ import zlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Literal
+from typing import Final, Literal, cast
 
 from yoetz.adapters.git_subject_state import (
     GitOutputTruncated,
@@ -1523,3 +1523,39 @@ def _existing_regular_file(candidate: str) -> str | None:
     except OSError:
         return None
     return candidate
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions("git_new_file_diff")
+    if resolved is None:
+        return
+    (native_new_file_diff,) = resolved
+    module = globals()
+    python_new_file_diff = _new_file_diff
+    # The reference renders through these module globals; a patched one is an observation
+    # point the native renderer cannot honor, so the reference runs instead.
+    watched = tuple((name, module[name]) for name in ("_decode", "_prefixed", "_quote_path"))
+
+    def native_new_file_diff_entry(
+        path: bytes, content: bytes, executable: bool
+    ) -> tuple[bytes, str]:
+        if (
+            type(path) is bytes
+            and type(content) is bytes
+            and type(executable) is bool
+            and type(_BINARY_PROBE_BYTES) is int
+            and _BINARY_PROBE_BYTES >= 0
+            and all(module.get(name) is original for name, original in watched)
+        ):
+            return cast(
+                tuple[bytes, str],
+                native_new_file_diff(path, content, executable, _BINARY_PROBE_BYTES),
+            )
+        return python_new_file_diff(path, content, executable)
+
+    module["_new_file_diff"] = native_new_file_diff_entry
+
+
+_bind_native()

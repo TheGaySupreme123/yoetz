@@ -1,0 +1,27 @@
+[package]
+name = "yoetz-native"
+description = "Optional Rust accelerator for the Yoetz Python package (Python module yoetz_native)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "yoetz_native"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+yoetz-core.workspace = true
+pyo3.workspace = true
+sha2.workspace = true
+hex.workspace = true
+itoa.workspace = true
+memchr.workspace = true
+regex.workspace = true
+regex-syntax.workspace = true
+libc.workspace = true
+
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]

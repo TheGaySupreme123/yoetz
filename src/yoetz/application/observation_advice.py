@@ -1211,3 +1211,126 @@ def minimized_semantic_evidence_packet(
             for item in candidates
         ),
     }
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions(
+        "advice_identity_bind",
+        "advice_stable_finding_id",
+        "advice_canonical_material",
+        "advice_suppression_identity",
+        "advice_condition_identity",
+        "advice_delivery_identity",
+    )
+    if resolved is None:
+        return
+    (
+        bind,
+        native_finding_id,
+        native_material,
+        native_suppression,
+        native_condition,
+        native_delivery,
+    ) = resolved
+    bind(
+        _FINDING_DOMAIN,
+        PREFIX_BY_KIND[IdKind.FINDING],
+        _SUPPRESSION_DOMAIN,
+        _DELIVERY_DOMAIN,
+    )
+    python_finding_id = stable_advice_finding_id
+    python_material = canonical_material
+    python_suppression = _suppression_identity
+    python_condition = _delivery_condition_identity
+    python_delivery = advice_delivery_identity
+    bound_finding_id = finding_id
+    bound_encode = canonical_encode
+
+    # Each twin answers only for exact ``str`` inputs it encodes byte-identically and only while
+    # the collaborators the reference calls through this module are the originals; anything else
+    # runs the reference.
+    def native_stable_advice_finding_id(
+        rule_code: str, detail_token: str, evidence_digest: str
+    ) -> FindingId:
+        """Allocate a deterministic UUIDv4-shaped finding id for observation advice."""
+
+        if finding_id is bound_finding_id:
+            allocated = native_finding_id(rule_code, detail_token, evidence_digest)
+            if allocated is not None:
+                return cast(FindingId, allocated)
+        return python_finding_id(rule_code, detail_token, evidence_digest)
+
+    def native_canonical_material(
+        finding_ids: Sequence[FindingId], evidence_digest: str, next_action: str
+    ) -> bytes:
+        material = native_material(finding_ids, evidence_digest, next_action)
+        if material is None:
+            return python_material(finding_ids, evidence_digest, next_action)
+        return cast(bytes, material)
+
+    def native_suppression_identity(
+        finding_ids: Sequence[FindingId],
+        evidence_digest: str,
+        next_action: str,
+    ) -> str:
+        if canonical_material is native_canonical_material:
+            identity = native_suppression(finding_ids, evidence_digest, next_action)
+            if identity is not None:
+                return cast(str, identity)
+        return python_suppression(finding_ids, evidence_digest, next_action)
+
+    def native_delivery_condition_identity(candidate: ObservationAdviceCandidate) -> str:
+        """Hash the stable rule-specific condition without rolling evidence references."""
+
+        if canonical_encode is bound_encode:
+            identity = native_condition(candidate.detail_token, candidate.rule_code)
+            if identity is not None:
+                return cast(str, identity)
+        return python_condition(candidate)
+
+    def native_advice_delivery_identity(
+        snapshot: AdviceSnapshot, *, item: AdviceItem | None = None
+    ) -> str:
+        """Identity of the *condition* the hook channel is reporting."""
+
+        if canonical_encode is bound_encode:
+            top = item
+            if top is None and snapshot.ranked_items:
+                top = snapshot.ranked_items[0]
+            # The reference's condition members, read in its order; ``None`` marks the
+            # item-less form, which has no ``condition_identity`` member.
+            if top is not None:
+                identity = native_delivery(
+                    top.condition_identity or "",
+                    top.detail,
+                    top.recommended_next_action,
+                    top.rule_code,
+                    top.summary,
+                )
+            else:
+                identity = native_delivery(None, "", snapshot.recommended_next_action, "", "")
+            if identity is not None:
+                return cast(str, identity)
+        return python_delivery(snapshot, item=item)
+
+    for twin, reference in (
+        (native_stable_advice_finding_id, python_finding_id),
+        (native_canonical_material, python_material),
+        (native_suppression_identity, python_suppression),
+        (native_delivery_condition_identity, python_condition),
+        (native_advice_delivery_identity, python_delivery),
+    ):
+        twin.__name__ = reference.__name__
+        twin.__qualname__ = reference.__qualname__
+    globals().update(
+        stable_advice_finding_id=native_stable_advice_finding_id,
+        canonical_material=native_canonical_material,
+        _suppression_identity=native_suppression_identity,
+        _delivery_condition_identity=native_delivery_condition_identity,
+        advice_delivery_identity=native_advice_delivery_identity,
+    )
+
+
+_bind_native()

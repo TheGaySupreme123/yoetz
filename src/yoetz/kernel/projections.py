@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable, Mapping, Set
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Final, Protocol, cast
+from typing import Any, Final, Protocol, cast
 
 from yoetz.domain.events import (
     PAYLOAD_TYPES,
@@ -766,7 +766,10 @@ class ProjectionState:
             ResponseRecordedPayload,
             "finding_id",
         )
-        contradictions = self._copy_contradictions(self.contradictions)
+        contradictions = self._copy_contradictions(
+            self.contradictions,
+            None if prior is None else prior.contradictions,
+        )
         coordination_contexts: dict[
             EventId, ProjectionRecord[CoordinationContextRecordedPayload]
         ] = self._copy_event_mapping(
@@ -834,13 +837,10 @@ class ProjectionState:
         source: Mapping[int, PlanProjectionRecord],
         trusted: Mapping[int, PlanProjectionRecord] | None,
     ) -> dict[int, PlanProjectionRecord]:
-        if not isinstance(cast(object, source), Mapping):
+        if not _is_exact_dict(source) and not isinstance(cast(object, source), Mapping):
             raise _invalid()
-        result: dict[int, PlanProjectionRecord] = {}
-        for key, record in source.items():
-            if trusted is not None and trusted.get(key, _ABSENT) is record:
-                result[key] = record
-                continue
+
+        def admit(key: object, record: object) -> tuple[object, object]:
             if type(key) is not int or not 1 <= key <= _MAX_SAFE_INTEGER:
                 raise _invalid()
             if type(record) is not PlanProjectionRecord:
@@ -848,8 +848,9 @@ class ProjectionState:
             self._validate_record(record)
             if record.payload is not None and record.payload.plan_version != key:
                 raise _invalid()
-            result[key] = record
-        return result
+            return key, record
+
+        return cast(dict[int, PlanProjectionRecord], _carry_trusted(source, trusted, admit))
 
     def _copy_event_mapping[T: _ProjectionRecordLike](
         self,
@@ -860,26 +861,25 @@ class ProjectionState:
         *,
         source_key: bool,
     ) -> dict[EventId, T]:
-        if not isinstance(cast(object, source), Mapping):
+        if not _is_exact_dict(source) and not isinstance(cast(object, source), Mapping):
             raise _invalid()
-        result: dict[EventId, T] = {}
-        for raw_key, record in source.items():
-            if trusted is not None and trusted.get(raw_key, _ABSENT) is record:
-                result[raw_key] = record
-                continue
+
+        def admit(raw_key: object, record: object) -> tuple[object, object]:
             try:
                 key = event_id(raw_key)
             except ValueError as exc:
                 raise _invalid() from exc
             if type(record) is not record_type:
                 raise _invalid()
-            self._validate_record(record)
-            if record.payload is not None and type(record.payload) is not payload_type:
+            typed = cast(_ProjectionRecordLike, record)
+            self._validate_record(typed)
+            if typed.payload is not None and type(typed.payload) is not payload_type:
                 raise _invalid()
-            if source_key and record.source_event_id != key:
+            if source_key and typed.source_event_id != key:
                 raise _invalid()
-            result[key] = record
-        return result
+            return key, record
+
+        return cast(dict[EventId, T], _carry_trusted(source, trusted, admit))
 
     def _copy_mapping[K: str, T: _ProjectionRecordLike](
         self,
@@ -890,39 +890,39 @@ class ProjectionState:
         payload_type: type[object] | tuple[type[object], ...],
         payload_key: str,
     ) -> dict[K, T]:
-        if not isinstance(cast(object, source), Mapping):
+        if not _is_exact_dict(source) and not isinstance(cast(object, source), Mapping):
             raise _invalid()
-        result: dict[K, T] = {}
-        for raw_key, record in source.items():
-            if trusted is not None and trusted.get(raw_key, _ABSENT) is record:
-                result[raw_key] = record
-                continue
+
+        def admit(raw_key: object, record: object) -> tuple[object, object]:
             try:
                 key = key_validator(raw_key)
             except ValueError as exc:
                 raise _invalid() from exc
             if type(record) is not record_type:
                 raise _invalid()
-            self._validate_record(record)
-            if record.payload is not None:
+            typed = cast(_ProjectionRecordLike, record)
+            self._validate_record(typed)
+            if typed.payload is not None:
                 allowed_types: tuple[type[object], ...] = (
                     payload_type if isinstance(payload_type, tuple) else (payload_type,)
                 )
-                if type(record.payload) not in allowed_types:
+                if type(typed.payload) not in allowed_types:
                     raise _invalid()
-                if getattr(record.payload, payload_key) != key:
+                if getattr(typed.payload, payload_key) != key:
                     raise _invalid()
-            result[key] = record
-        return result
+            return key, record
+
+        return cast(dict[K, T], _carry_trusted(source, trusted, admit))
 
     def _copy_contradictions(
         self,
         source: Mapping[ContradictionKey, ContradictionRecord],
+        trusted: Mapping[ContradictionKey, ContradictionRecord] | None = None,
     ) -> dict[ContradictionKey, ContradictionRecord]:
-        if not isinstance(cast(object, source), Mapping):
+        if not _is_exact_dict(source) and not isinstance(cast(object, source), Mapping):
             raise _invalid()
-        result: dict[ContradictionKey, ContradictionRecord] = {}
-        for key, record in source.items():
+
+        def admit(key: object, record: object) -> tuple[object, object]:
             if type(key) is not ContradictionKey or type(record) is not ContradictionRecord:
                 raise _invalid()
             if (
@@ -931,8 +931,59 @@ class ProjectionState:
                 or record.source_frontier > self.frontier
             ):
                 raise _invalid()
-            result[key] = record
-        return result
+            return key, record
+
+        return cast(
+            dict[ContradictionKey, ContradictionRecord],
+            _carry_positional(source, trusted, admit),
+        )
+
+
+def _carry_trusted(
+    source: Mapping[Any, object],
+    trusted: Mapping[Any, object] | None,
+    admit: Callable[[object, object], tuple[object, object]],
+) -> dict[object, object]:
+    """Copy *source*, carrying entries the validated prior holds by identity; admit the rest.
+
+    An entry whose record object the trusted prior holds under the same key was validated when
+    that prior was built (records are frozen). Every other entry goes through ``admit``, in source
+    order, which validates it and returns the key and value to store.
+    """
+
+    result: dict[object, object] = {}
+    for raw_key, record in source.items():
+        if trusted is not None and trusted.get(raw_key, _ABSENT) is record:
+            result[raw_key] = record
+            continue
+        key, value = admit(raw_key, record)
+        result[key] = value
+    return result
+
+
+def _carry_positional(
+    source: Mapping[Any, object],
+    trusted: Mapping[Any, object] | None,
+    admit: Callable[[object, object], tuple[object, object]],
+) -> dict[object, object]:
+    """Copy *source*, admitting every entry in source order.
+
+    ``trusted`` is unused here; the accelerated twin carries an entry only when the validated
+    prior holds the identical key and value objects at the same position.
+    """
+
+    del trusted
+    result: dict[object, object] = {}
+    for raw_key, record in source.items():
+        key, value = admit(raw_key, record)
+        result[key] = value
+    return result
+
+
+def _is_exact_dict(value: object) -> bool:
+    """Whether *value* is exactly a ``dict`` (the shape the accelerated carries accept)."""
+
+    return type(value) is dict
 
 
 def derive_projection_state(
@@ -1160,16 +1211,28 @@ def _sorted_record_map[K](
     source: Mapping[K, _ProjectionRecordLike],
     *,
     key_text: Callable[[K], str] = _string_key,
+    record_value: Callable[[_ProjectionRecordLike], JsonValue] | None = None,
 ) -> dict[str, JsonValue]:
     rows = sorted(
         ((key_text(key), record) for key, record in source.items()),
         key=lambda item: item[0].encode("ascii"),
     )
-    return {key: _record_snapshot(record) for key, record in rows}
+    if record_value is None:
+        return {key: _record_snapshot(record) for key, record in rows}
+    return {key: record_value(record) for key, record in rows}
 
 
 def projection_snapshot(state: ProjectionState) -> dict[str, JsonValue]:
     """Return the exact canonical JSON-compatible generation-1 snapshot."""
+
+    return _projection_snapshot(state, None)
+
+
+def _projection_snapshot(
+    state: ProjectionState,
+    record_value: Callable[[_ProjectionRecordLike], JsonValue] | None,
+) -> dict[str, JsonValue]:
+    """Build the snapshot; ``record_value`` (default ``_record_snapshot``) renders each record."""
 
     if type(state) is not ProjectionState:
         raise _invalid()
@@ -1193,32 +1256,41 @@ def projection_snapshot(state: ProjectionState) -> dict[str, JsonValue]:
         "plans": _sorted_record_map(
             cast(Mapping[int, _ProjectionRecordLike], state.plans),
             key_text=_plan_key,
+            record_value=record_value,
         ),
         "obligations": _sorted_record_map(
-            cast(Mapping[ObligationId, _ProjectionRecordLike], state.obligations)
+            cast(Mapping[ObligationId, _ProjectionRecordLike], state.obligations),
+            record_value=record_value,
         ),
         "decisions": _sorted_record_map(
-            cast(Mapping[EventId, _ProjectionRecordLike], state.decisions)
+            cast(Mapping[EventId, _ProjectionRecordLike], state.decisions),
+            record_value=record_value,
         ),
         "assignments": _sorted_record_map(
-            cast(Mapping[EventId, _ProjectionRecordLike], state.assignments)
+            cast(Mapping[EventId, _ProjectionRecordLike], state.assignments),
+            record_value=record_value,
         ),
         "actions": _sorted_record_map(
-            cast(Mapping[ActionId, _ProjectionRecordLike], state.actions)
+            cast(Mapping[ActionId, _ProjectionRecordLike], state.actions), record_value=record_value
         ),
         "results": _sorted_record_map(
-            cast(Mapping[ResultId, _ProjectionRecordLike], state.results)
+            cast(Mapping[ResultId, _ProjectionRecordLike], state.results), record_value=record_value
         ),
         "evidence": _sorted_record_map(
-            cast(Mapping[EvidenceId, _ProjectionRecordLike], state.evidence)
+            cast(Mapping[EvidenceId, _ProjectionRecordLike], state.evidence),
+            record_value=record_value,
         ),
-        "claims": _sorted_record_map(cast(Mapping[ClaimId, _ProjectionRecordLike], state.claims)),
+        "claims": _sorted_record_map(
+            cast(Mapping[ClaimId, _ProjectionRecordLike], state.claims), record_value=record_value
+        ),
         "contradictions": contradictions,
         "findings": _sorted_record_map(
-            cast(Mapping[FindingId, _ProjectionRecordLike], state.findings)
+            cast(Mapping[FindingId, _ProjectionRecordLike], state.findings),
+            record_value=record_value,
         ),
         "responses": _sorted_record_map(
-            cast(Mapping[FindingId, _ProjectionRecordLike], state.responses)
+            cast(Mapping[FindingId, _ProjectionRecordLike], state.responses),
+            record_value=record_value,
         ),
         "latest_tested_state": (
             None
@@ -1233,15 +1305,18 @@ def projection_snapshot(state: ProjectionState) -> dict[str, JsonValue]:
     # as the recipient ledger records one of the new event families.
     if state.coordination_contexts:
         snapshot["coordination_contexts"] = _sorted_record_map(
-            cast(Mapping[EventId, _ProjectionRecordLike], state.coordination_contexts)
+            cast(Mapping[EventId, _ProjectionRecordLike], state.coordination_contexts),
+            record_value=record_value,
         )
     if state.coordination_dispositions:
         snapshot["coordination_dispositions"] = _sorted_record_map(
-            cast(Mapping[EventId, _ProjectionRecordLike], state.coordination_dispositions)
+            cast(Mapping[EventId, _ProjectionRecordLike], state.coordination_dispositions),
+            record_value=record_value,
         )
     if state.coordination_declarations:
         snapshot["coordination_declarations"] = _sorted_record_map(
-            cast(Mapping[EventId, _ProjectionRecordLike], state.coordination_declarations)
+            cast(Mapping[EventId, _ProjectionRecordLike], state.coordination_declarations),
+            record_value=record_value,
         )
     if state.pending_missing_for_assessment is not None:
         pending = state.pending_missing_for_assessment
@@ -1782,3 +1857,48 @@ def projection_digest(state: ProjectionState) -> str:
     """Digest the exact canonical projection snapshot."""
 
     return canonical_digest(projection_snapshot(state))
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions("projection_carry_trusted", "projection_carry_positional")
+    if resolved is None:
+        return
+    native_trusted, native_positional = resolved
+    python_carry_trusted = _carry_trusted
+    python_carry_positional = _carry_positional
+
+    def native_carry_trusted(
+        source: Mapping[Any, object],
+        trusted: Mapping[Any, object] | None,
+        admit: Callable[[object, object], tuple[object, object]],
+    ) -> dict[object, object]:
+        if trusted is not None and _is_exact_dict(source):
+            carried = native_trusted(source, trusted, admit)
+            if carried is not None:
+                return cast(dict[object, object], carried)
+        return python_carry_trusted(source, trusted, admit)
+
+    def native_carry_positional(
+        source: Mapping[Any, object],
+        trusted: Mapping[Any, object] | None,
+        admit: Callable[[object, object], tuple[object, object]],
+    ) -> dict[object, object]:
+        if trusted is not None and _is_exact_dict(source):
+            carried = native_positional(source, trusted, admit)
+            if carried is not None:
+                return cast(dict[object, object], carried)
+        return python_carry_positional(source, trusted, admit)
+
+    # ``projection_digest`` keeps no per-record fragment cache between calls: the fragments are
+    # the projection's canonical text (decrypted payload plaintext included) and a module-level
+    # cache would outlive every caller's reference to the projection. Records and projections
+    # cannot be weakly referenced, so the digest re-encodes (through the native canonical encoder).
+    globals().update(
+        _carry_trusted=native_carry_trusted,
+        _carry_positional=native_carry_positional,
+    )
+
+
+_bind_native()

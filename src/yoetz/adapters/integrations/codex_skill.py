@@ -1004,3 +1004,35 @@ class CodexSkillIntegration(IntegrationsPort):
             tuple(sorted((*bundle.members, _MARKER_NAME), key=str.encode)),
             current.preview_digest,
         )
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions("managed_validated_text_ok")
+    if resolved is None:
+        return
+    (native_text_ok,) = resolved
+    module = globals()
+    python_validated_text = _validated_text
+    # The reference checks through these module globals; a patched one is an observation point
+    # the native scan cannot honor, so the reference runs (and raises) instead.
+    watched = tuple((name, module[name]) for name in ("_LINK_RE", "Path", "_error"))
+
+    def native_validated_text(path: str, data: bytes) -> None:
+        if (
+            type(_SOURCE_FILE_LIMIT) is int
+            and _SOURCE_FILE_LIMIT >= 0
+            and all(module.get(name) is original for name, original in watched)
+            and native_text_ok(data, _SOURCE_FILE_LIMIT) is True
+        ):
+            if path == "SKILL.md":
+                _validate_skill_frontmatter(data.decode("utf-8", errors="strict"))
+            return
+        # Refusals (and any other input shape) come from the reference itself.
+        python_validated_text(path, data)
+
+    module["_validated_text"] = native_validated_text
+
+
+_bind_native()

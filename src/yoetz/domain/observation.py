@@ -2604,3 +2604,224 @@ def observation_revoke_command_from_json(value: JsonValue) -> ObservationRevokeC
         workspace_commitment=cast(str, source["workspace_commitment"]),
         retain_evidence=cast(Literal[True], source["retain_evidence"]),
     )
+
+
+def _bind_native() -> None:
+    import sys
+
+    from yoetz._native import NATIVE_ENV, native_functions
+
+    resolved = native_functions(
+        "bind_observation",
+        "observation_tables",
+        "normalize_observed_command",
+        "structural_payload",
+        "sorted_unique_tokens",
+        "sorted_unique_gap_codes",
+        "evidence_refs",
+        "content_object_refs",
+        "workspace_commitment_from_path",
+        "stream_line_commitment",
+        "hook_source_commitment",
+        "observed_command_commitment",
+    )
+    if resolved is None:
+        return
+    (
+        bind,
+        tables,
+        native_normalize,
+        native_structural,
+        native_tokens,
+        native_gap_codes,
+        native_evidence_refs,
+        native_content_refs,
+        native_workspace_commitment,
+        native_stream_line_commitment,
+        native_hook_commitment,
+        native_command_commitment,
+    ) = resolved
+    native = tables()
+    gap_default = (_sorted_unique_gap_codes.__kwdefaults__ or {}).get("maximum")
+    # The twins hard-code these limits, key tables, and patterns; a drifted copy keeps Python.
+    if not (
+        native["_MAX_OBSERVED_COMMAND_CHARS"] == _MAX_OBSERVED_COMMAND_CHARS
+        and native["_MAX_OBSERVED_ARGV"] == _MAX_OBSERVED_ARGV
+        and native["_MAX_STRUCTURAL_BYTES"] == _MAX_STRUCTURAL_BYTES
+        and frozenset(native["_STRUCTURAL_KEYS"]) == _STRUCTURAL_KEYS
+        and frozenset(native["_STRUCTURAL_TOKEN_KEYS"]) == _STRUCTURAL_TOKEN_KEYS
+        and frozenset(native["_PROSE_KEYS"]) == _PROSE_KEYS
+        and frozenset(native["_SHELL_WRAPPERS"]) == _SHELL_WRAPPERS
+        and native["_SHELL_COMMAND_FLAG_RE"] == _SHELL_COMMAND_FLAG_RE.pattern
+        and native["_TOKEN_RE"] == _TOKEN_RE.pattern
+        and native["_GAP_RE"] == _GAP_RE.pattern
+        and _SHELL_COMMAND_FLAG_RE.flags == _TOKEN_RE.flags == _GAP_RE.flags == re.ASCII
+        and native["_MAX_GAP_CODES"] == gap_default
+        and native["OBSERVATION_WORKSPACE_DOMAIN"] == OBSERVATION_WORKSPACE_DOMAIN
+        and native["OBSERVATION_STREAM_LINE_DOMAIN"] == OBSERVATION_STREAM_LINE_DOMAIN
+        and native["OBSERVATION_HOOK_COMMITMENT_DOMAIN"] == OBSERVATION_HOOK_COMMITMENT_DOMAIN
+        and native["OBSERVATION_COMMAND_COMMITMENT_DOMAIN"] == OBSERVATION_COMMAND_COMMITMENT_DOMAIN
+    ):
+        if os.environ.get(NATIVE_ENV, "") == "require":
+            raise ImportError("yoetz_native_table_mismatch")
+        return
+    # Every module global a reference reads at call time that its twin reproduces instead of
+    # reading: (globals that must stay the objects bound here, builtins that must stay
+    # unshadowed in this namespace, (owner, attribute) pairs that must stay put, dict globals
+    # whose contents must stay unchanged). A replaced one sends the call to the reference.
+    refusal = ("_invalid", "PROTOCOL_REASON_CODES", "ProtocolValueError")
+    sorted_set = (*refusal, "_exact_tuple", "cast")
+    commitment = (*refusal, "hmac", "hashlib")
+    commitment_builtins = ("type", "bytes", "len", "str")
+    guards: dict[str, tuple[tuple[object, ...], ...]] = {
+        "normalize_observed_command": (
+            (
+                "_MAX_OBSERVED_ARGV",
+                "_MAX_OBSERVED_COMMAND_CHARS",
+                "_shell_wrapped_command",
+                "_collapse_unquoted_blanks",
+                "_SHELL_WRAPPERS",
+                "_SHELL_COMMAND_FLAG_RE",
+                "shlex",
+                "cast",
+            ),
+            ("type", "str", "list", "tuple", "len", "any", "range", "ValueError"),
+            ((shlex, "split"), (shlex, "join")),
+            (),
+        ),
+        "_structural_payload": (
+            (
+                *refusal,
+                "_PROSE_KEYS",
+                "_STRUCTURAL_KEYS",
+                "_STRUCTURAL_TOKEN_KEYS",
+                "_token",
+                "_TOKEN_RE",
+                "_reject_path_like",
+                "_looks_like_path",
+                "_MAX_STRUCTURAL_BYTES",
+                "cast",
+            ),
+            ("type", "any", "len", "str", "tuple"),
+            (),
+            (),
+        ),
+        "_sorted_unique_tokens": (
+            (*sorted_set, "_token", "_TOKEN_RE"),
+            ("type", "len", "tuple"),
+            (),
+            (),
+        ),
+        "_sorted_unique_gap_codes": (
+            (*sorted_set, "_gap_code", "_GAP_RE"),
+            ("type", "len", "tuple"),
+            (),
+            (),
+        ),
+        "_evidence_refs": ((*sorted_set, "_token", "_TOKEN_RE"), ("type", "len", "tuple"), (), ()),
+        "_content_object_refs": (
+            (*sorted_set, "_looks_like_path"),
+            ("type", "len", "tuple", "str"),
+            (),
+            (),
+        ),
+        "workspace_commitment_from_path": (
+            (*commitment, "os", "OBSERVATION_WORKSPACE_DOMAIN"),
+            commitment_builtins,
+            (),
+            (),
+        ),
+        "stream_line_commitment": (
+            (*commitment, "OBSERVATION_STREAM_LINE_DOMAIN"),
+            ("type", "bytes", "len"),
+            (),
+            (),
+        ),
+        "hook_source_commitment": (
+            (*commitment, "OBSERVATION_HOOK_COMMITMENT_DOMAIN"),
+            commitment_builtins,
+            (),
+            (),
+        ),
+        "observed_command_commitment": (
+            (*commitment, "OBSERVATION_COMMAND_COMMITMENT_DOMAIN"),
+            commitment_builtins,
+            (),
+            (),
+        ),
+    }
+    bind(
+        globals(),
+        {
+            "normalize_observed_command": normalize_observed_command,
+            "_structural_payload": _structural_payload,
+            "_sorted_unique_tokens": _sorted_unique_tokens,
+            "_sorted_unique_gap_codes": _sorted_unique_gap_codes,
+            "_evidence_refs": _evidence_refs,
+            "_content_object_refs": _content_object_refs,
+            "workspace_commitment_from_path": workspace_commitment_from_path,
+            "stream_line_commitment": stream_line_commitment,
+            "hook_source_commitment": hook_source_commitment,
+            "observed_command_commitment": observed_command_commitment,
+            # The native HMAC stands in for these only while they are the originals.
+            "hmac.new": hmac.new,
+            "hashlib.sha256": hashlib.sha256,
+            "os.fsencode": os.fsencode,
+            "fs_utf8_surrogateescape": sys.getfilesystemencoding() == "utf-8"
+            and sys.getfilesystemencodeerrors() == "surrogateescape",
+        },
+        guards,
+    )
+    globals().update(
+        workspace_commitment_from_path=native_workspace_commitment,
+        stream_line_commitment=native_stream_line_commitment,
+        hook_source_commitment=native_hook_commitment,
+        observed_command_commitment=native_command_commitment,
+        normalize_observed_command=native_normalize,
+        _structural_payload=native_structural,
+        _sorted_unique_tokens=native_tokens,
+        _sorted_unique_gap_codes=native_gap_codes,
+        _evidence_refs=native_evidence_refs,
+        _content_object_refs=native_content_refs,
+    )
+
+    envelopes = native_functions("envelope_bind", "envelope_from_json")
+    if envelopes is None:
+        return
+    bind_envelope, native_envelope_from_json = envelopes
+    python_envelope_from_json = observation_envelope_from_json
+    namespace = globals()
+    # The twin stands in for the reference's own steps only while every collaborator it reads
+    # through this namespace is still the one bound here; it calls the rest in the reference's
+    # order, so ``ObservationEnvelope`` is still built and validated by Python.
+    bind_envelope(
+        namespace,
+        {
+            name: namespace[name]
+            for name in (
+                "JsonObject",
+                "ObservationSource",
+                "ObservationCursor",
+                "ObservationEnvelope",
+                "observation_cursor_from_json",
+                "timestamp_from_string",
+                "_structural_payload",
+                "_content_object_refs",
+                "_sorted_unique_gap_codes",
+            )
+        },
+        python_envelope_from_json,
+    )
+
+    def native_observation_envelope_from_json(value: JsonValue) -> ObservationEnvelope:
+        envelope = native_envelope_from_json(value)
+        if envelope is None:
+            return python_envelope_from_json(value)
+        return cast(ObservationEnvelope, envelope)
+
+    native_observation_envelope_from_json.__name__ = python_envelope_from_json.__name__
+    native_observation_envelope_from_json.__qualname__ = python_envelope_from_json.__qualname__
+    globals().update(observation_envelope_from_json=native_observation_envelope_from_json)
+
+
+_bind_native()

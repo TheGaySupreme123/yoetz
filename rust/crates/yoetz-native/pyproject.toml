@@ -1,0 +1,19 @@
+[build-system]
+requires = ["maturin>=1.15,<2"]
+build-backend = "maturin"
+
+[project]
+name = "yoetz-native"
+version = "0.3.0"
+description = "Optional Rust accelerator for Yoetz; the yoetz package uses it when installed"
+requires-python = ">=3.14,<3.15"
+license = "Apache-2.0"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3.14",
+]
+
+[tool.maturin]
+module-name = "yoetz_native"
+features = ["extension-module"]
+profile = "release"

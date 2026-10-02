@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from functools import total_ordering
 from types import MappingProxyType, NotImplementedType
-from typing import Final, Literal, NewType, cast, final
+from typing import Any, Final, Literal, NewType, cast, final
 
 from yoetz.protocol.canonical import (
     MAX_JSON_DEPTH,
@@ -735,3 +735,103 @@ def parse_wire_sequence(value: str) -> int:
 
 def render_wire_sequence(value: int) -> str:
     return canonical_integer_string(value)
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+    from yoetz._native_replay import ReplayReferences, adopt_identity, reference_functions
+
+    resolved = native_functions(
+        "values_bind_json_object",
+        "values_freeze_json_at",
+        "values_freeze_json",
+    )
+    if resolved is None:
+        return
+    bind_json_object, native_freeze_json_at, native_freeze_json = resolved
+    bind_json_object(JsonObject)
+
+    python: dict[str, Callable[..., Any]] = {
+        "_freeze_json": _freeze_json,
+        "freeze_json": freeze_json,
+    }
+    replay: ReplayReferences  # bound below, once the wrappers are
+
+    # The accepted path stays native. A refusal is replayed by the reference, called after the
+    # ``except`` block, so it raises with the reference's exception chain and a frame of this
+    # module as the diagnostic origin.
+    def native_freeze_json_at_wrapper(value: object, *, depth: int) -> JsonValue:
+        try:
+            return native_freeze_json_at(value, depth=depth)
+        except Exception:
+            pass
+        return replay["_freeze_json"](value, depth=depth)
+
+    def native_freeze_json_wrapper(value: object) -> JsonValue:
+        try:
+            return native_freeze_json(value)
+        except Exception:
+            pass
+        return replay["freeze_json"](value)
+
+    wrappers: dict[str, Callable[..., Any]] = {
+        "_freeze_json": native_freeze_json_at_wrapper,
+        "freeze_json": native_freeze_json_wrapper,
+    }
+    for name, wrapper in wrappers.items():
+        adopt_identity(wrapper, python[name])
+    # ``JsonObject.__init__`` freezes its members through the module global ``_freeze_json``.
+    globals().update(wrappers)
+    replay = reference_functions(globals(), python)
+
+    timestamps = native_functions(
+        "values_bind_timestamp",
+        "values_parse_rfc3339_millis",
+        "values_is_wire_timestamp",
+        "values_timestamp_from_string",
+    )
+    if timestamps is None:
+        return
+    bind_timestamp, native_parse, native_is_wire, native_from_string = timestamps
+    bind_timestamp(Timestamp)
+    python_parse = parse_rfc3339_millis
+    python_post_init = Timestamp.__post_init__
+    python_from_string = timestamp_from_string
+
+    # Each twin only accepts. Whatever it does not accept is judged, and refused with the exact
+    # exception chain and a frame of this module, by the reference.
+    def native_parse_rfc3339_millis(value: object) -> datetime:
+        parsed = native_parse(value)
+        if parsed is None:
+            return python_parse(value)
+        return cast(datetime, parsed)
+
+    def native_post_init(self: Timestamp) -> None:
+        # A replaced ``parse_rfc3339_millis`` is an observation point of the reference.
+        wire = self._wire  # pyright: ignore[reportPrivateUsage]
+        if parse_rfc3339_millis is native_parse_rfc3339_millis and native_is_wire(wire):
+            return
+        python_post_init(self)
+
+    def native_timestamp_from_string(value: object) -> Timestamp:
+        if parse_rfc3339_millis is native_parse_rfc3339_millis and Timestamp is timestamp_class:
+            created = native_from_string(value)
+            if created is not None:
+                return cast(Timestamp, created)
+        return python_from_string(value)
+
+    timestamp_class = Timestamp
+    native_parse_rfc3339_millis.__name__ = python_parse.__name__
+    native_parse_rfc3339_millis.__qualname__ = python_parse.__qualname__
+    native_post_init.__name__ = python_post_init.__name__
+    native_post_init.__qualname__ = python_post_init.__qualname__
+    native_timestamp_from_string.__name__ = python_from_string.__name__
+    native_timestamp_from_string.__qualname__ = python_from_string.__qualname__
+    Timestamp.__post_init__ = native_post_init  # type: ignore[method-assign]
+    globals().update(
+        parse_rfc3339_millis=native_parse_rfc3339_millis,
+        timestamp_from_string=native_timestamp_from_string,
+    )
+
+
+_bind_native()

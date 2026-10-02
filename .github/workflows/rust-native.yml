@@ -1,0 +1,160 @@
+# .github/workflows/rust-native.yml — experimental Rust accelerator gate (rust/, yoetz_native).
+#
+# The yoetz wheel stays pure Python; `yoetz_native` is an optional, separately built extension.
+# This workflow proves the Rust workspace builds and lints cleanly, then runs the unchanged
+# Python suite twice against the same checkout: with YZ_NATIVE=require (every bound native twin
+# must load and is exercised) and with YZ_NATIVE=0 (the pure-Python references still pass).
+# Never uses production credentials or live providers.
+
+name: Rust native accelerator
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [rust-experiment]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-native-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  TZ: UTC
+  LANG: C.UTF-8
+  LC_ALL: C.UTF-8
+  UV_VERSION: "0.11.29"
+  UV_NO_PROGRESS: "1"
+  UV_LOCKED: "1"
+  PYTHONUTF8: "1"
+  RUST_TOOLCHAIN: "1.97.0"
+  CARGO_TERM_COLOR: never
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # ---------------------------------------------------------------------------------------------
+  # rust-workspace — format, lint, and unit-test the Rust crates.
+  # ---------------------------------------------------------------------------------------------
+  rust-workspace:
+    name: rust-workspace
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Install pinned uv and Python 3.14
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy,rustfmt
+          rustup default "$RUST_TOOLCHAIN"
+
+      - name: cargo fmt --check
+        run: cargo fmt --manifest-path rust/Cargo.toml --all --check
+
+      # PyO3's build script needs the interpreter it targets; setup-uv only selects the version.
+      - name: cargo clippy (warnings are errors)
+        run: |
+          uv python install 3.14.6
+          uv python find 3.14.6 > "$RUNNER_TEMP/python-path"
+          export PYO3_PYTHON="$(cat "$RUNNER_TEMP/python-path")"
+          cargo clippy --manifest-path rust/Cargo.toml --all-targets --locked -- -D warnings
+
+      # The PyO3 crate is exercised by the native-parity job through the Python suite; its test
+      # binary would need libpython at run time and holds no Rust tests.
+      - name: cargo test (pure crates)
+        run: cargo test --manifest-path rust/Cargo.toml --locked -p yoetz-core -p yoetz-cli
+
+  # ---------------------------------------------------------------------------------------------
+  # native-parity — the unchanged Python suite with the accelerator required, then disabled.
+  # ---------------------------------------------------------------------------------------------
+  native-parity:
+    name: native-parity (YZ_NATIVE=${{ matrix.mode }})
+    needs: rust-workspace
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: ["require", "0"]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      PYTHONHASHSEED: "0"
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Install pinned uv and Python 3.14
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+
+      - name: uv sync --locked
+        run: uv sync --locked --all-extras --group dev
+
+      - name: Build and install the yoetz_native accelerator into the project environment
+        run: rust/build-native.sh
+
+      # Network-denied approved checks run inside bubblewrap; Ubuntu 24.04 also needs unprivileged
+      # user namespaces allowed for it on this throwaway runner.
+      - name: Install bubblewrap for the check sandbox
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      # Integration tests create state directories and Unix sockets under the temp directory: keep
+      # it private (not the world-writable /tmp, refused as path_shared_temp) and short.
+      - name: Isolate HOME/XDG/Yoetz app data and TMPDIR inside private runner directories
+        run: |
+          iso="${RUNNER_TEMP}/yoetz-home"
+          tmp="${HOME}/yzt"
+          mkdir -p "$iso" "$tmp"
+          chmod 700 "$tmp"
+          echo "HOME=$iso" >> "$GITHUB_ENV"
+          echo "XDG_DATA_HOME=$iso/.local/share" >> "$GITHUB_ENV"
+          echo "XDG_CONFIG_HOME=$iso/.config" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
+          echo "TMPDIR=$tmp" >> "$GITHUB_ENV"
+          echo "YZCI_DENY_NETWORK=1" >> "$GITHUB_ENV"
+          echo "YZ_NATIVE=${{ matrix.mode }}" >> "$GITHUB_ENV"
+
+      - name: Unit, property, and conformance (bounded, excludes fault/soak/live)
+        run: |
+          uv run --locked pytest tests/unit tests/property tests/conformance \
+            -m "not fault and not soak and not live" -q --timeout=300
+
+      - name: Integration, terminal interface, and capability (bounded)
+        run: |
+          uv run --locked pytest tests/integration tests/tui tests/capability \
+            -m "not fault and not soak and not live and not live_keyring and not live_provider and not kill_matrix" \
+            -q --timeout=600

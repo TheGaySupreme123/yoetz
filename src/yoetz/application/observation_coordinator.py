@@ -783,6 +783,77 @@ def _empty_capture_bootstrap_workspaces() -> set[str]:
     return set()
 
 
+_CAPTURED_CONTENT_FORMAT: Final = "yoetz.observation-content/1"
+_CAPTURED_CONTENT_KEYS: Final = frozenset(
+    {
+        "format",
+        "content_kind",
+        "correlation_identity",
+        "source_commitment",
+        "media_type",
+        "part_index",
+        "part_count",
+        "redacted",
+        "content_b64",
+    }
+)
+
+type _VerifiedCapturedContent = tuple[object, object, object, bool, object, object, str, int]
+
+
+def _captured_content_manifest(chunk: ObservationContentChunk) -> tuple[bytes, str]:
+    """Return a stored chunk's canonical manifest bytes and its content's ``sha256:`` digest."""
+
+    manifest = canonical_encode(
+        JsonObject(
+            {
+                "format": _CAPTURED_CONTENT_FORMAT,
+                "content_kind": chunk.content_kind.value,
+                "correlation_identity": chunk.correlation_identity,
+                "source_commitment": chunk.source_commitment,
+                "media_type": chunk.media_type,
+                "part_index": chunk.part_index,
+                "part_count": chunk.part_count,
+                "redacted": chunk.redacted,
+                "content_b64": base64.b64encode(chunk.content).decode("ascii"),
+            }
+        )
+    )
+    return manifest, "sha256:" + hashlib.sha256(chunk.content).hexdigest()
+
+
+def _verified_captured_content(material: bytes) -> _VerifiedCapturedContent | None:
+    """Read one stored manifest object back, or ``None`` when it is not an exact manifest.
+
+    The result is ``(content_kind, part_index, part_count, redacted, correlation_identity,
+    source_commitment, content_digest, content_bytes)``; the caller still validates the raw
+    members by building the manifest. An unreadable document or invalid base64 raises.
+    """
+
+    parsed = strict_json_parse(material)
+    if (
+        not isinstance(parsed, Mapping)
+        or frozenset(parsed) != _CAPTURED_CONTENT_KEYS
+        or canonical_encode(parsed) != material
+        or parsed.get("format") != _CAPTURED_CONTENT_FORMAT
+        or parsed.get("media_type") != "text/plain"
+        or type(parsed.get("content_b64")) is not str
+        or type(parsed.get("redacted")) is not bool
+    ):
+        return None
+    content = base64.b64decode(cast(str, parsed["content_b64"]), validate=True)
+    return (
+        parsed["content_kind"],
+        parsed["part_index"],
+        parsed["part_count"],
+        cast(bool, parsed["redacted"]),
+        parsed["correlation_identity"],
+        parsed["source_commitment"],
+        "sha256:" + hashlib.sha256(content).hexdigest(),
+        len(content),
+    )
+
+
 @dataclass
 class ObservationCoordinator:
     """Resolve Codex session → mapped task SQLite observation store + ledger."""
@@ -4993,40 +5064,30 @@ class ObservationCoordinator:
                     return loaded, False, False
                 if not await capture_fence_current():
                     return loaded, False, False
-                parsed = strict_json_parse(material)
-                expected_keys = {
-                    "format",
-                    "content_kind",
-                    "correlation_identity",
-                    "source_commitment",
-                    "media_type",
-                    "part_index",
-                    "part_count",
-                    "redacted",
-                    "content_b64",
-                }
-                if (
-                    not isinstance(parsed, Mapping)
-                    or set(parsed) != expected_keys
-                    or canonical_encode(parsed) != material
-                    or parsed.get("format") != "yoetz.observation-content/1"
-                    or parsed.get("media_type") != "text/plain"
-                    or type(parsed.get("content_b64")) is not str
-                    or type(parsed.get("redacted")) is not bool
-                ):
+                fields = _verified_captured_content(material)
+                if fields is None:
                     return loaded, False, False
-                content = base64.b64decode(cast(str, parsed["content_b64"]), validate=True)
+                (
+                    content_kind,
+                    part_index,
+                    part_count,
+                    redacted,
+                    correlation_identity,
+                    source_commitment,
+                    content_digest,
+                    content_bytes,
+                ) = fields
                 verified = ObservationContentManifest(
                     object_id=ref.object_id,
                     envelope_digest=ref.envelope_digest,
-                    content_kind=ObservationContentKind(cast(str, parsed["content_kind"])),
-                    part_index=cast(int, parsed["part_index"]),
-                    part_count=cast(int, parsed["part_count"]),
-                    redacted=cast(bool, parsed["redacted"]),
-                    content_digest="sha256:" + hashlib.sha256(content).hexdigest(),
-                    content_bytes=len(content),
-                    correlation_identity=cast(str, parsed["correlation_identity"]),
-                    source_commitment=cast(str, parsed["source_commitment"]),
+                    content_kind=ObservationContentKind(cast(str, content_kind)),
+                    part_index=cast(int, part_index),
+                    part_count=cast(int, part_count),
+                    redacted=redacted,
+                    content_digest=content_digest,
+                    content_bytes=content_bytes,
+                    correlation_identity=cast(str, correlation_identity),
+                    source_commitment=cast(str, source_commitment),
                 )
                 if not content_binding_matches(
                     verified.content_kind,
@@ -5243,21 +5304,7 @@ class ObservationCoordinator:
                 content=safe_content,
                 redacted=chunk.redacted or detected,
             )
-            manifest_bytes = canonical_encode(
-                JsonObject(
-                    {
-                        "format": "yoetz.observation-content/1",
-                        "content_kind": stored_chunk.content_kind.value,
-                        "correlation_identity": stored_chunk.correlation_identity,
-                        "source_commitment": stored_chunk.source_commitment,
-                        "media_type": stored_chunk.media_type,
-                        "part_index": stored_chunk.part_index,
-                        "part_count": stored_chunk.part_count,
-                        "redacted": stored_chunk.redacted,
-                        "content_b64": base64.b64encode(safe_content).decode("ascii"),
-                    }
-                )
-            )
+            manifest_bytes, content_digest = _captured_content_manifest(stored_chunk)
             finalized_now: StagedObject | None = None
             if existing is None:
                 metadata = ObjectMetadata(
@@ -5307,7 +5354,6 @@ class ObservationCoordinator:
                         )
                     )
                     continue
-            content_digest = "sha256:" + hashlib.sha256(safe_content).hexdigest()
             # The object may already be durable. Recheck authority before
             # binding its manifest. A revoke that wins after finalization must
             # not record captured evidence for the old fence. Only an object
@@ -5959,23 +6005,8 @@ class ObservationCoordinator:
             content=scan.content,
             redacted=scan.redacted,
         )
-        manifest = canonical_encode(
-            JsonObject(
-                {
-                    "format": "yoetz.observation-content/1",
-                    "content_kind": chunk.content_kind.value,
-                    "correlation_identity": chunk.correlation_identity,
-                    "source_commitment": chunk.source_commitment,
-                    "media_type": chunk.media_type,
-                    "part_index": 0,
-                    "part_count": 1,
-                    "redacted": scan.redacted,
-                    "content_b64": base64.b64encode(scan.content).decode("ascii"),
-                }
-            )
-        )
+        manifest, content_digest = _captured_content_manifest(chunk)
         staged, ref = await self._stage_captured_content(runtime, manifest)
-        content_digest = "sha256:" + hashlib.sha256(scan.content).hexdigest()
         logical_identity = f"verification:{job.job_id}"
         try:
             store.record_content_manifest(
@@ -6745,3 +6776,86 @@ class ObservationCoordinator:
                 request_id=operation_id,
             )
             raise
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions(
+        "coordinator_captured_content_manifest",
+        "coordinator_verified_captured_content",
+        "stable_uuid4_from_hex_digest",
+    )
+    if resolved is None:
+        return
+    native_manifest, native_verified, native_uuid4 = resolved
+    import json
+
+    from yoetz.protocol.ids import PREFIX_BY_KIND
+
+    python_manifest = _captured_content_manifest
+    python_verified = _verified_captured_content
+    python_stable_operation_id = ObservationCoordinator._stable_operation_id  # pyright: ignore[reportPrivateUsage]
+    bound_encode = canonical_encode
+    bound_parse = strict_json_parse
+    bound_json_object = JsonObject
+    stdlib_loads = json.loads
+    stdlib_b64encode = base64.b64encode
+    stdlib_b64decode = base64.b64decode
+    stdlib_sha256 = hashlib.sha256
+    request_prefix = PREFIX_BY_KIND[IdKind.REQUEST]
+
+    def stdlib_intact() -> bool:
+        return (
+            base64.b64encode is stdlib_b64encode
+            and base64.b64decode is stdlib_b64decode
+            and hashlib.sha256 is stdlib_sha256
+        )
+
+    # Each twin answers only for inputs it reproduces byte-identically and only while the
+    # collaborators the reference calls are the originals; anything else runs the reference.
+    def native_captured_content_manifest(chunk: ObservationContentChunk) -> tuple[bytes, str]:
+        """Return a stored chunk's canonical manifest bytes and its content's ``sha256:`` digest."""
+
+        if canonical_encode is bound_encode and JsonObject is bound_json_object and stdlib_intact():
+            encoded = native_manifest(chunk)
+            if encoded is not None:
+                return cast(tuple[bytes, str], encoded)
+        return python_manifest(chunk)
+
+    def native_verified_captured_content(material: bytes) -> _VerifiedCapturedContent | None:
+        """Read one stored manifest object back, or ``None`` when it is not an exact manifest."""
+
+        if (
+            strict_json_parse is bound_parse
+            and canonical_encode is bound_encode
+            and json.loads is stdlib_loads
+            and stdlib_intact()
+        ):
+            fields = native_verified(material)
+            if fields is not None:
+                return cast(_VerifiedCapturedContent, fields)
+        return python_verified(material)
+
+    def native_stable_operation_id(self: ObservationCoordinator, digest: str) -> str:
+        # Only 32 plain hex digits; the reference decides (and falls back) for anything else.
+        derived = native_uuid4(digest, request_prefix)
+        if derived is not None:
+            return cast(str, derived)
+        return python_stable_operation_id(self, digest)
+
+    for twin, reference in (
+        (native_captured_content_manifest, python_manifest),
+        (native_verified_captured_content, python_verified),
+        (native_stable_operation_id, python_stable_operation_id),
+    ):
+        twin.__name__ = reference.__name__
+        twin.__qualname__ = reference.__qualname__
+    ObservationCoordinator._stable_operation_id = native_stable_operation_id  # type: ignore[method-assign]
+    globals().update(
+        _captured_content_manifest=native_captured_content_manifest,
+        _verified_captured_content=native_verified_captured_content,
+    )
+
+
+_bind_native()

@@ -541,3 +541,72 @@ class OsCursorMcpProcesses:
             return _darwin_snapshots(self.expected_launcher)
         except OSError, ValueError, TimeoutError:
             return None
+
+
+def _bind_native() -> None:
+    import os
+
+    from yoetz._native import native_functions
+
+    if os.name != "posix":
+        return
+    resolved = native_functions("cursor_linux_snapshots")
+    if resolved is None:
+        return
+    (native_scan,) = resolved
+    module = globals()
+    python_linux_snapshots = _linux_snapshots
+    # The scan classifies through these module globals; a patched one is an observation point
+    # the native scan cannot honor, so the reference runs instead.
+    watched = tuple(
+        (name, module[name])
+        for name in (
+            "Path",
+            "CursorMcpProcessSnapshot",
+            "classify_serve_argv",
+            "_cursor_helper_comm",
+            "_yoetz_launcher_token",
+            "_valid_project_selector",
+            "_classify_cursor_project_suffix",
+            "_launcher_match",
+            "_MAX_TOKENS",
+            "_MAX_COMM",
+            "_MAX_PROJECT_SELECTOR",
+            "_POLICY_SUFFIXES",
+            "_STRICT_SUFFIXES",
+            "_CURSOR_COMM_PREFIXES",
+            "_CURSOR_COMM_EXACT",
+        )
+    )
+
+    def native_linux_snapshots(
+        expected_launcher: tuple[str, ...] | None,
+    ) -> tuple[CursorMcpProcessSnapshot, ...] | None:
+        if (
+            (
+                expected_launcher is None
+                or (
+                    type(expected_launcher) is tuple
+                    and all(type(part) is str for part in expected_launcher)
+                )
+            )
+            and type(_MAX_PROCESSES) is int
+            and _MAX_PROCESSES >= 0
+            and all(module.get(name) is original for name, original in watched)
+        ):
+            rows = native_scan("/proc", expected_launcher, _MAX_PROCESSES)
+            if rows is None:
+                return None
+            if rows is not False:
+                return tuple(
+                    CursorMcpProcessSnapshot(
+                        "cursor_helper" if helper else "other", route, launcher
+                    )
+                    for helper, route, launcher in rows
+                )
+        return python_linux_snapshots(expected_launcher)
+
+    module["_linux_snapshots"] = native_linux_snapshots
+
+
+_bind_native()

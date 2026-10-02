@@ -100,6 +100,67 @@ def _ledger_write_boundary() -> Generator[None]:
         ) from exc
 
 
+def _fold_status_rows(
+    rows: Iterable[tuple[object, ...]], session_commitment: str | None
+) -> tuple[list[ObservationSource], set[str], set[str]]:
+    """Fold status rows into (covered sources, current gaps, unsupported event kinds).
+
+    ``rows`` are ``(session_commitment, source, event_kind, gap_codes_json,
+    content_refs_json)`` in ledger order; covered sources are listed in first-seen order.
+    """
+
+    covered: dict[ObservationSource, None] = {}
+    # Event rows are append-only, but ``gap_codes`` describe the condition
+    # observed at that row rather than an everlasting current state. Keep a
+    # small per-session current projection while retaining all rows for the
+    # operator history. In particular, a later accepted observation is live
+    # evidence that an earlier source-lag/cursor-stale condition healed;
+    # another session's healthy event must never clear this session's gap.
+    current_by_session: dict[str, set[str]] = {}
+    unsupported_by_session: dict[str, set[str]] = {}
+    for row in rows:
+        row_session = row[0]
+        source = ObservationSource(cast(str, row[1]))
+        event_kind = cast(str, row[2])
+        if type(row_session) is not str:
+            continue
+        session_current = current_by_session.setdefault(row_session, set())
+        session_unsupported = unsupported_by_session.setdefault(row_session, set())
+        covered[source] = None
+        gap_codes: set[str] = set()
+        gap_blob = row[3]
+        if type(gap_blob) is bytes:
+            parsed = strict_json_parse(gap_blob)
+            if type(parsed) is list:
+                gap_codes = {item for item in cast(list[object], parsed) if type(item) is str}
+        # A synthetic observation_gap row records the failure itself and
+        # must not be mistaken for recovery. Any accepted envelope after
+        # it advances the session's source and clears only the transient
+        # conditions whose healing the observation authority can prove.
+        if event_kind != "observation_gap":
+            session_current.discard(ObservationGapCode.SOURCE_LAG.value)
+            session_current.discard(ObservationGapCode.CURSOR_STALE.value)
+            refs_blob = row[4]
+            if type(refs_blob) is bytes:
+                refs = strict_json_parse(refs_blob)
+                if type(refs) is list and refs:
+                    session_current.discard(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
+        session_current.update(gap_codes)
+        if ObservationGapCode.UNSUPPORTED_EVENT.value in gap_codes:
+            session_unsupported.add(event_kind)
+    gaps: set[str] = set()
+    unsupported: set[str] = set()
+    if session_commitment is None:
+        for session_current in current_by_session.values():
+            gaps.update(session_current)
+        for session_unsupported in unsupported_by_session.values():
+            unsupported.update(session_unsupported)
+    else:
+        gaps.update(current_by_session.get(session_commitment, ()))
+        unsupported.update(unsupported_by_session.get(session_commitment, ()))
+    return list(covered), gaps, unsupported
+
+
 def _dedup_key(workspace: str, envelope: ObservationEnvelope) -> str:
     return canonical_digest(
         JsonObject(
@@ -2155,54 +2216,13 @@ class SqliteObservationStore:
                 "WHERE workspace_commitment = ? AND session_commitment = ? ORDER BY id ASC",
                 (workspace_commitment, session_commitment),
             ).fetchall()
-        # Event rows are append-only, but ``gap_codes`` describe the condition
-        # observed at that row rather than an everlasting current state. Keep a
-        # small per-session current projection while retaining all rows for the
-        # operator history. In particular, a later accepted observation is live
-        # evidence that an earlier source-lag/cursor-stale condition healed;
-        # another session's healthy event must never clear this session's gap.
-        current_by_session: dict[str, set[str]] = {}
-        unsupported_by_session: dict[str, set[str]] = {}
-        for row in cast("Iterable[tuple[object, ...]]", rows):
-            row_session = row[0]
-            source = ObservationSource(cast(str, row[1]))
-            event_kind = cast(str, row[2])
-            if type(row_session) is not str:
-                continue
-            session_current = current_by_session.setdefault(row_session, set())
-            session_unsupported = unsupported_by_session.setdefault(row_session, set())
+        covered, folded_gaps, folded_unsupported = _fold_status_rows(
+            cast("Iterable[tuple[object, ...]]", rows), session_commitment
+        )
+        for source in covered:
             coverage[source] = True
-            gap_codes: set[str] = set()
-            gap_blob = row[3]
-            if type(gap_blob) is bytes:
-                parsed = strict_json_parse(gap_blob)
-                if type(parsed) is list:
-                    gap_codes = {item for item in cast(list[object], parsed) if type(item) is str}
-            # A synthetic observation_gap row records the failure itself and
-            # must not be mistaken for recovery. Any accepted envelope after
-            # it advances the session's source and clears only the transient
-            # conditions whose healing the observation authority can prove.
-            if event_kind != "observation_gap":
-                session_current.discard(ObservationGapCode.SOURCE_LAG.value)
-                session_current.discard(ObservationGapCode.CURSOR_STALE.value)
-                refs_blob = row[4]
-                if type(refs_blob) is bytes:
-                    refs = strict_json_parse(refs_blob)
-                    if type(refs) is list and refs:
-                        session_current.discard(
-                            ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
-                        )
-            session_current.update(gap_codes)
-            if ObservationGapCode.UNSUPPORTED_EVENT.value in gap_codes:
-                session_unsupported.add(event_kind)
-        if session_commitment is None:
-            for session_current in current_by_session.values():
-                gaps.update(session_current)
-            for session_unsupported in unsupported_by_session.values():
-                unsupported.update(session_unsupported)
-        else:
-            gaps.update(current_by_session.get(session_commitment, ()))
-            unsupported.update(unsupported_by_session.get(session_commitment, ()))
+        gaps.update(folded_gaps)
+        unsupported.update(folded_unsupported)
         if consent is None:
             lifecycle = ObservationLifecycle.STOPPED
         elif consent[0] is not None:
@@ -2365,3 +2385,61 @@ class SqliteObservationStore:
             except Exception:
                 continue
         return tuple(result)
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions("bind_observation_status_fold", "observation_status_fold")
+    if resolved is None:
+        return
+    bind, native_fold = resolved
+    import json
+
+    bind({"source_class": ObservationSource, "gap_class": ObservationGapCode})
+    python_fold = _fold_status_rows
+    bound_parse = strict_json_parse
+    stdlib_loads = json.loads
+
+    def native_fold_status_rows(
+        rows: Iterable[tuple[object, ...]], session_commitment: str | None
+    ) -> tuple[list[ObservationSource], set[str], set[str]]:
+        # The twin parses blobs itself, so a replaced parser (or ``json.loads`` beneath it)
+        # keeps the reference; so does every row the twin does not accept.
+        if strict_json_parse is bound_parse and json.loads is stdlib_loads:
+            folded = native_fold(rows, session_commitment)
+            if folded is not None:
+                return folded
+        return python_fold(rows, session_commitment)
+
+    globals().update(_fold_status_rows=native_fold_status_rows)
+
+    rows = native_functions("observation_envelopes_from_rows")
+    if rows is None:
+        return
+    (native_envelopes_from_rows,) = rows
+    python_envelopes_from_rows = SqliteObservationStore._envelopes_from_rows  # pyright: ignore[reportPrivateUsage]
+    bound_json_object = JsonObject
+    bound_from_json = observation_envelope_from_json
+
+    def envelopes_from_rows(rows: Iterable[object]) -> tuple[ObservationEnvelope, ...]:
+        # The batch parses, freezes, and decodes natively (deferring per row to the domain
+        # reference); a replaced parser, ``json.loads``, ``JsonObject``, or decoder keeps the
+        # reference loop.
+        if (
+            strict_json_parse is bound_parse
+            and json.loads is stdlib_loads
+            and JsonObject is bound_json_object
+            and observation_envelope_from_json is bound_from_json
+        ):
+            decoded = native_envelopes_from_rows(rows)
+            if decoded is not None:
+                return cast(tuple[ObservationEnvelope, ...], decoded)
+        return python_envelopes_from_rows(rows)
+
+    envelopes_from_rows.__name__ = python_envelopes_from_rows.__name__
+    envelopes_from_rows.__qualname__ = python_envelopes_from_rows.__qualname__
+    SqliteObservationStore._envelopes_from_rows = staticmethod(envelopes_from_rows)  # type: ignore[method-assign]  # pyright: ignore[reportPrivateUsage]
+
+
+_bind_native()

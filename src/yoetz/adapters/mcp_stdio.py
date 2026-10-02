@@ -400,3 +400,38 @@ async def bounded_stdio_server(
                 os.close(descriptor)
             except OSError:
                 pass
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions("mcp_stdio_accept_frame")
+    if resolved is None:
+        return
+    (accept_frame,) = resolved
+    python_parse_frame = _parse_frame
+    python_validate_tree = _validate_tree
+    stdlib_loads = json.loads
+
+    def native_parse_frame(frame: bytes) -> SessionMessage:
+        # Accept-only: the native decoder returns the root object only when ``json.loads``
+        # plus ``_validate_tree`` would admit exactly that object; every other frame (and any
+        # replaced observation point) runs the reference for its exact failure reason.
+        if (
+            type(frame) is bytes
+            and json.loads is stdlib_loads
+            and _validate_tree is python_validate_tree
+        ):
+            parsed = accept_frame(frame, MAX_JSON_NESTING_DEPTH)
+            if parsed is not None:
+                try:
+                    message = types.JSONRPCMessage.model_validate(parsed)
+                except (ValidationError, RecursionError) as exc:
+                    raise TransportFailure("not_jsonrpc") from exc
+                return SessionMessage(message)
+        return python_parse_frame(frame)
+
+    globals().update(_parse_frame=native_parse_frame)
+
+
+_bind_native()

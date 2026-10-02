@@ -729,3 +729,36 @@ class SqliteWriterThread:
             except Exception:
                 pass
             _close_quietly(db)
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions(
+        "bind_sqlite_authorizers",
+        "sqlite_read_only_authorizer",
+        "sqlite_writer_authorizer",
+        "sqlite_migration_authorizer",
+    )
+    if resolved is None:
+        return
+    bind, native_read_only, native_writer, native_migration = resolved
+    # PRAGMA decisions read the policy sets above, so they stay with the Python references.
+    bind(
+        {
+            "apsw": apsw,
+            "globals": globals(),
+            "python_read_only": _read_only_authorizer,
+            "python_writer": _writer_authorizer,
+            "python_migration": _migration_authorizer,
+            "native_writer": native_writer,
+        }
+    )
+    globals().update(
+        _read_only_authorizer=native_read_only,
+        _writer_authorizer=native_writer,
+        _migration_authorizer=native_migration,
+    )
+
+
+_bind_native()

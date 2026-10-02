@@ -1584,3 +1584,30 @@ class PortablePluginArtifactAdapter(PluginArtifactPort):
                 changed,
             ),
         )
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions("managed_tree_digest")
+    if resolved is None:
+        return
+    (native_tree_digest,) = resolved
+    python_tree_digest = _tree_digest
+    # The reference hashes and digests through these module globals; a patched one is an
+    # observation point the native core cannot honor, so the reference runs instead.
+    sha = _sha
+    digest = canonical_digest
+
+    def native_tree_digest_entry(files: Mapping[str, bytes]) -> str:
+        if _sha is sha and canonical_digest is digest:
+            value = native_tree_digest(files)
+            if value is not None:
+                return cast(str, value)
+        # Any other shape (or a path the canonical encoder refuses) answers from the reference.
+        return python_tree_digest(files)
+
+    globals()["_tree_digest"] = native_tree_digest_entry
+
+
+_bind_native()

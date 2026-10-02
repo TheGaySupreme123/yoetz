@@ -30,7 +30,12 @@ from yoetz.domain.values import (
 )
 from yoetz.ports.ledger import AppendResult
 from yoetz.ports.objects import ObjectKind, ObjectRef
-from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
+from yoetz.protocol.canonical import (
+    canonical_digest,
+    canonical_encode,
+    canonical_round_trip_proven,
+    strict_json_parse,
+)
 from yoetz.protocol.coverage import Coverage
 from yoetz.protocol.errors import PROTOCOL_REASON_CODES, ProtocolValueError
 from yoetz.protocol.ids import IdKind, validate_id
@@ -233,7 +238,11 @@ def _canonical_structural_bytes(value: object) -> tuple[bytes, JsonObject]:
     if not isinstance(parsed, Mapping):
         raise _invalid("import_structural_result_invalid")
     row = JsonObject(cast(Mapping[object, object], parsed))
-    if canonical_encode(row) != value:
+    # A frozen row encodes exactly as the parsed mapping it was built from.
+    if (
+        not canonical_round_trip_proven(value, encode=canonical_encode, parse=strict_json_parse)
+        and canonical_encode(row) != value
+    ):
         raise _invalid("import_structural_result_invalid")
     return value, row
 
@@ -1043,3 +1052,48 @@ class ImporterPort(Protocol):
         identity_digest: str,
         through: Frontier,
     ) -> ImportReviewSource | None: ...
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions("importer_ordered_ids", "importer_sorted_ids")
+    if resolved is None:
+        return
+    native_ordered, native_sorted = resolved
+    python_ordered = _ordered_ids
+    python_sorted = _sorted_ids
+    bound_validate_id = validate_id
+
+    # The twins only accept, with the merged native ID grammar. Whatever they do not accept (a
+    # wrong type or size, an invalid, duplicate, or misordered member, a ``str`` subclass) is
+    # judged, and refused with the first offending item's exact reason, by the reference.
+    def native_sorted_ids(
+        value: object,
+        *,
+        kind: IdKind | None = None,
+        maximum: int = 64,
+    ) -> tuple[str, ...]:
+        if validate_id is bound_validate_id:
+            accepted = native_sorted(value, kind, maximum)
+            if accepted is not None:
+                return cast(tuple[str, ...], accepted)
+        return python_sorted(value, kind=kind, maximum=maximum)
+
+    def native_ordered_ids(value: object, *, kind: IdKind, maximum: int) -> tuple[str, ...]:
+        if validate_id is bound_validate_id:
+            accepted = native_ordered(value, kind, maximum)
+            if accepted is not None:
+                return cast(tuple[str, ...], accepted)
+        return python_ordered(value, kind=kind, maximum=maximum)
+
+    for twin, reference in (
+        (native_sorted_ids, python_sorted),
+        (native_ordered_ids, python_ordered),
+    ):
+        twin.__name__ = reference.__name__
+        twin.__qualname__ = reference.__qualname__
+    globals().update(_sorted_ids=native_sorted_ids, _ordered_ids=native_ordered_ids)
+
+
+_bind_native()

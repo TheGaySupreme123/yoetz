@@ -1821,3 +1821,17 @@ async def execute_status(
         raise classify_status_fault(exc, view=request.view, request_id=request.request_id) from exc
     finally:
         await app.runtime.release(runtime)
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions("status_bind_strip", "status_strip_optional_non_null_nulls")
+    if resolved is None:
+        return
+    bind_reference, native_strip = resolved
+    bind_reference(BaseModel, _strip_optional_non_null_nulls)
+    globals().update(_strip_optional_non_null_nulls=native_strip)
+
+
+_bind_native()
