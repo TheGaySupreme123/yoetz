@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Mapping
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, getcontext
 from typing import BinaryIO, Final, cast
 
 from yoetz.protocol.canonical import (
@@ -582,3 +582,70 @@ def read_cursor_hook_ingress(raw: bytes | None = None) -> tuple[Mapping[str, Jso
             raise CursorOversizedPayloadError(exc.reason_code) from exc
         return _cursor_identity_payload(parsed), True
     return _parse_cursor_hook_document(data), False
+
+
+# The optional Rust accelerator (``yoetz._native``) carries error-identical twins of the Cursor
+# document parse and of the oversized-body identity skim. Rebinding the module names here
+# means every importer reaches them; without the accelerator the definitions above stay.
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions("cursor_hook_document", "cursor_hook_identity")
+    if resolved is None:
+        return
+    native_document, native_identity = resolved
+    python_parse = _parse_cursor_hook_document
+    python_normalize = _normalize_cursor_value
+    python_identity = _cursor_identity_payload
+    python_ensure = ensure_canonical_value
+    stdlib_loads = json.loads
+
+    def native_scan_applies() -> bool:
+        # The reference scans through ``json.loads`` with ``Decimal`` (whose refusal depends
+        # on the context's InvalidOperation trap) and walks through two module functions;
+        # replacing any of them is an observation point the native scan cannot honor.
+        return (
+            json.loads is stdlib_loads
+            and _normalize_cursor_value is python_normalize
+            and ensure_canonical_value is python_ensure
+            and bool(getcontext().traps[InvalidOperation])
+        )
+
+    def native_parse_cursor_hook_document(data: bytes) -> Mapping[str, JsonValue]:
+        """Parse one complete Cursor hook body with the vendor-decimal rules."""
+
+        if type(data) is bytes and native_scan_applies():
+            return cast(Mapping[str, JsonValue], native_document(data))
+        return python_parse(data)
+
+    def native_read_cursor_hook_ingress(
+        raw: bytes | None = None,
+    ) -> tuple[Mapping[str, JsonValue], bool]:
+        """Read one Cursor hook for observation, skimming a complete oversized body."""
+
+        data = _read_cursor_bytes(raw, MAX_HOOK_SKIM_BYTES + 1)
+        if len(data) > MAX_HOOK_SKIM_BYTES:
+            raise ProtocolValueError("payload_too_large")
+        if len(data) > MAX_HOOK_STDIN_BYTES:
+            skim = (
+                _parse_cursor_hook_document is native_parse_cursor_hook_document
+                and _cursor_identity_payload is python_identity
+                and native_scan_applies()
+            )
+            try:
+                if skim:
+                    # The identity view is built without materializing the dropped content.
+                    return cast(dict[str, JsonValue], native_identity(data)), True
+                parsed = _parse_cursor_hook_document(data)
+            except ProtocolValueError as exc:
+                raise CursorOversizedPayloadError(exc.reason_code) from exc
+            return _cursor_identity_payload(parsed), True
+        return _parse_cursor_hook_document(data), False
+
+    globals().update(
+        _parse_cursor_hook_document=native_parse_cursor_hook_document,
+        read_cursor_hook_ingress=native_read_cursor_hook_ingress,
+    )
+
+
+_bind_native()

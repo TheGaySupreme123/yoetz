@@ -6,6 +6,7 @@
 //! `yoetz_native` accelerator and inside native command-line tools.
 
 pub mod application;
+pub mod cli;
 pub mod domain;
 pub mod importers;
 pub mod observability;

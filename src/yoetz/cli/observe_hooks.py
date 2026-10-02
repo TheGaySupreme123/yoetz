@@ -6769,3 +6769,97 @@ def handle_spool(
             )
         _finish_hook_pass(timing, monotonic=_monotonic, _state=_state, ms=total)
     return 0
+
+
+# The optional Rust accelerator (``yoetz._native``) carries output-identical twins of the lexical
+# edit-capture helpers. Each wrapper runs its Python reference when a module-level dependency it
+# calls has been replaced, or when the twin answers ``NotImplemented`` (an argument it does not
+# model, such as a non-ASCII locator that would be casefolded). Without the accelerator the
+# definitions above stay in place.
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions(
+        "observe_workspace_relative_edit_path",
+        "observe_sanitize_patch_paths",
+        "observe_sanitize_patch_result",
+        "observe_shell_heredocs",
+        "observe_codex_header_exit_codes",
+    )
+    if resolved is None:
+        return
+    (
+        native_relative,
+        native_patch_paths,
+        native_patch_result,
+        native_heredocs,
+        native_header_exit_codes,
+    ) = resolved
+    python_absolute_path_key = _absolute_path_key
+    python_relative = workspace_relative_edit_path
+    python_patch_paths = _sanitize_patch_paths
+    python_patch_result = _sanitize_patch_result
+    python_heredocs = _shell_heredocs
+    python_header_exit_codes = _codex_header_exit_codes
+
+    def native_workspace_relative_edit_path(
+        value: str, workspace_locator: str | None
+    ) -> str | None:
+        """Return a workspace-relative POSIX path for review content, or ``None``."""
+
+        if _absolute_path_key is python_absolute_path_key:
+            result = native_relative(value, workspace_locator)
+            if result is not NotImplemented:
+                return cast(str | None, result)
+        return python_relative(value, workspace_locator)
+
+    def native_locators_apply() -> bool:
+        return (
+            _absolute_path_key is python_absolute_path_key
+            and workspace_relative_edit_path is native_workspace_relative_edit_path
+        )
+
+    def native_sanitize_patch_paths(text: str, workspace_locator: str | None) -> str:
+        """Relativize file locators in patch headers; mask any outside the workspace."""
+
+        if native_locators_apply():
+            result = native_patch_paths(text, workspace_locator)
+            if result is not NotImplemented:
+                return cast(str, result)
+        return python_patch_paths(text, workspace_locator)
+
+    def native_sanitize_patch_result(text: str, workspace_locator: str | None) -> str:
+        """Relativize the ``A/M/D path`` lines of an apply_patch result summary."""
+
+        if native_locators_apply():
+            result = native_patch_result(text, workspace_locator)
+            if result is not NotImplemented:
+                return cast(str, result)
+        return python_patch_result(text, workspace_locator)
+
+    def native_shell_heredocs(command: str) -> list[tuple[str, str, str]]:
+        """Return bounded ``(prefix, suffix, body)`` triples for each heredoc in a command."""
+
+        result = native_heredocs(command, _MAX_SHELL_HEREDOCS)
+        if result is not NotImplemented:
+            return cast(list[tuple[str, str, str]], result)
+        return python_heredocs(command)
+
+    def native_codex_header_exit_codes(text: str) -> tuple[int, ...]:
+        """Read exit codes from a Codex function-output header, never from the output itself."""
+
+        result = native_header_exit_codes(text, _CODEX_HEADER_MAX_LINES)
+        if result is not NotImplemented:
+            return cast(tuple[int, ...], result)
+        return python_header_exit_codes(text)
+
+    globals().update(
+        workspace_relative_edit_path=native_workspace_relative_edit_path,
+        _sanitize_patch_paths=native_sanitize_patch_paths,
+        _sanitize_patch_result=native_sanitize_patch_result,
+        _shell_heredocs=native_shell_heredocs,
+        _codex_header_exit_codes=native_codex_header_exit_codes,
+    )
+
+
+_bind_native()
