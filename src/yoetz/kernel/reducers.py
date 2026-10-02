@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from types import MappingProxyType
-from typing import Final, cast
+from typing import Any, Final, cast
 
 from yoetz.domain.events import (
     LINEAGE_SERVICE_STAMPED_FAMILIES,
@@ -385,7 +385,7 @@ class ReplayIndex:
         source: Mapping[ObjectId, EventId],
         trusted: Mapping[ObjectId, EventId] | None,
     ) -> dict[ObjectId, EventId]:
-        if type(source) is not dict and not isinstance(cast(object, source), Mapping):
+        if not _is_exact_dict(source) and not isinstance(cast(object, source), Mapping):
             raise _corrupt()
         try:
             return cast(
@@ -400,7 +400,7 @@ class ReplayIndex:
         source: Mapping[ObjectId, tuple[EvidenceObjectSource, ...]],
         trusted: Mapping[ObjectId, tuple[EvidenceObjectSource, ...]] | None,
     ) -> dict[ObjectId, tuple[EvidenceObjectSource, ...]]:
-        if type(source) is not dict and not isinstance(cast(object, source), Mapping):
+        if not _is_exact_dict(source) and not isinstance(cast(object, source), Mapping):
             raise _corrupt()
         try:
             return cast(
@@ -417,7 +417,7 @@ class ReplayIndex:
         source: Mapping[ObjectId, EventId],
         trusted: Mapping[ObjectId, EventId] | None,
     ) -> dict[ObjectId, EventId]:
-        if type(source) is not dict and not isinstance(cast(object, source), Mapping):
+        if not _is_exact_dict(source) and not isinstance(cast(object, source), Mapping):
             raise _corrupt()
         try:
             return cast(
@@ -429,8 +429,8 @@ class ReplayIndex:
 
 
 def _carry_trusted(
-    source: Mapping[object, object],
-    trusted: Mapping[object, object] | None,
+    source: Mapping[Any, object],
+    trusted: Mapping[Any, object] | None,
     admit: Callable[[object, object], tuple[object, object]],
 ) -> dict[object, object]:
     """Copy *source*, carrying entries the validated prior index holds by identity.
@@ -447,6 +447,12 @@ def _carry_trusted(
         key, value = admit(raw_key, raw_value)
         result[key] = value
     return result
+
+
+def _is_exact_dict(value: object) -> bool:
+    """Whether *value* is exactly a ``dict`` (the shape the accelerated carries accept)."""
+
+    return type(value) is dict
 
 
 def _carry_id_set(
@@ -527,12 +533,16 @@ def _index_invariants(
     return observation_findings
 
 
+def _is_mapping_proxy(value: object) -> bool:
+    return type(value) is MappingProxyType
+
+
 def _dict_copy[K, V](source: Mapping[K, V]) -> dict[K, V]:
     """``dict(source)``; a ``mappingproxy`` over a ``dict`` copies through the dict itself."""
 
-    if type(source) is MappingProxyType:
+    if _is_mapping_proxy(source):
         copied = cast(MappingProxyType[K, V], source).copy()
-        if type(copied) is dict:
+        if _is_exact_dict(copied):
             return copied
     return dict(source)
 
@@ -1879,11 +1889,11 @@ def _bind_native() -> None:
     gap_types = (PlanPublishedPayload, PlanRevisedPayload, ClaimRecordedPayloadV1_1)
 
     def native_carry_trusted(
-        source: Mapping[object, object],
-        trusted: Mapping[object, object] | None,
+        source: Mapping[Any, object],
+        trusted: Mapping[Any, object] | None,
         admit: Callable[[object, object], tuple[object, object]],
     ) -> dict[object, object]:
-        if trusted is not None and type(source) is dict:
+        if trusted is not None and _is_exact_dict(source):
             carried = native_carry(source, trusted, admit)
             if carried is not None:
                 return cast(dict[object, object], carried)
@@ -1933,7 +1943,7 @@ def _bind_native() -> None:
             )
         if not verdict:
             raise _corrupt()
-        return cast(frozenset[EventId], observation_findings)
+        return observation_findings
 
     def native_secondary_effects_twin(
         plans: dict[int, PlanProjectionRecord],

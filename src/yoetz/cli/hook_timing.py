@@ -958,7 +958,7 @@ def _bind_native() -> None:
                 if folded is not NotImplemented:
                     return cast(tuple[bytes | None, bool], folded)
             if document is not None:
-                document = python_document(cast(bytes, document))
+                document = python_document(document)
         return python_updated_document(
             cast(dict[str, object] | None, document),
             host,

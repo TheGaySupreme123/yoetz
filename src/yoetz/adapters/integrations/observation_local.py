@@ -12704,8 +12704,8 @@ def _bind_native() -> None:
     bound_digest = canonical_digest
     bound_json_object = JsonObject
     bound_cursor_to_json = observation_cursor_to_json
-    python_ordered_keys = LocalObservationStore._ordered_dedup_keys  # noqa: SLF001
-    python_eviction_key = LocalObservationStore._select_dedup_eviction_key  # noqa: SLF001
+    python_ordered_keys = LocalObservationStore._ordered_dedup_keys  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    python_eviction_key = LocalObservationStore._select_dedup_eviction_key  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
     python_dedup_sessions = _dedup_sessions
     python_dedup_digest = _dedup_digest
     python_pairing_key = _pairing_key
@@ -12842,7 +12842,7 @@ def _bind_native() -> None:
     def native_select_dedup_eviction_key(state: _WorkspaceState) -> str | None:
         # The reference reaches the ring order through the class attribute; a replaced
         # ``_ordered_dedup_keys`` is an observation point the fused twin cannot honor.
-        if LocalObservationStore._ordered_dedup_keys is native_ordered_dedup_keys:  # noqa: SLF001
+        if LocalObservationStore._ordered_dedup_keys is native_ordered_dedup_keys:  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
             handled, key = native_eviction_key(
                 state.dedup_order or [], state.dedup, state.dedup_lanes
             )
@@ -12907,9 +12907,9 @@ def _bind_native() -> None:
 
     codec = _NativeEnvelopeCodec(_CODEC_MEMO_ENTRIES)
     # One shared LRU over envelopes, outbox rows, and quarantine entries, like the reference.
-    envelope_fragment = codec._fragments.bind(_build_envelope_fragment)  # noqa: SLF001
-    outbox_row_fragment = codec._fragments.bind(_build_outbox_row_fragment)  # noqa: SLF001
-    quarantine_entry_fragment = codec._fragments.bind(_build_quarantine_entry_fragment)  # noqa: SLF001
+    envelope_fragment = codec._fragments.bind(_build_envelope_fragment)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    outbox_row_fragment = codec._fragments.bind(_build_outbox_row_fragment)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    quarantine_entry_fragment = codec._fragments.bind(_build_quarantine_entry_fragment)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
     LocalObservationStore._ordered_dedup_keys = staticmethod(native_ordered_dedup_keys)  # noqa: SLF001  # type: ignore[method-assign]
     LocalObservationStore._select_dedup_eviction_key = staticmethod(  # noqa: SLF001  # type: ignore[method-assign]

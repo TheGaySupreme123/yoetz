@@ -686,8 +686,10 @@ def _bind_native() -> None:
         "_TEST_COMMANDS": _TEST_COMMANDS,
         "_FAILURE_STATUSES": _FAILURE_STATUSES,
     }
+    native_tables = cast(dict[str, object], tables())
     actual = {
-        name: frozenset(value) if type(value) is list else value for name, value in tables().items()
+        name: frozenset(cast(list[object], value)) if type(value) is list else value
+        for name, value in native_tables.items()
     }
     if actual != expected:
         if os.environ.get(NATIVE_ENV, "") == "require":

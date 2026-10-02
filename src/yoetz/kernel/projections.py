@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable, Mapping, Set
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Final, Protocol, cast
+from typing import Any, Final, Protocol, cast
 
 from yoetz.domain.events import (
     PAYLOAD_TYPES,
@@ -837,7 +837,7 @@ class ProjectionState:
         source: Mapping[int, PlanProjectionRecord],
         trusted: Mapping[int, PlanProjectionRecord] | None,
     ) -> dict[int, PlanProjectionRecord]:
-        if type(source) is not dict and not isinstance(cast(object, source), Mapping):
+        if not _is_exact_dict(source) and not isinstance(cast(object, source), Mapping):
             raise _invalid()
 
         def admit(key: object, record: object) -> tuple[object, object]:
@@ -861,7 +861,7 @@ class ProjectionState:
         *,
         source_key: bool,
     ) -> dict[EventId, T]:
-        if type(source) is not dict and not isinstance(cast(object, source), Mapping):
+        if not _is_exact_dict(source) and not isinstance(cast(object, source), Mapping):
             raise _invalid()
 
         def admit(raw_key: object, record: object) -> tuple[object, object]:
@@ -890,7 +890,7 @@ class ProjectionState:
         payload_type: type[object] | tuple[type[object], ...],
         payload_key: str,
     ) -> dict[K, T]:
-        if type(source) is not dict and not isinstance(cast(object, source), Mapping):
+        if not _is_exact_dict(source) and not isinstance(cast(object, source), Mapping):
             raise _invalid()
 
         def admit(raw_key: object, record: object) -> tuple[object, object]:
@@ -919,7 +919,7 @@ class ProjectionState:
         source: Mapping[ContradictionKey, ContradictionRecord],
         trusted: Mapping[ContradictionKey, ContradictionRecord] | None = None,
     ) -> dict[ContradictionKey, ContradictionRecord]:
-        if type(source) is not dict and not isinstance(cast(object, source), Mapping):
+        if not _is_exact_dict(source) and not isinstance(cast(object, source), Mapping):
             raise _invalid()
 
         def admit(key: object, record: object) -> tuple[object, object]:
@@ -940,8 +940,8 @@ class ProjectionState:
 
 
 def _carry_trusted(
-    source: Mapping[object, object],
-    trusted: Mapping[object, object] | None,
+    source: Mapping[Any, object],
+    trusted: Mapping[Any, object] | None,
     admit: Callable[[object, object], tuple[object, object]],
 ) -> dict[object, object]:
     """Copy *source*, carrying entries the validated prior holds by identity; admit the rest.
@@ -962,8 +962,8 @@ def _carry_trusted(
 
 
 def _carry_positional(
-    source: Mapping[object, object],
-    trusted: Mapping[object, object] | None,
+    source: Mapping[Any, object],
+    trusted: Mapping[Any, object] | None,
     admit: Callable[[object, object], tuple[object, object]],
 ) -> dict[object, object]:
     """Copy *source*, admitting every entry in source order.
@@ -978,6 +978,12 @@ def _carry_positional(
         key, value = admit(raw_key, record)
         result[key] = value
     return result
+
+
+def _is_exact_dict(value: object) -> bool:
+    """Whether *value* is exactly a ``dict`` (the shape the accelerated carries accept)."""
+
+    return type(value) is dict
 
 
 def derive_projection_state(
@@ -1870,22 +1876,22 @@ def _bind_native() -> None:
     from yoetz.protocol import canonical as canonical_module
 
     def native_carry_trusted(
-        source: Mapping[object, object],
-        trusted: Mapping[object, object] | None,
+        source: Mapping[Any, object],
+        trusted: Mapping[Any, object] | None,
         admit: Callable[[object, object], tuple[object, object]],
     ) -> dict[object, object]:
-        if trusted is not None and type(source) is dict:
+        if trusted is not None and _is_exact_dict(source):
             carried = native_trusted(source, trusted, admit)
             if carried is not None:
                 return cast(dict[object, object], carried)
         return python_carry_trusted(source, trusted, admit)
 
     def native_carry_positional(
-        source: Mapping[object, object],
-        trusted: Mapping[object, object] | None,
+        source: Mapping[Any, object],
+        trusted: Mapping[Any, object] | None,
         admit: Callable[[object, object], tuple[object, object]],
     ) -> dict[object, object]:
-        if trusted is not None and type(source) is dict:
+        if trusted is not None and _is_exact_dict(source):
             carried = native_positional(source, trusted, admit)
             if carried is not None:
                 return cast(dict[object, object], carried)
