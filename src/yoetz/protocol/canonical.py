@@ -19,9 +19,11 @@ __all__ = [
     "canonical_fragment",
     "container_levels",
     "canonical_integer_string",
+    "canonical_round_trip_proven",
     "ensure_canonical_set",
     "ensure_canonical_value",
     "entry_digest",
+    "is_canonical_json_bytes",
     "parse_canonical_integer_string",
     "request_digest",
     "strict_json_parse",
@@ -452,6 +454,37 @@ def _encode_string(value: str) -> str:
     return "".join(parts)
 
 
+def is_canonical_json_bytes(data: object) -> bool:
+    """Return whether ``canonical_encode(strict_json_parse(data)) == data`` holds.
+
+    ``True`` only when the parse succeeds and re-encoding reproduces *data* exactly; every
+    refusal answers ``False``. The accelerator answers in one pass over the bytes without
+    building a value; this reference evaluates the relation itself.
+    """
+
+    if type(data) is not bytes and type(data) is not bytearray:
+        return False
+    try:
+        return canonical_encode(strict_json_parse(data)) == data
+    except Exception:
+        return False
+
+
+def canonical_round_trip_proven(data: object, *, encode: object, parse: object) -> bool:
+    """Return ``True`` only when ``encode(parse(data)) == data`` is proven without running it.
+
+    A call site guarding ``encode(parse(data)) != data`` passes its own module's ``encode`` and
+    ``parse`` and skips that expression when this returns ``True``; otherwise it runs the
+    expression unchanged, so refusals and reasons stay exact. Proof needs the accelerator's
+    single-pass check and the caller's functions being this module's current ones (a test that
+    observes or faults them keeps its own path). Without the accelerator this does no work and
+    answers ``False``, so the pure-Python cost of a site never grows.
+    """
+
+    del data, encode, parse
+    return False
+
+
 # The optional Rust accelerator (``yoetz._native``) carries byte- and error-identical twins of
 # the functions above. Rebinding the public names here means every importer, including ones
 # that bound a name with ``from ... import``, reaches the twin; without the accelerator the
@@ -549,6 +582,38 @@ def _bind_native() -> None:
         _canonical_text=native_text,
         _validate_string=native_validate_string,
         _encode_string=native_encode_string,
+    )
+
+    round_trip = native_functions("is_canonical_json_bytes")
+    if round_trip is None:
+        return
+    (native_is_canonical,) = round_trip
+    python_is_canonical = is_canonical_json_bytes
+
+    def native_is_canonical_json_bytes(data: object) -> bool:
+        """Return whether ``canonical_encode(strict_json_parse(data)) == data`` without raising."""
+
+        # The single-pass check never calls ``json.loads``; a replaced one is an observation
+        # point, so the reference relation runs instead (as in ``strict_json_parse``).
+        if json.loads is stdlib_loads:
+            return bool(native_is_canonical(data))
+        return python_is_canonical(data)
+
+    def native_canonical_round_trip_proven(data: object, *, encode: object, parse: object) -> bool:
+        """Return ``True`` only when ``encode(parse(data)) == data`` provably holds."""
+
+        # ``canonical_encode``/``strict_json_parse`` are read from the module at call time, so a
+        # caller whose functions were replaced (or whose source here was) takes its own path.
+        return (
+            encode is canonical_encode
+            and parse is strict_json_parse
+            and json.loads is stdlib_loads
+            and native_is_canonical(data)
+        )
+
+    globals().update(
+        is_canonical_json_bytes=native_is_canonical_json_bytes,
+        canonical_round_trip_proven=native_canonical_round_trip_proven,
     )
 
 

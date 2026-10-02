@@ -30,7 +30,12 @@ from yoetz.domain.values import (
 )
 from yoetz.ports.ledger import AppendResult
 from yoetz.ports.objects import ObjectKind, ObjectRef
-from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
+from yoetz.protocol.canonical import (
+    canonical_digest,
+    canonical_encode,
+    canonical_round_trip_proven,
+    strict_json_parse,
+)
 from yoetz.protocol.coverage import Coverage
 from yoetz.protocol.errors import PROTOCOL_REASON_CODES, ProtocolValueError
 from yoetz.protocol.ids import IdKind, validate_id
@@ -233,7 +238,11 @@ def _canonical_structural_bytes(value: object) -> tuple[bytes, JsonObject]:
     if not isinstance(parsed, Mapping):
         raise _invalid("import_structural_result_invalid")
     row = JsonObject(cast(Mapping[object, object], parsed))
-    if canonical_encode(row) != value:
+    # A frozen row encodes exactly as the parsed mapping it was built from.
+    if (
+        not canonical_round_trip_proven(value, encode=canonical_encode, parse=strict_json_parse)
+        and canonical_encode(row) != value
+    ):
         raise _invalid("import_structural_result_invalid")
     return value, row
 

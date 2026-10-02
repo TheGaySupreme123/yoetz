@@ -620,6 +620,22 @@ pub fn strict_json_parse<'py>(py: Python<'py>, data: &Bound<'py, PyAny>, validat
     Ok(value)
 }
 
+/// `is_canonical_json_bytes(data) -> bool`: whether `canonical_encode(strict_json_parse(data))`
+/// would succeed and equal `data`, checked in one pass without building a value. Anything but
+/// an exact `bytes` or `bytearray` answers `False` (the reference raises `input_not_bytes`).
+#[pyfunction]
+pub fn is_canonical_json_bytes(data: &Bound<'_, PyAny>) -> bool {
+    if is_exact(data, ffi::PyBytes_CheckExact) {
+        let raw = unsafe { data.cast_unchecked::<PyBytes>() }.as_bytes();
+        return yoetz_core::protocol::canonical_check::is_canonical_json_bytes(raw);
+    }
+    if is_exact(data, ffi::PyByteArray_CheckExact) {
+        let owned = unsafe { data.cast_unchecked::<pyo3::types::PyByteArray>() }.to_vec();
+        return yoetz_core::protocol::canonical_check::is_canonical_json_bytes(&owned);
+    }
+    false
+}
+
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(bind_canonical_fragment, module)?)?;
     module.add_function(wrap_pyfunction!(canonical_encode, module)?)?;
@@ -636,5 +652,6 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(request_digest, module)?)?;
     module.add_function(wrap_pyfunction!(sha256_prefixed, module)?)?;
     module.add_function(wrap_pyfunction!(strict_json_parse, module)?)?;
+    module.add_function(wrap_pyfunction!(is_canonical_json_bytes, module)?)?;
     Ok(())
 }

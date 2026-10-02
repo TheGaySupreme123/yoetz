@@ -8,7 +8,11 @@ from typing import Protocol
 
 from yoetz.domain.privacy import LocalDisclosureSink
 from yoetz.domain.values import validate_sha256_digest
-from yoetz.protocol.canonical import canonical_encode, strict_json_parse
+from yoetz.protocol.canonical import (
+    canonical_encode,
+    canonical_round_trip_proven,
+    strict_json_parse,
+)
 from yoetz.protocol.ids import IdKind, validate_id
 
 __all__ = [
@@ -57,7 +61,13 @@ class StoredPublishResponse:
         if type(self.key) is not PublishResponseKey or type(self.result_canonical) is not bytes:
             raise _invalid()
         try:
-            canonical = canonical_encode(strict_json_parse(self.result_canonical))
+            canonical = (
+                self.result_canonical
+                if canonical_round_trip_proven(
+                    self.result_canonical, encode=canonical_encode, parse=strict_json_parse
+                )
+                else canonical_encode(strict_json_parse(self.result_canonical))
+            )
             validate_sha256_digest(self.result_digest)
         except (TypeError, ValueError) as exc:
             raise _invalid() from exc

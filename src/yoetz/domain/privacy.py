@@ -19,6 +19,7 @@ from yoetz.protocol.canonical import (
     JsonValue,
     canonical_digest,
     canonical_encode,
+    canonical_round_trip_proven,
     strict_json_parse,
 )
 from yoetz.protocol.coverage import PublicationChannel
@@ -1690,6 +1691,8 @@ class ProjectionAuditContext:
         for value in (self.control_request_canonical, self.internal_result_canonical):
             if type(value) is not bytes or not value or len(value) > MAX_EGRESS_CASE_BYTES:
                 raise _invalid()
+            if canonical_round_trip_proven(value, encode=canonical_encode, parse=strict_json_parse):
+                continue
             try:
                 if canonical_encode(strict_json_parse(value)) != value:
                     raise _invalid()
