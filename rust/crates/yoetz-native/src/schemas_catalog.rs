@@ -21,35 +21,38 @@ use yoetz_core::protocol::schema_refs::{
 
 use crate::walk::{NATIVE_RECURSION_LIMIT, is_exact};
 
+/// The text of a key already checked to convert (so never the empty fallback).
+fn key_text<'a>(key: &'a Bound<'_, PyString>) -> &'a str {
+    key.to_str().unwrap_or("")
+}
+
 fn freeze<'py>(py: Python<'py>, value: &Bound<'py, PyAny>, fallback: &Bound<'py, PyAny>, depth: usize) -> PyResult<Bound<'py, PyAny>> {
     if is_exact(value, ffi::PyDict_CheckExact) {
         if depth >= NATIVE_RECURSION_LIMIT {
             return fallback.call1((value,));
         }
         let source = unsafe { value.cast_unchecked::<PyDict>() };
-        let mut keys: Vec<Bound<'py, PyString>> = Vec::with_capacity(source.len());
-        let mut members: Vec<Bound<'py, PyAny>> = Vec::with_capacity(source.len());
+        let mut entries: Vec<(Bound<'py, PyString>, Bound<'py, PyAny>)> = Vec::with_capacity(source.len());
         for (key, member) in source.iter() {
             if !is_exact(&key, ffi::PyUnicode_CheckExact) {
                 // `str.encode` is the reference's to fail (or not) on this key.
                 return fallback.call1((value,));
             }
-            keys.push(unsafe { key.cast_into_unchecked::<PyString>() });
-            members.push(member);
-        }
-        let mut texts: Vec<&str> = Vec::with_capacity(keys.len());
-        for key in &keys {
-            match key.to_str() {
-                Ok(text) => texts.push(text),
+            let key = unsafe { key.cast_into_unchecked::<PyString>() };
+            if key.to_str().is_err() {
                 // A lone surrogate does not encode to UTF-16: the reference raises.
-                Err(_) => return fallback.call1((value,)),
+                return fallback.call1((value,));
             }
+            entries.push((key, member));
         }
-        let mut order: Vec<usize> = (0..keys.len()).collect();
-        order.sort_by(|left, right| utf16_cmp(texts[*left], texts[*right]));
+        // Canonical catalog bytes already hold every object's keys in this order.
+        let ordered = entries.windows(2).all(|pair| utf16_cmp(key_text(&pair[0].0), key_text(&pair[1].0)).is_lt());
+        if !ordered {
+            entries.sort_by(|left, right| utf16_cmp(key_text(&left.0), key_text(&right.0)));
+        }
         let frozen = PyDict::new(py);
-        for index in order {
-            frozen.set_item(&keys[index], freeze(py, &members[index], fallback, depth + 1)?)?;
+        for (key, member) in &entries {
+            frozen.set_item(key, freeze(py, member, fallback, depth + 1)?)?;
         }
         return unsafe { Bound::from_owned_ptr_or_err(py, ffi::PyDictProxy_New(frozen.as_ptr())) };
     }
