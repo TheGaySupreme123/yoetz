@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from functools import total_ordering
 from types import MappingProxyType, NotImplementedType
-from typing import Final, Literal, NewType, cast, final
+from typing import Any, Final, Literal, NewType, cast, final
 
 from yoetz.protocol.canonical import (
     MAX_JSON_DEPTH,
@@ -739,6 +739,7 @@ def render_wire_sequence(value: int) -> str:
 
 def _bind_native() -> None:
     from yoetz._native import native_functions
+    from yoetz._native_replay import ReplayReferences, adopt_identity, reference_functions
 
     resolved = native_functions(
         "values_bind_json_object",
@@ -748,9 +749,40 @@ def _bind_native() -> None:
     if resolved is None:
         return
     bind_json_object, native_freeze_json_at, native_freeze_json = resolved
-    # ``JsonObject.__init__`` freezes its members through the module global ``_freeze_json``.
     bind_json_object(JsonObject)
-    globals().update(_freeze_json=native_freeze_json_at, freeze_json=native_freeze_json)
+
+    python: dict[str, Callable[..., Any]] = {
+        "_freeze_json": _freeze_json,
+        "freeze_json": freeze_json,
+    }
+    replay: ReplayReferences  # bound below, once the wrappers are
+
+    # The accepted path stays native. A refusal is replayed by the reference, called after the
+    # ``except`` block, so it raises with the reference's exception chain and a frame of this
+    # module as the diagnostic origin.
+    def native_freeze_json_at_wrapper(value: object, *, depth: int) -> JsonValue:
+        try:
+            return native_freeze_json_at(value, depth=depth)
+        except Exception:
+            pass
+        return replay["_freeze_json"](value, depth=depth)
+
+    def native_freeze_json_wrapper(value: object) -> JsonValue:
+        try:
+            return native_freeze_json(value)
+        except Exception:
+            pass
+        return replay["freeze_json"](value)
+
+    wrappers: dict[str, Callable[..., Any]] = {
+        "_freeze_json": native_freeze_json_at_wrapper,
+        "freeze_json": native_freeze_json_wrapper,
+    }
+    for name, wrapper in wrappers.items():
+        adopt_identity(wrapper, python[name])
+    # ``JsonObject.__init__`` freezes its members through the module global ``_freeze_json``.
+    globals().update(wrappers)
+    replay = reference_functions(globals(), python)
 
     timestamps = native_functions(
         "values_bind_timestamp",

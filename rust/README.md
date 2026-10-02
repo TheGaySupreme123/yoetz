@@ -60,7 +60,8 @@ with `YZ_NATIVE=0`. The tests are never edited to fit the port.
    by Rust.
 3. **Same type rules.** `type(x) is int` is not `isinstance(x, int)`; `bool`, `IntEnum`,
    `StrEnum`, and `str`/`dict`/`list` subclasses take the reference's path. Mappings that are not
-   exact `dict`s go through their Python `.items()`.
+   exact `dict`s (or an exact `JsonObject`) defer the whole call to the reference, which iterates
+   them itself.
 4. **Honor monkeypatch points.** Tests replace module attributes to observe or fault calls. A twin
    must not bypass a dependency the tests patch: wrap it so it defers to the Python reference when
    the dependency is not the original (see `strict_json_parse` and `json.loads`), or keep that
@@ -69,6 +70,16 @@ with `YZ_NATIVE=0`. The tests are never edited to fit the port.
 5. **No native stack exhaustion.** Recursion over caller-controlled structures is bounded or
    iterative; hostile nesting must produce the reference's refusal, never a crash.
 6. **No user content in errors.** Reason codes only, as in Python.
+7. **Refusals come from the reference.** A native exception has no frame in the owning module
+   (diagnostics record the innermost `yoetz` frame as the origin) and none of the reference's
+   `__cause__`/`__context__` chain. A twin bound over a Python function is therefore wrapped:
+   the accepted path stays native, and on any exception the wrapper calls the Python reference
+   *after* its `except` block (`yoetz._native_replay`), which returns or raises exactly what the
+   reference does. A twin may raise to defer whatever only the reference may touch (a value whose
+   Python code would run, a document nested past `DEFER_NESTING`, whose verdict depends on
+   CPython's stack-dependent recursion guard). Native code that still raises builds its errors
+   through `registry::protocol_error`/`protocol_error_from`, which chain `__context__` the way a
+   Python `raise` does.
 
 ## Verification
 

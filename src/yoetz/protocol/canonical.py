@@ -5,8 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Mapping, Sequence
-from typing import Final, NoReturn, cast
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any, Final, NoReturn, cast
 
 from yoetz.protocol.errors import ProtocolValueError
 
@@ -491,6 +491,7 @@ def canonical_round_trip_proven(data: object, *, encode: object, parse: object) 
 # pure-Python definitions above stay in place unchanged.
 def _bind_native() -> None:
     from yoetz._native import native_functions
+    from yoetz._native_replay import ReplayReferences, adopt_identity, reference_functions
 
     resolved = native_functions(
         "bind_canonical_fragment",
@@ -528,61 +529,168 @@ def _bind_native() -> None:
     ) = resolved
     bind_fragment(CanonicalFragment)
 
-    def native_canonical_fragment(value: JsonValue | CanonicalFragment) -> CanonicalFragment:
-        """Validate and encode *value* once, returning a splice-ready fragment."""
+    python: dict[str, Callable[..., Any]] = {
+        "canonical_fragment": canonical_fragment,
+        "container_levels": container_levels,
+        "canonical_encode": canonical_encode,
+        "canonical_digest": canonical_digest,
+        "strict_json_parse": strict_json_parse,
+        "ensure_canonical_value": ensure_canonical_value,
+        "ensure_canonical_set": ensure_canonical_set,
+        "canonical_integer_string": canonical_integer_string,
+        "parse_canonical_integer_string": parse_canonical_integer_string,
+        "request_digest": request_digest,
+        "entry_digest": entry_digest,
+        "_canonical_text": _canonical_text,
+        "_validate_string": _validate_string,
+        "_encode_string": _encode_string,
+    }
+    replay: ReplayReferences  # bound below, once the wrappers are
 
+    # Each wrapper keeps the accepted path native. Any exception (a refusal, or a value the
+    # twin hands back because only the reference may touch it) is answered by the Python
+    # reference, called after the ``except`` block: its result, or its own refusal with the
+    # reference's exception chain and a frame of this module as the diagnostic origin.
+    def native_canonical_fragment(value: JsonValue | CanonicalFragment) -> CanonicalFragment:
         if type(value) is CanonicalFragment:
             return value
-        text, levels = fragment_parts(value)
-        return CanonicalFragment(text, levels, _token=_FRAGMENT_TOKEN)
+        try:
+            text, levels = fragment_parts(value)
+        except Exception:
+            pass
+        else:
+            return CanonicalFragment(text, levels, _token=_FRAGMENT_TOKEN)
+        return replay["canonical_fragment"](value)
+
+    def native_container_levels_wrapper(value: object) -> int:
+        try:
+            return native_container_levels(value)
+        except Exception:
+            pass
+        return replay["container_levels"](value)
+
+    def native_canonical_encode(value: JsonValue) -> bytes:
+        try:
+            return native_encode(value)
+        except Exception:
+            pass
+        return replay["canonical_encode"](value)
+
+    def native_canonical_digest(value: JsonValue) -> str:
+        try:
+            return native_digest(value)
+        except Exception:
+            pass
+        return replay["canonical_digest"](value)
+
+    def native_ensure_canonical_value(value: JsonValue, *, depth: int = 0) -> None:
+        try:
+            return native_ensure_value(value, depth=depth)
+        except Exception:
+            pass
+        return replay["ensure_canonical_value"](value, depth=depth)
+
+    def native_ensure_canonical_set(values: list[str] | tuple[str, ...]) -> None:
+        try:
+            return native_ensure_set(values)
+        except Exception:
+            pass
+        return replay["ensure_canonical_set"](values)
+
+    def native_canonical_integer_string(value: int) -> str:
+        try:
+            return native_integer_string(value)
+        except Exception:
+            pass
+        return replay["canonical_integer_string"](value)
+
+    def native_parse_canonical_integer_string(value: str, *, signed: bool = False) -> int:
+        try:
+            return native_parse_integer_string(value, signed=signed)
+        except Exception:
+            pass
+        return replay["parse_canonical_integer_string"](value, signed=signed)
+
+    def native_request_digest_wrapper(identity: JsonValue) -> str:
+        try:
+            return native_request_digest(identity)
+        except Exception:
+            pass
+        return replay["request_digest"](identity)
 
     def native_entry_digest(preimage: JsonValue) -> str:
-        """Digest an accepted-entry preimage after its exact top-level envelope gate."""
+        # The envelope gate runs no caller code only for an exact dict with exact ``str`` keys;
+        # anything else goes straight to the reference so its gate runs exactly once.
+        if type(preimage) is dict:
+            source = cast(dict[object, object], preimage)
+            if all(type(key) is str for key in source):
+                protocol = source.get("protocol")
+                if (
+                    frozenset(source) == _ACCEPTED_ENTRY_PREIMAGE_KEYS
+                    and type(protocol) is str
+                    and protocol == "yoetz.event"
+                ):
+                    try:
+                        return native_digest(source)
+                    except Exception:
+                        pass
+        return replay["entry_digest"](preimage)
 
-        if not _is_actual_mapping(preimage):
-            raise ProtocolValueError("not_an_accepted_envelope")
-        source = cast(Mapping[str, JsonValue], preimage)
+    def native_canonical_text(value: JsonValue | CanonicalFragment, *, depth: int = 0) -> str:
         try:
-            if frozenset(source) != _ACCEPTED_ENTRY_PREIMAGE_KEYS:
-                raise ProtocolValueError("not_an_accepted_envelope")
-            protocol = source["protocol"]
-        except ProtocolValueError:
-            raise
-        except Exception as exc:
-            raise ProtocolValueError("not_an_accepted_envelope") from exc
+            return native_text(value, depth=depth)
+        except Exception:
+            pass
+        return replay["_canonical_text"](value, depth=depth)
 
-        if type(protocol) is not str or protocol != "yoetz.event":
-            raise ProtocolValueError("not_an_accepted_envelope")
-        return native_digest(source)
+    def native_validate_string_wrapper(value: str) -> None:
+        try:
+            return native_validate_string(value)
+        except Exception:
+            pass
+        return replay["_validate_string"](value)
+
+    def native_encode_string_wrapper(value: str) -> str:
+        try:
+            return native_encode_string(value)
+        except Exception:
+            pass
+        return replay["_encode_string"](value)
 
     python_strict_json_parse = strict_json_parse
     stdlib_loads = json.loads
 
     def native_strict_json_parse(data: bytes | bytearray, *, validate: bool = True) -> JsonValue:
-        """Parse strict wire JSON into the Yoetz JSON profile."""
-
         # The reference delegates scanning to ``json.loads``; a replaced ``json.loads`` is an
         # observation point the native scanner cannot honor, so it defers to the reference.
         if json.loads is stdlib_loads:
-            return cast(JsonValue, native_parse(data, validate=validate))
+            try:
+                return cast(JsonValue, native_parse(data, validate=validate))
+            except Exception:
+                pass
+            return replay["strict_json_parse"](data, validate=validate)
         return python_strict_json_parse(data, validate=validate)
 
-    globals().update(
-        canonical_fragment=native_canonical_fragment,
-        container_levels=native_container_levels,
-        canonical_encode=native_encode,
-        canonical_digest=native_digest,
-        strict_json_parse=native_strict_json_parse,
-        ensure_canonical_value=native_ensure_value,
-        ensure_canonical_set=native_ensure_set,
-        canonical_integer_string=native_integer_string,
-        parse_canonical_integer_string=native_parse_integer_string,
-        request_digest=native_request_digest,
-        entry_digest=native_entry_digest,
-        _canonical_text=native_text,
-        _validate_string=native_validate_string,
-        _encode_string=native_encode_string,
-    )
+    wrappers: dict[str, Callable[..., Any]] = {
+        "canonical_fragment": native_canonical_fragment,
+        "container_levels": native_container_levels_wrapper,
+        "canonical_encode": native_canonical_encode,
+        "canonical_digest": native_canonical_digest,
+        "strict_json_parse": native_strict_json_parse,
+        "ensure_canonical_value": native_ensure_canonical_value,
+        "ensure_canonical_set": native_ensure_canonical_set,
+        "canonical_integer_string": native_canonical_integer_string,
+        "parse_canonical_integer_string": native_parse_canonical_integer_string,
+        "request_digest": native_request_digest_wrapper,
+        "entry_digest": native_entry_digest,
+        "_canonical_text": native_canonical_text,
+        "_validate_string": native_validate_string_wrapper,
+        "_encode_string": native_encode_string_wrapper,
+    }
+    for name, wrapper in wrappers.items():
+        adopt_identity(wrapper, python[name])
+    globals().update(wrappers)
+    replay = reference_functions(globals(), python)
 
     round_trip = native_functions("is_canonical_json_bytes")
     if round_trip is None:

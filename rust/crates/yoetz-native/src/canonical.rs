@@ -2,13 +2,20 @@
 //!
 //! The walker visits Python values directly (no intermediate tree) and applies the reference's
 //! checks in the reference's order: fragment, `None`, `bool`, exact `int`, any `float`, exact
-//! `str`, exact `list`/`tuple`, then any `collections.abc.Mapping`. Mapping keys are validated
-//! in insertion order before any member value, and member values are visited in sorted-key
-//! order, so the first refusal is always the one the reference reports.
+//! `str`, exact `list`/`tuple`, then an exact `dict` or exact `JsonObject`. Mapping keys are
+//! validated in insertion order before any member value, and member values are visited in
+//! sorted-key order, so the first refusal is always the one the reference reports.
+//!
+//! Every other value (a `str`/`int`/`list`/`dict` subclass, any other `Mapping`, an enum, an
+//! arbitrary object) defers the whole call: the walker raises before running any Python code
+//! of that value, and the module's Python wrapper re-runs the reference, which then reaches
+//! that value with its own lookups, iteration order, and exception chain. The wrappers replay
+//! every refusal through the reference the same way, so a native refusal only has to be a
+//! refusal; its class and reason are the reference's.
 
 use std::os::raw::c_void;
 
-use pyo3::exceptions::{PyRecursionError, PyTypeError};
+use pyo3::exceptions::{PyNotImplementedError, PyTypeError};
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
@@ -19,36 +26,34 @@ use yoetz_core::protocol::json::{self, JsonSink, JsonText};
 use crate::registry::{Slot, protocol_error};
 
 static CANONICAL_FRAGMENT: Slot = Slot::new();
-static MAPPING_ABC: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static BUILTIN_INT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
-/// Python's own recursion limit stops `container_levels` long before this; it only keeps a
-/// hostile structure from exhausting the native stack.
-const MAX_LEVELS_RECURSION: usize = 900;
-
-fn mapping_abc(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
-    MAPPING_ABC
-        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
-            Ok(py.import("collections.abc")?.getattr("Mapping")?.unbind())
-        })
-        .map(|value| value.bind(py))
+/// Hand the whole call back to the Python reference. Only the module's Python wrappers call
+/// these twins, and they re-run the reference on any exception; Rust callers treat any error
+/// as "defer" too. Raised before any Python code of the offending value runs.
+fn defer() -> PyErr {
+    PyNotImplementedError::new_err("native_defer")
 }
 
-/// `issubclass(type(value), Mapping)`, treating any failure as `False` like the reference.
-fn is_actual_mapping(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
-    if unsafe { ffi::PyDict_Check(value.as_ptr()) } != 0 {
-        return true;
-    }
-    let Ok(mapping) = mapping_abc(py) else {
-        return false;
-    };
-    let result = unsafe { ffi::PyObject_IsSubclass(value.get_type().as_ptr(), mapping.as_ptr()) };
-    if result < 0 {
-        // Discard the raised error: the reference swallows BaseException here.
-        let _ = PyErr::take(py);
-        return false;
-    }
-    result == 1
+/// The bound `JsonObject` class, when `yoetz.domain.values` has bound it.
+fn json_object_class(py: Python<'_>) -> Option<Bound<'_, PyAny>> {
+    crate::walk::JSON_OBJECT.get(py)
+}
+
+#[inline]
+fn is_type(value: &Bound<'_, PyAny>, class: Option<&Bound<'_, PyAny>>) -> bool {
+    class.is_some_and(|class| value.get_type().as_ptr() == class.as_ptr())
+}
+
+/// An exact `str`, `int`, `bool`, `float`, or `None`: values the reference never treats as a
+/// container (no ABC can claim them).
+#[inline]
+fn is_plain_scalar(value: &Bound<'_, PyAny>) -> bool {
+    value.is_none()
+        || is_exact(value, ffi::PyUnicode_CheckExact)
+        || is_exact(value, ffi::PyLong_CheckExact)
+        || is_exact(value, ffi::PyBool_Check)
+        || is_exact(value, ffi::PyFloat_CheckExact)
 }
 
 #[inline]
@@ -87,6 +92,7 @@ struct Encoder<'py> {
     py: Python<'py>,
     out: Vec<u8>,
     fragment: Option<Bound<'py, PyAny>>,
+    json_object: Option<Bound<'py, PyAny>>,
     base_depth: usize,
     levels: i64,
 }
@@ -97,6 +103,7 @@ impl<'py> Encoder<'py> {
             py,
             out: Vec::with_capacity(1024),
             fragment: CANONICAL_FRAGMENT.get(py),
+            json_object: json_object_class(py),
             base_depth,
             levels: -1,
         }
@@ -202,7 +209,7 @@ impl<'py> Encoder<'py> {
             self.out.push(b']');
             return Ok(());
         }
-        if is_actual_mapping(py, value) {
+        if is_exact(value, ffi::PyDict_CheckExact) || is_type(value, self.json_object.as_ref()) {
             self.enter_container(depth)?;
             let (keys, items) = mapping_members(py, value)?;
             let mut order: Vec<(&str, usize)> = Vec::with_capacity(keys.len());
@@ -223,14 +230,17 @@ impl<'py> Encoder<'py> {
             self.out.push(b'}');
             return Ok(());
         }
-        Err(self.fail(core::UNSUPPORTED_JSON_TYPE))
+        // Any other value: a non-exact mapping, a subclass, or an unsupported type. The
+        // reference decides (it may call the value's own Python code), so defer.
+        Err(defer())
     }
 }
 
 /// A mapping's validated keys and their member values, in insertion order.
 type MappingMembers<'py> = (Vec<Bound<'py, PyString>>, Vec<Bound<'py, PyAny>>);
 
-/// Collect a mapping's members, validating every key in insertion order first.
+/// Collect an exact `dict`'s or exact `JsonObject`'s members, validating every key in
+/// insertion order first. No Python code runs while the dict is iterated.
 fn mapping_members<'py>(
     py: Python<'py>,
     value: &Bound<'py, PyAny>,
@@ -257,19 +267,11 @@ fn mapping_members<'py>(
         for (key, item) in dict.iter() {
             admit(key, item)?;
         }
-    } else if crate::walk::JSON_OBJECT
-        .get(py)
-        .is_some_and(|class| crate::walk::is_type(value, &class))
-    {
+    } else {
         // An exact ``JsonObject``'s ``items()`` yields its ``_items`` pairs in order.
         for pair in crate::walk::json_object_items(value)?.iter() {
             let pair = pair.cast_into::<PyTuple>()?;
             admit(pair.get_item(0)?, pair.get_item(1)?)?;
-        }
-    } else {
-        for pair in value.call_method0("items")?.try_iter()? {
-            let (key, item): (Bound<'py, PyAny>, Bound<'py, PyAny>) = pair?.extract()?;
-            admit(key, item)?;
         }
     }
     Ok((keys, items))
@@ -346,50 +348,59 @@ pub fn ensure_canonical_value(
 }
 
 /// `container_levels(value) -> int` (no validation, like the reference).
+///
+/// Walks exact `list`/`tuple`/`dict`/`JsonObject` containers and plain scalars; anything else,
+/// or a container nested past `DEFER_NESTING` (the reference has no bound of its own and stops
+/// only at Python's recursion limit), defers to the reference.
 #[pyfunction]
 pub fn container_levels(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<i64> {
     let fragment = CANONICAL_FRAGMENT.get(py);
-    levels_of(py, value, fragment.as_ref(), 0)
+    let json_object = json_object_class(py);
+    levels_of(value, fragment.as_ref(), json_object.as_ref(), 0)
 }
 
 fn levels_of(
-    py: Python<'_>,
     value: &Bound<'_, PyAny>,
     fragment: Option<&Bound<'_, PyAny>>,
+    json_object: Option<&Bound<'_, PyAny>>,
     recursion: usize,
 ) -> PyResult<i64> {
-    if recursion > MAX_LEVELS_RECURSION {
-        return Err(PyRecursionError::new_err(
-            "maximum recursion depth exceeded",
-        ));
+    if is_type(value, fragment) {
+        return value.getattr("levels")?.extract();
     }
-    if let Some(fragment) = fragment {
-        if value.get_type().as_ptr() == fragment.as_ptr() {
-            return value.getattr("levels")?.extract();
+    if is_plain_scalar(value) {
+        return Ok(-1);
+    }
+    if recursion >= json::DEFER_NESTING {
+        return Err(defer());
+    }
+    let mut deepest = -1;
+    if is_exact(value, ffi::PyList_CheckExact) {
+        let list = unsafe { value.cast_unchecked::<PyList>() };
+        // Index access re-reads the length; no Python code runs inside this walk.
+        let mut index = 0;
+        while index < list.len() {
+            let item = list.get_item(index)?;
+            deepest = deepest.max(levels_of(&item, fragment, json_object, recursion + 1)?);
+            index += 1;
         }
-    }
-    if is_exact(value, ffi::PyList_CheckExact) || is_exact(value, ffi::PyTuple_CheckExact) {
-        let mut deepest = -1;
-        for item in value.try_iter()? {
-            deepest = deepest.max(levels_of(py, &item?, fragment, recursion + 1)?);
+    } else if is_exact(value, ffi::PyTuple_CheckExact) {
+        for item in unsafe { value.cast_unchecked::<PyTuple>() }.iter() {
+            deepest = deepest.max(levels_of(&item, fragment, json_object, recursion + 1)?);
         }
-        return Ok(1 + deepest);
-    }
-    if is_actual_mapping(py, value) {
-        let mut deepest = -1;
-        let values = if is_exact(value, ffi::PyDict_CheckExact) {
-            unsafe { value.cast_unchecked::<PyDict>() }
-                .values()
-                .into_any()
-        } else {
-            value.call_method0("values")?
-        };
-        for item in values.try_iter()? {
-            deepest = deepest.max(levels_of(py, &item?, fragment, recursion + 1)?);
+    } else if is_exact(value, ffi::PyDict_CheckExact) {
+        for item in unsafe { value.cast_unchecked::<PyDict>() }.values().iter() {
+            deepest = deepest.max(levels_of(&item, fragment, json_object, recursion + 1)?);
         }
-        return Ok(1 + deepest);
+    } else if is_type(value, json_object) {
+        for pair in crate::walk::json_object_items(value)?.iter() {
+            let item = pair.cast_into::<PyTuple>()?.get_item(1)?;
+            deepest = deepest.max(levels_of(&item, fragment, json_object, recursion + 1)?);
+        }
+    } else {
+        return Err(defer());
     }
-    Ok(-1)
+    Ok(1 + deepest)
 }
 
 /// `_validate_string(value) -> None`.
@@ -422,11 +433,10 @@ pub fn encode_string<'py>(
 /// `ensure_canonical_set(values) -> None`.
 #[pyfunction]
 pub fn ensure_canonical_set(py: Python<'_>, values: &Bound<'_, PyAny>) -> PyResult<()> {
-    let pointer = values.as_ptr();
-    let is_sequence =
-        unsafe { ffi::PyList_Check(pointer) != 0 || ffi::PyTuple_Check(pointer) != 0 };
-    if !is_sequence {
-        return Err(protocol_error(py, core::UNSUPPORTED_JSON_TYPE));
+    // The reference's `isinstance(values, list | tuple)` and `for member in values` can run a
+    // subclass's (or a spoofed `__class__`'s) Python code: only exact sequences stay native.
+    if !(is_exact(values, ffi::PyList_CheckExact) || is_exact(values, ffi::PyTuple_CheckExact)) {
+        return Err(defer());
     }
     let mut previous: Option<Vec<u8>> = None;
     for member in values.try_iter()? {
@@ -491,25 +501,44 @@ pub fn request_digest(py: Python<'_>, identity: &Bound<'_, PyAny>) -> PyResult<S
     canonical_digest(py, identity)
 }
 
+/// The reference's `_reject_ledger_assigned_fields` walk over exact containers; any other
+/// value it would inspect (it calls `issubclass` on each node and iterates mappings live)
+/// defers. No Python code runs in this walk, so the dict snapshot is the live iteration.
 fn reject_ledger_assigned_fields(
     py: Python<'_>,
     node: &Bound<'_, PyAny>,
     depth: usize,
 ) -> PyResult<()> {
-    if is_actual_mapping(py, node) {
+    let fragment = CANONICAL_FRAGMENT.get(py);
+    let json_object = json_object_class(py);
+    reject_ledger_walk(py, node, depth, fragment.as_ref(), json_object.as_ref())
+}
+
+fn reject_ledger_walk(
+    py: Python<'_>,
+    node: &Bound<'_, PyAny>,
+    depth: usize,
+    fragment: Option<&Bound<'_, PyAny>>,
+    json_object: Option<&Bound<'_, PyAny>>,
+) -> PyResult<()> {
+    if is_plain_scalar(node) || is_type(node, fragment) {
+        return Ok(());
+    }
+    let is_dict = is_exact(node, ffi::PyDict_CheckExact);
+    if is_dict || is_type(node, json_object) {
         if depth >= MAX_JSON_DEPTH {
             return Err(protocol_error(py, core::NESTING_TOO_DEEP));
         }
-        let pairs: Vec<(Bound<'_, PyAny>, Bound<'_, PyAny>)> =
-            if is_exact(node, ffi::PyDict_CheckExact) {
-                unsafe { node.cast_unchecked::<PyDict>() }.iter().collect()
-            } else {
-                let mut collected = Vec::new();
-                for pair in node.call_method0("items")?.try_iter()? {
-                    collected.push(pair?.extract()?);
-                }
-                collected
-            };
+        let pairs: Vec<(Bound<'_, PyAny>, Bound<'_, PyAny>)> = if is_dict {
+            unsafe { node.cast_unchecked::<PyDict>() }.iter().collect()
+        } else {
+            let mut collected = Vec::new();
+            for pair in crate::walk::json_object_items(node)?.iter() {
+                let pair = pair.cast_into::<PyTuple>()?;
+                collected.push((pair.get_item(0)?, pair.get_item(1)?));
+            }
+            collected
+        };
         for (key, item) in pairs {
             if is_exact(&key, ffi::PyUnicode_CheckExact) {
                 if let Ok(name) = unsafe { key.cast_unchecked::<PyString>() }.to_str() {
@@ -518,7 +547,7 @@ fn reject_ledger_assigned_fields(
                     }
                 }
             }
-            reject_ledger_assigned_fields(py, &item, depth + 1)?;
+            reject_ledger_walk(py, &item, depth + 1, fragment, json_object)?;
         }
         return Ok(());
     }
@@ -527,10 +556,11 @@ fn reject_ledger_assigned_fields(
             return Err(protocol_error(py, core::NESTING_TOO_DEEP));
         }
         for item in node.try_iter()? {
-            reject_ledger_assigned_fields(py, &item?, depth + 1)?;
+            reject_ledger_walk(py, &item?, depth + 1, fragment, json_object)?;
         }
+        return Ok(());
     }
-    Ok(())
+    Err(defer())
 }
 
 /// `sha256:<hex>` of raw bytes.
@@ -669,13 +699,34 @@ impl<'py> JsonSink for PySink<'py> {
     }
 }
 
-/// `strict_json_parse(data, *, validate=True)`.
-#[pyfunction]
-#[pyo3(signature = (data, *, validate = true))]
+/// `strict_json_parse(data, *, validate=True)` for Rust callers (nesting bounded at
+/// `MAX_PARSE_NESTING`, an approximation of the reference's stack-dependent guard).
 pub fn strict_json_parse<'py>(
     py: Python<'py>,
     data: &Bound<'py, PyAny>,
     validate: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    parse_strict(py, data, validate, json::MAX_PARSE_NESTING)
+}
+
+/// `strict_json_parse(data, *, validate=True)` for the Python wrapper, which replays every
+/// refusal through the reference: a document nested past `DEFER_NESTING` stops here so the
+/// reference decides with its real recursion guard.
+#[pyfunction]
+#[pyo3(name = "strict_json_parse", signature = (data, *, validate = true))]
+pub fn strict_json_parse_py<'py>(
+    py: Python<'py>,
+    data: &Bound<'py, PyAny>,
+    validate: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    parse_strict(py, data, validate, json::DEFER_NESTING)
+}
+
+fn parse_strict<'py>(
+    py: Python<'py>,
+    data: &Bound<'py, PyAny>,
+    validate: bool,
+    nesting: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
     let owned;
     let raw: &[u8] = if is_exact(data, ffi::PyByteArray_CheckExact) {
@@ -692,7 +743,7 @@ pub fn strict_json_parse<'py>(
         depth: 0,
         suspect: false,
     };
-    let value = json::scan(text, &mut sink)?;
+    let value = json::scan_limited(text, &mut sink, nesting)?;
     if validate && sink.suspect {
         encode_value(py, &value, 0)?;
     }
@@ -730,7 +781,7 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(parse_canonical_integer_string, module)?)?;
     module.add_function(wrap_pyfunction!(request_digest, module)?)?;
     module.add_function(wrap_pyfunction!(sha256_prefixed, module)?)?;
-    module.add_function(wrap_pyfunction!(strict_json_parse, module)?)?;
+    module.add_function(wrap_pyfunction!(strict_json_parse_py, module)?)?;
     module.add_function(wrap_pyfunction!(is_canonical_json_bytes, module)?)?;
     Ok(())
 }
