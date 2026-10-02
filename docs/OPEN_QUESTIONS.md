@@ -1,6 +1,6 @@
 # Yoetz — decision ledger and release-gate dispositions
 
-**ADRs:** ADR-001 through ADR-029 | **Related:** [`docs/INTERFACES.md`](INTERFACES.md),
+**ADRs:** ADR-001 through ADR-033 | **Related:** [`docs/INTERFACES.md`](INTERFACES.md),
 [`docs/adr/`](adr/), release-evidence generation
 
 ## Purpose
@@ -236,7 +236,11 @@ stopped isolated instance is observation, not certification. Whether 0.153.4 emi
   because the `status` result they cause discloses only what that call would already have returned
   under the ordinary provenance rules and the `agent_context` ceiling. An exact v0.1 capability
   cell may declare either or both arms after E-013 passes; unsupported cells remain `None`.
-  Remote service exposure remains deferred. No adapter silently installs or configures hooks;
+  Remote service exposure remains deferred. ADR-033 records the proposed shape (local service
+  forwards; hooks and MCP do not dial out) and the founder questions that must be accepted
+  before this deferral lifts. The local commands `yoetz remote status`, `configure`,
+  `disconnect`, and `connect` exist, and `connect` opens no network connection. No adapter
+  silently installs or configures hooks;
   every hook install goes through the host's explicit plugin ceremony.
 - MCP prompts. v0.1 ships tools, resources, and the `instructions` string only.
 - Launchd/systemd convenience installers, multi-user service hosting, remote control, and

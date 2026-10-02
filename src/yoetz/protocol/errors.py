@@ -504,6 +504,9 @@ ADMITTED_CONTINUATION_TOKENS: frozenset[str] = frozenset(
         "semantic_response_truncated",
         "semantic_timeout",
         "semantic_transport_retry",
+        # Local remote-mode refusals (ADR-033). Not attached by a protocol reason code.
+        "remote_forwarding_closed",
+        "remote_request_correction",
     }
 )
 

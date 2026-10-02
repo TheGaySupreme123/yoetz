@@ -2220,3 +2220,9 @@ Recording hook text there would label it `agent_transcribed`, which it is not, a
 the prompt-capture consent still open on issue #908.
 For Codex the first attach runs on `SessionStart`, before any prompt exists; a retry on
 `UserPromptSubmit` is also unproven for the initial `codex exec` prompt (above).
+
+## Remote service mode (ADR-033)
+
+Codex is not a remote-service integration. Hooks and the MCP bridge stay clients of the local
+service. `yoetz remote connect` records nothing on the network and opens no connection. Remote
+forwarding stays deferred until the founder questions in ADR-033 are accepted.

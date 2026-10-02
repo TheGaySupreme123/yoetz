@@ -46,6 +46,7 @@ SLASH_COMMANDS: Final[tuple[SlashCommand, ...]] = (
     SlashCommand("privacy", "choose what may leave this computer"),
     SlashCommand("provider", "configure optional deeper review"),
     SlashCommand("service", "manage the protected local service"),
+    SlashCommand("remote", "show the optional remote endpoint; forwarding stays off"),
     SlashCommand("doctor", "diagnose installation problems"),
     SlashCommand("help", "show what Yoetz can do here"),
     SlashCommand("quit", "leave Yoetz"),

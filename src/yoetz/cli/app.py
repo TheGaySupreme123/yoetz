@@ -167,6 +167,10 @@ instance_app = typer.Typer(
     ),
     no_args_is_help=True,
 )
+remote_app = typer.Typer(
+    help="Record an optional remote endpoint. Forwarding stays off until it is authorized.",
+    no_args_is_help=True,
+)
 auto_unlock_app = typer.Typer(
     help="Inspect or repair restart-safe passphrase unlock.", no_args_is_help=True
 )
@@ -237,6 +241,7 @@ integrate_app.add_typer(integrate_admission_app, name="admission")
 app.add_typer(setup_app, name="setup")
 app.add_typer(service_app, name="service")
 app.add_typer(instance_app, name="instance")
+app.add_typer(remote_app, name="remote")
 service_app.add_typer(auto_unlock_app, name="auto-unlock")
 service_app.add_typer(recovery_app, name="recovery")
 app.add_typer(provider_app, name="provider")
@@ -2078,6 +2083,84 @@ def instance_create(
         )
 
     _run_instance_operation(operation, json_output=json_output)
+
+
+def _run_remote(operation: Callable[[Path], dict[str, JsonValue]], *, json_output: bool) -> None:
+    from yoetz.application.remote_mode import (
+        RemoteModeError,
+        default_remote_root,
+        render_remote_status,
+    )
+    from yoetz.cli.render import local_recovery_json
+
+    try:
+        status = operation(default_remote_root())
+    except RemoteModeError as error:
+        if json_output or not sys.stdout.isatty():
+            recovery = local_recovery_json(error.reason)
+            body: dict[str, JsonValue] = {"ok": False, "reason": error.reason}
+            if recovery is not None:
+                body["recovery"] = recovery
+            _stdout_json(body)
+        _stderr(_bounded_failure_line(error.reason))
+        code = (
+            exit_code_for(PublicErrorCode.PRIVACY_AUTHORITY_REQUIRED)
+            if error.reason == "remote_egress_not_authorized"
+            else exit_code_for(PublicErrorCode.INVALID_REQUEST)
+        )
+        _finish(code)
+        return
+    if json_output or not sys.stdout.isatty():
+        _stdout_json(status)
+    else:
+        typer.echo(render_remote_status(status))
+    _finish(0)
+
+
+@remote_app.command("status")
+def remote_status_command(json_output: _JSON = False) -> None:
+    """Show whether a remote endpoint is recorded. Forwarding is always off."""
+
+    from yoetz.application.remote_mode import remote_status
+
+    _run_remote(remote_status, json_output=json_output)
+
+
+@remote_app.command("configure")
+def remote_configure(
+    transport: Annotated[Literal["https", "ssh"], typer.Option("--transport")],
+    endpoint: Annotated[str, typer.Option("--endpoint")],
+    credential_kind: Annotated[str, typer.Option("--credential-kind")] = "api_key",
+    json_output: _JSON = False,
+) -> None:
+    """Record an endpoint locally. This command does not store or send a credential."""
+
+    from yoetz.application.remote_mode import configure_remote
+
+    _run_remote(
+        lambda root: configure_remote(
+            root, transport=transport, endpoint=endpoint, credential_kind=credential_kind
+        ),
+        json_output=json_output,
+    )
+
+
+@remote_app.command("disconnect")
+def remote_disconnect(json_output: _JSON = False) -> None:
+    """Remove a stored remote endpoint and return to local mode."""
+
+    from yoetz.application.remote_mode import disconnect_remote
+
+    _run_remote(disconnect_remote, json_output=json_output)
+
+
+@remote_app.command("connect")
+def remote_connect(json_output: _JSON = False) -> None:
+    """Refuse remote forwarding. No connection is opened."""
+
+    from yoetz.application.remote_mode import connect_remote
+
+    _run_remote(connect_remote, json_output=json_output)
 
 
 @instance_app.command("status")
