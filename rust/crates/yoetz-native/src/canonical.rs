@@ -247,6 +247,12 @@ fn mapping_members<'py>(
         for (key, item) in dict.iter() {
             admit(key, item)?;
         }
+    } else if crate::walk::JSON_OBJECT.get(py).is_some_and(|class| crate::walk::is_type(value, &class)) {
+        // An exact ``JsonObject``'s ``items()`` yields its ``_items`` pairs in order.
+        for pair in crate::walk::json_object_items(value)?.iter() {
+            let pair = pair.cast_into::<PyTuple>()?;
+            admit(pair.get_item(0)?, pair.get_item(1)?)?;
+        }
     } else {
         for pair in value.call_method0("items")?.try_iter()? {
             let (key, item): (Bound<'py, PyAny>, Bound<'py, PyAny>) = pair?.extract()?;

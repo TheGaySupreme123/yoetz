@@ -204,3 +204,40 @@ def safe_request_id_from(arguments: object) -> str | None:
     if is_valid_id(IdKind.REQUEST, candidate):
         return candidate
     return None
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions(
+        "ids_bind_kinds",
+        "ids_validate_id",
+        "ids_is_valid_id",
+        "ids_validate_actor_id",
+    )
+    if resolved is None:
+        return
+    bind_kinds, native_validate_id, native_is_valid_id, native_validate_actor_id = resolved
+    # ``new_id`` stays here: it reads randomness through ``os.urandom``, an observation point.
+    bind_kinds(IdKind, IdKind.ACTOR, PREFIX_BY_KIND)
+
+    # A refusal must pass through a frame of this module: diagnostics record the innermost
+    # ``yoetz`` frame of an exception as its origin, and a native frame has none.
+    def validate_id(kind: IdKind, value: object) -> str:
+        """Validate one ID against an expected kind and return the same string object."""
+
+        return native_validate_id(kind, value)
+
+    def validate_actor_id(value: object) -> str:
+        """Validate a caller-asserted actor identifier without minting assurance."""
+
+        return native_validate_actor_id(value)
+
+    globals().update(
+        validate_id=validate_id,
+        is_valid_id=native_is_valid_id,
+        validate_actor_id=validate_actor_id,
+    )
+
+
+_bind_native()

@@ -3236,3 +3236,39 @@ async def _close_ready_context(context: object) -> None:
             failure = exc
     if failure is not None:
         raise failure
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions(
+        "service_bind_leaves",
+        "service_leaves",
+        "service_bind_plain_nested_mappings",
+        "service_plain_nested_mappings",
+        "service_bind_replace_pointer",
+        "service_replace_pointer",
+    )
+    if resolved is None:
+        return
+    (
+        bind_leaves,
+        native_leaves,
+        bind_plain,
+        native_plain,
+        bind_replace,
+        native_replace,
+    ) = resolved
+    # Each twin hands any node it does not walk natively to its reference, which recurses
+    # through these module globals.
+    bind_leaves(_leaves)
+    bind_plain(_plain_nested_mappings)
+    bind_replace(_replace_pointer)
+    globals().update(
+        _leaves=native_leaves,
+        _plain_nested_mappings=native_plain,
+        _replace_pointer=native_replace,
+    )
+
+
+_bind_native()

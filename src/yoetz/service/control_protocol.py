@@ -1010,3 +1010,19 @@ def public_error_code_for_control_reason(reason: str) -> PublicErrorCode:
     }:
         return PublicErrorCode.INVALID_REQUEST
     return PublicErrorCode.SERVICE_UNAVAILABLE
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions("control_bind_plain_wire_value", "control_plain_wire_value")
+    if resolved is None:
+        return
+    bind_reference, native_plain_wire_value = resolved
+    # The twin walks exact containers itself and hands every other node to the reference, which
+    # recurses through this module global and so returns to the twin for its members.
+    bind_reference(_plain_wire_value)
+    globals().update(_plain_wire_value=native_plain_wire_value)
+
+
+_bind_native()

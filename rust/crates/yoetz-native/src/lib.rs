@@ -12,6 +12,12 @@ use pyo3::prelude::*;
 mod registry;
 
 mod canonical;
+mod control_protocol;
+mod ids;
+mod models;
+mod service;
+mod values;
+mod walk;
 
 #[pymodule]
 fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -20,5 +26,10 @@ fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(registry::bind_protocol_value_error, module)?)?;
 
     canonical::register(module)?;
+    control_protocol::register(module)?;
+    ids::register(module)?;
+    models::register(module)?;
+    service::register(module)?;
+    values::register(module)?;
     Ok(())
 }
