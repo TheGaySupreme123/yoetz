@@ -69,8 +69,10 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --manifest-path rust/Cargo.toml --all --check
 
+      # PyO3's build script needs the interpreter it targets; setup-uv only selects the version.
       - name: cargo clippy (warnings are errors)
         run: |
+          uv python install 3.14.6
           uv python find 3.14.6 > "$RUNNER_TEMP/python-path"
           export PYO3_PYTHON="$(cat "$RUNNER_TEMP/python-path")"
           cargo clippy --manifest-path rust/Cargo.toml --all-targets --locked -- -D warnings
@@ -91,9 +93,11 @@ jobs:
       matrix:
         mode: ["require", "0"]
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     permissions:
       contents: read
+    env:
+      PYTHONHASHSEED: "0"
     steps:
       - name: Checkout (no persisted credentials)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -120,14 +124,27 @@ jobs:
       - name: Build and install the yoetz_native accelerator into the project environment
         run: rust/build-native.sh
 
-      - name: Isolate HOME/XDG/Yoetz app data inside job temp directory
+      # Network-denied approved checks run inside bubblewrap; Ubuntu 24.04 also needs unprivileged
+      # user namespaces allowed for it on this throwaway runner.
+      - name: Install bubblewrap for the check sandbox
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      # Integration tests create state directories and Unix sockets under the temp directory: keep
+      # it private (not the world-writable /tmp, refused as path_shared_temp) and short.
+      - name: Isolate HOME/XDG/Yoetz app data and TMPDIR inside private runner directories
         run: |
           iso="${RUNNER_TEMP}/yoetz-home"
-          mkdir -p "$iso"
+          tmp="${HOME}/yzt"
+          mkdir -p "$iso" "$tmp"
+          chmod 700 "$tmp"
           echo "HOME=$iso" >> "$GITHUB_ENV"
           echo "XDG_DATA_HOME=$iso/.local/share" >> "$GITHUB_ENV"
           echo "XDG_CONFIG_HOME=$iso/.config" >> "$GITHUB_ENV"
           echo "XDG_CACHE_HOME=$iso/.cache" >> "$GITHUB_ENV"
+          echo "TMPDIR=$tmp" >> "$GITHUB_ENV"
           echo "YZCI_DENY_NETWORK=1" >> "$GITHUB_ENV"
           echo "YZ_NATIVE=${{ matrix.mode }}" >> "$GITHUB_ENV"
 
