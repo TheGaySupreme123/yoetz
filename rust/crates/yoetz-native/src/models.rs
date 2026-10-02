@@ -19,8 +19,9 @@ use yoetz_core::protocol::pointer::{self as core_pointer, INVALID_JSON_POINTER};
 
 use crate::registry::{Slot, protocol_error};
 use crate::walk::{
-    JSON_OBJECT, NATIVE_RECURSION_LIMIT, is_exact, is_mapping_instance, is_plain_scalar,
-    is_sequence_instance, is_type, json_object_index,
+    DictItems, JSON_OBJECT, NATIVE_RECURSION_LIMIT, defer_deep, entry_depth, is_exact,
+    is_mapping_instance, is_plain_scalar, is_sequence_instance, is_type, json_object_index,
+    reference_only,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -89,7 +90,9 @@ fn build_info(
 ) -> PyResult<ModelInfo> {
     let by_dump_key = PyDict::new(py);
     let fields_dict = fields.cast::<PyDict>()?;
-    for (name, field) in fields_dict.iter() {
+    // Attribute reads run Python code: iterate without PyO3's panicking iterator.
+    let mut fields_items = DictItems::new(fields_dict);
+    while let Some((name, field)) = fields_items.next_item()? {
         let mut key = field.getattr(pyo3::intern!(py, "serialization_alias"))?;
         if !key.is_truthy()? {
             key = field.getattr(pyo3::intern!(py, "alias"))?;
@@ -232,6 +235,25 @@ fn model_root<'py>(
     getattr_or_none(model, name)
 }
 
+/// A live `mapping.items()` iteration: an exact `dict` through `DictItems` (CPython's
+/// `RuntimeError` on mutation, never a panic), any other mapping through its own iterator.
+enum Pairs<'py> {
+    Dict(DictItems<'py>),
+    Iter(Bound<'py, pyo3::types::PyIterator>),
+}
+
+impl<'py> Pairs<'py> {
+    fn next_pair(&mut self) -> PyResult<Option<(Bound<'py, PyAny>, Bound<'py, PyAny>)>> {
+        match self {
+            Pairs::Dict(items) => items.next_item(),
+            Pairs::Iter(iterator) => match iterator.next() {
+                Some(pair) => Ok(Some(pair?.extract()?)),
+                None => Ok(None),
+            },
+        }
+    }
+}
+
 struct Stripper<'py> {
     py: Python<'py>,
     base: Bound<'py, PyAny>,
@@ -251,7 +273,9 @@ impl<'py> Stripper<'py> {
     ) -> PyResult<Bound<'py, PyAny>> {
         let py = self.py;
         if depth > NATIVE_RECURSION_LIMIT {
-            return self.reference.call1((model, dumped));
+            // The reference recurses through the module global into this twin, which then
+            // defers at once: CPython's recursion guard decides, as without the accelerator.
+            return defer_deep(|| self.reference.call1((model, dumped)));
         }
         let (optional, by_dump_key) = if self.public {
             let info = model_info(py, &model.get_type())?;
@@ -272,22 +296,18 @@ impl<'py> Stripper<'py> {
             )
         };
         let result = PyDict::new(py);
-        let pairs: Vec<(Bound<'py, PyAny>, Bound<'py, PyAny>)> =
-            if is_exact(dumped, ffi::PyDict_CheckExact) {
-                unsafe { dumped.cast_unchecked::<PyDict>() }
-                    .iter()
-                    .collect()
-            } else {
-                let mut collected = Vec::new();
-                for pair in dumped
+        // `dumped.items()`, iterated live like the reference's loop: the attribute reads and
+        // nested strips inside it run Python code that may change `dumped`.
+        let mut pairs = if is_exact(dumped, ffi::PyDict_CheckExact) {
+            Pairs::Dict(DictItems::of(dumped))
+        } else {
+            Pairs::Iter(
+                dumped
                     .call_method0(pyo3::intern!(py, "items"))?
-                    .try_iter()?
-                {
-                    collected.push(pair?.extract()?);
-                }
-                collected
-            };
-        for (key, value) in pairs {
+                    .try_iter()?,
+            )
+        };
+        while let Some((key, value)) = pairs.next_pair()? {
             let field_name = match by_dump_key
                 .as_ref()
                 .map(|map| map.get_item(&key))
@@ -371,13 +391,16 @@ pub fn strip_optional_non_null_fields<'py>(
     let (Some(base), Some(reference)) = (BASE_MODEL.get(py), STRIP_REFERENCE.get(py)) else {
         return Err(pyo3::exceptions::PyRuntimeError::new_err("strip_unbound"));
     };
+    if reference_only() {
+        return reference.call1((model, dumped));
+    }
     Stripper {
         py,
         base,
         reference,
         public: true,
     }
-    .strip(model, dumped, 0)
+    .strip(model, dumped, entry_depth())
 }
 
 static STATUS_STRIP_REFERENCE: Slot = Slot::new();
@@ -401,13 +424,16 @@ pub fn strip_optional_non_null_nulls<'py>(
     let (Some(base), Some(reference)) = (BASE_MODEL.get(py), STATUS_STRIP_REFERENCE.get(py)) else {
         return Err(pyo3::exceptions::PyRuntimeError::new_err("strip_unbound"));
     };
+    if reference_only() {
+        return reference.call1((model, dumped));
+    }
     Stripper {
         py,
         base,
         reference,
         public: false,
     }
-    .strip(model, dumped, 0)
+    .strip(model, dumped, entry_depth())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -462,7 +488,9 @@ fn tuple_fields(
         }
     }
     let mut names = Vec::new();
-    for (name, field) in fields_dict.iter() {
+    // `accepts_tuple` is Python code: iterate without PyO3's panicking iterator.
+    let mut fields_items = DictItems::new(fields_dict);
+    while let Some((name, field)) = fields_items.next_item()? {
         let annotation = field.getattr(pyo3::intern!(py, "annotation"))?;
         if accepts_tuple.call1((annotation,))?.is_truthy()? {
             names.push(name.cast_into::<PyString>()?.unbind());

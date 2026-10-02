@@ -8,13 +8,22 @@
 //! encode) and any nesting past `NATIVE_RECURSION_LIMIT` goes to the Python reference passed in
 //! as `fallback`, so its own behavior and recursion limit decide. Catalog lookups stay in Python
 //! callbacks, so their errors are the reference's own.
+//!
+//! Every Python call a walk makes goes through `walk::call_python` at the walk's depth, and the
+//! reference for a subtree past the limit runs reference-only (`walk::defer_deep`), so a twin
+//! re-entered from its own reference never stacks native frames under each Python frame. An
+//! exact `dict` is iterated live (`walk::DictItems`): a fallback that mutates the dict being
+//! walked raises the reference's own `RuntimeError` instead of being hidden by a snapshot.
 
 use pyo3::ffi;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyIterator, PyList, PySet, PyString, PyTuple};
+use pyo3::types::{PyDict, PyFrozenSet, PyIterator, PyList, PySet, PyString, PyTuple};
 use sha2::{Digest, Sha256};
 
-use crate::walk::{NATIVE_RECURSION_LIMIT, is_exact, is_mapping_instance, is_plain_scalar};
+use crate::walk::{
+    DictItems, NATIVE_RECURSION_LIMIT, call_python, defer_deep, entry_depth, is_exact,
+    is_mapping_instance, is_plain_scalar, reference_only,
+};
 
 type Entries<'py> = Vec<(Bound<'py, PyAny>, Bound<'py, PyAny>)>;
 
@@ -23,12 +32,45 @@ fn is_mapping_proxy(value: &Bound<'_, PyAny>) -> bool {
     unsafe { ffi::Py_TYPE(value.as_ptr()) == std::ptr::addr_of_mut!(ffi::PyDictProxy_Type) }
 }
 
-/// The `(key, value)` pairs `source.items()` yields, for an exact `dict` or a mapping proxy
-/// whose `items()` is a `dict` view; `None` for any other mapping.
-fn dict_entries<'py>(value: &Bound<'py, PyAny>) -> PyResult<Option<Entries<'py>>> {
+/// What `source.items()` iterates for a node the twins walk: an exact `dict`, iterated live as
+/// the reference's iterator is, or the pairs of a mapping proxy over a `dict` (a frozen catalog
+/// document, whose private `dict` nothing else can reach), read once.
+enum Source<'py> {
+    Dict(Bound<'py, PyAny>),
+    Proxy(Entries<'py>),
+}
+
+/// One pass over a [`Source`].
+enum Items<'a, 'py> {
+    Dict(DictItems<'py>),
+    Proxy(std::slice::Iter<'a, (Bound<'py, PyAny>, Bound<'py, PyAny>)>),
+}
+
+impl<'py> Source<'py> {
+    /// A fresh pass over the members (a live `dict` iterator for an exact `dict`).
+    fn items(&self) -> Items<'_, 'py> {
+        match self {
+            Source::Dict(dict) => Items::Dict(DictItems::of(dict)),
+            Source::Proxy(entries) => Items::Proxy(entries.iter()),
+        }
+    }
+}
+
+impl<'py> Items<'_, 'py> {
+    /// The next pair, or the `RuntimeError` CPython's iterator raises after a mutation.
+    fn next_entry(&mut self) -> PyResult<Option<(Bound<'py, PyAny>, Bound<'py, PyAny>)>> {
+        match self {
+            Items::Dict(items) => items.next_item(),
+            Items::Proxy(entries) => Ok(entries.next().cloned()),
+        }
+    }
+}
+
+/// The members `source.items()` yields, for an exact `dict` or a mapping proxy whose `items()`
+/// is a `dict` view; `None` for any other mapping.
+fn dict_source<'py>(value: &Bound<'py, PyAny>) -> PyResult<Option<Source<'py>>> {
     if is_exact(value, ffi::PyDict_CheckExact) {
-        let dict = unsafe { value.cast_unchecked::<PyDict>() };
-        return Ok(Some(dict.iter().collect()));
+        return Ok(Some(Source::Dict(value.clone())));
     }
     if !is_mapping_proxy(value) {
         return Ok(None);
@@ -43,7 +85,27 @@ fn dict_entries<'py>(value: &Bound<'py, PyAny>) -> PyResult<Option<Entries<'py>>
         let pair = pair.cast_into::<PyTuple>()?;
         entries.push((pair.get_item(0)?, pair.get_item(1)?));
     }
-    Ok(Some(entries))
+    Ok(Some(Source::Proxy(entries)))
+}
+
+/// Whether every key is an exact `str` (no Python code runs while checking).
+fn exact_str_keys(source: &Source<'_>) -> PyResult<bool> {
+    let mut items = source.items();
+    while let Some((key, _)) = items.next_entry()? {
+        if !is_exact(&key, ffi::PyUnicode_CheckExact) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// `key == text` as the reference evaluates it: natively for an exact `str`, through Python's
+/// `==` for any other key (a mutation during iteration can surface one).
+fn key_equals(key: &Bound<'_, PyAny>, text: &str) -> PyResult<bool> {
+    if is_exact(key, ffi::PyUnicode_CheckExact) {
+        return Ok(unsafe { key.cast_unchecked::<PyString>() }.to_str().ok() == Some(text));
+    }
+    key.eq(text)
 }
 
 /// The members of an exact `list` or `tuple`, read the way the reference's iteration reads them.
@@ -100,13 +162,14 @@ fn thaw<'py>(
         return Ok(value.clone());
     }
     if depth >= NATIVE_RECURSION_LIMIT {
-        return fallback.call1((value,));
+        return defer_deep(|| fallback.call1((value,)));
     }
-    if let Some(entries) = dict_entries(value)? {
+    if let Some(source) = dict_source(value)? {
         let thawed = PyDict::new(py);
-        for (key, item) in entries {
+        let mut items = source.items();
+        while let Some((key, item)) = items.next_entry()? {
             let key = if stringify && !is_exact(&key, ffi::PyUnicode_CheckExact) {
-                key.str()?.into_any()
+                call_python(depth, || key.str())?.into_any()
             } else {
                 key
             };
@@ -122,7 +185,7 @@ fn thaw<'py>(
         return Ok(PyList::new(py, thawed)?.into_any());
     }
     if is_foreign_container(py, value)? {
-        return fallback.call1((value,));
+        return call_python(depth, || fallback.call1((value,)));
     }
     Ok(value.clone())
 }
@@ -137,7 +200,10 @@ pub fn thaw_json<'py>(
     fallback: &Bound<'py, PyAny>,
     stringify_keys: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
-    thaw(py, value, fallback, stringify_keys, 0)
+    if reference_only() {
+        return fallback.call1((value,));
+    }
+    thaw(py, value, fallback, stringify_keys, entry_depth())
 }
 
 /// `_bundle_key(uri)` for an ASCII `uri`.
@@ -159,13 +225,24 @@ struct Rewrite<'py> {
 }
 
 impl<'py> Rewrite<'py> {
-    fn defer(
+    /// The Python reference for `value`.
+    fn reference(
         &self,
         value: &Bound<'py, PyAny>,
         current_uri: &Bound<'py, PyString>,
     ) -> PyResult<Bound<'py, PyAny>> {
         self.fallback
             .call1((value, current_uri, &self.root_uri, &self.inline_uris))
+    }
+
+    /// The Python reference for a node at `depth` the walk does not reproduce.
+    fn defer(
+        &self,
+        value: &Bound<'py, PyAny>,
+        current_uri: &Bound<'py, PyString>,
+        depth: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        call_python(depth, || self.reference(value, current_uri))
     }
 
     fn rewrite(
@@ -179,18 +256,23 @@ impl<'py> Rewrite<'py> {
             return Ok(value.clone());
         }
         if depth >= NATIVE_RECURSION_LIMIT {
-            return self.defer(value, current_uri);
+            return defer_deep(|| self.reference(value, current_uri));
         }
-        if let Some(entries) = dict_entries(value)? {
-            let mut reference: Option<&Bound<'py, PyAny>> = None;
-            for (key, item) in &entries {
-                if !is_exact(key, ffi::PyUnicode_CheckExact) {
-                    return self.defer(value, current_uri);
+        if let Some(source) = dict_source(value)? {
+            let mut reference: Option<Bound<'py, PyAny>> = None;
+            let mut member_count = 0usize;
+            let mut scan = source.items();
+            while let Some((key, item)) = scan.next_entry()? {
+                if !is_exact(&key, ffi::PyUnicode_CheckExact) {
+                    return self.defer(value, current_uri, depth);
                 }
-                if exact_text(key) == Some("$ref") {
+                member_count += 1;
+                if exact_text(&key) == Some("$ref") {
                     reference = Some(item);
                 }
             }
+            drop(scan);
+            let reference = reference.as_ref();
             // `None` keeps the member; `Some` replaces it with a rewritten reference.
             let mut rewritten: Option<Bound<'py, PyString>> = None;
             let mut keep_reference = false;
@@ -198,7 +280,7 @@ impl<'py> Rewrite<'py> {
                 let pointer = reference.as_ptr();
                 if unsafe { ffi::PyUnicode_Check(pointer) } != 0 {
                     let Some(text) = exact_text(reference) else {
-                        return self.defer(value, current_uri);
+                        return self.defer(value, current_uri, depth);
                     };
                     keep_reference = true;
                     if text.starts_with(self.namespace.as_str()) {
@@ -208,14 +290,15 @@ impl<'py> Rewrite<'py> {
                         };
                         let uri_object = PyString::new(py, uri);
                         if fragment.is_none()
-                            && entries.len() == 1
+                            && member_count == 1
                             && self.inline_uris.contains(&uri_object)?
                         {
-                            let document = self.inline_document.call1((&uri_object,))?;
+                            let document =
+                                call_python(depth, || self.inline_document.call1((&uri_object,)))?;
                             return self.rewrite(py, &document, &uri_object, depth + 1);
                         }
                         if !uri.is_ascii() {
-                            return self.defer(value, current_uri);
+                            return self.defer(value, current_uri, depth);
                         }
                         let mut target = format!("#/$defs/{}", bundle_key(uri));
                         if let Some(fragment) = fragment {
@@ -226,7 +309,7 @@ impl<'py> Rewrite<'py> {
                         let current = current_uri.to_str()?;
                         if current != self.root_text {
                             if !current.is_ascii() {
-                                return self.defer(value, current_uri);
+                                return self.defer(value, current_uri, depth);
                             }
                             rewritten = Some(PyString::new(
                                 py,
@@ -237,19 +320,26 @@ impl<'py> Rewrite<'py> {
                 }
             }
             let result = PyDict::new(py);
-            for (key, item) in &entries {
-                let text = exact_text(key);
-                if matches!(text, Some("$id" | "$schema")) {
+            let mut items = source.items();
+            while let Some((key, item)) = items.next_entry()? {
+                let skipped = if is_exact(&key, ffi::PyUnicode_CheckExact) {
+                    matches!(exact_text(&key), Some("$id" | "$schema"))
+                } else {
+                    // Only a mutation of the dict during iteration surfaces another key here;
+                    // the reference's `key not in {"$id", "$schema"}` then decides.
+                    PyFrozenSet::new(py, ["$id", "$schema"])?.contains(&key)?
+                };
+                if skipped {
                     continue;
                 }
-                if keep_reference && text == Some("$ref") {
+                if key_equals(&key, "$ref")? && keep_reference {
                     match &rewritten {
-                        Some(target) => result.set_item(key, target)?,
-                        None => result.set_item(key, item)?,
+                        Some(target) => result.set_item(&key, target)?,
+                        None => result.set_item(&key, &item)?,
                     }
                     continue;
                 }
-                result.set_item(key, self.rewrite(py, item, current_uri, depth + 1)?)?;
+                result.set_item(&key, self.rewrite(py, &item, current_uri, depth + 1)?)?;
             }
             return Ok(result.into_any());
         }
@@ -261,7 +351,7 @@ impl<'py> Rewrite<'py> {
             return Ok(PyList::new(py, rewritten)?.into_any());
         }
         if is_foreign_container(py, value)? {
-            return self.defer(value, current_uri);
+            return self.defer(value, current_uri, depth);
         }
         Ok(value.clone())
     }
@@ -288,6 +378,9 @@ pub fn rewrite_schema_refs<'py>(
     let (Ok(_), Ok(root_text)) = (current_uri.to_str(), root_uri.to_str()) else {
         return fallback.call1((value, current_uri, root_uri, inline_uris));
     };
+    if reference_only() {
+        return fallback.call1((value, current_uri, root_uri, inline_uris));
+    }
     let rewrite = Rewrite {
         namespace: namespace.to_owned(),
         root_uri: root_uri.clone(),
@@ -296,13 +389,15 @@ pub fn rewrite_schema_refs<'py>(
         inline_document: inline_document.clone(),
         fallback: fallback.clone(),
     };
-    rewrite.rewrite(py, value, current_uri, 0)
+    rewrite.rewrite(py, value, current_uri, entry_depth())
 }
 
 enum Frame<'py> {
     Node(Bound<'py, PyAny>),
     /// A mapping whose values are visited once its referenced document has been.
     ValuesOf(Bound<'py, PyAny>),
+    /// The live values of an exact `dict`, as `source.values()` iterates them.
+    DictValues(DictItems<'py>),
     Members(Vec<Bound<'py, PyAny>>, usize),
     Iter(Bound<'py, PyIterator>),
 }
@@ -330,13 +425,24 @@ pub fn external_schema_documents<'py>(
         let candidate = match frame {
             Frame::Node(candidate) => candidate,
             Frame::ValuesOf(mapping) => {
-                stack.push(Frame::Iter(
-                    mapping
-                        .call_method0(pyo3::intern!(py, "values"))?
-                        .try_iter()?,
-                ));
+                if is_exact(&mapping, ffi::PyDict_CheckExact) {
+                    stack.push(Frame::DictValues(DictItems::of(&mapping)));
+                } else {
+                    stack.push(Frame::Iter(
+                        mapping
+                            .call_method0(pyo3::intern!(py, "values"))?
+                            .try_iter()?,
+                    ));
+                }
                 continue;
             }
+            Frame::DictValues(mut items) => match items.next_item()? {
+                Some((_, candidate)) => {
+                    stack.push(Frame::DictValues(items));
+                    candidate
+                }
+                None => continue,
+            },
             Frame::Members(members, index) => {
                 if index >= members.len() {
                     continue;
@@ -398,16 +504,7 @@ pub fn external_schema_documents<'py>(
                     }
                 }
             }
-            if exact_dict {
-                let members: Vec<Bound<'py, PyAny>> =
-                    unsafe { candidate.cast_unchecked::<PyDict>() }
-                        .values()
-                        .iter()
-                        .collect();
-                stack.push(Frame::Members(members, 0));
-            } else {
-                stack.push(Frame::ValuesOf(candidate));
-            }
+            stack.push(Frame::ValuesOf(candidate));
             if let Some(document) = nested {
                 stack.push(Frame::Node(document));
             }
@@ -435,11 +532,12 @@ fn legacy_arrays<'py>(
         return Ok(candidate.clone());
     }
     if depth >= NATIVE_RECURSION_LIMIT {
-        return fallback.call1((candidate,));
+        return defer_deep(|| fallback.call1((candidate,)));
     }
-    if let Some(entries) = dict_entries(candidate)? {
+    if let Some(source) = dict_source(candidate)? {
         let mapping = PyDict::new(py);
-        for (key, item) in entries {
+        let mut items = source.items();
+        while let Some((key, item)) = items.next_entry()? {
             mapping.set_item(key, legacy_arrays(py, &item, fallback, depth + 1)?)?;
         }
         let prefix_key = pyo3::intern!(py, "prefixItems");
@@ -496,7 +594,7 @@ fn legacy_arrays<'py>(
         return Ok(PyList::new(py, projected)?.into_any());
     }
     if is_foreign_container(py, candidate)? {
-        return fallback.call1((candidate,));
+        return call_python(depth, || fallback.call1((candidate,)));
     }
     Ok(candidate.clone())
 }
@@ -509,7 +607,10 @@ pub fn legacy_compatible_output_arrays<'py>(
     candidate: &Bound<'py, PyAny>,
     fallback: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    legacy_arrays(py, candidate, fallback, 0)
+    if reference_only() {
+        return fallback.call1((candidate,));
+    }
+    legacy_arrays(py, candidate, fallback, entry_depth())
 }
 
 fn flatten<'py>(
@@ -523,19 +624,17 @@ fn flatten<'py>(
         return Ok(candidate.clone());
     }
     if depth >= NATIVE_RECURSION_LIMIT {
-        return fallback.call1((candidate,));
+        return defer_deep(|| fallback.call1((candidate,)));
     }
-    if let Some(entries) = dict_entries(candidate)? {
-        if entries
-            .iter()
-            .any(|(key, _)| !is_exact(key, ffi::PyUnicode_CheckExact))
-        {
-            return fallback.call1((candidate,));
+    if let Some(source) = dict_source(candidate)? {
+        if !exact_str_keys(&source)? {
+            return call_python(depth, || fallback.call1((candidate,)));
         }
         let mapping = PyDict::new(py);
-        for (key, item) in entries {
-            let projected = if exact_text(&key) == Some("$defs") {
-                thaw(py, &item, thaw_fallback, false, 0)?
+        let mut items = source.items();
+        while let Some((key, item)) = items.next_entry()? {
+            let projected = if key_equals(&key, "$defs")? {
+                thaw(py, &item, thaw_fallback, false, depth + 1)?
             } else {
                 flatten(py, &item, fallback, thaw_fallback, depth + 1)?
             };
@@ -563,7 +662,7 @@ fn flatten<'py>(
             let member = member?;
             if !(is_plain_scalar(&member)) {
                 // `set.issubset` hashes every member; the reference decides an unhashable one.
-                return fallback.call1((candidate,));
+                return call_python(depth, || fallback.call1((candidate,)));
             }
             match exact_text(&member) {
                 Some("sequence") => has_sequence = true,
@@ -579,7 +678,7 @@ fn flatten<'py>(
         let Some(head_digest) =
             head_digest.filter(|head| unsafe { ffi::PyDict_Check(head.as_ptr()) } != 0)
         else {
-            return fallback.call1((candidate,));
+            return call_python(depth, || fallback.call1((candidate,)));
         };
         mapping.del_item(all_of)?;
         head_digest.set_item(
@@ -600,7 +699,7 @@ fn flatten<'py>(
         return Ok(PyList::new(py, projected)?.into_any());
     }
     if is_foreign_container(py, candidate)? {
-        return fallback.call1((candidate,));
+        return call_python(depth, || fallback.call1((candidate,)));
     }
     Ok(candidate.clone())
 }
@@ -615,7 +714,10 @@ pub fn flatten_frontier_conditions<'py>(
     fallback: &Bound<'py, PyAny>,
     thaw_fallback: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    flatten(py, candidate, fallback, thaw_fallback, 0)
+    if reference_only() {
+        return fallback.call1((candidate,));
+    }
+    flatten(py, candidate, fallback, thaw_fallback, entry_depth())
 }
 
 /// A whole-call twin stopped: only the Python reference, run from the start, can decide (it
@@ -699,41 +801,54 @@ impl<'py> LocalDefs<'py> {
         if depth >= NATIVE_RECURSION_LIMIT {
             return Err(Undecided);
         }
-        if let Some(entries) = dict_entries(candidate)? {
-            let mut texts = Vec::with_capacity(entries.len());
+        if let Some(source) = dict_source(candidate)? {
             let mut reference = None;
-            for (key, item) in &entries {
+            let mut scan = source.items();
+            while let Some((key, item)) = scan.next_entry()? {
+                if !is_exact(&key, ffi::PyUnicode_CheckExact) {
+                    return Err(Undecided);
+                }
+                if exact_text(&key) == Some("$ref") {
+                    reference = Some(item);
+                }
+            }
+            drop(scan);
+            // The members are read live: a mutation during the walk (a fallback's side effect)
+            // raises, and the reference, run from the start, decides.
+            let member_text = |key: &Bound<'py, PyAny>| -> Step<Option<&'static str>> {
                 if !is_exact(key, ffi::PyUnicode_CheckExact) {
                     return Err(Undecided);
                 }
-                let text = unsafe { key.cast_unchecked::<PyString>() }.to_str().ok();
-                if text == Some("$ref") {
-                    reference = Some(item);
-                }
-                texts.push(text);
-            }
-            if let Some(key) = self.target_key(reference)? {
+                Ok(match exact_text(key) {
+                    Some("$ref") => Some("$ref"),
+                    Some("$defs") => Some("$defs"),
+                    _ => None,
+                })
+            };
+            if let Some(key) = self.target_key(reference.as_ref())? {
                 if self.prefix.is_none() && self.resolving.contains(&key) {
                     return Err(Undecided);
                 }
-                let Some(target) = mapping_get(&self.definitions, &key)? else {
+                let Some(target) = call_python(depth, || mapping_get(&self.definitions, &key))?
+                else {
                     return Err(Undecided);
                 };
                 self.resolving.push(key);
-                let thawed = thaw(py, &target, &self.thaw_fallback, false, 0)?;
+                let thawed = thaw(py, &target, &self.thaw_fallback, false, depth + 1)?;
                 let resolved_target = self.resolve(py, &thawed, depth + 1)?;
                 self.resolving.pop();
                 if !is_exact(&resolved_target, ffi::PyDict_CheckExact) {
                     return Err(Undecided);
                 }
                 let merged = unsafe { resolved_target.cast_unchecked::<PyDict>() }.copy()?;
-                for ((key, item), text) in entries.iter().zip(&texts) {
-                    if *text == Some("$ref") {
+                let mut items = source.items();
+                while let Some((key, item)) = items.next_entry()? {
+                    if member_text(&key)? == Some("$ref") {
                         continue;
                     }
-                    let resolved_item = self.resolve(py, item, depth + 1)?;
-                    if let Some(existing) = merged.get_item(key)? {
-                        if existing.ne(&resolved_item)? {
+                    let resolved_item = self.resolve(py, &item, depth + 1)?;
+                    if let Some(existing) = merged.get_item(&key)? {
+                        if call_python(depth, || existing.ne(&resolved_item))? {
                             return Err(Undecided);
                         }
                     }
@@ -742,11 +857,12 @@ impl<'py> LocalDefs<'py> {
                 return Ok(merged.into_any());
             }
             let resolved = PyDict::new(py);
-            for ((key, item), text) in entries.iter().zip(&texts) {
-                if *text == Some("$defs") {
+            let mut items = source.items();
+            while let Some((key, item)) = items.next_entry()? {
+                if member_text(&key)? == Some("$defs") {
                     continue;
                 }
-                resolved.set_item(key, self.resolve(py, item, depth + 1)?)?;
+                resolved.set_item(key, self.resolve(py, &item, depth + 1)?)?;
             }
             return Ok(resolved.into_any());
         }
@@ -801,7 +917,10 @@ pub fn inline_local_defs<'py>(
     let Ok(mut pass) = prepared else {
         return Ok(undecided.clone());
     };
-    match pass.resolve(py, source, 0) {
+    if reference_only() {
+        return Ok(undecided.clone());
+    }
+    match pass.resolve(py, source, entry_depth()) {
         Ok(resolved) => Ok(resolved),
         Err(Undecided) => Ok(undecided.clone()),
     }
@@ -819,21 +938,25 @@ fn collect_defs<'py>(
     if depth >= NATIVE_RECURSION_LIMIT {
         return Err(Undecided);
     }
-    if let Some(entries) = dict_entries(candidate)? {
-        for (key, item) in &entries {
-            if !is_exact(key, ffi::PyUnicode_CheckExact) {
+    if let Some(source) = dict_source(candidate)? {
+        let mut scan = source.items();
+        while let Some((key, item)) = scan.next_entry()? {
+            if !is_exact(&key, ffi::PyUnicode_CheckExact) {
                 return Err(Undecided);
             }
             if unsafe { key.cast_unchecked::<PyString>() }.to_str().ok() == Some("$ref") {
-                if let Some(text) = exact_str_text(item)? {
+                if let Some(text) = exact_str_text(&item)? {
                     if let Some(rest) = text.strip_prefix("#/$defs/") {
                         found.add(rest.split('/').next().unwrap_or(rest))?;
                     }
                 }
             }
         }
-        for (_, item) in &entries {
-            collect_defs(item, found, depth + 1)?;
+        drop(scan);
+        // Live: a mutation during the walk raises, and the reference decides.
+        let mut items = source.items();
+        while let Some((_, item)) = items.next_entry()? {
+            collect_defs(&item, found, depth + 1)?;
         }
         return Ok(());
     }
@@ -883,26 +1006,30 @@ fn collect_descriptions<'py>(
                 found.push(description);
             }
         }
-        let values: Vec<Bound<'py, PyAny>> = mapping.values().iter().collect();
-        for item in values {
+        // Live: a mutation during the walk raises, and the reference decides.
+        let mut items = DictItems::new(mapping);
+        while let Some((_, item)) = items.next_item()? {
             collect_descriptions(&item, found, depth + 1)?;
         }
         return Ok(());
     }
-    if let Some(entries) = dict_entries(candidate)? {
+    if let Some(source) = dict_source(candidate)? {
         // A mapping proxy over a `dict`: its `get` is that dict's, found among exact `str` keys.
-        for (key, item) in &entries {
-            if !is_exact(key, ffi::PyUnicode_CheckExact) {
+        let mut scan = source.items();
+        while let Some((key, item)) = scan.next_entry()? {
+            if !is_exact(&key, ffi::PyUnicode_CheckExact) {
                 return Err(Undecided);
             }
             if unsafe { key.cast_unchecked::<PyString>() }.to_str().ok() == Some("description")
-                && is_exact(item, ffi::PyUnicode_CheckExact)
+                && is_exact(&item, ffi::PyUnicode_CheckExact)
             {
                 found.push(item.clone());
             }
         }
-        for (_, item) in &entries {
-            collect_descriptions(item, found, depth + 1)?;
+        drop(scan);
+        let mut items = source.items();
+        while let Some((_, item)) = items.next_entry()? {
+            collect_descriptions(&item, found, depth + 1)?;
         }
         return Ok(());
     }

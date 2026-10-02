@@ -4,6 +4,11 @@
 //! The two tree walks take their Python reference as `fallback` and hand it any node they do not
 //! reproduce exactly (a non-`str` key, a key holding a lone surrogate, or nesting past
 //! `NATIVE_RECURSION_LIMIT`), so the reference's own exception and recursion limit decide those.
+//! The reference recurses through the module global back into the twin, so it runs at the
+//! walk's depth (`walk::call_python`), and reference-only past the limit (`walk::defer_deep`):
+//! CPython's recursion guard then decides deep nesting exactly as without the accelerator. Members
+//! are read live (`source[key]` in sorted order, a live `dict.items()` iterator), so a fallback's
+//! side effect on a dict being walked has the reference's outcome.
 //!
 //! The reference proof never raises a refusal itself: it answers `True` only when every `$ref`
 //! in the catalog is admissible and `referencing` 0.37 would resolve it (against the registry
@@ -12,6 +17,7 @@
 
 use std::collections::HashMap;
 
+use pyo3::exceptions::PyKeyError;
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyList, PyString, PyTuple};
@@ -20,7 +26,10 @@ use yoetz_core::protocol::schema_refs::{
     unescape_segment, utf16_cmp,
 };
 
-use crate::walk::{NATIVE_RECURSION_LIMIT, is_exact};
+use crate::walk::{
+    DictItems, NATIVE_RECURSION_LIMIT, call_python, defer_deep, entry_depth, is_exact,
+    reference_only,
+};
 
 /// The text of a key already checked to convert (so never the empty fallback).
 fn key_text<'a>(key: &'a Bound<'_, PyString>) -> &'a str {
@@ -35,39 +44,45 @@ fn freeze<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     if is_exact(value, ffi::PyDict_CheckExact) {
         if depth >= NATIVE_RECURSION_LIMIT {
-            return fallback.call1((value,));
+            return defer_deep(|| fallback.call1((value,)));
         }
         let source = unsafe { value.cast_unchecked::<PyDict>() };
-        let mut entries: Vec<(Bound<'py, PyString>, Bound<'py, PyAny>)> =
-            Vec::with_capacity(source.len());
-        for (key, member) in source.iter() {
+        // `sorted(source, key=...)`: every key is read before any member is frozen, and no
+        // Python code runs while they are.
+        let mut keys: Vec<Bound<'py, PyString>> = Vec::with_capacity(source.len());
+        let mut scan = DictItems::new(source);
+        while let Some((key, _)) = scan.next_item()? {
             if !is_exact(&key, ffi::PyUnicode_CheckExact) {
                 // `str.encode` is the reference's to fail (or not) on this key.
-                return fallback.call1((value,));
+                return call_python(depth, || fallback.call1((value,)));
             }
             let key = unsafe { key.cast_into_unchecked::<PyString>() };
             if key.to_str().is_err() {
                 // A lone surrogate does not encode to UTF-16: the reference raises.
-                return fallback.call1((value,));
+                return call_python(depth, || fallback.call1((value,)));
             }
-            entries.push((key, member));
+            keys.push(key);
         }
         // Canonical catalog bytes already hold every object's keys in this order.
-        let ordered = entries
+        let ordered = keys
             .windows(2)
-            .all(|pair| utf16_cmp(key_text(&pair[0].0), key_text(&pair[1].0)).is_lt());
+            .all(|pair| utf16_cmp(key_text(&pair[0]), key_text(&pair[1])).is_lt());
         if !ordered {
-            entries.sort_by(|left, right| utf16_cmp(key_text(&left.0), key_text(&right.0)));
+            keys.sort_by(|left, right| utf16_cmp(key_text(left), key_text(right)));
         }
         let frozen = PyDict::new(py);
-        for (key, member) in &entries {
-            frozen.set_item(key, freeze(py, member, fallback, depth + 1)?)?;
+        for key in &keys {
+            // `source[key]`, read when the reference reads it.
+            let Some(member) = source.get_item(key)? else {
+                return Err(PyKeyError::new_err(key.clone().unbind()));
+            };
+            frozen.set_item(key, freeze(py, &member, fallback, depth + 1)?)?;
         }
         return unsafe { Bound::from_owned_ptr_or_err(py, ffi::PyDictProxy_New(frozen.as_ptr())) };
     }
     if is_exact(value, ffi::PyList_CheckExact) {
         if depth >= NATIVE_RECURSION_LIMIT {
-            return fallback.call1((value,));
+            return defer_deep(|| fallback.call1((value,)));
         }
         let list = unsafe { value.cast_unchecked::<PyList>() };
         let mut members = Vec::with_capacity(list.len());
@@ -90,7 +105,10 @@ pub fn freeze_json<'py>(
     value: &Bound<'py, PyAny>,
     fallback: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    freeze(py, value, fallback, 0)
+    if reference_only() {
+        return fallback.call1((value,));
+    }
+    freeze(py, value, fallback, entry_depth())
 }
 
 fn uses_dynamic<'py>(
@@ -100,12 +118,12 @@ fn uses_dynamic<'py>(
 ) -> PyResult<bool> {
     if is_exact(value, ffi::PyDict_CheckExact) {
         if depth >= NATIVE_RECURSION_LIMIT {
-            return fallback.call1((value,))?.is_truthy();
+            return defer_deep(|| fallback.call1((value,)))?.is_truthy();
         }
-        let source = unsafe { value.cast_unchecked::<PyDict>() };
-        for (key, item) in source.iter() {
+        let mut items = DictItems::of(value);
+        while let Some((key, item)) = items.next_item()? {
             if !is_exact(&key, ffi::PyUnicode_CheckExact) {
-                return fallback.call1((value,))?.is_truthy();
+                return call_python(depth, || fallback.call1((value,)))?.is_truthy();
             }
             let key = unsafe { key.cast_unchecked::<PyString>() };
             // A key holding a lone surrogate equals neither marker.
@@ -122,7 +140,7 @@ fn uses_dynamic<'py>(
     }
     if is_exact(value, ffi::PyList_CheckExact) {
         if depth >= NATIVE_RECURSION_LIMIT {
-            return fallback.call1((value,))?.is_truthy();
+            return defer_deep(|| fallback.call1((value,)))?.is_truthy();
         }
         let list = unsafe { value.cast_unchecked::<PyList>() };
         let mut index = 0;
@@ -143,7 +161,10 @@ pub fn uses_dynamic_reference<'py>(
     value: &Bound<'py, PyAny>,
     fallback: &Bound<'py, PyAny>,
 ) -> PyResult<bool> {
-    uses_dynamic(value, fallback, 0)
+    if reference_only() {
+        return fallback.call1((value,))?.is_truthy();
+    }
+    uses_dynamic(value, fallback, entry_depth())
 }
 
 /// Whether `referencing` resolves pointer `fragment` within `root`, with every value it asks

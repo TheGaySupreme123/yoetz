@@ -500,17 +500,28 @@ fn reject_ledger_assigned_fields(
         if depth >= MAX_JSON_DEPTH {
             return Err(protocol_error(py, core::NESTING_TOO_DEEP));
         }
-        let pairs: Vec<(Bound<'_, PyAny>, Bound<'_, PyAny>)> =
-            if is_exact(node, ffi::PyDict_CheckExact) {
-                unsafe { node.cast_unchecked::<PyDict>() }.iter().collect()
-            } else {
-                let mut collected = Vec::new();
-                for pair in node.call_method0("items")?.try_iter()? {
-                    collected.push(pair?.extract()?);
-                }
-                collected
+        // `source.items()`, iterated live like the reference's loop: a nested mapping's own
+        // `items()` that mutates this dict raises CPython's `RuntimeError`, never a panic.
+        let mut live =
+            is_exact(node, ffi::PyDict_CheckExact).then(|| crate::walk::DictItems::of(node));
+        let mut collected = Vec::new();
+        if live.is_none() {
+            for pair in node.call_method0("items")?.try_iter()? {
+                collected.push(pair?.extract()?);
+            }
+        }
+        let mut collected = collected.into_iter();
+        loop {
+            let (key, item): (Bound<'_, PyAny>, Bound<'_, PyAny>) = match &mut live {
+                Some(items) => match items.next_item()? {
+                    Some(pair) => pair,
+                    None => break,
+                },
+                None => match collected.next() {
+                    Some(pair) => pair,
+                    None => break,
+                },
             };
-        for (key, item) in pairs {
             if is_exact(&key, ffi::PyUnicode_CheckExact) {
                 if let Ok(name) = unsafe { key.cast_unchecked::<PyString>() }.to_str() {
                     if core::REQUEST_DIGEST_FENCE_KEYS.contains(&name) {

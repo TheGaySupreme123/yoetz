@@ -401,7 +401,7 @@ impl<'py> Pipeline<'py> {
         Ok(value)
     }
 
-    fn encode_body(&self, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBytes>> {
+    fn encode_body(&self, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let py = self.py;
         let wire = self.global("_plain_wire_value")?.call1((value,))?;
         if !is_mapping_instance(py, &wire)? {
@@ -440,13 +440,23 @@ impl<'py> Pipeline<'py> {
             self.global("freeze_json")?.call1((source,))
         };
         self.frame_size(&payload, length, &mut frame, &build)?;
-        let raw = payload.cast::<PyBytes>()?.as_bytes();
+        if !is_exact(&payload, ffi::PyBytes_CheckExact) {
+            // A patched `canonical_encode` may return any bytes-like object: build the frame the
+            // way the reference does, `struct.pack(">I", len(payload)) + payload`.
+            let header = self
+                .global("struct")?
+                .getattr(pyo3::intern!(py, "pack"))?
+                .call1((">I", payload.len()?))?;
+            return header.add(&payload);
+        }
+        let raw = unsafe { payload.cast_unchecked::<PyBytes>() }.as_bytes();
         let length = u32::try_from(raw.len()).map_err(|_| self.fail("frame_invalid"))?;
-        PyBytes::new_with(py, raw.len() + 4, |out| {
+        Ok(PyBytes::new_with(py, raw.len() + 4, |out| {
             out[..4].copy_from_slice(&length.to_be_bytes());
             out[4..].copy_from_slice(raw);
             Ok(())
-        })
+        })?
+        .into_any())
     }
 }
 
@@ -537,7 +547,7 @@ pub fn decode_control_payload<'py>(
 pub fn encode_control_frame<'py>(
     py: Python<'py>,
     value: &Bound<'py, PyAny>,
-) -> PyResult<Bound<'py, PyBytes>> {
+) -> PyResult<Bound<'py, PyAny>> {
     let pipeline = Pipeline::new(py)?;
     pipeline
         .encode_body(value)

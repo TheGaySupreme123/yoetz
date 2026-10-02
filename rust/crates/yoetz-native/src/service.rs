@@ -13,8 +13,8 @@ use yoetz_core::protocol::pointer::push_escaped;
 
 use crate::registry::Slot;
 use crate::walk::{
-    JSON_OBJECT, NATIVE_RECURSION_LIMIT, is_exact, is_mapping_instance, is_plain_scalar, is_type,
-    json_object_items,
+    DictItems, JSON_OBJECT, NATIVE_RECURSION_LIMIT, defer_deep, entry_depth, is_exact,
+    is_mapping_instance, is_plain_scalar, is_type, json_object_items, reference_only,
 };
 
 static REFERENCE: Slot = Slot::new();
@@ -26,7 +26,13 @@ pub fn bind_leaves(reference: Bound<'_, PyAny>) {
     REFERENCE.set(reference.unbind());
 }
 
-struct Defer;
+/// Only the reference, run on the whole call, can decide; `deep` when the walk passed
+/// `NATIVE_RECURSION_LIMIT`, so the reference runs reference-only.
+struct Defer {
+    deep: bool,
+}
+
+const SHAPE: Defer = Defer { deep: false };
 
 struct Walker<'py> {
     py: Python<'py>,
@@ -43,10 +49,10 @@ impl<'py> Walker<'py> {
         depth: usize,
     ) -> PyResult<Result<(), Defer>> {
         if !is_exact(key, ffi::PyUnicode_CheckExact) {
-            return Ok(Err(Defer));
+            return Ok(Err(SHAPE));
         }
         let Ok(text) = unsafe { key.cast_unchecked::<PyString>() }.to_str() else {
-            return Ok(Err(Defer));
+            return Ok(Err(SHAPE));
         };
         let mark = pointer.len();
         pointer.push('/');
@@ -63,12 +69,15 @@ impl<'py> Walker<'py> {
         depth: usize,
     ) -> PyResult<Result<(), Defer>> {
         if depth > NATIVE_RECURSION_LIMIT {
-            return Ok(Err(Defer));
+            return Ok(Err(Defer { deep: true }));
         }
         if is_exact(value, ffi::PyDict_CheckExact) {
-            for (key, item) in unsafe { value.cast_unchecked::<PyDict>() }.iter() {
-                if self.member(&key, &item, pointer, depth)?.is_err() {
-                    return Ok(Err(Defer));
+            // Live, like the reference's loop: an `isinstance` hook that mutates the dict raises
+            // CPython's `RuntimeError` here rather than a panic.
+            let mut items = DictItems::of(value);
+            while let Some((key, item)) = items.next_item()? {
+                if let Err(defer) = self.member(&key, &item, pointer, depth)? {
+                    return Ok(Err(defer));
                 }
             }
             return Ok(Ok(()));
@@ -77,38 +86,47 @@ impl<'py> Walker<'py> {
             if is_type(value, &class) {
                 for pair in json_object_items(value)?.iter() {
                     let pair = pair.cast_into::<PyTuple>()?;
-                    if self
-                        .member(&pair.get_item(0)?, &pair.get_item(1)?, pointer, depth)?
-                        .is_err()
+                    if let Err(defer) =
+                        self.member(&pair.get_item(0)?, &pair.get_item(1)?, pointer, depth)?
                     {
-                        return Ok(Err(Defer));
+                        return Ok(Err(defer));
                     }
                 }
                 return Ok(Ok(()));
             }
         }
-        if is_exact(value, ffi::PyList_CheckExact) || is_exact(value, ffi::PyTuple_CheckExact) {
-            let items: Vec<Bound<'py, PyAny>> = if is_exact(value, ffi::PyList_CheckExact) {
-                unsafe { value.cast_unchecked::<PyList>() }.iter().collect()
-            } else {
-                unsafe { value.cast_unchecked::<PyTuple>() }
-                    .iter()
-                    .collect()
-            };
-            for (index, item) in items.iter().enumerate() {
+        let is_list = is_exact(value, ffi::PyList_CheckExact);
+        if is_list || is_exact(value, ffi::PyTuple_CheckExact) {
+            // `enumerate(value)`: a list's length is re-read at each step, like its iterator.
+            let mut index = 0;
+            loop {
+                let item = if is_list {
+                    let list = unsafe { value.cast_unchecked::<PyList>() };
+                    if index >= list.len() {
+                        break;
+                    }
+                    list.get_item(index)?
+                } else {
+                    let tuple = unsafe { value.cast_unchecked::<PyTuple>() };
+                    if index >= tuple.len() {
+                        break;
+                    }
+                    tuple.get_item(index)?
+                };
                 let mark = pointer.len();
                 pointer.push('/');
                 pointer.push_str(itoa::Buffer::new().format(index));
-                let outcome = self.walk(item, pointer, depth + 1)?;
+                let outcome = self.walk(&item, pointer, depth + 1)?;
                 pointer.truncate(mark);
-                if outcome.is_err() {
-                    return Ok(Err(Defer));
+                if let Err(defer) = outcome {
+                    return Ok(Err(defer));
                 }
+                index += 1;
             }
             return Ok(Ok(()));
         }
         if is_mapping_instance(self.py, value)? {
-            return Ok(Err(Defer));
+            return Ok(Err(SHAPE));
         }
         let row = PyTuple::new(
             self.py,
@@ -149,9 +167,15 @@ pub fn leaves<'py>(
         json_object: JSON_OBJECT.get(py),
         rows: Vec::new(),
     };
-    match walker.walk(value, &mut start, 0)? {
+    if reference_only() {
+        return defer();
+    }
+    match walker.walk(value, &mut start, entry_depth())? {
         Ok(()) => Ok(PyTuple::new(py, walker.rows)?.into_any()),
-        Err(Defer) => defer(),
+        // The reference recurses through the module global into this twin, which then defers
+        // at once: CPython's recursion guard decides, as without the accelerator.
+        Err(Defer { deep: true }) => defer_deep(defer),
+        Err(Defer { deep: false }) => defer(),
     }
 }
 
@@ -198,7 +222,10 @@ impl<'py> Plain<'py> {
                     )?;
                 }
             } else {
-                for (key, item) in unsafe { value.cast_unchecked::<PyDict>() }.iter() {
+                // Live, like the reference's comprehension: a nested mapping's `items()` (run
+                // through the reference) that mutates this dict raises CPython's `RuntimeError`.
+                let mut items = DictItems::of(value);
+                while let Some((key, item)) = items.next_item()? {
                     out.set_item(key, self.plain(&item, depth + 1)?)?;
                 }
             }

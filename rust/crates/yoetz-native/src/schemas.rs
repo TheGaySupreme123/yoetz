@@ -23,6 +23,8 @@ use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 use regex::Regex;
 use yoetz_core::protocol::schemas::{compile_python_pattern, is_rfc3339_date_time};
 
+use crate::walk::DictItems;
+
 type NodeId = u32;
 
 const ANY: NodeId = 0;
@@ -141,8 +143,36 @@ enum Constant {
 }
 
 enum Pattern {
-    Native(Regex),
+    /// `memo`: answers for this pattern may be remembered (see [`memoizable`]).
+    Native {
+        regex: Regex,
+        memo: bool,
+    },
     Python(Py<PyAny>),
+}
+
+/// Longest pattern match, and longest subject, whose answer the pattern memory keeps.
+const MAX_REMEMBERED_TEXT: usize = 256;
+
+/// Whether answers for `regex` may be remembered: it is anchored at the start and matches at
+/// most `MAX_REMEMBERED_TEXT` bytes, the identifier and digest shapes the memory is for. A pattern
+/// that admits unbounded text (base64 content, free text) never keeps its subjects, and neither
+/// does an unanchored one (it can match inside any payload).
+fn memoizable(regex: &Regex) -> bool {
+    let Ok(hir) = regex_syntax::ParserBuilder::new()
+        .unicode(true)
+        .build()
+        .parse(regex.as_str())
+    else {
+        return false;
+    };
+    let properties = hir.properties();
+    properties
+        .look_set_prefix()
+        .contains(regex_syntax::hir::Look::Start)
+        && properties
+            .maximum_len()
+            .is_some_and(|length| length <= MAX_REMEMBERED_TEXT)
 }
 
 #[derive(Default)]
@@ -215,10 +245,14 @@ struct MatchMemory {
     /// One map per compiled pattern.
     by_pattern: Vec<HashMap<Box<str>, bool>>,
     entries: usize,
+    /// Subject bytes held.
+    bytes: usize,
 }
 
 /// Entries the pattern-answer memory holds before it starts over.
 const MAX_REMEMBERED_MATCHES: usize = 1 << 16;
+/// Subject bytes the pattern-answer memory holds before it starts over.
+const MAX_REMEMBERED_BYTES: usize = 1 << 20;
 
 static MAPPING_ABC: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
@@ -306,7 +340,8 @@ impl<'py> Context<'py> {
                 }
             }
             Value::Object(object) => {
-                for (key, member) in object.iter() {
+                let mut entries = DictItems::new(&object);
+                while let Some((key, member)) = entries.next_item()? {
                     if !exact(&key, ffi::PyUnicode_CheckExact) {
                         return Err(Defer);
                     }
@@ -354,6 +389,14 @@ impl<'py> Context<'py> {
             let address = pointer as usize;
             if let Some(dict) = self.converted.get(&address) {
                 return Ok(Value::Object(dict.clone()));
+            }
+            // Only a `JsonObject`'s own `.items()` is read here. Any other mapping's is caller
+            // code: running it would add a call the reference never makes (one whose side
+            // effects could change what `_plain_validation_instance` then sees), so Python
+            // reads it instead.
+            let json_object = crate::walk::JSON_OBJECT.get(self.py).ok_or(Defer)?;
+            if !crate::walk::is_type(item, &json_object) {
+                return Err(Defer);
             }
             // `_plain_validation_instance` rebuilds a mapping from its `.items()`.
             let dict = PyDict::new(self.py);
@@ -546,7 +589,11 @@ impl SchemaValidity {
         self.applicators_valid(cx, kw, item)
     }
 
-    fn native_match(&self, pattern: usize, regex: &Regex, text: &str) -> bool {
+    fn native_match(&self, pattern: usize, regex: &Regex, memo: bool, text: &str) -> bool {
+        if !memo || text.len() > MAX_REMEMBERED_TEXT {
+            // Never keep a long or payload-shaped subject (tool output, file bytes as base64).
+            return regex.is_match(text);
+        }
         // `try_lock`: a concurrent check simply skips the memory.
         if let Ok(memory) = self.matches.try_lock() {
             if let Some(known) = memory
@@ -559,9 +606,12 @@ impl SchemaValidity {
         }
         let matched = regex.is_match(text);
         if let Ok(mut memory) = self.matches.try_lock() {
-            if memory.entries >= MAX_REMEMBERED_MATCHES {
+            if memory.entries >= MAX_REMEMBERED_MATCHES
+                || memory.bytes + text.len() > MAX_REMEMBERED_BYTES
+            {
                 memory.by_pattern.iter_mut().for_each(HashMap::clear);
                 memory.entries = 0;
+                memory.bytes = 0;
             }
             if memory.by_pattern.len() <= pattern {
                 memory.by_pattern.resize_with(pattern + 1, HashMap::new);
@@ -571,6 +621,7 @@ impl SchemaValidity {
                 .is_none()
             {
                 memory.entries += 1;
+                memory.bytes += text.len();
             }
         }
         matched
@@ -592,7 +643,9 @@ impl SchemaValidity {
         }
         if let Some(pattern) = kw.pattern {
             let matched = match &self.patterns[pattern] {
-                Pattern::Native(regex) => self.native_match(pattern, regex, text.to_str()?),
+                Pattern::Native { regex, memo } => {
+                    self.native_match(pattern, regex, *memo, text.to_str()?)
+                }
                 Pattern::Python(compiled) => !compiled
                     .bind(cx.py)
                     .call_method1("search", (text,))?
@@ -742,7 +795,8 @@ impl SchemaValidity {
                     }
                 }
                 _ => {
-                    for (key, member) in object.iter() {
+                    let mut entries = DictItems::new(object);
+                    while let Some((key, member)) = entries.next_item()? {
                         let declared = match &kw.property_set {
                             Some(set) => set.bind(py).contains(&key)?,
                             None => false,
@@ -764,7 +818,8 @@ impl SchemaValidity {
         if let Some(unevaluated) = kw.unevaluated {
             let mut evaluated = HashSet::new();
             self.evaluated_keywords(cx, kw, object, &mut evaluated)?;
-            for (key, member) in object.iter() {
+            let mut entries = DictItems::new(object);
+            while let Some((key, member)) = entries.next_item()? {
                 if !evaluated.contains(key_text(&key)?.as_str())
                     && !self.valid(cx, unevaluated, &member)?
                 {
@@ -879,7 +934,8 @@ impl SchemaValidity {
             }
         }
         for node in [kw.additional, kw.unevaluated].into_iter().flatten() {
-            for (key, member) in object.iter() {
+            let mut entries = DictItems::new(object);
+            while let Some((key, member)) = entries.next_item()? {
                 if self.valid(cx, node, &member)? {
                     out.insert(key_text(&key)?);
                 }
@@ -990,7 +1046,8 @@ impl SchemaValidity {
                 if a.len() != b.len() {
                     return Ok(false);
                 }
-                for (key, member) in a.iter() {
+                let mut entries = DictItems::new(a);
+                while let Some((key, member)) = entries.next_item()? {
                     let Some(other) = b.get_item(&key)? else {
                         return Ok(false);
                     };
@@ -1201,7 +1258,8 @@ impl<'py> Compiler<'py> {
             ..Keywords::default()
         };
         let mut applies = false;
-        for (key, member) in schema.iter() {
+        let mut entries = DictItems::new(schema);
+        while let Some((key, member)) = entries.next_item()? {
             let key = text(&key)?;
             if key == "$id" {
                 if !self.root_addresses.contains(&address) {
@@ -1252,7 +1310,8 @@ impl<'py> Compiler<'py> {
                 "exclusiveMaximum" => kw.exclusive_maximum = Some(integer(&member)?),
                 "properties" => {
                     let properties = dict(&member)?;
-                    for (name, subschema) in properties.iter() {
+                    let mut entries = DictItems::new(properties);
+                    while let Some((name, subschema)) = entries.next_item()? {
                         let name = text_object(&name)?;
                         let target = self.schema(&subschema, document)?;
                         kw.properties.push((name, target));
@@ -1391,7 +1450,10 @@ impl<'py> Compiler<'py> {
         // Python must accept the pattern either way, or the stock keyword would raise.
         let compiled = self.re_compile.call1((source,))?;
         let pattern = match native_pattern(source) {
-            Some(regex) => Pattern::Native(regex),
+            Some(regex) => Pattern::Native {
+                memo: memoizable(&regex),
+                regex,
+            },
             None => Pattern::Python(compiled.unbind()),
         };
         let index = self.patterns.len();
@@ -1784,4 +1846,40 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<SchemaValidity>()?;
     module.add_function(wrap_pyfunction!(compile_schema_validity, module)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn remembered(pattern: &str) -> bool {
+        memoizable(&compile_python_pattern(pattern).expect("pattern compiles"))
+    }
+
+    #[test]
+    fn identifier_and_digest_patterns_are_remembered() {
+        assert!(remembered("^sha256:[0-9a-f]{64}$"));
+        assert!(remembered("^hmac-sha256:[0-9a-f]{64}$"));
+        assert!(remembered(
+            "^req_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        ));
+        assert!(remembered("^[A-Za-z0-9][A-Za-z0-9._+/-]{0,127}$"));
+        assert!(remembered("^(?:genesis|sha256:[0-9a-f]{64})$"));
+    }
+
+    #[test]
+    fn payload_and_unanchored_patterns_are_never_remembered() {
+        // Base64 content, free text, and unbounded identifiers admit arbitrarily long subjects.
+        assert!(!remembered(
+            "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?$"
+        ));
+        assert!(!remembered(
+            "^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-][AQgw]|[A-Za-z0-9_-]{2}[AEIMQUYcgkosw048])?$"
+        ));
+        assert!(!remembered("^[a-z0-9][a-z0-9._-]*$"));
+        // Unanchored: it matches the tail of any payload.
+        assert!(!remembered("==$"));
+        // Bounded, but longer than any remembered subject.
+        assert!(!remembered("^[a-z]{0,300}$"));
+    }
 }
