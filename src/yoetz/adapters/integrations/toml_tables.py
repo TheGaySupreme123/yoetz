@@ -8,7 +8,7 @@ is insufficient, because an owner-added key would then survive removal at the pa
 from __future__ import annotations
 
 import re
-from typing import Final
+from typing import Final, cast
 
 __all__ = ["append_table_block", "exact_table_span", "strip_exact_table"]
 
@@ -84,3 +84,56 @@ def append_table_block(raw: bytes, block: str) -> bytes:
     if prefix:
         prefix += b"\n"
     return prefix + block.encode("utf-8")
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions(
+        "toml_exact_table_span", "toml_strip_exact_table", "toml_append_table_block"
+    )
+    if resolved is None:
+        return
+    native_span, native_strip, native_append = resolved
+    python_span = exact_table_span
+    python_strip = strip_exact_table
+    python_append = append_table_block
+    header_re = _TOML_TABLE_HEADER_RE
+
+    # Only exact ``bytes``/``str`` take the native path: a ``bytearray`` or subclass keeps the
+    # reference's own semantics (including in-place ``+=`` on a ``bytearray``), and an empty
+    # table keeps the reference's ``IndexError``. A replaced header pattern defers too.
+    def native_exact_table_span(raw: bytes, table: str) -> tuple[int, int] | None:
+        if (
+            type(raw) is bytes
+            and type(table) is str
+            and table
+            and _TOML_TABLE_HEADER_RE is header_re
+        ):
+            return cast(tuple[int, int] | None, native_span(raw, table))
+        return python_span(raw, table)
+
+    def native_strip_exact_table(raw: bytes, table: str) -> bytes:
+        if (
+            type(raw) is bytes
+            and type(table) is str
+            and table
+            and _TOML_TABLE_HEADER_RE is header_re
+            and exact_table_span is native_exact_table_span
+        ):
+            return cast(bytes, native_strip(raw, table))
+        return python_strip(raw, table)
+
+    def native_append_table_block(raw: bytes, block: str) -> bytes:
+        if type(raw) is bytes and type(block) is str and block:
+            return cast(bytes, native_append(raw, block))
+        return python_append(raw, block)
+
+    globals().update(
+        exact_table_span=native_exact_table_span,
+        strip_exact_table=native_strip_exact_table,
+        append_table_block=native_append_table_block,
+    )
+
+
+_bind_native()

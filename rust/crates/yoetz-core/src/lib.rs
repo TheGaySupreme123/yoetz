@@ -5,6 +5,7 @@
 //! contract); this crate exists so the same computation runs natively, both behind the
 //! `yoetz_native` accelerator and inside native command-line tools.
 
+pub mod fswalks;
 pub mod protocol;
 
 /// Interface revision shared with `yoetz/_native.py`. A mismatch disables the accelerator.
