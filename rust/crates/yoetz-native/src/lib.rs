@@ -12,6 +12,7 @@ use pyo3::prelude::*;
 mod registry;
 
 mod canonical;
+mod observability_privacy;
 
 #[pymodule]
 fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -20,5 +21,6 @@ fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(registry::bind_protocol_value_error, module)?)?;
 
     canonical::register(module)?;
+    observability_privacy::register(module)?;
     Ok(())
 }

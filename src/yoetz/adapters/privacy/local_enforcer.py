@@ -333,3 +333,46 @@ class LocalPrivacyEnforcer:
 
     def scan_exact_bytes(self, data: bytes) -> tuple[ForbiddenDataKind, ...]:
         return scan_exact_bytes(data)
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+    from yoetz.observability import privacy as privacy_module
+
+    if native_functions("privacy_scan_kinds") is None:
+        return
+    sensitive_kinds = getattr(privacy_module, "_native_sensitive_kinds", None)
+    if sensitive_kinds is None:
+        return
+    shared_scan = scan_for_sensitive_content
+    # The twin keeps the name ``scan_exact_bytes`` (profiles attribute the never-send scan by it),
+    # so the reference is read from the module namespace rather than the shadowed local.
+    python_scan_exact_bytes = globals()["scan_exact_bytes"]
+    # (private_key_marker present, credential_pattern present) -> the sorted mapped kinds.
+    by_presence: dict[tuple[bool, bool], tuple[ForbiddenDataKind, ...]] = {
+        (False, False): (),
+        (False, True): (ForbiddenDataKind.API_CREDENTIAL,),
+        (True, False): (ForbiddenDataKind.PRIVATE_CERTIFICATE,),
+        (True, True): tuple(
+            sorted(
+                (ForbiddenDataKind.API_CREDENTIAL, ForbiddenDataKind.PRIVATE_CERTIFICATE),
+                key=lambda value: value.value.encode(),
+            )
+        ),
+    }
+
+    def scan_exact_bytes(data: bytes) -> tuple[ForbiddenDataKind, ...]:
+        """Map the shared observability scanner to the closed never-send vocabulary."""
+
+        # Only the kinds matter here, so the native scanner reports their presence without
+        # building findings; a replaced scanner is an observation point and gets the reference.
+        if scan_for_sensitive_content is shared_scan:
+            presence = sensitive_kinds(data)
+            if presence is not NotImplemented:
+                return by_presence[cast(tuple[bool, bool], presence)]
+        return python_scan_exact_bytes(data)
+
+    globals().update(scan_exact_bytes=scan_exact_bytes)
+
+
+_bind_native()
