@@ -25,6 +25,8 @@ mod service;
 mod values;
 mod walk;
 mod schemas;
+mod schemas_catalog;
+mod mcp_descriptors;
 mod fswalks;
 mod objects_envelope;
 mod secret_memory;
@@ -50,6 +52,8 @@ fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     service::register(module)?;
     values::register(module)?;
     schemas::register(module)?;
+    schemas_catalog::register(module)?;
+    mcp_descriptors::register(module)?;
     fswalks::register(module)?;
     objects_envelope::register(module)?;
     secret_memory::register(module)?;

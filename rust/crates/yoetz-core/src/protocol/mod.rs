@@ -8,3 +8,4 @@ pub mod ids;
 pub mod pointer;
 pub mod timestamp;
 pub mod schemas;
+pub mod schema_refs;
