@@ -20,6 +20,7 @@ mod shlex;
 mod jsonframes;
 mod control_protocol;
 mod control_pipeline;
+mod bundle_upgrade;
 mod ids;
 mod models;
 mod service;
@@ -46,6 +47,7 @@ fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     missing_for_assessment::register(module)?;
     jsonframes::register(module)?;
     control_protocol::register(module)?;
+    bundle_upgrade::register(module)?;
     ids::register(module)?;
     models::register(module)?;
     service::register(module)?;
