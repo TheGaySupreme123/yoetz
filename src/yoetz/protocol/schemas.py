@@ -6,7 +6,7 @@ import hashlib
 import re
 import threading
 from collections import OrderedDict
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -265,6 +265,35 @@ def _ref_resolved_once(
         yield from errors
 
     return keyword
+
+
+# The keyword factories the native checker reproduces. A replaced one (a test fault, an adaptation
+# to another ``jsonschema``) keeps every verdict in Python.
+_CHECKER_KEYWORDS: Final = (_ref_resolved_once, _any_of_first_error, _one_of_first_error)
+# ``yoetz_native.compile_schema_validity`` when the accelerator is bound (``_bind_native``).
+_compile_schema_validity: Callable[..., Any] | None = None
+
+
+def _native_validity(stripped: Mapping[str, dict[str, JsonValue]], keywords: Iterable[str]) -> Any:
+    """The compiled native twin of the checker for *stripped*, or ``None``.
+
+    It exists only while the checker's keywords and the ``date-time`` format check are the ones it
+    reproduces, and only for a catalog whose every construct it implements; *keywords* are the
+    keywords the mirrored validator class applies. Anything else keeps the Python checker alone.
+    """
+
+    compile_validity = _compile_schema_validity
+    if compile_validity is None:
+        return None
+    current = (_ref_resolved_once, _any_of_first_error, _one_of_first_error)
+    if any(each is not original for each, original in zip(current, _CHECKER_KEYWORDS, strict=True)):
+        return None
+    if _FORMAT_CHECKER.checkers != {"date-time": (_is_rfc3339_date_time, ())}:
+        return None
+    try:
+        return compile_validity(dict(stripped), re.compile, _is_rfc3339_date_time, tuple(keywords))
+    except Exception:
+        return None
 
 
 def _deny_retrieve(uri: str) -> Never:
@@ -846,6 +875,10 @@ class _ValidityChecker:
     # Remembers and reuses verdicts; the other one never does, for an instance holding a fragment.
     remembering_class: Any
     forgetful_class: Any
+    # The compiled native twin of both classes (or ``None``) and the keyword tables of the two
+    # classes it was compiled to reproduce; a class whose table has changed since decides alone.
+    native: Any = None
+    native_keywords: tuple[dict[str, Any], dict[str, Any]] | None = None
 
     @classmethod
     def build(cls, state: _CatalogState) -> _ValidityChecker | None:
@@ -872,14 +905,66 @@ class _ValidityChecker:
                 },
             )
 
+        remembering_class = validator_class(verdicts)
+        forgetful_class = validator_class(None)
+        native = _native_validity(stripped, remembering_class.VALIDATORS)
         return cls(
             state,
             MappingProxyType(stripped),
             _build_registry(stripped),
             verdicts,
-            validator_class(verdicts),
-            validator_class(None),
+            remembering_class,
+            forgetful_class,
+            native,
+            None
+            if native is None
+            else (dict(remembering_class.VALIDATORS), dict(forgetful_class.VALIDATORS)),
         )
+
+    def _native_verdict(
+        self,
+        validator_class: Any,
+        schema_id: str,
+        instance: object,
+        key: tuple[str, bytes] | None = None,
+    ) -> bool | None:
+        """The native verdict for *validator_class*, or ``None`` when only Python can tell.
+
+        With *key*, *instance* is an unconverted canonical value, and the verdict memory is
+        consulted for *key* once the value is known to hold no spliced fragment.
+        """
+
+        native = self.native
+        keywords = self.native_keywords
+        if native is None or keywords is None:
+            return None
+        expected = keywords[0] if validator_class is self.remembering_class else keywords[1]
+        if validator_class.VALIDATORS != expected:
+            return None
+        if key is None:
+            return native.check(schema_id, instance)
+        return native.check(schema_id, instance, True, self.verdicts.seen, key)
+
+    def canonical_verdict(self, schema_id: str, value: JsonValue, digest: bytes) -> bool | None:
+        """Decide a canonical value before ``_plain_validation_instance``, or ``None``.
+
+        *digest* is the SHA-256 of the value's canonical bytes. The native checker reads any
+        mapping as the object and any tuple as the array the plain instance would hold, and
+        answers ``None`` for a value holding a spliced fragment (or anything else it does not
+        judge), which therefore never shares a verdict here. ``None`` sends the caller down the
+        plain-instance path; ``False`` means the stock validator rejects the value.
+        """
+
+        if self.native is None:
+            return None
+        key = (schema_id, digest)
+        try:
+            verdict = self._native_verdict(self.remembering_class, schema_id, value, key)
+        except Exception:
+            return None
+        if verdict:
+            self.verdicts.remember(key)
+        return verdict
 
     def is_valid(self, schema_id: str, instance: JsonValue, digest: bytes | None) -> bool:
         """Whether the stock validator accepts *instance*; ``False`` whenever it cannot tell.
@@ -892,12 +977,14 @@ class _ValidityChecker:
             if digest is not None and self.verdicts.seen((schema_id, digest)):
                 return True
             validator_class = self.forgetful_class if digest is None else self.remembering_class
-            validator = validator_class(
-                self.plain_by_id[schema_id],
-                registry=self.registry,
-                format_checker=_FORMAT_CHECKER,
-            )
-            valid = next(validator.iter_errors(instance), None) is None
+            valid = self._native_verdict(validator_class, schema_id, instance)
+            if valid is None:
+                validator = validator_class(
+                    self.plain_by_id[schema_id],
+                    registry=self.registry,
+                    format_checker=_FORMAT_CHECKER,
+                )
+                valid = next(validator.iter_errors(instance), None) is None
         except Exception:
             return False
         if valid and digest is not None:
@@ -1158,10 +1245,17 @@ def validate_schema_instance(name: str, version: str, value: JsonValue) -> None:
     # Encoding enforces the canonical profile exactly as ``ensure_canonical_value`` does, and its
     # bytes identify the instance for the checker's verdict memory.
     digest = hashlib.sha256(canonical_encode(value)).digest()
-    instance, spliced = _plain_validation_instance(value)
     checker = _validity_checker()
-    if checker is not None and checker.is_valid(
-        document.schema_id, instance, None if spliced else digest
+    verdict = (
+        None if checker is None else checker.canonical_verdict(document.schema_id, value, digest)
+    )
+    if verdict:
+        return
+    instance, spliced = _plain_validation_instance(value)
+    if (
+        verdict is None
+        and checker is not None
+        and checker.is_valid(document.schema_id, instance, None if spliced else digest)
     ):
         return
     state = _load_catalog_state()
@@ -1989,3 +2083,15 @@ def _selected_family_for(error: ValidationError) -> tuple[str, str] | None:
         return None
     version = document.schema_version
     return (family, version) if SCHEMA_VERSION_PATTERN.fullmatch(version) is not None else None
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions("compile_schema_validity")
+    if resolved is None:
+        return
+    globals()["_compile_schema_validity"] = resolved[0]
+
+
+_bind_native()
