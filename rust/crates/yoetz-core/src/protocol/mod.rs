@@ -6,3 +6,4 @@ pub mod json_compat;
 pub mod ids;
 pub mod pointer;
 pub mod timestamp;
+pub mod schemas;

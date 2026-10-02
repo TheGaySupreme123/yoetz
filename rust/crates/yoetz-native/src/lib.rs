@@ -24,6 +24,7 @@ mod models;
 mod service;
 mod values;
 mod walk;
+mod schemas;
 
 #[pymodule]
 fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -43,5 +44,6 @@ fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     models::register(module)?;
     service::register(module)?;
     values::register(module)?;
+    schemas::register(module)?;
     Ok(())
 }
