@@ -12,6 +12,8 @@ use pyo3::prelude::*;
 mod registry;
 
 mod canonical;
+mod kernel_projections;
+mod kernel_reducers;
 
 #[pymodule]
 fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -20,5 +22,7 @@ fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(registry::bind_protocol_value_error, module)?)?;
 
     canonical::register(module)?;
+    kernel_projections::register(module)?;
+    kernel_reducers::register(module)?;
     Ok(())
 }
