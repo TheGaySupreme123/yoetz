@@ -112,30 +112,33 @@ dataclasses that make up the object model stay in Python: the tests construct, c
 
 ## Performance
 
-`rust/bench/compare.py` on a shared 4-CPU Linux container (minimum of several runs, each mode in a
-fresh interpreter over identical inputs; absolute times vary with load, the ratios are stable):
+`rust/bench/compare.py` on a shared 4-CPU Linux container (each mode in a fresh interpreter over
+identical inputs; every figure is the minimum over the samples of two runs; absolute times vary
+with load, the ratios are stable):
 
 | Operation | Pure Python | Rust accelerator | Speedup |
 |---|---:|---:|---:|
-| canonical: strict_json_parse (781 KiB state) | 35.1 ms | 2.4 ms | 14.4x |
-| canonical: canonical_encode (781 KiB state) | 35.3 ms | 1.1 ms | 30.9x |
-| canonical: canonical_digest (781 KiB state) | 35.9 ms | 1.6 ms | 22.2x |
-| privacy: scan_for_sensitive_content (400 KiB source) | 74.9 ms | 478 µs | 156.4x |
-| privacy: redact_sensitive_content (400 KiB source) | 91.4 ms | 474 µs | 192.9x |
-| schemas: cold catalog load (216 schemas) | 676.1 ms | 122.7 ms | 5.5x |
-| status: cached 100-row evidence page, all stages (CPU) | 241.0 ms | 25.9 ms | 9.3x |
-| status: closure-prepare of a ~1,000-event ledger (CPU) | 2695.9 ms | 322.2 ms | 8.4x |
-| semantic case: bound a large review envelope to 40% | 391.2 ms | 1.3 ms | 295.3x |
-| kernel: genesis replay of a 1007-record ledger | 296.3 ms | 120.9 ms | 2.5x |
-| hooks: Cursor hook ingress (607 KiB body) | 59.8 ms | 2.5 ms | 24.2x |
-| hooks: sanitize a 256 KiB apply_patch | 4.0 ms | 246 µs | 16.2x |
-| process: import yoetz.mcp.server (wall) | 2032.0 ms | 1331.8 ms | 1.5x |
-| process: one Claude Code PreToolUse hook (wall) | 172.8 ms | 148.8 ms | 1.2x |
+| canonical: strict_json_parse (781 KiB state) | 30.2 ms | 2.4 ms | 12.6x |
+| canonical: canonical_encode (781 KiB state) | 27.4 ms | 1.2 ms | 22.8x |
+| canonical: canonical_digest (781 KiB state) | 27.3 ms | 1.6 ms | 17.1x |
+| canonical: refuse a small object holding a float | 4 µs | 10 µs | 0.4x |
+| privacy: scan_for_sensitive_content (400 KiB source) | 56.3 ms | 488 µs | 115.4x |
+| privacy: redact_sensitive_content (400 KiB source) | 48.1 ms | 502 µs | 95.8x |
+| schemas: cold catalog load (216 schemas) | 607.6 ms | 113.4 ms | 5.4x |
+| status: cached 100-row evidence page, all stages (CPU) | 246.5 ms | 23.2 ms | 10.6x |
+| status: closure-prepare of a ~1,000-event ledger (CPU) | 2911.4 ms | 351.1 ms | 8.3x |
+| semantic case: bound a large review envelope to 40% | 398.1 ms | 1.4 ms | 284.4x |
+| kernel: genesis replay of a 1007-record ledger | 288.7 ms | 82.0 ms | 3.5x |
+| kernel: extend a 1006-record replay by one record | 8.0 ms | 1.7 ms | 4.7x |
+| hooks: Cursor hook ingress (607 KiB body) | 58.3 ms | 2.4 ms | 24.3x |
+| hooks: sanitize a 256 KiB apply_patch | 4.0 ms | 244 µs | 16.4x |
+| process: import yoetz.mcp.server (wall) | 2022.2 ms | 1463.3 ms | 1.4x |
+| process: one Claude Code PreToolUse hook (wall) | 151.6 ms | 154.7 ms | 1.0x |
 
 The status-page and closure figures are the end-to-end paths of
-`tests/integration/application/test_status_render_cost.py`, whose cost bounds are expressed in
-units of `canonical_encode` and therefore only hold in native mode because the whole page path,
-not just the encoder, got faster.
+`tests/integration/application/test_status_render_cost.py`. Its cost bounds are expressed in units
+of `canonical_encode`, so a faster encoder alone would have broken them; they hold in both modes
+because the whole page path, not just the encoder, got faster.
 
 ## Verification
 
@@ -172,9 +175,10 @@ suite.
   instead of 996 levels for control-frame conversion, about 690 instead of 997 for schema
   freezing, whose reference recursion re-enters through the native twin).
 - Refusals cost more than in pure Python. Error replay runs the native attempt and then the
-  Python reference, so a rejected input costs one native pass plus the reference (a canonical
-  refusal takes about 13 µs instead of 7 µs); accepted inputs, the common case, take only the
+  Python reference, so a rejected input costs one native pass plus the reference (refusing a small
+  object takes about 10 µs instead of 4 µs); accepted inputs, the common case, take only the
   native pass.
 - No replay caches. The kernel twins keep no ledger state between calls (a cached index or
-  projection would retain event payloads past the reference's lifetime), so extending an existing
-  replay costs the same as in pure Python per appended record.
+  projection would retain event payloads past the reference's lifetime), so extending a replay
+  rebuilds and re-validates the prior index each time, as the reference does: faster than pure
+  Python, but not incremental.
