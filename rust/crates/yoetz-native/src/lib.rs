@@ -18,6 +18,12 @@ mod observation;
 mod observation_selection;
 mod shlex;
 mod jsonframes;
+mod control_protocol;
+mod ids;
+mod models;
+mod service;
+mod values;
+mod walk;
 
 #[pymodule]
 fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -32,5 +38,10 @@ fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     observation_selection::register(module)?;
     missing_for_assessment::register(module)?;
     jsonframes::register(module)?;
+    control_protocol::register(module)?;
+    ids::register(module)?;
+    models::register(module)?;
+    service::register(module)?;
+    values::register(module)?;
     Ok(())
 }

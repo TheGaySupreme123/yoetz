@@ -735,3 +735,22 @@ def parse_wire_sequence(value: str) -> int:
 
 def render_wire_sequence(value: int) -> str:
     return canonical_integer_string(value)
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions(
+        "values_bind_json_object",
+        "values_freeze_json_at",
+        "values_freeze_json",
+    )
+    if resolved is None:
+        return
+    bind_json_object, native_freeze_json_at, native_freeze_json = resolved
+    # ``JsonObject.__init__`` freezes its members through the module global ``_freeze_json``.
+    bind_json_object(JsonObject)
+    globals().update(_freeze_json=native_freeze_json_at, freeze_json=native_freeze_json)
+
+
+_bind_native()
