@@ -51,7 +51,10 @@ impl<'py, 'a> Builder<'py, 'a> {
         })
     }
 
-    fn object(&mut self, members: &'a [(CursorKey<'a>, CursorValue<'a>)]) -> PyResult<Bound<'py, PyDict>> {
+    fn object(
+        &mut self,
+        members: &'a [(CursorKey<'a>, CursorValue<'a>)],
+    ) -> PyResult<Bound<'py, PyDict>> {
         let dict = PyDict::new(self.py);
         for (key, item) in members {
             dict.set_item(self.key(key)?, self.value(item)?)?;
@@ -69,25 +72,39 @@ fn exact_bytes<'a>(value: &'a Bound<'_, PyAny>) -> Option<&'a [u8]> {
 
 /// `_parse_cursor_hook_document(data)` for exact `bytes`; anything else is `NotImplemented`.
 #[pyfunction]
-pub fn cursor_hook_document<'py>(py: Python<'py>, data: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+pub fn cursor_hook_document<'py>(
+    py: Python<'py>,
+    data: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
     let Some(raw) = exact_bytes(data) else {
         return Ok(super::defer(py));
     };
-    let members = core::parse_cursor_hook_document(raw).map_err(|reason| protocol_error(py, reason))?;
-    let mut builder = Builder { py, keys: HashMap::new() };
+    let members =
+        core::parse_cursor_hook_document(raw).map_err(|reason| protocol_error(py, reason))?;
+    let mut builder = Builder {
+        py,
+        keys: HashMap::new(),
+    };
     Ok(builder.object(&members)?.into_any())
 }
 
 /// `_cursor_identity_payload(_parse_cursor_hook_document(data))` without materializing the
 /// discarded content.
 #[pyfunction]
-pub fn cursor_hook_identity<'py>(py: Python<'py>, data: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+pub fn cursor_hook_identity<'py>(
+    py: Python<'py>,
+    data: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
     let Some(raw) = exact_bytes(data) else {
         return Ok(super::defer(py));
     };
-    let members = core::parse_cursor_hook_document(raw).map_err(|reason| protocol_error(py, reason))?;
+    let members =
+        core::parse_cursor_hook_document(raw).map_err(|reason| protocol_error(py, reason))?;
     let view = core::cursor_identity_payload(&members);
-    let mut builder = Builder { py, keys: HashMap::new() };
+    let mut builder = Builder {
+        py,
+        keys: HashMap::new(),
+    };
     Ok(builder.object(&view)?.into_any())
 }
 

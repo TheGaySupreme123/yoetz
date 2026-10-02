@@ -10,9 +10,9 @@ use std::sync::{Arc, Mutex};
 
 use pyo3::exceptions::PyValueError;
 use pyo3::ffi;
+use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDateTime, PyDict, PyString, PyTuple, PyTzInfo};
-use pyo3::intern;
 use yoetz_core::objects::envelope::{self as core, CreatedAt};
 
 struct Bindings {
@@ -51,10 +51,16 @@ fn required<'py>(source: &Bound<'py, PyDict>, name: &str) -> PyResult<Bound<'py,
 /// `watched` names the module attributes whose replacement must route a call to the Python
 /// reference; their current values are captured now.
 #[pyfunction]
-pub fn bind_object_envelope(py: Python<'_>, source: &Bound<'_, PyDict>, watched: &Bound<'_, PyTuple>) -> PyResult<()> {
+pub fn bind_object_envelope(
+    py: Python<'_>,
+    source: &Bound<'_, PyDict>,
+    watched: &Bound<'_, PyTuple>,
+) -> PyResult<()> {
     let globals = required(source, "globals")?.cast_into::<PyDict>()?;
     let kind_class = required(source, "kind_class")?;
-    let kind_by_value = kind_class.getattr("_value2member_map_")?.cast_into::<PyDict>()?;
+    let kind_by_value = kind_class
+        .getattr("_value2member_map_")?
+        .cast_into::<PyDict>()?;
     let json_module = py.import("json")?;
     let mut captured = Vec::with_capacity(watched.len());
     for name in watched.iter() {
@@ -69,7 +75,11 @@ pub fn bind_object_envelope(py: Python<'_>, source: &Bound<'_, PyDict>, watched:
         envelope_class: required(source, "envelope_class")?.unbind(),
         kind_class: kind_class.unbind(),
         kind_by_value: kind_by_value.unbind(),
-        object_new: py.import("builtins")?.getattr("object")?.getattr("__new__")?.unbind(),
+        object_new: py
+            .import("builtins")?
+            .getattr("object")?
+            .getattr("__new__")?
+            .unbind(),
         stdlib_loads: required(source, "stdlib_loads")?.unbind(),
         json_module: json_module.into_any().unbind(),
         python_decode: required(source, "python_decode")?.unbind(),
@@ -77,7 +87,9 @@ pub fn bind_object_envelope(py: Python<'_>, source: &Bound<'_, PyDict>, watched:
         globals: globals.unbind(),
         watched: captured,
     };
-    *BINDINGS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(bound));
+    *BINDINGS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(bound));
     Ok(())
 }
 
@@ -95,20 +107,31 @@ impl Bindings {
         Ok(loads.is(self.stdlib_loads.bind(py)))
     }
 
-    fn global<'py>(&self, py: Python<'py>, name: &Bound<'py, PyString>) -> PyResult<Option<Bound<'py, PyAny>>> {
+    fn global<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyString>,
+    ) -> PyResult<Option<Bound<'py, PyAny>>> {
         self.globals.bind(py).get_item(name)
     }
 
     /// A module integer limit read at call time, or `None` when it is not a plain `int`.
     fn limit(&self, py: Python<'_>, name: &Bound<'_, PyString>) -> PyResult<Option<i64>> {
         match self.global(py, name)? {
-            Some(value) if unsafe { ffi::PyLong_CheckExact(value.as_ptr()) } != 0 => Ok(value.extract::<i64>().ok()),
+            Some(value) if unsafe { ffi::PyLong_CheckExact(value.as_ptr()) } != 0 => {
+                Ok(value.extract::<i64>().ok())
+            }
             _ => Ok(None),
         }
     }
 
     /// Call the module's identifier validator; `false` (error discarded) when it refuses.
-    fn identifier_ok(&self, py: Python<'_>, validator: &Bound<'_, PyString>, value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    fn identifier_ok(
+        &self,
+        py: Python<'_>,
+        validator: &Bound<'_, PyString>,
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<bool> {
         let Some(function) = self.global(py, validator)? else {
             return Ok(false);
         };
@@ -144,7 +167,10 @@ fn datetime_from<'py>(py: Python<'py>, fields: &CreatedAt) -> PyResult<Bound<'py
 
 /// `_created_at_from_wire(value) -> datetime`.
 #[pyfunction]
-pub fn object_envelope_created_at<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+pub fn object_envelope_created_at<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
     if let Some(fields) = exact_str(value).and_then(core::created_at_from_wire) {
         return Ok(datetime_from(py, &fields)?.into_any());
     }
@@ -159,17 +185,28 @@ pub fn object_envelope_header_valid(py: Python<'_>, header: &Bound<'_, PyAny>) -
         return Ok(false);
     }
     let created_at = header.getattr(intern!(py, "created_at"))?;
-    if exact_str(&created_at).and_then(core::created_at_from_wire).is_none() {
+    if exact_str(&created_at)
+        .and_then(core::created_at_from_wire)
+        .is_none()
+    {
         return Ok(false);
     }
-    if !bound.identifier_ok(py, intern!(py, "object_id"), &header.getattr(intern!(py, "object_id"))?)? {
+    if !bound.identifier_ok(
+        py,
+        intern!(py, "object_id"),
+        &header.getattr(intern!(py, "object_id"))?,
+    )? {
         return Ok(false);
     }
     let task = header.getattr(intern!(py, "task_id"))?;
     if !bound.identifier_ok(py, intern!(py, "task_id"), &task)? {
         return Ok(false);
     }
-    if !header.getattr(intern!(py, "object_kind"))?.get_type().is(bound.kind_class.bind(py)) {
+    if !header
+        .getattr(intern!(py, "object_kind"))?
+        .get_type()
+        .is(bound.kind_class.bind(py))
+    {
         return Ok(false);
     }
     let media_type = header.getattr(intern!(py, "media_type"))?;
@@ -216,7 +253,9 @@ fn assemble<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let instance = bound.object_new.bind(py).call1((class,))?;
     for (name, value) in fields {
-        let status = unsafe { ffi::PyObject_GenericSetAttr(instance.as_ptr(), name.as_ptr(), value.as_ptr()) };
+        let status = unsafe {
+            ffi::PyObject_GenericSetAttr(instance.as_ptr(), name.as_ptr(), value.as_ptr())
+        };
         if status != 0 {
             return Err(PyErr::fetch(py));
         }
@@ -226,7 +265,10 @@ fn assemble<'py>(
 
 /// `decode_object_envelope(data) -> ObjectEnvelope`.
 #[pyfunction]
-pub fn object_envelope_decode<'py>(py: Python<'py>, data: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+pub fn object_envelope_decode<'py>(
+    py: Python<'py>,
+    data: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
     let bound = bindings()?;
     if let Some(envelope) = decode_accepted(py, &bound, data)? {
         return Ok(envelope);
@@ -234,7 +276,11 @@ pub fn object_envelope_decode<'py>(py: Python<'py>, data: &Bound<'py, PyAny>) ->
     bound.python_decode.bind(py).call1((data,))
 }
 
-fn decode_accepted<'py>(py: Python<'py>, bound: &Bindings, data: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
+fn decode_accepted<'py>(
+    py: Python<'py>,
+    bound: &Bindings,
+    data: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
     if unsafe { ffi::PyBytes_CheckExact(data.as_ptr()) } == 0 || !bound.unpatched(py)? {
         return Ok(None);
     }
@@ -244,7 +290,9 @@ fn decode_accepted<'py>(py: Python<'py>, bound: &Bindings, data: &Bound<'py, PyA
     ) else {
         return Ok(None);
     };
-    let (Ok(max_header), Ok(max_plaintext)) = (usize::try_from(max_header), u64::try_from(max_plaintext)) else {
+    let (Ok(max_header), Ok(max_plaintext)) =
+        (usize::try_from(max_header), u64::try_from(max_plaintext))
+    else {
         return Ok(None);
     };
     let bytes = unsafe { data.cast_unchecked::<PyBytes>() }.as_bytes();
@@ -267,17 +315,41 @@ fn decode_accepted<'py>(py: Python<'py>, bound: &Bindings, data: &Bound<'py, PyA
         bound,
         bound.header_class.bind(py),
         &[
-            (intern!(py, "created_at"), PyString::new(py, &header.created_at).into_any()),
-            (intern!(py, "encryption_format"), PyString::new(py, core::ENCRYPTION_FORMAT).into_any()),
-            (intern!(py, "key_slot"), PyString::new(py, &header.key_slot).into_any()),
-            (intern!(py, "media_type"), PyString::new(py, &header.media_type).into_any()),
+            (
+                intern!(py, "created_at"),
+                PyString::new(py, &header.created_at).into_any(),
+            ),
+            (
+                intern!(py, "encryption_format"),
+                PyString::new(py, core::ENCRYPTION_FORMAT).into_any(),
+            ),
+            (
+                intern!(py, "key_slot"),
+                PyString::new(py, &header.key_slot).into_any(),
+            ),
+            (
+                intern!(py, "media_type"),
+                PyString::new(py, &header.media_type).into_any(),
+            ),
             (intern!(py, "object_id"), object_id),
             (intern!(py, "object_kind"), kind),
-            (intern!(py, "payload_algorithm"), PyString::new(py, core::PAYLOAD_ALGORITHM).into_any()),
-            (intern!(py, "plaintext_size"), header.plaintext_size.into_pyobject(py)?.into_any()),
+            (
+                intern!(py, "payload_algorithm"),
+                PyString::new(py, core::PAYLOAD_ALGORITHM).into_any(),
+            ),
+            (
+                intern!(py, "plaintext_size"),
+                header.plaintext_size.into_pyobject(py)?.into_any(),
+            ),
             (intern!(py, "task_id"), task_id),
-            (intern!(py, "wrap_algorithm"), PyString::new(py, core::WRAP_ALGORITHM).into_any()),
-            (intern!(py, "wrapped_dek"), PyBytes::new(py, &header.wrapped_dek).into_any()),
+            (
+                intern!(py, "wrap_algorithm"),
+                PyString::new(py, core::WRAP_ALGORITHM).into_any(),
+            ),
+            (
+                intern!(py, "wrapped_dek"),
+                PyBytes::new(py, &header.wrapped_dek).into_any(),
+            ),
         ],
     )?;
     let envelope = assemble(
@@ -286,10 +358,22 @@ fn decode_accepted<'py>(py: Python<'py>, bound: &Bindings, data: &Bound<'py, PyA
         bound.envelope_class.bind(py),
         &[
             (intern!(py, "header"), header_object),
-            (intern!(py, "header_bytes"), PyBytes::new(py, &bytes[9..frame.header_end]).into_any()),
-            (intern!(py, "payload_nonce"), PyBytes::new(py, &bytes[frame.header_end..frame.nonce_end]).into_any()),
-            (intern!(py, "ciphertext"), PyBytes::new(py, &bytes[frame.nonce_end..frame.ciphertext_end]).into_any()),
-            (intern!(py, "tag"), PyBytes::new(py, &bytes[frame.ciphertext_end..]).into_any()),
+            (
+                intern!(py, "header_bytes"),
+                PyBytes::new(py, &bytes[9..frame.header_end]).into_any(),
+            ),
+            (
+                intern!(py, "payload_nonce"),
+                PyBytes::new(py, &bytes[frame.header_end..frame.nonce_end]).into_any(),
+            ),
+            (
+                intern!(py, "ciphertext"),
+                PyBytes::new(py, &bytes[frame.nonce_end..frame.ciphertext_end]).into_any(),
+            ),
+            (
+                intern!(py, "tag"),
+                PyBytes::new(py, &bytes[frame.ciphertext_end..]).into_any(),
+            ),
         ],
     )?;
     Ok(Some(envelope))

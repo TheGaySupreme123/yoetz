@@ -35,40 +35,63 @@ pub fn bind_observation(globals: Bound<'_, PyDict>, fallbacks: Bound<'_, PyDict>
 #[pyfunction]
 pub fn observation_tables(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
     let tables = PyDict::new(py);
-    tables.set_item("_MAX_OBSERVED_COMMAND_CHARS", core::MAX_OBSERVED_COMMAND_CHARS)?;
+    tables.set_item(
+        "_MAX_OBSERVED_COMMAND_CHARS",
+        core::MAX_OBSERVED_COMMAND_CHARS,
+    )?;
     tables.set_item("_MAX_OBSERVED_ARGV", core::MAX_OBSERVED_ARGV)?;
     tables.set_item("_MAX_STRUCTURAL_BYTES", core::MAX_STRUCTURAL_BYTES)?;
     tables.set_item("_STRUCTURAL_KEYS", core::STRUCTURAL_KEYS.to_vec())?;
-    tables.set_item("_STRUCTURAL_TOKEN_KEYS", core::STRUCTURAL_TOKEN_KEYS.to_vec())?;
+    tables.set_item(
+        "_STRUCTURAL_TOKEN_KEYS",
+        core::STRUCTURAL_TOKEN_KEYS.to_vec(),
+    )?;
     tables.set_item("_PROSE_KEYS", core::PROSE_KEYS.to_vec())?;
     tables.set_item("_SHELL_WRAPPERS", core::SHELL_WRAPPERS.to_vec())?;
     tables.set_item("_SHELL_COMMAND_FLAG_RE", core::SHELL_COMMAND_FLAG_PATTERN)?;
     tables.set_item("_TOKEN_RE", core::TOKEN_PATTERN)?;
     tables.set_item("_GAP_RE", core::GAP_PATTERN)?;
     tables.set_item("_MAX_GAP_CODES", core::MAX_GAP_CODES)?;
-    tables.set_item("OBSERVATION_WORKSPACE_DOMAIN", PyBytes::new(py, core::WORKSPACE_DOMAIN))?;
-    tables.set_item("OBSERVATION_STREAM_LINE_DOMAIN", PyBytes::new(py, core::STREAM_LINE_DOMAIN))?;
-    tables.set_item("OBSERVATION_HOOK_COMMITMENT_DOMAIN", PyBytes::new(py, core::HOOK_COMMITMENT_DOMAIN))?;
-    tables.set_item("OBSERVATION_COMMAND_COMMITMENT_DOMAIN", PyBytes::new(py, core::COMMAND_COMMITMENT_DOMAIN))?;
+    tables.set_item(
+        "OBSERVATION_WORKSPACE_DOMAIN",
+        PyBytes::new(py, core::WORKSPACE_DOMAIN),
+    )?;
+    tables.set_item(
+        "OBSERVATION_STREAM_LINE_DOMAIN",
+        PyBytes::new(py, core::STREAM_LINE_DOMAIN),
+    )?;
+    tables.set_item(
+        "OBSERVATION_HOOK_COMMITMENT_DOMAIN",
+        PyBytes::new(py, core::HOOK_COMMITMENT_DOMAIN),
+    )?;
+    tables.set_item(
+        "OBSERVATION_COMMAND_COMMITMENT_DOMAIN",
+        PyBytes::new(py, core::COMMAND_COMMITMENT_DOMAIN),
+    )?;
     Ok(tables)
 }
 
 fn slot<'py>(py: Python<'py>, slot: &Slot) -> PyResult<Bound<'py, PyAny>> {
-    slot.get(py).ok_or_else(|| PyNameError::new_err("yoetz_native_observation_unbound"))
+    slot.get(py)
+        .ok_or_else(|| PyNameError::new_err("yoetz_native_observation_unbound"))
 }
 
 /// A global of `yoetz.domain.observation`, read at call time like the reference does.
 fn global<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
     let globals = slot(py, &GLOBALS)?;
     let globals = globals.cast::<PyDict>()?;
-    globals.get_item(name)?.ok_or_else(|| PyNameError::new_err(name.to_owned()))
+    globals
+        .get_item(name)?
+        .ok_or_else(|| PyNameError::new_err(name.to_owned()))
 }
 
 /// The Python reference implementation of `name`.
 fn fallback<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
     let fallbacks = slot(py, &FALLBACKS)?;
     let fallbacks = fallbacks.cast::<PyDict>()?;
-    fallbacks.get_item(name)?.ok_or_else(|| PyNameError::new_err(name.to_owned()))
+    fallbacks
+        .get_item(name)?
+        .ok_or_else(|| PyNameError::new_err(name.to_owned()))
 }
 
 #[inline]
@@ -83,7 +106,10 @@ fn is_exact_str(value: &Bound<'_, PyAny>) -> bool {
 
 /// `normalize_observed_command(value)`.
 #[pyfunction]
-pub fn normalize_observed_command<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+pub fn normalize_observed_command<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
     let pointer = value.as_ptr();
     let normalized = if is_exact_str(value) {
         match exact_utf8(value) {
@@ -92,7 +118,10 @@ pub fn normalize_observed_command<'py>(py: Python<'py>, value: &Bound<'py, PyAny
         }
     } else if unsafe { ffi::PyList_CheckExact(pointer) != 0 } || is_exact_tuple(value) {
         let items: Vec<Bound<'py, PyAny>> = value.try_iter()?.collect::<PyResult<_>>()?;
-        if items.is_empty() || items.len() > core::MAX_OBSERVED_ARGV || !items.iter().all(is_exact_str) {
+        if items.is_empty()
+            || items.len() > core::MAX_OBSERVED_ARGV
+            || !items.iter().all(is_exact_str)
+        {
             return Ok(py.None().into_bound(py));
         }
         let mut argv: Vec<&str> = Vec::with_capacity(items.len());
@@ -114,7 +143,9 @@ pub fn normalize_observed_command<'py>(py: Python<'py>, value: &Bound<'py, PyAny
 
 /// A `JsonObject`'s `(key, value)` pairs from its frozen item tuple, or `None` when the object
 /// does not carry one in the expected shape.
-fn json_object_items<'py>(object: &Bound<'py, PyAny>) -> Option<Vec<(Bound<'py, PyAny>, Bound<'py, PyAny>)>> {
+fn json_object_items<'py>(
+    object: &Bound<'py, PyAny>,
+) -> Option<Vec<(Bound<'py, PyAny>, Bound<'py, PyAny>)>> {
     let items = object.getattr("_items").ok()?;
     if !is_exact_tuple(&items) {
         return None;
@@ -146,7 +177,9 @@ fn invalid_from(py: Python<'_>, reason: &str, cause: PyErr) -> PyErr {
 }
 
 fn is_protocol_error(py: Python<'_>, error: &PyErr) -> bool {
-    PROTOCOL_VALUE_ERROR.get(py).is_some_and(|class| error.matches(py, class).unwrap_or(false))
+    PROTOCOL_VALUE_ERROR
+        .get(py)
+        .is_some_and(|class| error.matches(py, class).unwrap_or(false))
 }
 
 /// `_looks_like_path(text)` for one exact `str`.
@@ -159,13 +192,19 @@ fn str_looks_like_path(py: Python<'_>, text: &Bound<'_, PyAny>) -> PyResult<bool
         None => {
             // `value[0].isalpha()` for a non-ASCII first character.
             let first: String = slice.chars().take(1).collect();
-            PyString::new(py, &first).call_method0("isalpha")?.is_truthy()
+            PyString::new(py, &first)
+                .call_method0("isalpha")?
+                .is_truthy()
         }
     }
 }
 
 /// `_reject_path_like(value)`, iteratively.
-fn reject_path_like<'py>(py: Python<'py>, value: Bound<'py, PyAny>, json_object: &Bound<'py, PyAny>) -> PyResult<()> {
+fn reject_path_like<'py>(
+    py: Python<'py>,
+    value: Bound<'py, PyAny>,
+    json_object: &Bound<'py, PyAny>,
+) -> PyResult<()> {
     let mut stack = vec![value];
     while let Some(value) = stack.pop() {
         if is_exact_str(&value) {
@@ -189,26 +228,39 @@ fn reject_path_like<'py>(py: Python<'py>, value: Bound<'py, PyAny>, json_object:
 
 /// `_structural_payload(value)`.
 #[pyfunction]
-pub fn structural_payload<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+pub fn structural_payload<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
     let json_object = global(py, "JsonObject")?;
     let payload = if value.get_type().is(&json_object) {
         value.clone()
     } else {
         match json_object.call1((value,)) {
             Ok(payload) => payload,
-            Err(error) if is_protocol_error(py, &error) => return Err(invalid_from(py, INVALID, error)),
+            Err(error) if is_protocol_error(py, &error) => {
+                return Err(invalid_from(py, INVALID, error));
+            }
             Err(error) => return Err(error),
         }
     };
     let Some(pairs) = json_object_items(&payload) else {
         return fallback(py, "_structural_payload")?.call1((payload,));
     };
-    let keys: Vec<Option<&str>> =
-        pairs.iter().map(|(key, _)| unsafe { key.cast_unchecked::<PyString>() }.to_str().ok()).collect();
-    if keys.iter().any(|key| key.is_some_and(|key| core::PROSE_KEYS.contains(&key))) {
+    let keys: Vec<Option<&str>> = pairs
+        .iter()
+        .map(|(key, _)| unsafe { key.cast_unchecked::<PyString>() }.to_str().ok())
+        .collect();
+    if keys
+        .iter()
+        .any(|key| key.is_some_and(|key| core::PROSE_KEYS.contains(&key)))
+    {
         return Err(protocol_error(py, UNKNOWN_FIELD));
     }
-    if keys.iter().any(|key| !key.is_some_and(|key| core::STRUCTURAL_KEYS.contains(&key))) {
+    if keys
+        .iter()
+        .any(|key| !key.is_some_and(|key| core::STRUCTURAL_KEYS.contains(&key)))
+    {
         return Err(protocol_error(py, UNKNOWN_FIELD));
     }
     for ((_, item), key) in pairs.iter().zip(keys) {
@@ -217,7 +269,9 @@ pub fn structural_payload<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> Py
         if core::has_path_suffix(key) {
             return Err(protocol_error(py, UNKNOWN_FIELD));
         }
-        if core::STRUCTURAL_TOKEN_KEYS.contains(&key) && !exact_utf8(item).is_some_and(core::is_token) {
+        if core::STRUCTURAL_TOKEN_KEYS.contains(&key)
+            && !exact_utf8(item).is_some_and(core::is_token)
+        {
             return Err(protocol_error(py, INVALID));
         }
         if key == "protection_reference" {
@@ -229,7 +283,9 @@ pub fn structural_payload<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> Py
             }
             match global(py, "validate_commitment")?.call1((item,)) {
                 Ok(_) => {}
-                Err(error) if is_protocol_error(py, &error) => return Err(invalid_from(py, INVALID, error)),
+                Err(error) if is_protocol_error(py, &error) => {
+                    return Err(invalid_from(py, INVALID, error));
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -278,7 +334,11 @@ fn sorted_unique<'py>(
         if let Some(previous) = result.last() {
             let previous = previous.to_str()?;
             if current.as_bytes() <= previous.as_bytes() {
-                let reason = if current == previous { "duplicate_set_member" } else { "unsorted_set_field" };
+                let reason = if current == previous {
+                    "duplicate_set_member"
+                } else {
+                    "unsorted_set_field"
+                };
                 return Err(protocol_error(py, reason));
             }
         }
@@ -326,7 +386,10 @@ pub fn sorted_unique_tokens<'py>(
 
 /// `_evidence_refs(value)`.
 #[pyfunction]
-pub fn evidence_refs<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+pub fn evidence_refs<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
     if let Some(maximum) = limit(py, "_MAX_EVIDENCE_REFS")? {
         if let Some(tuple) = sorted_unique(py, value, maximum, |item| token_member(py, item))? {
             return Ok(tuple.into_any());
@@ -345,7 +408,9 @@ pub fn sorted_unique_gap_codes<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let limit = match maximum {
         None => Some(core::MAX_GAP_CODES as i64),
-        Some(maximum) if unsafe { ffi::PyLong_CheckExact(maximum.as_ptr()) } != 0 => maximum.extract::<i64>().ok(),
+        Some(maximum) if unsafe { ffi::PyLong_CheckExact(maximum.as_ptr()) } != 0 => {
+            maximum.extract::<i64>().ok()
+        }
         Some(_) => None,
     };
     if let Some(limit) = limit {
@@ -378,7 +443,10 @@ pub fn sorted_unique_gap_codes<'py>(
 
 /// `_content_object_refs(value)`.
 #[pyfunction]
-pub fn content_object_refs<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+pub fn content_object_refs<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
     if let Some(maximum) = limit(py, "_MAX_CONTENT_REFS")? {
         let native = sorted_unique(py, value, maximum, |item| {
             if !is_exact_str(item) {
@@ -422,9 +490,16 @@ pub fn content_object_refs<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> P
 /// computes what they would. A replaced one sends the call to the Python reference.
 fn stdlib_intact(py: Python<'_>, fsencode: bool) -> PyResult<bool> {
     let pairs: &[(&str, &str, &str)] = if fsencode {
-        &[("hmac", "new", "hmac.new"), ("hashlib", "sha256", "hashlib.sha256"), ("os", "fsencode", "os.fsencode")]
+        &[
+            ("hmac", "new", "hmac.new"),
+            ("hashlib", "sha256", "hashlib.sha256"),
+            ("os", "fsencode", "os.fsencode"),
+        ]
     } else {
-        &[("hmac", "new", "hmac.new"), ("hashlib", "sha256", "hashlib.sha256")]
+        &[
+            ("hmac", "new", "hmac.new"),
+            ("hashlib", "sha256", "hashlib.sha256"),
+        ]
     };
     for (module, name, original) in pairs {
         let current = global(py, module)?.getattr(*name)?;
@@ -476,7 +551,9 @@ fn text_commitment<'py>(
     if stdlib_intact(py, fsencode)? {
         let key = commitment_key(py, key_material)?;
         if let Some(text) = commitment_text(py, value)? {
-            return Ok(PyString::new(py, &core::hmac_commitment(key, domain, text.as_bytes())).into_any());
+            return Ok(
+                PyString::new(py, &core::hmac_commitment(key, domain, text.as_bytes())).into_any(),
+            );
         }
     }
     fallback(py, name)?.call1((key_material, value))
@@ -489,7 +566,14 @@ pub fn workspace_commitment_from_path<'py>(
     key_material: &Bound<'py, PyAny>,
     path: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    text_commitment(py, "workspace_commitment_from_path", core::WORKSPACE_DOMAIN, true, key_material, path)
+    text_commitment(
+        py,
+        "workspace_commitment_from_path",
+        core::WORKSPACE_DOMAIN,
+        true,
+        key_material,
+        path,
+    )
 }
 
 /// `hook_source_commitment(key_material, source_identity)`.
@@ -499,7 +583,14 @@ pub fn hook_source_commitment<'py>(
     key_material: &Bound<'py, PyAny>,
     source_identity: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    text_commitment(py, "hook_source_commitment", core::HOOK_COMMITMENT_DOMAIN, false, key_material, source_identity)
+    text_commitment(
+        py,
+        "hook_source_commitment",
+        core::HOOK_COMMITMENT_DOMAIN,
+        false,
+        key_material,
+        source_identity,
+    )
 }
 
 /// `observed_command_commitment(key_material, command)`.
@@ -509,7 +600,14 @@ pub fn observed_command_commitment<'py>(
     key_material: &Bound<'py, PyAny>,
     command: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    text_commitment(py, "observed_command_commitment", core::COMMAND_COMMITMENT_DOMAIN, false, key_material, command)
+    text_commitment(
+        py,
+        "observed_command_commitment",
+        core::COMMAND_COMMITMENT_DOMAIN,
+        false,
+        key_material,
+        command,
+    )
 }
 
 /// `stream_line_commitment(key_material, content)`.
@@ -527,7 +625,11 @@ pub fn stream_line_commitment<'py>(
         return Err(protocol_error(py, INVALID));
     }
     let message = unsafe { content.cast_unchecked::<PyBytes>() }.as_bytes();
-    Ok(PyString::new(py, &core::hmac_commitment(key, core::STREAM_LINE_DOMAIN, message)).into_any())
+    Ok(PyString::new(
+        py,
+        &core::hmac_commitment(key, core::STREAM_LINE_DOMAIN, message),
+    )
+    .into_any())
 }
 
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {

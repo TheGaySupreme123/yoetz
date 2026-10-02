@@ -5,10 +5,10 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use pyo3::exceptions::PyKeyError;
 use pyo3::exceptions::PyTypeError;
 use pyo3::ffi;
 use pyo3::prelude::*;
-use pyo3::exceptions::PyKeyError;
 use pyo3::types::PyString;
 use yoetz_core::protocol::canonical::Reason;
 use yoetz_core::protocol::ids::{self as core, Candidate};
@@ -30,7 +30,11 @@ static KINDS: Mutex<Option<Kinds>> = Mutex::new(None);
 /// Bind `IdKind`, `IdKind.ACTOR`, and `PREFIX_BY_KIND`.
 #[pyfunction]
 #[pyo3(name = "ids_bind_kinds")]
-pub fn bind_id_kinds(class: Bound<'_, PyAny>, actor: Bound<'_, PyAny>, prefix_by_kind: Bound<'_, PyAny>) -> PyResult<()> {
+pub fn bind_id_kinds(
+    class: Bound<'_, PyAny>,
+    actor: Bound<'_, PyAny>,
+    prefix_by_kind: Bound<'_, PyAny>,
+) -> PyResult<()> {
     let mut prefixes = HashMap::new();
     let mut members = Vec::new();
     let items = prefix_by_kind.call_method0("items")?;
@@ -42,8 +46,15 @@ pub fn bind_id_kinds(class: Bound<'_, PyAny>, actor: Bound<'_, PyAny>, prefix_by
         prefixes.insert(member.as_ptr() as usize, prefix);
         members.push(member.unbind());
     }
-    let kinds = Kinds { class: class.unbind(), actor: actor.unbind(), prefixes, _members: members };
-    *KINDS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(kinds);
+    let kinds = Kinds {
+        class: class.unbind(),
+        actor: actor.unbind(),
+        prefixes,
+        _members: members,
+    };
+    *KINDS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(kinds);
     Ok(())
 }
 
@@ -73,7 +84,9 @@ fn actor_verdict(value: &Bound<'_, PyAny>) -> Verdict {
 }
 
 fn id_verdict(kind: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<Verdict> {
-    let guard = KINDS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let guard = KINDS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let Some(kinds) = guard.as_ref() else {
         return Err(PyTypeError::new_err("id_kind_wrong_type"));
     };
@@ -102,7 +115,9 @@ fn id_verdict(kind: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<Ver
 /// The prefix of an exact bound `IdKind` member other than `ACTOR`, or `None` (also before
 /// `ids_bind_kinds` ran). Callers that need the reference's refusal defer to it on `None`.
 pub(crate) fn kind_prefix(kind: &Bound<'_, PyAny>) -> Option<String> {
-    let guard = KINDS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let guard = KINDS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let kinds = guard.as_ref()?;
     if kind.get_type().as_ptr() != kinds.class.as_ptr() || kind.as_ptr() == kinds.actor.as_ptr() {
         return None;
@@ -112,14 +127,22 @@ pub(crate) fn kind_prefix(kind: &Bound<'_, PyAny>) -> Option<String> {
 
 /// Whether `kind` is the bound `IdKind.ACTOR` member.
 pub(crate) fn is_actor_kind(kind: &Bound<'_, PyAny>) -> bool {
-    let guard = KINDS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    guard.as_ref().is_some_and(|kinds| kind.as_ptr() == kinds.actor.as_ptr())
+    let guard = KINDS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard
+        .as_ref()
+        .is_some_and(|kinds| kind.as_ptr() == kinds.actor.as_ptr())
 }
 
 /// `validate_id(kind, value) -> value` (the same object).
 #[pyfunction]
 #[pyo3(name = "ids_validate_id")]
-pub fn validate_id<'py>(py: Python<'py>, kind: &Bound<'py, PyAny>, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+pub fn validate_id<'py>(
+    py: Python<'py>,
+    kind: &Bound<'py, PyAny>,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
     match id_verdict(kind, value)? {
         Verdict::Valid => Ok(value.clone()),
         Verdict::Refused(reason) => Err(protocol_error(py, reason)),
@@ -136,7 +159,10 @@ pub fn is_valid_id(kind: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResul
 /// `validate_actor_id(value) -> value` (the same object).
 #[pyfunction]
 #[pyo3(name = "ids_validate_actor_id")]
-pub fn validate_actor_id<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+pub fn validate_actor_id<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
     match actor_verdict(value) {
         Verdict::Valid => Ok(value.clone()),
         Verdict::Refused(reason) => Err(protocol_error(py, reason)),

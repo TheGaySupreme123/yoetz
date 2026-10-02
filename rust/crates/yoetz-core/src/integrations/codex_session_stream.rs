@@ -49,7 +49,10 @@ pub fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
 
 /// The final path component the way `pathlib.PurePosixPath(name).name` reads it.
 pub fn posix_name(path: &str) -> &str {
-    path.split('/').rev().find(|part| !part.is_empty() && *part != ".").unwrap_or("")
+    path.split('/')
+        .rev()
+        .find(|part| !part.is_empty() && *part != ".")
+        .unwrap_or("")
 }
 
 /// `rollout_filename_matches_token` for an ASCII file name and a valid token.
@@ -68,7 +71,11 @@ pub fn rollout_filename_matches(name: &str, token_value: &str) -> bool {
 }
 
 /// `session_commitment \0 str(source_generation) \0 source_identity \0` (all ASCII).
-fn oversized_context(session_commitment: &str, source_generation: i64, source_identity: &str) -> Vec<u8> {
+fn oversized_context(
+    session_commitment: &str,
+    source_generation: i64,
+    source_identity: &str,
+) -> Vec<u8> {
     let mut context = Vec::with_capacity(session_commitment.len() + source_identity.len() + 24);
     context.extend_from_slice(session_commitment.as_bytes());
     context.push(0);
@@ -80,7 +87,10 @@ fn oversized_context(session_commitment: &str, source_generation: i64, source_id
 }
 
 fn is_lower_hex_digest(text: &[u8]) -> bool {
-    text.len() == 64 && text.iter().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    text.len() == 64
+        && text
+            .iter()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// `_encode_oversized_partial` once the caller has checked `line_start` is a non-negative `int`
@@ -93,7 +103,9 @@ pub fn encode_oversized_partial(
     source_identity: &str,
     key_material: &[u8],
 ) -> Option<Vec<u8>> {
-    let digest = prefix_commitment.strip_prefix("hmac-sha256:").unwrap_or(prefix_commitment);
+    let digest = prefix_commitment
+        .strip_prefix("hmac-sha256:")
+        .unwrap_or(prefix_commitment);
     if line_start < 0 || !is_lower_hex_digest(digest.as_bytes()) {
         return None;
     }
@@ -149,7 +161,10 @@ pub fn decode_oversized_partial(
     if !canonical_decimal || !prefix_digest_raw.is_ascii() {
         return OversizedPartial::Invalid;
     }
-    let Some(line_start) = std::str::from_utf8(line_start_raw).ok().and_then(|text| text.parse::<i64>().ok()) else {
+    let Some(line_start) = std::str::from_utf8(line_start_raw)
+        .ok()
+        .and_then(|text| text.parse::<i64>().ok())
+    else {
         return OversizedPartial::Defer;
     };
     if !is_lower_hex_digest(prefix_digest_raw) {
@@ -159,19 +174,28 @@ pub fn decode_oversized_partial(
     context.extend_from_slice(line_start_raw);
     context.push(b':');
     context.extend_from_slice(prefix_digest_raw);
-    let expected = hex::encode(hmac_sha256(key_material, &[OVERSIZED_PARTIAL_DOMAIN, &context]));
+    let expected = hex::encode(hmac_sha256(
+        key_material,
+        &[OVERSIZED_PARTIAL_DOMAIN, &context],
+    ));
     if !constant_time_eq(tag, expected.as_bytes()) {
         return OversizedPartial::Invalid;
     }
     // The digest is 64 lowercase hex characters, so this conversion cannot fail.
-    OversizedPartial::State(line_start, String::from_utf8_lossy(prefix_digest_raw).into_owned())
+    OversizedPartial::State(
+        line_start,
+        String::from_utf8_lossy(prefix_digest_raw).into_owned(),
+    )
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
     }
-    left.iter().zip(right).fold(0u8, |acc, (l, r)| acc | (l ^ r)) == 0
+    left.iter()
+        .zip(right)
+        .fold(0u8, |acc, (l, r)| acc | (l ^ r))
+        == 0
 }
 
 /// `_oversized_line_commitment` with ASCII text arguments.
@@ -312,7 +336,9 @@ impl<'a> Fold<'a> {
                 return true;
             }
         }
-        self.seen_exits.get(commitment).is_some_and(|exits| exits.contains(&item.exit_status))
+        self.seen_exits
+            .get(commitment)
+            .is_some_and(|exits| exits.contains(&item.exit_status))
     }
 
     fn settle(&mut self, commitment: Option<&'a str>, closing: bool) {
@@ -322,7 +348,12 @@ impl<'a> Fold<'a> {
         if self.owed.get(commitment).copied().unwrap_or(0) <= 0 {
             return;
         }
-        if self.open_calls.get(commitment).is_some_and(|calls| !calls.is_empty()) && !closing {
+        if self
+            .open_calls
+            .get(commitment)
+            .is_some_and(|calls| !calls.is_empty())
+            && !closing
+        {
             return;
         }
         let mut waiting = 0;
@@ -396,7 +427,11 @@ pub fn rollout_item_decisions<'a>(
                 }
                 while !fold.pending.is_empty() {
                     let item = fold.pending[0];
-                    let decision = if fold.proven_copy(&item) { Decision::Copy } else { Decision::Unpaired };
+                    let decision = if fold.proven_copy(&item) {
+                        Decision::Copy
+                    } else {
+                        Decision::Unpaired
+                    };
                     fold.decide(0, decision);
                 }
                 continue;
@@ -409,7 +444,11 @@ pub fn rollout_item_decisions<'a>(
                     calls.remove(call);
                 }
             }
-            let mut joined = call_id.and_then(|call| fold.pending.iter().position(|item| item.call_id == Some(call)));
+            let mut joined = call_id.and_then(|call| {
+                fold.pending
+                    .iter()
+                    .position(|item| item.call_id == Some(call))
+            });
             if !row.stated {
                 if let Some(position) = joined {
                     fold.decide(position, Decision::Carrier);
@@ -429,20 +468,25 @@ pub fn rollout_item_decisions<'a>(
                 fold.stated_calls.insert(call);
             }
             if let Some(commitment) = commitment {
-                fold.seen_exits.entry(commitment).or_default().insert(exit_fact);
+                fold.seen_exits
+                    .entry(commitment)
+                    .or_default()
+                    .insert(exit_fact);
             }
             if joined.is_none() {
                 if let Some(commitment) = commitment {
-                    joined = fold
-                        .pending
-                        .iter()
-                        .position(|item| item.commitment == Some(commitment) && item.exit_status == exit_fact);
+                    joined = fold.pending.iter().position(|item| {
+                        item.commitment == Some(commitment) && item.exit_status == exit_fact
+                    });
                 }
             }
             if let Some(position) = joined {
                 fold.decide(position, Decision::Copy);
             } else if let Some(commitment) = commitment {
-                fold.stated_exits.entry(commitment).or_default().push(exit_fact);
+                fold.stated_exits
+                    .entry(commitment)
+                    .or_default()
+                    .push(exit_fact);
             }
             fold.settle(commitment, false);
             continue;
@@ -451,7 +495,12 @@ pub fn rollout_item_decisions<'a>(
             continue;
         }
         let identity = row.source_identity;
-        if fold.decided.contains_key(identity) || fold.pending.iter().any(|item| item.source_identity == identity) {
+        if fold.decided.contains_key(identity)
+            || fold
+                .pending
+                .iter()
+                .any(|item| item.source_identity == identity)
+        {
             continue;
         }
         if let Some(call) = call_id.filter(|call| fold.unstated_calls.contains_key(call)) {
@@ -464,7 +513,9 @@ pub fn rollout_item_decisions<'a>(
             .and_then(|exits| exits.iter().position(|exit| *exit == exit_fact))
         {
             // `commitment` is `Some` here: the position came from its exit list.
-            if let Some(exits) = commitment.and_then(|commitment| fold.stated_exits.get_mut(commitment)) {
+            if let Some(exits) =
+                commitment.and_then(|commitment| fold.stated_exits.get_mut(commitment))
+            {
                 exits.remove(position);
             }
             fold.record(row_index, identity, Decision::Copy);
@@ -479,7 +530,11 @@ pub fn rollout_item_decisions<'a>(
             fold.settle(commitment, false);
         }
     }
-    let remaining: Vec<(usize, &'a str)> = fold.pending.iter().map(|item| (item.row, item.source_identity)).collect();
+    let remaining: Vec<(usize, &'a str)> = fold
+        .pending
+        .iter()
+        .map(|item| (item.row, item.source_identity))
+        .collect();
     for (row, identity) in remaining {
         fold.record(row, identity, Decision::Pending);
     }
@@ -492,9 +547,18 @@ mod tests {
 
     #[test]
     fn filename_slots() {
-        assert!(rollout_filename_matches("rollout-2026-07-23T12-00-00-root.jsonl", "root"));
-        assert!(rollout_filename_matches("rollout-2026-07-23T12-00-00-root_child.JSONL", "root"));
-        assert!(!rollout_filename_matches("rollout-2026-07-23T12-00-00-root-child.jsonl", "root"));
+        assert!(rollout_filename_matches(
+            "rollout-2026-07-23T12-00-00-root.jsonl",
+            "root"
+        ));
+        assert!(rollout_filename_matches(
+            "rollout-2026-07-23T12-00-00-root_child.JSONL",
+            "root"
+        ));
+        assert!(!rollout_filename_matches(
+            "rollout-2026-07-23T12-00-00-root-child.jsonl",
+            "root"
+        ));
         assert!(rollout_filename_matches("root.jsonl.zst", "root"));
         assert_eq!(posix_name("a/b/./"), "b");
         assert_eq!(posix_name("/"), "");
@@ -503,10 +567,21 @@ mod tests {
     #[test]
     fn oversized_partial_round_trips() {
         let digest = "ab".repeat(32);
-        let encoded = encode_oversized_partial(7, &format!("hmac-sha256:{digest}"), "s", 2, "i", b"key").unwrap();
-        assert_eq!(decode_oversized_partial(&encoded, "s", 2, "i", b"key"), OversizedPartial::State(7, digest.clone()));
-        assert_eq!(decode_oversized_partial(&encoded, "s", 3, "i", b"key"), OversizedPartial::Invalid);
-        assert_eq!(decode_oversized_partial(b"plain", "s", 2, "i", b"key"), OversizedPartial::NotOversized);
+        let encoded =
+            encode_oversized_partial(7, &format!("hmac-sha256:{digest}"), "s", 2, "i", b"key")
+                .unwrap();
+        assert_eq!(
+            decode_oversized_partial(&encoded, "s", 2, "i", b"key"),
+            OversizedPartial::State(7, digest.clone())
+        );
+        assert_eq!(
+            decode_oversized_partial(&encoded, "s", 3, "i", b"key"),
+            OversizedPartial::Invalid
+        );
+        assert_eq!(
+            decode_oversized_partial(b"plain", "s", 2, "i", b"key"),
+            OversizedPartial::NotOversized
+        );
     }
 
     #[test]
@@ -531,6 +606,9 @@ mod tests {
             stated: true,
             hooked_item: true,
         };
-        assert_eq!(rollout_item_decisions(&[post, item], &[]), vec![(1, Decision::Copy)]);
+        assert_eq!(
+            rollout_item_decisions(&[post, item], &[]),
+            vec![(1, Decision::Copy)]
+        );
     }
 }

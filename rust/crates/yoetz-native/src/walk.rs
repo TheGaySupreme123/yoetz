@@ -42,7 +42,11 @@ pub fn is_plain_scalar(value: &Bound<'_, PyAny>) -> bool {
         || is_exact(value, ffi::PyFloat_CheckExact)
 }
 
-fn abc<'py>(py: Python<'py>, cell: &'static PyOnceLock<Py<PyAny>>, name: &str) -> PyResult<&'py Bound<'py, PyAny>> {
+fn abc<'py>(
+    py: Python<'py>,
+    cell: &'static PyOnceLock<Py<PyAny>>,
+    name: &str,
+) -> PyResult<&'py Bound<'py, PyAny>> {
     cell.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
         Ok(py.import("collections.abc")?.getattr(name)?.unbind())
     })
@@ -62,7 +66,10 @@ pub fn is_mapping_instance(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult
     if is_exact(value, ffi::PyDict_CheckExact) {
         return Ok(true);
     }
-    if is_plain_scalar(value) || is_exact(value, ffi::PyList_CheckExact) || is_exact(value, ffi::PyTuple_CheckExact) {
+    if is_plain_scalar(value)
+        || is_exact(value, ffi::PyList_CheckExact)
+        || is_exact(value, ffi::PyTuple_CheckExact)
+    {
         return Ok(false);
     }
     value.is_instance(mapping_abc(py)?)
@@ -70,10 +77,17 @@ pub fn is_mapping_instance(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult
 
 /// `isinstance(value, collections.abc.Sequence)`.
 pub fn is_sequence_instance(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<bool> {
-    if is_exact(value, ffi::PyList_CheckExact) || is_exact(value, ffi::PyTuple_CheckExact) || is_exact(value, ffi::PyUnicode_CheckExact) {
+    if is_exact(value, ffi::PyList_CheckExact)
+        || is_exact(value, ffi::PyTuple_CheckExact)
+        || is_exact(value, ffi::PyUnicode_CheckExact)
+    {
         return Ok(true);
     }
-    if value.is_none() || is_exact(value, ffi::PyLong_CheckExact) || is_exact(value, ffi::PyBool_Check) || is_exact(value, ffi::PyDict_CheckExact) {
+    if value.is_none()
+        || is_exact(value, ffi::PyLong_CheckExact)
+        || is_exact(value, ffi::PyBool_Check)
+        || is_exact(value, ffi::PyDict_CheckExact)
+    {
         return Ok(false);
     }
     value.is_instance(sequence_abc(py)?)
@@ -84,7 +98,10 @@ pub fn is_actual_mapping(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
     if is_exact(value, ffi::PyDict_Check) {
         return true;
     }
-    if is_plain_scalar(value) || is_exact(value, ffi::PyList_CheckExact) || is_exact(value, ffi::PyTuple_CheckExact) {
+    if is_plain_scalar(value)
+        || is_exact(value, ffi::PyList_CheckExact)
+        || is_exact(value, ffi::PyTuple_CheckExact)
+    {
         return false;
     }
     let Ok(mapping) = mapping_abc(py) else {

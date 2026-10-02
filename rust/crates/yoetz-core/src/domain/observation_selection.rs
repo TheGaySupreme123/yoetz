@@ -12,13 +12,40 @@ pub const MAX_RESULT_JSON_BYTES: usize = 65_536;
 /// `_MAX_COMMAND_CHARS` (code points).
 pub const MAX_COMMAND_CHARS: usize = 16_384;
 
-pub const ROUTINE_READ_TOOLS: &[&str] = &["glob", "grep", "list_files", "read", "read_file", "search", "view_file"];
-pub const SHELL_TOOLS: &[&str] =
-    &["bash", "command", "exec", "exec_command", "local_shell", "run_terminal_cmd", "shell"];
+pub const ROUTINE_READ_TOOLS: &[&str] = &[
+    "glob",
+    "grep",
+    "list_files",
+    "read",
+    "read_file",
+    "search",
+    "view_file",
+];
+pub const SHELL_TOOLS: &[&str] = &[
+    "bash",
+    "command",
+    "exec",
+    "exec_command",
+    "local_shell",
+    "run_terminal_cmd",
+    "shell",
+];
 pub const READ_ONLY_COMMANDS: &[&str] = &["head", "ls", "pwd", "rg", "tail", "wc"];
 pub const PRE_EVENTS: &[&str] = &["PreToolUse", "preToolUse"];
-pub const POST_EVENTS: &[&str] = &["PostToolUse", "postToolUse", "PostToolUseFailure", "postToolUseFailure"];
-pub const SUCCESS_STATUSES: &[&str] = &["complete", "completed", "ok", "passed", "success", "succeeded"];
+pub const POST_EVENTS: &[&str] = &[
+    "PostToolUse",
+    "postToolUse",
+    "PostToolUseFailure",
+    "postToolUseFailure",
+];
+pub const SUCCESS_STATUSES: &[&str] = &[
+    "complete",
+    "completed",
+    "ok",
+    "passed",
+    "success",
+    "succeeded",
+];
 pub const FAILURE_STATUSES: &[(&str, &str)] = &[
     ("aborted", "failure"),
     ("canceled", "cancelled"),
@@ -38,7 +65,8 @@ pub const FAILURE_STATUSES: &[(&str, &str)] = &[
 pub const PARTIAL_STATUSES: &[&str] = &["partial", "partially_completed"];
 pub const RG_PRE_OPTIONS: &[&str] = &["--pre", "--pre-glob", "--pre-files"];
 pub const GIT_SIDE_EFFECT_PREFIXES: &[&str] = &["--output=", "--ext-diff=", "--textconv="];
-pub const GIT_SIDE_EFFECT_OPTIONS: &[&str] = &["--ext-diff", "--output", "-o", "--textconv", "--filters"];
+pub const GIT_SIDE_EFFECT_OPTIONS: &[&str] =
+    &["--ext-diff", "--output", "-o", "--textconv", "--filters"];
 pub const EDIT_TOOL_HINTS: &[&str] = &[
     "apply_patch",
     "create_file",
@@ -56,13 +84,34 @@ pub const EDIT_TOOL_HINTS: &[&str] = &[
     "write",
     "write_file",
 ];
-pub const TEST_TOOL_HINTS: &[&str] = &["cargo_test", "jest", "mocha", "nox", "pytest", "test", "tox", "vitest"];
-pub const VERIFICATION_TOOL_HINTS: &[&str] = &["assert", "check", "lint", "review", "typecheck", "verify"];
-pub const EDIT_COMMANDS: &[&str] =
-    &["apply_patch", "cp", "install", "mkdir", "mv", "perl", "rm", "rmdir", "sed", "tee", "touch"];
+pub const TEST_TOOL_HINTS: &[&str] = &[
+    "cargo_test",
+    "jest",
+    "mocha",
+    "nox",
+    "pytest",
+    "test",
+    "tox",
+    "vitest",
+];
+pub const VERIFICATION_TOOL_HINTS: &[&str] =
+    &["assert", "check", "lint", "review", "typecheck", "verify"];
+pub const EDIT_COMMANDS: &[&str] = &[
+    "apply_patch",
+    "cp",
+    "install",
+    "mkdir",
+    "mv",
+    "perl",
+    "rm",
+    "rmdir",
+    "sed",
+    "tee",
+    "touch",
+];
 pub const TEST_COMMANDS: &[&str] = &[
-    "cargo", "go", "jest", "make", "mocha", "mypy", "nox", "npm", "pnpm", "pytest", "pyright", "ruff", "tox", "tsc",
-    "uv", "vitest", "yarn",
+    "cargo", "go", "jest", "make", "mocha", "mypy", "nox", "npm", "pnpm", "pytest", "pyright",
+    "ruff", "tox", "tsc", "uv", "vitest", "yarn",
 ];
 const SHELL_VERIFICATION_COMMANDS: &[&str] = &["check", "lint", "review", "verify", "typecheck"];
 const GIT_READ_SUBCOMMANDS: &[&str] = &["diff", "log", "rev-parse", "show", "status"];
@@ -87,7 +136,10 @@ const fn facts(candidate: bool, reason: &'static str) -> RoutineFacts {
 
 /// `_is_edit_tool_token(lowered)`.
 pub fn is_edit_tool_token(lowered: &str) -> bool {
-    member(EDIT_TOOL_HINTS, lowered) || ["edit", "write", "patch"].iter().any(|hint| lowered.contains(hint))
+    member(EDIT_TOOL_HINTS, lowered)
+        || ["edit", "write", "patch"]
+            .iter()
+            .any(|hint| lowered.contains(hint))
 }
 
 /// What `_routine_facts` decides from the folded tool name alone.
@@ -108,12 +160,22 @@ pub fn tool_decision(lowered: &str) -> ToolDecision {
     if is_edit_tool_token(lowered) {
         return ToolDecision::Facts(facts(false, "edit"));
     }
-    if member(TEST_TOOL_HINTS, lowered) || ["test", "pytest", "check"].iter().any(|hint| lowered.contains(hint)) {
-        let reason = if lowered.contains("test") || lowered.contains("pytest") { "test" } else { "verification" };
+    if member(TEST_TOOL_HINTS, lowered)
+        || ["test", "pytest", "check"]
+            .iter()
+            .any(|hint| lowered.contains(hint))
+    {
+        let reason = if lowered.contains("test") || lowered.contains("pytest") {
+            "test"
+        } else {
+            "verification"
+        };
         return ToolDecision::Facts(facts(false, reason));
     }
     if member(VERIFICATION_TOOL_HINTS, lowered)
-        || ["lint", "verify", "review", "typecheck"].iter().any(|hint| lowered.contains(hint))
+        || ["lint", "verify", "review", "typecheck"]
+            .iter()
+            .any(|hint| lowered.contains(hint))
     {
         return ToolDecision::Facts(facts(false, "verification"));
     }
@@ -133,7 +195,11 @@ fn routine_shell_reason(lowered: &str, argv: &[String]) -> &'static str {
     if member(EDIT_COMMANDS, lowered) {
         return "edit";
     }
-    if lowered == "git" && argv.len() >= 2 && argv[1] == "diff" && argv[2..].iter().any(|item| item == "--check") {
+    if lowered == "git"
+        && argv.len() >= 2
+        && argv[1] == "diff"
+        && argv[2..].iter().any(|item| item == "--check")
+    {
         return "verification";
     }
     if member(TEST_COMMANDS, lowered) {
@@ -148,7 +214,10 @@ fn routine_shell_reason(lowered: &str, argv: &[String]) -> &'static str {
 /// `_routine_shell_facts` from the selected non-empty command string onward.
 ///
 /// `fold` is `str.casefold`; it may fail only if the Python call it wraps fails.
-pub fn shell_command_facts<E>(raw: &str, fold: &mut impl FnMut(&str) -> Result<String, E>) -> Result<RoutineFacts, E> {
+pub fn shell_command_facts<E>(
+    raw: &str,
+    fold: &mut impl FnMut(&str) -> Result<String, E>,
+) -> Result<RoutineFacts, E> {
     const AMBIGUOUS: RoutineFacts = facts(false, "ambiguous_shell");
     if raw.is_empty() || raw.chars().count() > MAX_COMMAND_CHARS {
         return Ok(AMBIGUOUS);
@@ -188,7 +257,9 @@ pub fn shell_command_facts<E>(raw: &str, fold: &mut impl FnMut(&str) -> Result<S
     for argument in &argv[1..] {
         let option = fold(argument)?;
         if member(GIT_SIDE_EFFECT_OPTIONS, &option)
-            || GIT_SIDE_EFFECT_PREFIXES.iter().any(|prefix| option.starts_with(prefix))
+            || GIT_SIDE_EFFECT_PREFIXES
+                .iter()
+                .any(|prefix| option.starts_with(prefix))
             || option.contains("textconv")
             || option.contains("ext-diff")
         {
@@ -344,7 +415,12 @@ pub struct Classification {
 }
 
 /// The assembly at the end of `classify_observation`.
-pub fn assemble(phase: Phase, routine: RoutineFacts, outcome: Option<&'static str>, untrusted: bool) -> Classification {
+pub fn assemble(
+    phase: Phase,
+    routine: RoutineFacts,
+    outcome: Option<&'static str>,
+    untrusted: bool,
+) -> Classification {
     let proven = phase == Phase::Post && routine.candidate && outcome == Some("success");
     let protected = phase != Phase::Post || !proven;
     let mut reasons = Vec::with_capacity(5);
@@ -403,7 +479,10 @@ mod tests {
         assert_eq!(shell("rg --pre=x foo"), facts(false, "unsafe_shell"));
         assert_eq!(shell("git status"), facts(true, "routine_shell"));
         assert_eq!(shell("git diff --check"), facts(false, "verification"));
-        assert_eq!(shell("git -c x diff --output=y"), facts(false, "unsafe_shell"));
+        assert_eq!(
+            shell("git -c x diff --output=y"),
+            facts(false, "unsafe_shell")
+        );
         assert_eq!(shell("git commit"), facts(false, "unknown_operation"));
         assert_eq!(shell("ls | wc"), facts(false, "ambiguous_shell"));
         assert_eq!(shell("'ls"), facts(false, "ambiguous_shell"));

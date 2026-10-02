@@ -24,7 +24,10 @@ fn exact_count(value: &Bound<'_, PyAny>, minimum: i64) -> Option<usize> {
     if unsafe { pyo3::ffi::PyLong_CheckExact(value.as_ptr()) } == 0 {
         return None;
     }
-    let number = value.extract::<i64>().ok().filter(|number| *number >= minimum)?;
+    let number = value
+        .extract::<i64>()
+        .ok()
+        .filter(|number| *number >= minimum)?;
     Some(usize::try_from(number).unwrap_or(usize::MAX))
 }
 
@@ -89,7 +92,8 @@ pub fn observe_shell_heredocs<'py>(
     command: &Bound<'py, PyAny>,
     max_heredocs: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let (Some(text), Some(max_heredocs)) = (exact_utf8(command), exact_count(max_heredocs, 0)) else {
+    let (Some(text), Some(max_heredocs)) = (exact_utf8(command), exact_count(max_heredocs, 0))
+    else {
         return Ok(defer(py));
     };
     let mut triples = Vec::new();
@@ -118,7 +122,10 @@ pub fn observe_codex_header_exit_codes<'py>(
 }
 
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add_function(wrap_pyfunction!(observe_workspace_relative_edit_path, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        observe_workspace_relative_edit_path,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(observe_sanitize_patch_paths, module)?)?;
     module.add_function(wrap_pyfunction!(observe_sanitize_patch_result, module)?)?;
     module.add_function(wrap_pyfunction!(observe_shell_heredocs, module)?)?;

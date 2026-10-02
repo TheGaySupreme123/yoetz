@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::hash::{BuildHasherDefault, Hash, Hasher};
 
-use crate::protocol::canonical::{encode_str_into, sha256_prefixed, utf16_cmp, Reason};
+use crate::protocol::canonical::{Reason, encode_str_into, sha256_prefixed, utf16_cmp};
 
 /// `LocalObservationStore._ordered_dedup_keys`: positions into `order` of the first occurrence of
 /// every key still present (`present[i]`), followed by the remaining members of the live set.
@@ -29,7 +29,9 @@ pub fn ordered_dedup_keys<'a>(
             ordered.push(DedupSource::Order(index));
         }
     }
-    let mut rest: Vec<usize> = (0..extra.len()).filter(|&index| !seen.contains(extra[index])).collect();
+    let mut rest: Vec<usize> = (0..extra.len())
+        .filter(|&index| !seen.contains(extra[index]))
+        .collect();
     rest.sort_by(|&left, &right| extra[left].as_bytes().cmp(extra[right].as_bytes()));
     ordered.extend(rest.into_iter().map(DedupSource::Extra));
     ordered
@@ -115,7 +117,11 @@ pub fn dedup_eviction_position(lanes: &[HashedStr<'_>]) -> Option<usize> {
 /// validated every key and value in the reference's (insertion) order.
 pub fn flat_object_digest(members: &mut [(&str, Vec<u8>)]) -> Result<String, Reason> {
     members.sort_by(|left, right| utf16_cmp(left.0, right.0));
-    let capacity = members.iter().map(|(key, value)| key.len() + value.len() + 4).sum::<usize>() + 2;
+    let capacity = members
+        .iter()
+        .map(|(key, value)| key.len() + value.len() + 4)
+        .sum::<usize>()
+        + 2;
     let mut out = Vec::with_capacity(capacity);
     out.push(b'{');
     for (position, (key, value)) in members.iter().enumerate() {
@@ -153,7 +159,13 @@ mod tests {
     }
 
     fn lanes<'a>(texts: &[&'a str]) -> Vec<HashedStr<'a>> {
-        texts.iter().map(|text| HashedStr { hash: text.len() as u64, text }).collect()
+        texts
+            .iter()
+            .map(|text| HashedStr {
+                hash: text.len() as u64,
+                text,
+            })
+            .collect()
     }
 
     #[test]
@@ -162,13 +174,22 @@ mod tests {
         assert_eq!(dedup_eviction_position(&lanes(&["a", "b"])), Some(0));
         assert_eq!(dedup_eviction_position(&lanes(&["a", "b", "b"])), Some(1));
         // Equal hashes, different texts: still distinct lanes.
-        assert_eq!(dedup_eviction_position(&lanes(&["a", "c", "b", "b"])), Some(2));
-        assert_eq!(dedup_eviction_position(&lanes(&["_unknown:k1", "_unknown:k1"])), Some(0));
+        assert_eq!(
+            dedup_eviction_position(&lanes(&["a", "c", "b", "b"])),
+            Some(2)
+        );
+        assert_eq!(
+            dedup_eviction_position(&lanes(&["_unknown:k1", "_unknown:k1"])),
+            Some(0)
+        );
     }
 
     #[test]
     fn flat_digest_sorts_members() {
         let mut members = vec![("b", b"1".to_vec()), ("a", b"\"x\"".to_vec())];
-        assert_eq!(flat_object_digest(&mut members).unwrap(), sha256_prefixed(br#"{"a":"x","b":1}"#));
+        assert_eq!(
+            flat_object_digest(&mut members).unwrap(),
+            sha256_prefixed(br#"{"a":"x","b":1}"#)
+        );
     }
 }

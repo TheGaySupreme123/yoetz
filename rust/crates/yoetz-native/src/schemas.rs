@@ -40,18 +40,57 @@ const MAX_PLAIN_DEPTH: usize = 80;
 /// The draft 2020-12 keywords `jsonschema` 4.26 applies (`Draft202012Validator.VALIDATORS`). The
 /// mirrored class's own keyword list is passed in at compile time; one outside this list refuses.
 const KNOWN_KEYWORDS: &[&str] = &[
-    "$dynamicRef", "$ref", "additionalProperties", "allOf", "anyOf", "const", "contains",
-    "dependentRequired", "dependentSchemas", "enum", "exclusiveMaximum", "exclusiveMinimum",
-    "format", "if", "items", "maxItems", "maxLength", "maxProperties", "maximum", "minItems",
-    "minLength", "minProperties", "minimum", "multipleOf", "not", "oneOf", "pattern",
-    "patternProperties", "prefixItems", "properties", "propertyNames", "required", "type",
-    "unevaluatedItems", "unevaluatedProperties", "uniqueItems",
+    "$dynamicRef",
+    "$ref",
+    "additionalProperties",
+    "allOf",
+    "anyOf",
+    "const",
+    "contains",
+    "dependentRequired",
+    "dependentSchemas",
+    "enum",
+    "exclusiveMaximum",
+    "exclusiveMinimum",
+    "format",
+    "if",
+    "items",
+    "maxItems",
+    "maxLength",
+    "maxProperties",
+    "maximum",
+    "minItems",
+    "minLength",
+    "minProperties",
+    "minimum",
+    "multipleOf",
+    "not",
+    "oneOf",
+    "pattern",
+    "patternProperties",
+    "prefixItems",
+    "properties",
+    "propertyNames",
+    "required",
+    "type",
+    "unevaluatedItems",
+    "unevaluatedProperties",
+    "uniqueItems",
 ];
 
 /// Keys that change reference resolution or that this module does not implement.
 const REFUSED_KEYWORDS: &[&str] = &[
-    "$dynamicRef", "$dynamicAnchor", "$anchor", "$recursiveRef", "$recursiveAnchor", "$vocabulary",
-    "$schema", "dependentSchemas", "patternProperties", "multipleOf", "unevaluatedItems",
+    "$dynamicRef",
+    "$dynamicAnchor",
+    "$anchor",
+    "$recursiveRef",
+    "$recursiveAnchor",
+    "$vocabulary",
+    "$schema",
+    "dependentSchemas",
+    "patternProperties",
+    "multipleOf",
+    "unevaluatedItems",
 ];
 
 // Instance kinds, for the per-node set of kinds a node can accept.
@@ -185,9 +224,9 @@ static MAPPING_ABC: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 /// `_actual_mapping`: `issubclass(type(value), Mapping)`, any failure meaning `False`.
 fn is_actual_mapping(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
-    let Ok(mapping) = MAPPING_ABC
-        .get_or_try_init(py, || -> PyResult<Py<PyAny>> { Ok(py.import("collections.abc")?.getattr("Mapping")?.unbind()) })
-    else {
+    let Ok(mapping) = MAPPING_ABC.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+        Ok(py.import("collections.abc")?.getattr("Mapping")?.unbind())
+    }) else {
         return false;
     };
     let result = unsafe { ffi::PyObject_IsSubclass(value.get_type().as_ptr(), mapping.as_ptr()) };
@@ -239,7 +278,9 @@ impl<'py> Context<'py> {
                 KIND_STR
             } else if ffi::PyDict_CheckExact(pointer) != 0 {
                 KIND_OBJECT
-            } else if ffi::PyList_CheckExact(pointer) != 0 || (self.raw && ffi::PyTuple_CheckExact(pointer) != 0) {
+            } else if ffi::PyList_CheckExact(pointer) != 0
+                || (self.raw && ffi::PyTuple_CheckExact(pointer) != 0)
+            {
                 KIND_ARRAY
             } else {
                 KIND_ALL
@@ -294,10 +335,14 @@ impl<'py> Context<'py> {
             return Ok(Value::Int(number));
         }
         if exact(item, ffi::PyUnicode_CheckExact) {
-            return Ok(Value::Str(unsafe { item.cast_unchecked::<PyString>() }.clone()));
+            return Ok(Value::Str(
+                unsafe { item.cast_unchecked::<PyString>() }.clone(),
+            ));
         }
         if exact(item, ffi::PyDict_CheckExact) {
-            return Ok(Value::Object(unsafe { item.cast_unchecked::<PyDict>() }.clone()));
+            return Ok(Value::Object(
+                unsafe { item.cast_unchecked::<PyDict>() }.clone(),
+            ));
         }
         if exact(item, ffi::PyList_CheckExact) {
             return Ok(Value::Array(item.clone()));
@@ -345,13 +390,20 @@ unsafe fn plain_fast(item: *mut ffi::PyObject, depth: usize) -> Fast {
         return Fast::Other;
     }
     unsafe {
-        if item == ffi::Py_None() || ffi::PyBool_Check(item) != 0 || ffi::PyUnicode_CheckExact(item) != 0 {
+        if item == ffi::Py_None()
+            || ffi::PyBool_Check(item) != 0
+            || ffi::PyUnicode_CheckExact(item) != 0
+        {
             return Fast::Plain;
         }
         if ffi::PyLong_CheckExact(item) != 0 {
             let mut overflow: std::os::raw::c_int = 0;
             ffi::PyLong_AsLongLongAndOverflow(item, &mut overflow);
-            return if overflow == 0 { Fast::Plain } else { Fast::Other };
+            return if overflow == 0 {
+                Fast::Plain
+            } else {
+                Fast::Other
+            };
         }
         if ffi::PyList_CheckExact(item) != 0 {
             let length = ffi::PyList_GET_SIZE(item);
@@ -415,7 +467,12 @@ fn type_matches(types: u8, value: &Value<'_>) -> bool {
 }
 
 impl SchemaValidity {
-    fn valid<'py>(&self, cx: &mut Context<'py>, node: NodeId, item: &Bound<'py, PyAny>) -> Verdict<bool> {
+    fn valid<'py>(
+        &self,
+        cx: &mut Context<'py>,
+        node: NodeId,
+        item: &Bound<'py, PyAny>,
+    ) -> Verdict<bool> {
         match &self.nodes[node as usize] {
             Node::Any => Ok(true),
             Node::Never => Ok(false),
@@ -436,7 +493,12 @@ impl SchemaValidity {
         }
     }
 
-    fn keywords_valid<'py>(&self, cx: &mut Context<'py>, kw: &Keywords, item: &Bound<'py, PyAny>) -> Verdict<bool> {
+    fn keywords_valid<'py>(
+        &self,
+        cx: &mut Context<'py>,
+        kw: &Keywords,
+        item: &Bound<'py, PyAny>,
+    ) -> Verdict<bool> {
         let value = cx.value(item)?;
         if let Some(types) = kw.types {
             if !type_matches(types, &value) {
@@ -487,7 +549,11 @@ impl SchemaValidity {
     fn native_match(&self, pattern: usize, regex: &Regex, text: &str) -> bool {
         // `try_lock`: a concurrent check simply skips the memory.
         if let Ok(memory) = self.matches.try_lock() {
-            if let Some(known) = memory.by_pattern.get(pattern).and_then(|answers| answers.get(text)) {
+            if let Some(known) = memory
+                .by_pattern
+                .get(pattern)
+                .and_then(|answers| answers.get(text))
+            {
                 return *known;
             }
         }
@@ -500,24 +566,37 @@ impl SchemaValidity {
             if memory.by_pattern.len() <= pattern {
                 memory.by_pattern.resize_with(pattern + 1, HashMap::new);
             }
-            if memory.by_pattern[pattern].insert(text.into(), matched).is_none() {
+            if memory.by_pattern[pattern]
+                .insert(text.into(), matched)
+                .is_none()
+            {
                 memory.entries += 1;
             }
         }
         matched
     }
 
-    fn string_valid(&self, cx: &mut Context<'_>, kw: &Keywords, text: &Bound<'_, PyString>) -> Verdict<bool> {
+    fn string_valid(
+        &self,
+        cx: &mut Context<'_>,
+        kw: &Keywords,
+        text: &Bound<'_, PyString>,
+    ) -> Verdict<bool> {
         if kw.min_length.is_some() || kw.max_length.is_some() {
             let length = string_length(text);
-            if kw.min_length.is_some_and(|bound| length < bound) || kw.max_length.is_some_and(|bound| length > bound) {
+            if kw.min_length.is_some_and(|bound| length < bound)
+                || kw.max_length.is_some_and(|bound| length > bound)
+            {
                 return Ok(false);
             }
         }
         if let Some(pattern) = kw.pattern {
             let matched = match &self.patterns[pattern] {
                 Pattern::Native(regex) => self.native_match(pattern, regex, text.to_str()?),
-                Pattern::Python(compiled) => !compiled.bind(cx.py).call_method1("search", (text,))?.is_none(),
+                Pattern::Python(compiled) => !compiled
+                    .bind(cx.py)
+                    .call_method1("search", (text,))?
+                    .is_none(),
             };
             if !matched {
                 return Ok(false);
@@ -539,9 +618,16 @@ impl SchemaValidity {
         Ok(true)
     }
 
-    fn array_valid<'py>(&self, cx: &mut Context<'py>, kw: &Keywords, array: &Bound<'py, PyAny>) -> Verdict<bool> {
+    fn array_valid<'py>(
+        &self,
+        cx: &mut Context<'py>,
+        kw: &Keywords,
+        array: &Bound<'py, PyAny>,
+    ) -> Verdict<bool> {
         let total = array_len(array);
-        if kw.min_items.is_some_and(|bound| (total as i64) < bound) || kw.max_items.is_some_and(|bound| (total as i64) > bound) {
+        if kw.min_items.is_some_and(|bound| (total as i64) < bound)
+            || kw.max_items.is_some_and(|bound| (total as i64) > bound)
+        {
             return Ok(false);
         }
         for (index, node) in kw.prefix_items.iter().enumerate().take(total) {
@@ -588,10 +674,17 @@ impl SchemaValidity {
 
     /// Size bounds, `required`, `dependentRequired` and the light properties. `None` when one
     /// fails, otherwise how many light properties are present.
-    fn object_shallow<'py>(&self, cx: &mut Context<'py>, kw: &Keywords, object: &Bound<'py, PyDict>) -> Verdict<Option<i64>> {
+    fn object_shallow<'py>(
+        &self,
+        cx: &mut Context<'py>,
+        kw: &Keywords,
+        object: &Bound<'py, PyDict>,
+    ) -> Verdict<Option<i64>> {
         let py = cx.py;
         let total = object.len() as i64;
-        if kw.min_properties.is_some_and(|bound| total < bound) || kw.max_properties.is_some_and(|bound| total > bound) {
+        if kw.min_properties.is_some_and(|bound| total < bound)
+            || kw.max_properties.is_some_and(|bound| total > bound)
+        {
             return Ok(None);
         }
         for name in &kw.required {
@@ -621,7 +714,13 @@ impl SchemaValidity {
     }
 
     /// The heavy properties, `additionalProperties`, `propertyNames`, `unevaluatedProperties`.
-    fn object_deep<'py>(&self, cx: &mut Context<'py>, kw: &Keywords, object: &Bound<'py, PyDict>, present: i64) -> Verdict<bool> {
+    fn object_deep<'py>(
+        &self,
+        cx: &mut Context<'py>,
+        kw: &Keywords,
+        object: &Bound<'py, PyDict>,
+        present: i64,
+    ) -> Verdict<bool> {
         let py = cx.py;
         let total = object.len() as i64;
         let mut present = present;
@@ -666,7 +765,9 @@ impl SchemaValidity {
             let mut evaluated = HashSet::new();
             self.evaluated_keywords(cx, kw, object, &mut evaluated)?;
             for (key, member) in object.iter() {
-                if !evaluated.contains(key_text(&key)?.as_str()) && !self.valid(cx, unevaluated, &member)? {
+                if !evaluated.contains(key_text(&key)?.as_str())
+                    && !self.valid(cx, unevaluated, &member)?
+                {
                     return Ok(false);
                 }
             }
@@ -674,7 +775,12 @@ impl SchemaValidity {
         Ok(true)
     }
 
-    fn applicators_valid<'py>(&self, cx: &mut Context<'py>, kw: &Keywords, item: &Bound<'py, PyAny>) -> Verdict<bool> {
+    fn applicators_valid<'py>(
+        &self,
+        cx: &mut Context<'py>,
+        kw: &Keywords,
+        item: &Bound<'py, PyAny>,
+    ) -> Verdict<bool> {
         if let Some(reference) = kw.reference {
             if !self.valid(cx, reference, item)? {
                 return Ok(false);
@@ -717,7 +823,11 @@ impl SchemaValidity {
             }
         }
         if let Some(condition) = kw.condition {
-            let branch = if self.valid(cx, condition, item)? { kw.then } else { kw.otherwise };
+            let branch = if self.valid(cx, condition, item)? {
+                kw.then
+            } else {
+                kw.otherwise
+            };
             if let Some(branch) = branch {
                 if !self.valid(cx, branch, item)? {
                     return Ok(false);
@@ -794,7 +904,12 @@ impl SchemaValidity {
     }
 
     /// `_utils.uniq` over an array's members.
-    fn unique<'py>(&self, cx: &mut Context<'py>, array: &Bound<'py, PyAny>, total: usize) -> Verdict<bool> {
+    fn unique<'py>(
+        &self,
+        cx: &mut Context<'py>,
+        array: &Bound<'py, PyAny>,
+        total: usize,
+    ) -> Verdict<bool> {
         if total <= 1 {
             return Ok(true);
         }
@@ -825,7 +940,10 @@ impl SchemaValidity {
             }
             return Ok(true);
         }
-        if members.iter().all(|member| matches!(member, Value::Array(_))) {
+        if members
+            .iter()
+            .all(|member| matches!(member, Value::Array(_)))
+        {
             // Sorting lists of lists may or may not raise depending on their contents; the
             // comparison order decides which pairs `uniq` checks.
             return Err(Defer);
@@ -843,7 +961,12 @@ impl SchemaValidity {
     }
 
     /// `_utils.equal` between two instance values.
-    fn equal_values<'py>(&self, cx: &mut Context<'py>, left: &Value<'py>, right: &Value<'py>) -> Verdict<bool> {
+    fn equal_values<'py>(
+        &self,
+        cx: &mut Context<'py>,
+        left: &Value<'py>,
+        right: &Value<'py>,
+    ) -> Verdict<bool> {
         Ok(match (left, right) {
             (Value::Null, Value::Null) => true,
             (Value::Bool(a), Value::Bool(b)) => a == b,
@@ -884,7 +1007,12 @@ impl SchemaValidity {
     }
 
     /// `_utils.equal` between an instance value and a schema constant.
-    fn equals_constant<'py>(&self, cx: &mut Context<'py>, value: &Value<'py>, constant: &Constant) -> Verdict<bool> {
+    fn equals_constant<'py>(
+        &self,
+        cx: &mut Context<'py>,
+        value: &Value<'py>,
+        constant: &Constant,
+    ) -> Verdict<bool> {
         Ok(match (value, constant) {
             (Value::Null, Constant::Null) => true,
             (Value::Bool(a), Constant::Bool(b)) => a == b,
@@ -934,7 +1062,9 @@ fn key_text(key: &Bound<'_, PyAny>) -> Verdict<String> {
     if !exact(key, ffi::PyUnicode_CheckExact) {
         return Err(Defer);
     }
-    Ok(unsafe { key.cast_unchecked::<PyString>() }.to_str()?.to_owned())
+    Ok(unsafe { key.cast_unchecked::<PyString>() }
+        .to_str()?
+        .to_owned())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -964,7 +1094,9 @@ fn text(value: &Bound<'_, PyAny>) -> Result<String, Refuse> {
     if !exact(value, ffi::PyUnicode_CheckExact) {
         return Err(Refuse);
     }
-    Ok(unsafe { value.cast_unchecked::<PyString>() }.to_str()?.to_owned())
+    Ok(unsafe { value.cast_unchecked::<PyString>() }
+        .to_str()?
+        .to_owned())
 }
 
 fn text_object<'py>(value: &Bound<'py, PyAny>) -> Result<Py<PyString>, Refuse> {
@@ -1050,7 +1182,11 @@ fn declares_id(value: &Bound<'_, PyAny>) -> Result<bool, Refuse> {
 impl<'py> Compiler<'py> {
     fn schema(&mut self, value: &Bound<'py, PyAny>, document: &str) -> Result<NodeId, Refuse> {
         if unsafe { ffi::PyBool_Check(value.as_ptr()) } != 0 {
-            return Ok(if value.as_ptr() == unsafe { ffi::Py_True() } { ANY } else { NEVER });
+            return Ok(if value.as_ptr() == unsafe { ffi::Py_True() } {
+                ANY
+            } else {
+                NEVER
+            });
         }
         let schema = dict(value)?;
         let address = value.as_ptr() as usize;
@@ -1060,7 +1196,10 @@ impl<'py> Compiler<'py> {
         let node = NodeId::try_from(self.nodes.len()).map_err(|_| Refuse)?;
         self.nodes.push(Node::Any);
         self.by_address.insert(address, node);
-        let mut kw = Keywords { min_contains: 1, ..Keywords::default() };
+        let mut kw = Keywords {
+            min_contains: 1,
+            ..Keywords::default()
+        };
         let mut applies = false;
         for (key, member) in schema.iter() {
             let key = text(&key)?;
@@ -1194,13 +1333,20 @@ impl<'py> Compiler<'py> {
     }
 
     /// Resolve `reference` from `document` the way `referencing` does for this catalog, or refuse.
-    fn resolve(&self, document: &str, reference: &str) -> Result<(Bound<'py, PyAny>, String), Refuse> {
+    fn resolve(
+        &self,
+        document: &str,
+        reference: &str,
+    ) -> Result<(Bound<'py, PyAny>, String), Refuse> {
         let (uri, fragment) = match reference.strip_prefix('#') {
             Some(fragment) => (document.to_owned(), fragment),
             None => {
                 // `urljoin` leaves an absolute, already-normal catalog URI unchanged.
                 let (base, fragment) = reference.split_once('#').unwrap_or((reference, ""));
-                if !base.starts_with("https://") || base.contains(['%', '?', '\\']) || base.contains("/.") {
+                if !base.starts_with("https://")
+                    || base.contains(['%', '?', '\\'])
+                    || base.contains("/.")
+                {
                     return Err(Refuse);
                 }
                 (base.to_owned(), fragment)
@@ -1282,14 +1428,17 @@ fn bare_reference(node: &Node) -> Option<NodeId> {
         && kw.max_items.is_none()
         && !kw.unique
         && kw.contains.is_none())
-        .then_some(reference)
+    .then_some(reference)
 }
 
 /// Point every use of a node that applies only a `$ref` at the reference's target: applying
 /// `{"$ref": X}` decides exactly what applying X decides, including the keys
 /// `unevaluatedProperties` counts as evaluated. A reference cycle of bare references is left as
 /// is (the walk defers on it by depth, like any cycle).
-fn collapse_references(nodes: &mut [Node], roots: HashMap<String, NodeId>) -> HashMap<String, NodeId> {
+fn collapse_references(
+    nodes: &mut [Node],
+    roots: HashMap<String, NodeId>,
+) -> HashMap<String, NodeId> {
     let targets: Vec<NodeId> = (0..nodes.len())
         .map(|start| {
             let mut node = start as NodeId;
@@ -1328,13 +1477,21 @@ fn collapse_references(nodes: &mut [Node], roots: HashMap<String, NodeId>) -> Ha
         {
             *slot = target(*slot);
         }
-        for list in [&mut kw.prefix_items, &mut kw.all_of, &mut kw.any_of, &mut kw.one_of] {
+        for list in [
+            &mut kw.prefix_items,
+            &mut kw.all_of,
+            &mut kw.any_of,
+            &mut kw.one_of,
+        ] {
             for child in list.iter_mut() {
                 *child = target(*child);
             }
         }
     }
-    roots.into_iter().map(|(schema_id, node)| (schema_id, target(node))).collect()
+    roots
+        .into_iter()
+        .map(|(schema_id, node)| (schema_id, target(node)))
+        .collect()
 }
 
 fn type_kinds(types: u8) -> u8 {
@@ -1371,7 +1528,12 @@ fn constant_kind(constant: &Constant) -> u8 {
 /// whatever its value (`type`, `const` and `enum` admit one kind each, a `$ref`/`allOf` member
 /// must hold too, an `anyOf`/`oneOf` needs one branch). Nodes on a reference cycle get every
 /// kind.
-fn accepted_kinds(nodes: &[Node], node: NodeId, memo: &mut [Option<u8>], visiting: &mut [bool]) -> u8 {
+fn accepted_kinds(
+    nodes: &[Node],
+    node: NodeId,
+    memo: &mut [Option<u8>],
+    visiting: &mut [bool],
+) -> u8 {
     if let Some(known) = memo[node as usize] {
         return known;
     }
@@ -1392,14 +1554,18 @@ fn accepted_kinds(nodes: &[Node], node: NodeId, memo: &mut [Option<u8>], visitin
         kinds &= constant_kind(constant);
     }
     if let Some(choices) = &kw.choices {
-        kinds &= choices.iter().fold(0, |union, choice| union | constant_kind(choice));
+        kinds &= choices
+            .iter()
+            .fold(0, |union, choice| union | constant_kind(choice));
     }
     for child in kw.reference.iter().chain(&kw.all_of) {
         kinds &= accepted_kinds(nodes, *child, memo, visiting);
     }
     for branches in [&kw.any_of, &kw.one_of] {
         if !branches.is_empty() {
-            let union = branches.iter().fold(0, |union, child| union | accepted_kinds(nodes, *child, memo, visiting));
+            let union = branches.iter().fold(0, |union, child| {
+                union | accepted_kinds(nodes, *child, memo, visiting)
+            });
             kinds &= union;
         }
     }
@@ -1447,7 +1613,9 @@ fn weight(nodes: &[Node], node: NodeId, memo: &mut [Option<u32>], visiting: &mut
     visiting[node as usize] = true;
     let mut total: u32 = 1;
     for child in children(kw) {
-        total = total.saturating_add(weight(nodes, child, memo, visiting)).min(CYCLE_WEIGHT);
+        total = total
+            .saturating_add(weight(nodes, child, memo, visiting))
+            .min(CYCLE_WEIGHT);
     }
     visiting[node as usize] = false;
     memo[node as usize] = Some(total);
@@ -1459,11 +1627,18 @@ fn weight(nodes: &[Node], node: NodeId, memo: &mut [Option<u32>], visiting: &mut
 fn order_properties(nodes: &mut [Node]) {
     let mut memo = vec![None; nodes.len()];
     let mut visiting = vec![false; nodes.len()];
-    let weights: Vec<u32> = (0..nodes.len()).map(|node| weight(nodes, node as NodeId, &mut memo, &mut visiting)).collect();
+    let weights: Vec<u32> = (0..nodes.len())
+        .map(|node| weight(nodes, node as NodeId, &mut memo, &mut visiting))
+        .collect();
     for node in nodes.iter_mut() {
         if let Node::Schema(kw) = node {
-            kw.properties.sort_by_key(|(_, child)| weights[*child as usize]);
-            kw.light_properties = kw.properties.iter().take_while(|(_, child)| weights[*child as usize] <= LIGHT_WEIGHT).count();
+            kw.properties
+                .sort_by_key(|(_, child)| weights[*child as usize]);
+            kw.light_properties = kw
+                .properties
+                .iter()
+                .take_while(|(_, child)| weights[*child as usize] <= LIGHT_WEIGHT)
+                .count();
         }
     }
 }
@@ -1473,7 +1648,9 @@ fn order_properties(nodes: &mut [Node]) {
 static NATIVE_PATTERNS: Mutex<Option<HashMap<String, Option<Regex>>>> = Mutex::new(None);
 
 fn native_pattern(source: &str) -> Option<Regex> {
-    let mut cache = NATIVE_PATTERNS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut cache = NATIVE_PATTERNS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let cache = cache.get_or_insert_with(HashMap::new);
     if let Some(known) = cache.get(source) {
         return known.clone();
@@ -1579,7 +1756,12 @@ impl SchemaValidity {
         key: Option<&Bound<'_, PyAny>>,
     ) -> Option<bool> {
         let root = *self.roots.get(schema_id)?;
-        let mut cx = Context { py, raw, depth: 0, converted: HashMap::new() };
+        let mut cx = Context {
+            py,
+            raw,
+            depth: 0,
+            converted: HashMap::new(),
+        };
         if raw {
             cx.ensure_plain(instance, 0).ok()?;
             if let (Some(seen), Some(key)) = (seen, key) {

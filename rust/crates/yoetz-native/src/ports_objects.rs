@@ -10,7 +10,8 @@ use crate::ports_importer::{Grammar, exact_str_members};
 /// Whether `values` passes `_sorted_unique_ascii` and every member validates for `kind`.
 #[pyfunction]
 pub fn objects_live_object_ids_valid(values: &Bound<'_, PyAny>, kind: &Bound<'_, PyAny>) -> bool {
-    let (Some(grammar), Some(members)) = (Grammar::of(kind), exact_str_members(values, usize::MAX)) else {
+    let (Some(grammar), Some(members)) = (Grammar::of(kind), exact_str_members(values, usize::MAX))
+    else {
         return false;
     };
     let mut previous: Option<&str> = None;
@@ -18,7 +19,9 @@ pub fn objects_live_object_ids_valid(values: &Bound<'_, PyAny>, kind: &Bound<'_,
         let Ok(text) = member.to_str() else {
             return false;
         };
-        if previous.is_some_and(|before| text.as_bytes() <= before.as_bytes()) || !grammar.accepts(member) {
+        if previous.is_some_and(|before| text.as_bytes() <= before.as_bytes())
+            || !grammar.accepts(member)
+        {
             return false;
         }
         previous = Some(text);

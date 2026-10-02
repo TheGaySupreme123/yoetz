@@ -71,7 +71,9 @@ pub fn bind_sqlite_authorizers(source: &Bound<'_, PyDict>) -> PyResult<()> {
         python_migration: required(source, "python_migration")?.unbind(),
         native_writer: required(source, "native_writer")?.unbind(),
     };
-    *BINDINGS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(bound));
+    *BINDINGS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(bound));
     Ok(())
 }
 
@@ -92,7 +94,11 @@ fn name_of<'a>(value: &'a Bound<'_, PyAny>) -> Option<Option<&'a str>> {
         return None;
     }
     // A string with lone surrogates equals none of the ASCII names compared below.
-    Some(Some(unsafe { value.cast_unchecked::<PyString>() }.to_str().unwrap_or("\u{FFFD}")))
+    Some(Some(
+        unsafe { value.cast_unchecked::<PyString>() }
+            .to_str()
+            .unwrap_or("\u{FFFD}"),
+    ))
 }
 
 enum Decision {
@@ -103,7 +109,11 @@ enum Decision {
 
 impl Bindings {
     fn writer_decision(&self, action: i64, second: Option<&str>) -> Decision {
-        if action == self.attach || action == self.create_vtable || action == self.detach || action == self.drop_vtable {
+        if action == self.attach
+            || action == self.create_vtable
+            || action == self.detach
+            || action == self.drop_vtable
+        {
             return Decision::Deny;
         }
         if action == self.function && second == Some("load_extension") {
@@ -116,7 +126,11 @@ impl Bindings {
     }
 
     fn read_only_decision(&self, action: i64) -> Decision {
-        if action == self.select || action == self.read || action == self.function || action == self.recursive {
+        if action == self.select
+            || action == self.read
+            || action == self.function
+            || action == self.recursive
+        {
             return Decision::Ok;
         }
         if action == self.pragma {
@@ -125,7 +139,13 @@ impl Bindings {
         Decision::Deny
     }
 
-    fn result<'py>(&self, py: Python<'py>, decision: Decision, reference: &Py<PyAny>, args: Args<'_, 'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn result<'py>(
+        &self,
+        py: Python<'py>,
+        decision: Decision,
+        reference: &Py<PyAny>,
+        args: Args<'_, 'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         match decision {
             Decision::Ok => Ok(self.ok.bind(py).clone()),
             Decision::Deny => Ok(self.deny.bind(py).clone()),
@@ -143,7 +163,11 @@ type Args<'a, 'py> = (
 );
 
 /// Parse the fast-path arguments: exact-int action and `None`/exact-`str` names.
-fn fast_args<'a>(action: &Bound<'_, PyAny>, first: &'a Bound<'_, PyAny>, second: &'a Bound<'_, PyAny>) -> Option<(i64, Option<&'a str>, Option<&'a str>)> {
+fn fast_args<'a>(
+    action: &Bound<'_, PyAny>,
+    first: &'a Bound<'_, PyAny>,
+    second: &'a Bound<'_, PyAny>,
+) -> Option<(i64, Option<&'a str>, Option<&'a str>)> {
     Some((action_code(action)?, name_of(first)?, name_of(second)?))
 }
 
@@ -212,7 +236,12 @@ pub fn sqlite_migration_authorizer<'py>(
     if !writer.is(bound.native_writer.bind(py)) {
         return writer.call1(args);
     }
-    bound.result(py, bound.writer_decision(code, second_name), &bound.python_writer, args)
+    bound.result(
+        py,
+        bound.writer_decision(code, second_name),
+        &bound.python_writer,
+        args,
+    )
 }
 
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {

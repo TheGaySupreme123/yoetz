@@ -17,7 +17,11 @@ pub const INVALID_JSON_POINTER: Reason = "invalid_json_pointer";
 ///
 /// `is_nfc` answers `unicodedata.normalize("NFC", text) == text` for non-ASCII text; the whole
 /// pointer's normalization is checked before anything else, as in the reference.
-pub fn decode_pointer<F>(pointer: &str, max_bytes: usize, mut is_nfc: F) -> Result<Vec<String>, Reason>
+pub fn decode_pointer<F>(
+    pointer: &str,
+    max_bytes: usize,
+    mut is_nfc: F,
+) -> Result<Vec<String>, Reason>
 where
     F: FnMut(&str) -> bool,
 {
@@ -63,7 +67,9 @@ pub fn array_index(segment: &str) -> Option<usize> {
     }
     let mut value: usize = 0;
     for &byte in bytes {
-        value = value.saturating_mul(10).saturating_add(usize::from(byte - b'0'));
+        value = value
+            .saturating_mul(10)
+            .saturating_add(usize::from(byte - b'0'));
     }
     Some(value)
 }
@@ -100,9 +106,15 @@ mod tests {
         assert_eq!(decode("a"), Err(INVALID_JSON_POINTER));
         assert_eq!(decode("/~"), Err(INVALID_JSON_POINTER));
         assert_eq!(decode("/~2"), Err(INVALID_JSON_POINTER));
-        assert_eq!(decode(&format!("/{}", "a".repeat(256))), Err(INVALID_JSON_POINTER));
+        assert_eq!(
+            decode(&format!("/{}", "a".repeat(256))),
+            Err(INVALID_JSON_POINTER)
+        );
         assert!(decode(&format!("/{}", "a".repeat(255))).is_ok());
-        assert_eq!(decode_pointer("/\u{e9}", 256, |_| false), Err(INVALID_JSON_POINTER));
+        assert_eq!(
+            decode_pointer("/\u{e9}", 256, |_| false),
+            Err(INVALID_JSON_POINTER)
+        );
     }
 
     #[test]

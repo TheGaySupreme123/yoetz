@@ -28,7 +28,11 @@ fn drive_letter(text: &str) -> Option<u8> {
 /// `_absolute_path_key(value)`: a comparable absolute key and whether it compares
 /// case-insensitively, or `None` for a relative path.
 pub fn absolute_path_key(value: &str) -> Option<(Cow<'_, str>, bool)> {
-    let text: Cow<'_, str> = if value.contains('\\') { Cow::Owned(value.replace('\\', "/")) } else { Cow::Borrowed(value) };
+    let text: Cow<'_, str> = if value.contains('\\') {
+        Cow::Owned(value.replace('\\', "/"))
+    } else {
+        Cow::Borrowed(value)
+    };
     let bytes = text.as_bytes();
     // ``^([A-Za-z]):/(.*)$`` (DOTALL)
     if let Some(letter) = drive_letter(&text) {
@@ -82,7 +86,10 @@ fn ascii_casefold(text: &str) -> Result<Cow<'_, str>, Defer> {
 }
 
 /// `workspace_relative_edit_path(value, workspace_locator)` for a `str` value.
-pub fn workspace_relative_edit_path(value: &str, workspace_locator: Option<&str>) -> Result<Option<String>, Defer> {
+pub fn workspace_relative_edit_path(
+    value: &str,
+    workspace_locator: Option<&str>,
+) -> Result<Option<String>, Defer> {
     if value.is_empty() || value.contains('\n') || value.contains('\0') {
         return Ok(None);
     }
@@ -145,7 +152,11 @@ fn starts_with_dir(path: &str, root: &str) -> bool {
     path.len() > root.len() && path.starts_with(root) && path.as_bytes()[root.len()] == b'/'
 }
 
-fn rewrite_token(token: &str, workspace_locator: Option<&str>, out: &mut String) -> Result<(), Defer> {
+fn rewrite_token(
+    token: &str,
+    workspace_locator: Option<&str>,
+    out: &mut String,
+) -> Result<(), Defer> {
     if token == "/dev/null" {
         out.push_str(token);
         return Ok(());
@@ -167,8 +178,12 @@ fn rewrite_token(token: &str, workspace_locator: Option<&str>, out: &mut String)
     Ok(())
 }
 
-const PATCH_PATH_PREFIXES: [&str; 4] =
-    ["*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: "];
+const PATCH_PATH_PREFIXES: [&str; 4] = [
+    "*** Add File: ",
+    "*** Update File: ",
+    "*** Delete File: ",
+    "*** Move to: ",
+];
 
 /// `(\.*?)(\r?)$` over `rest`: the body and whether a final carriage return closed it.
 #[inline]
@@ -224,7 +239,10 @@ pub fn sanitize_patch_paths(text: &str, workspace_locator: Option<&str>) -> Resu
         if index > 0 {
             out.push('\n');
         }
-        if let Some(prefix) = PATCH_PATH_PREFIXES.iter().find(|prefix| line.starts_with(*prefix)) {
+        if let Some(prefix) = PATCH_PATH_PREFIXES
+            .iter()
+            .find(|prefix| line.starts_with(*prefix))
+        {
             let (path, cr) = split_final_cr(&line[prefix.len()..]);
             out.push_str(prefix);
             rewrite_token(path, workspace_locator, &mut out)?;
@@ -243,7 +261,9 @@ pub fn sanitize_patch_paths(text: &str, workspace_locator: Option<&str>) -> Resu
             // ``--- x`` is a header only when paired with ``+++ y``; rewriting keeps each
             // line's prefix, so the neighbors are read from the original lines.
             let paired = if prefix == "--- " {
-                lines.get(index + 1).is_some_and(|next| next.starts_with("+++ "))
+                lines
+                    .get(index + 1)
+                    .is_some_and(|next| next.starts_with("+++ "))
             } else {
                 index > 0 && lines[index - 1].starts_with("--- ")
             };
@@ -268,10 +288,15 @@ pub fn sanitize_patch_result(text: &str, workspace_locator: Option<&str>) -> Res
         }
         // ``^([AMDR] )(.+?)(\r?)$``
         let bytes = line.as_bytes();
-        let matched = bytes.len() >= 3 && matches!(bytes[0], b'A' | b'M' | b'D' | b'R') && bytes[1] == b' ';
+        let matched =
+            bytes.len() >= 3 && matches!(bytes[0], b'A' | b'M' | b'D' | b'R') && bytes[1] == b' ';
         if matched {
             let rest = &line[2..];
-            let (path, cr) = if rest.len() >= 2 { split_final_cr(rest) } else { (rest, "") };
+            let (path, cr) = if rest.len() >= 2 {
+                split_final_cr(rest)
+            } else {
+                (rest, "")
+            };
             if absolute_path_key(path).is_some() {
                 out.push_str(&line[..2]);
                 match workspace_relative_edit_path(path, workspace_locator)? {
@@ -310,7 +335,9 @@ fn heredoc_start(line: &str) -> Option<(usize, usize, &str)> {
         }
         // ``\s*`` is greedy and never worth backtracking: neither a quote nor an
         // identifier can start with whitespace.
-        at += line[at..].find(|c: char| !is_python_space(c)).unwrap_or(line.len() - at);
+        at += line[at..]
+            .find(|c: char| !is_python_space(c))
+            .unwrap_or(line.len() - at);
         let quote = match bytes.get(at) {
             Some(&byte @ (b'\'' | b'"')) => {
                 at += 1;
@@ -348,7 +375,9 @@ pub fn shell_heredocs(command: &str, max_heredocs: usize) -> Vec<(&str, &str, St
     while index < lines.len() && found.len() < max_heredocs {
         let line = lines[index];
         index += 1;
-        let Some((start, end, delimiter)) = heredoc_start(line) else { continue };
+        let Some((start, end, delimiter)) = heredoc_start(line) else {
+            continue;
+        };
         let body_start = index;
         while index < lines.len() && lines[index].trim_matches(is_python_space) != delimiter {
             index += 1;
@@ -371,7 +400,9 @@ fn digits_between(text: &str, min: usize, max: usize) -> Option<(&str, &str)> {
 
 /// `_CODEX_HEADER_EXIT.fullmatch(line)`: `(?:Exit code: |Process exited with code )(-?[0-9]{1,4})`.
 fn header_exit(line: &str) -> Option<i64> {
-    let rest = line.strip_prefix("Exit code: ").or_else(|| line.strip_prefix("Process exited with code "))?;
+    let rest = line
+        .strip_prefix("Exit code: ")
+        .or_else(|| line.strip_prefix("Process exited with code "))?;
     let (negative, unsigned) = match rest.strip_prefix('-') {
         Some(unsigned) => (true, unsigned),
         None => (false, rest),
@@ -386,13 +417,19 @@ fn header_exit(line: &str) -> Option<i64> {
 
 /// `_CODEX_HEADER_FIELD.fullmatch(line) is not None`.
 fn header_field(line: &str) -> bool {
-    let digits_only = |rest: &str, max: usize| digits_between(rest, 1, max).is_some_and(|(_, tail)| tail.is_empty());
+    let digits_only = |rest: &str, max: usize| {
+        digits_between(rest, 1, max).is_some_and(|(_, tail)| tail.is_empty())
+    };
     if let Some(rest) = line.strip_prefix("Chunk ID: ") {
         return (1..=64).contains(&rest.len())
-            && rest.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+            && rest
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
     }
     if let Some(rest) = line.strip_prefix("Wall time: ") {
-        let Some((_, mut tail)) = digits_between(rest, 1, 12) else { return false };
+        let Some((_, mut tail)) = digits_between(rest, 1, 12) else {
+            return false;
+        };
         if let Some(fraction) = tail.strip_prefix('.') {
             match digits_between(fraction, 1, 12) {
                 Some((_, after)) => tail = after,
@@ -416,7 +453,10 @@ fn header_field(line: &str) -> bool {
 /// `_codex_header_exit_codes(text)` reading at most `max_lines` lines (`max_lines >= 1`).
 pub fn codex_header_exit_codes(text: &str, max_lines: usize) -> Vec<i64> {
     let mut codes = Vec::new();
-    for raw_line in text.splitn(max_lines.saturating_add(1), '\n').take(max_lines) {
+    for raw_line in text
+        .splitn(max_lines.saturating_add(1), '\n')
+        .take(max_lines)
+    {
         let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
         if line == "Output:" {
             return codes;
@@ -448,12 +488,28 @@ mod tests {
             ("", None),
             ("a\nb", None),
         ] {
-            assert_eq!(workspace_relative_edit_path(value, ws), Ok(expected.map(str::to_owned)), "{value:?}");
+            assert_eq!(
+                workspace_relative_edit_path(value, ws),
+                Ok(expected.map(str::to_owned)),
+                "{value:?}"
+            );
         }
-        assert_eq!(workspace_relative_edit_path("C:\\Repo\\x.py", Some("/mnt/c/repo/")), Ok(Some("x.py".to_owned())));
-        assert_eq!(workspace_relative_edit_path("/mnt/C/Ä/x", Some("/mnt/c/ä")), Err(Defer));
-        assert_eq!(absolute_path_key("/mnt/c\n"), Some((Cow::Borrowed("/mnt/c"), true)));
-        assert_eq!(absolute_path_key("//srv//share/"), Some((Cow::Borrowed("//srv/share"), true)));
+        assert_eq!(
+            workspace_relative_edit_path("C:\\Repo\\x.py", Some("/mnt/c/repo/")),
+            Ok(Some("x.py".to_owned()))
+        );
+        assert_eq!(
+            workspace_relative_edit_path("/mnt/C/Ä/x", Some("/mnt/c/ä")),
+            Err(Defer)
+        );
+        assert_eq!(
+            absolute_path_key("/mnt/c\n"),
+            Some((Cow::Borrowed("/mnt/c"), true))
+        );
+        assert_eq!(
+            absolute_path_key("//srv//share/"),
+            Some((Cow::Borrowed("//srv/share"), true))
+        );
     }
 
     #[test]
@@ -475,8 +531,16 @@ mod tests {
 
     #[test]
     fn heredocs_match_reference() {
-        let found = shell_heredocs_default("cat > f <<'EOF' && x\nline\n  EOF  \napply_patch <<<PATCH\nbody\nPATCH\ncat <<\"A\nnope");
-        assert_eq!(found, vec![("cat > f ", " && x", "line\n".to_owned()), ("apply_patch <", "", "body\n".to_owned())]);
+        let found = shell_heredocs_default(
+            "cat > f <<'EOF' && x\nline\n  EOF  \napply_patch <<<PATCH\nbody\nPATCH\ncat <<\"A\nnope",
+        );
+        assert_eq!(
+            found,
+            vec![
+                ("cat > f ", " && x", "line\n".to_owned()),
+                ("apply_patch <", "", "body\n".to_owned())
+            ]
+        );
     }
 
     fn codex_header_exit_codes_default(text: &str) -> Vec<i64> {
@@ -485,8 +549,16 @@ mod tests {
 
     #[test]
     fn header_exit_codes() {
-        assert_eq!(codex_header_exit_codes_default("Chunk ID: ab_1\nWall time: 0.5 seconds\nProcess exited with code -2\r\nOutput:\nx"), vec![-2]);
-        assert_eq!(codex_header_exit_codes_default("Exit code: 0\nWall time: 1 seconds\nOutput:"), vec![0]);
+        assert_eq!(
+            codex_header_exit_codes_default(
+                "Chunk ID: ab_1\nWall time: 0.5 seconds\nProcess exited with code -2\r\nOutput:\nx"
+            ),
+            vec![-2]
+        );
+        assert_eq!(
+            codex_header_exit_codes_default("Exit code: 0\nWall time: 1 seconds\nOutput:"),
+            vec![0]
+        );
         assert!(codex_header_exit_codes_default("Exit code: 12345\nOutput:").is_empty());
         assert!(codex_header_exit_codes_default("Exit code: 0").is_empty());
     }

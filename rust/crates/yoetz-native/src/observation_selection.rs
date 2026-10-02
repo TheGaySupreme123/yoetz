@@ -114,7 +114,8 @@ pub fn observation_selection_tables(py: Python<'_>) -> PyResult<Bound<'_, PyDict
 }
 
 fn slot<'py>(py: Python<'py>, slot: &Slot) -> PyResult<Bound<'py, PyAny>> {
-    slot.get(py).ok_or_else(|| PyNameError::new_err("yoetz_native_observation_selection_unbound"))
+    slot.get(py)
+        .ok_or_else(|| PyNameError::new_err("yoetz_native_observation_selection_unbound"))
 }
 
 fn mapping_abc(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
@@ -144,12 +145,22 @@ fn as_dict<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> Flow<Option<Bound
             return Ok(None);
         }
     }
-    if value.is_instance(mapping_abc(py)?)? { Err(Stop::Defer) } else { Ok(None) }
+    if value.is_instance(mapping_abc(py)?)? {
+        Err(Stop::Defer)
+    } else {
+        Ok(None)
+    }
 }
 
 /// `mapping.get(key)` with `None` for a missing key.
-fn get<'py>(py: Python<'py>, mapping: &Bound<'py, PyDict>, key: &Bound<'py, PyString>) -> PyResult<Bound<'py, PyAny>> {
-    Ok(mapping.get_item(key)?.unwrap_or_else(|| py.None().into_bound(py)))
+fn get<'py>(
+    py: Python<'py>,
+    mapping: &Bound<'py, PyDict>,
+    key: &Bound<'py, PyString>,
+) -> PyResult<Bound<'py, PyAny>> {
+    Ok(mapping
+        .get_item(key)?
+        .unwrap_or_else(|| py.None().into_bound(py)))
 }
 
 /// `_classification_token(value)`.
@@ -191,7 +202,10 @@ fn is_exact_bool(value: &Bound<'_, PyAny>) -> bool {
 
 /// `_routine_shell_facts(payload)`.
 fn routine_shell_facts<'py>(py: Python<'py>, payload: &Bound<'py, PyDict>) -> Flow<RoutineFacts> {
-    const AMBIGUOUS: RoutineFacts = RoutineFacts { candidate: false, reason: "ambiguous_shell" };
+    const AMBIGUOUS: RoutineFacts = RoutineFacts {
+        candidate: false,
+        reason: "ambiguous_shell",
+    };
     let Some(nested) = as_dict(py, &get(py, payload, intern!(py, "tool_input"))?)? else {
         return Ok(AMBIGUOUS);
     };
@@ -224,7 +238,10 @@ fn classification_nonempty_str<'py>(value: &Bound<'py, PyAny>) -> Option<Bound<'
 /// `_routine_facts(payload)`.
 fn routine_facts<'py>(py: Python<'py>, payload: &Bound<'py, PyDict>) -> Flow<RoutineFacts> {
     let Some(tool) = classification_token(&get(py, payload, intern!(py, "tool_name"))?) else {
-        return Ok(RoutineFacts { candidate: false, reason: "unknown_tool" });
+        return Ok(RoutineFacts {
+            candidate: false,
+            reason: "unknown_tool",
+        });
     };
     // Substring hints over a fold that keeps a lone surrogate need the reference.
     let Some(lowered) = casefold_token(py, &tool)? else {
@@ -237,7 +254,10 @@ fn routine_facts<'py>(py: Python<'py>, payload: &Bound<'py, PyDict>) -> Flow<Rou
 }
 
 /// `_bounded_result_mapping(value)`.
-fn bounded_result_mapping<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> Flow<Option<Bound<'py, PyDict>>> {
+fn bounded_result_mapping<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+) -> Flow<Option<Bound<'py, PyDict>>> {
     if let Some(dict) = as_dict(py, value)? {
         return Ok(Some(dict));
     }
@@ -271,15 +291,23 @@ fn bounded_result_mapping<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> Fl
 fn global<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
     let globals = slot(py, &GLOBALS)?;
     let globals = globals.cast::<PyDict>()?;
-    globals.get_item(name)?.ok_or_else(|| PyNameError::new_err(name.to_owned()))
+    globals
+        .get_item(name)?
+        .ok_or_else(|| PyNameError::new_err(name.to_owned()))
 }
 
 /// `_classification_result_mappings(payload)`.
-fn result_mappings<'py>(py: Python<'py>, payload: &Bound<'py, PyDict>) -> Flow<Vec<Bound<'py, PyDict>>> {
+fn result_mappings<'py>(
+    py: Python<'py>,
+    payload: &Bound<'py, PyDict>,
+) -> Flow<Vec<Bound<'py, PyDict>>> {
     let mut mappings = vec![payload.clone()];
-    for key in
-        [intern!(py, "tool_response"), intern!(py, "tool_output"), intern!(py, "result"), intern!(py, "result_json")]
-    {
+    for key in [
+        intern!(py, "tool_response"),
+        intern!(py, "tool_output"),
+        intern!(py, "result"),
+        intern!(py, "result_json"),
+    ] {
         let Some(mapping) = bounded_result_mapping(py, &get(py, payload, key)?)? else {
             continue;
         };
@@ -301,7 +329,11 @@ fn result_mappings<'py>(py: Python<'py>, payload: &Bound<'py, PyDict>) -> Flow<V
 fn failure_hook_events(py: Python<'_>) -> PyResult<&Bound<'_, PyFrozenSet>> {
     FAILURE_HOOK_EVENTS
         .get_or_try_init(py, || -> PyResult<Py<PyFrozenSet>> {
-            Ok(PyFrozenSet::new(py, ["PostToolUseFailure", "postToolUseFailure", "StopFailure"])?.unbind())
+            Ok(PyFrozenSet::new(
+                py,
+                ["PostToolUseFailure", "postToolUseFailure", "StopFailure"],
+            )?
+            .unbind())
         })
         .map(|value| value.bind(py))
 }
@@ -310,8 +342,11 @@ fn falsy_errors(py: Python<'_>) -> PyResult<&Bound<'_, PyTuple>> {
     FALSY_ERRORS
         .get_or_try_init(py, || -> PyResult<Py<PyTuple>> {
             let empty = PyString::new(py, "").into_any();
-            let items: [Bound<'_, PyAny>; 3] =
-                [py.None().into_bound(py), pyo3::types::PyBool::new(py, false).to_owned().into_any(), empty];
+            let items: [Bound<'_, PyAny>; 3] = [
+                py.None().into_bound(py),
+                pyo3::types::PyBool::new(py, false).to_owned().into_any(),
+                empty,
+            ];
             Ok(PyTuple::new(py, items)?.unbind())
         })
         .map(|value| value.bind(py))
@@ -325,13 +360,21 @@ fn classification_outcome<'py>(
     event: &str,
 ) -> Flow<Option<&'static str>> {
     let hook_event = get(py, payload, intern!(py, "hook_event_name"))?;
-    let mut outcome =
-        core::Outcome { denied: matches!(event, "PermissionDenied" | "permission_denied"), ..core::Outcome::default() };
-    outcome.failure = matches!(event, "PostToolUseFailure" | "postToolUseFailure" | "StopFailure")
-        || failure_hook_events(py)?.as_any().contains(&hook_event)?;
+    let mut outcome = core::Outcome {
+        denied: matches!(event, "PermissionDenied" | "permission_denied"),
+        ..core::Outcome::default()
+    };
+    outcome.failure = matches!(
+        event,
+        "PostToolUseFailure" | "postToolUseFailure" | "StopFailure"
+    ) || failure_hook_events(py)?.as_any().contains(&hook_event)?;
 
     for mapping in result_mappings(py, payload)? {
-        for key in [intern!(py, "denied"), intern!(py, "is_denied"), intern!(py, "permission_denied")] {
+        for key in [
+            intern!(py, "denied"),
+            intern!(py, "is_denied"),
+            intern!(py, "permission_denied"),
+        ] {
             if is_true(&get(py, &mapping, key)?) {
                 outcome.denied = true;
             }
@@ -350,8 +393,13 @@ fn classification_outcome<'py>(
                 outcome.cancelled = true;
             }
         }
-        for (index, key) in
-            [intern!(py, "is_error"), intern!(py, "isError"), intern!(py, "failed")].into_iter().enumerate()
+        for (index, key) in [
+            intern!(py, "is_error"),
+            intern!(py, "isError"),
+            intern!(py, "failed"),
+        ]
+        .into_iter()
+        .enumerate()
         {
             let value = get(py, &mapping, key)?;
             if is_exact_bool(&value) {
@@ -373,16 +421,20 @@ fn classification_outcome<'py>(
                 }
             }
         }
-        for key in
-            [intern!(py, "exit_code"), intern!(py, "exitCode"), intern!(py, "exit_status"), intern!(py, "exitStatus")]
-        {
+        for key in [
+            intern!(py, "exit_code"),
+            intern!(py, "exitCode"),
+            intern!(py, "exit_status"),
+            intern!(py, "exitStatus"),
+        ] {
             let Some(value) = mapping.get_item(key)? else {
                 continue;
             };
             let mut valid = None;
             if unsafe { ffi::PyLong_CheckExact(value.as_ptr()) } != 0 {
                 let mut overflow: std::os::raw::c_int = 0;
-                let number = unsafe { ffi::PyLong_AsLongLongAndOverflow(value.as_ptr(), &mut overflow) };
+                let number =
+                    unsafe { ffi::PyLong_AsLongLongAndOverflow(value.as_ptr(), &mut overflow) };
                 if overflow == 0 && (-1..=255).contains(&number) {
                     valid = Some(number);
                 }
@@ -463,7 +515,11 @@ fn native_args<'a, 'py>(
     }
     let event_name = unsafe { event_name.cast_unchecked::<PyString>() };
     let event = event_name.to_str().ok()?;
-    Some((unsafe { payload.cast_unchecked::<PyDict>() }, event_name, event))
+    Some((
+        unsafe { payload.cast_unchecked::<PyDict>() },
+        event_name,
+        event,
+    ))
 }
 
 fn classify<'py>(
@@ -474,7 +530,10 @@ fn classify<'py>(
 ) -> Flow<Bound<'py, PyAny>> {
     let phase = core::phase(event);
     let routine = if phase == Phase::Other {
-        RoutineFacts { candidate: false, reason: "unknown_operation" }
+        RoutineFacts {
+            candidate: false,
+            reason: "unknown_operation",
+        }
     } else {
         routine_facts(py, payload)?
     };
@@ -490,7 +549,13 @@ fn classify<'py>(
             ContentRole::Both => &ROLE_BOTH,
         },
     )?;
-    let reasons = PyTuple::new(py, assembled.reason_tokens.iter().map(|reason| PyString::intern(py, reason)))?;
+    let reasons = PyTuple::new(
+        py,
+        assembled
+            .reason_tokens
+            .iter()
+            .map(|reason| PyString::intern(py, reason)),
+    )?;
     Ok(slot(py, &CLASSIFICATION)?.call1((
         assembled.protected,
         assembled.routine_candidate,
@@ -519,10 +584,17 @@ pub fn classify_observation<'py>(
 
 /// `is_routine_read_candidate(payload)`.
 #[pyfunction]
-pub fn is_routine_read_candidate<'py>(py: Python<'py>, payload: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+pub fn is_routine_read_candidate<'py>(
+    py: Python<'py>,
+    payload: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
     if unsafe { ffi::PyDict_CheckExact(payload.as_ptr()) } != 0 {
         match routine_facts(py, unsafe { payload.cast_unchecked::<PyDict>() }) {
-            Ok(facts) => return Ok(pyo3::types::PyBool::new(py, facts.candidate).to_owned().into_any()),
+            Ok(facts) => {
+                return Ok(pyo3::types::PyBool::new(py, facts.candidate)
+                    .to_owned()
+                    .into_any());
+            }
             Err(Stop::Raise(error)) => return Err(error),
             Err(Stop::Defer) => {}
         }
@@ -531,7 +603,10 @@ pub fn is_routine_read_candidate<'py>(py: Python<'py>, payload: &Bound<'py, PyAn
 }
 
 /// The pairs of a `JsonObject`'s frozen item tuple, or `None` when it does not carry one.
-fn json_object_dict<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyDict>>> {
+fn json_object_dict<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, PyDict>>> {
     let Ok(items) = value.getattr("_items") else {
         return Ok(None);
     };
@@ -558,7 +633,10 @@ fn json_object_dict<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResult
 
 /// `dict(structural_payload)`: a copy of an exact `dict`, a `JsonObject`'s frozen pairs, or the
 /// `dict` constructor itself for anything else.
-fn structural_dict<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
+fn structural_dict<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyDict>> {
     if unsafe { ffi::PyDict_CheckExact(value.as_ptr()) } != 0 {
         return unsafe { value.cast_unchecked::<PyDict>() }.copy();
     }
@@ -612,12 +690,19 @@ pub fn envelope_outcome_state<'py>(
 
 /// `is_edit_tool_name(tool_name)`.
 #[pyfunction]
-pub fn is_edit_tool_name<'py>(py: Python<'py>, tool_name: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+pub fn is_edit_tool_name<'py>(
+    py: Python<'py>,
+    tool_name: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
     let Some(tool) = classification_token(tool_name) else {
         return Ok(pyo3::types::PyBool::new(py, false).to_owned().into_any());
     };
     match casefold_token(py, &tool)? {
-        Some(lowered) => Ok(pyo3::types::PyBool::new(py, core::is_edit_tool_lowered(&lowered)).to_owned().into_any()),
+        Some(lowered) => Ok(
+            pyo3::types::PyBool::new(py, core::is_edit_tool_lowered(&lowered))
+                .to_owned()
+                .into_any(),
+        ),
         None => slot(py, &FALLBACK_EDIT)?.call1((tool_name,)),
     }
 }

@@ -106,7 +106,8 @@ impl<'a, F> CompatSink<'a, F> {
     }
 
     fn open(&mut self) -> Result<(), Deferred> {
-        if self.depth > self.limits.max_value_depth || self.depth > self.limits.max_container_depth {
+        if self.depth > self.limits.max_value_depth || self.depth > self.limits.max_container_depth
+        {
             return Err(Deferred);
         }
         self.depth += 1;
@@ -158,7 +159,10 @@ impl<'a, B, F: FnMut(&str) -> Option<B>> JsonSink for CompatSink<'a, F> {
         }
         let digits = literal.strip_prefix('-').unwrap_or(literal);
         if digits.len() <= 18 {
-            return literal.parse::<i64>().map(CompatValue::Int).map_err(|_| Deferred);
+            return literal
+                .parse::<i64>()
+                .map(CompatValue::Int)
+                .map_err(|_| Deferred);
         }
         (self.big)(literal).map(CompatValue::Big).ok_or(Deferred)
     }
@@ -202,7 +206,12 @@ impl<'a, B, F: FnMut(&str) -> Option<B>> JsonSink for CompatSink<'a, F> {
         self.open()?;
         Ok(Vec::new())
     }
-    fn insert(&mut self, object: &mut Self::Object, key: Self::Key, value: Self::Value) -> Result<(), Deferred> {
+    fn insert(
+        &mut self,
+        object: &mut Self::Object,
+        key: Self::Key,
+        value: Self::Value,
+    ) -> Result<(), Deferred> {
         object.push((key, value));
         Ok(())
     }
@@ -228,7 +237,12 @@ pub fn accept<'a, B, F: FnMut(&str) -> Option<B>>(
     if limits.max_value_depth > MAX_COMPAT_DEPTH || limits.max_container_depth > MAX_COMPAT_DEPTH {
         return None;
     }
-    let mut sink = CompatSink { text, depth: 0, limits, big };
+    let mut sink = CompatSink {
+        text,
+        depth: 0,
+        limits,
+        big,
+    };
     json::scan(text, &mut sink).ok()
 }
 
@@ -249,10 +263,16 @@ pub fn accept_object_line<B, F: FnMut(&str) -> Option<B>>(
 mod tests {
     use super::*;
 
-    const CODEX: CompatLimits =
-        CompatLimits { max_value_depth: 64, max_container_depth: 64, allow_overflow: false };
-    const MCP: CompatLimits =
-        CompatLimits { max_value_depth: usize::MAX >> 1, max_container_depth: 63, allow_overflow: true };
+    const CODEX: CompatLimits = CompatLimits {
+        max_value_depth: 64,
+        max_container_depth: 64,
+        allow_overflow: false,
+    };
+    const MCP: CompatLimits = CompatLimits {
+        max_value_depth: usize::MAX >> 1,
+        max_container_depth: 63,
+        allow_overflow: true,
+    };
 
     fn big(literal: &str) -> Option<String> {
         (literal.trim_start_matches('-').len() <= 4300).then(|| literal.to_owned())
@@ -268,16 +288,26 @@ mod tests {
 
     #[test]
     fn keeps_stdlib_values() {
-        let value = accepts(r#"{"a": [1, -0, 1.5e3, 1e400, "xé", null, true], "b": 12345678901234567890}"#, MCP);
-        let Some(CompatValue::Object(members)) = value else { panic!("object expected") };
+        let value = accepts(
+            r#"{"a": [1, -0, 1.5e3, 1e400, "xé", null, true], "b": 12345678901234567890}"#,
+            MCP,
+        );
+        let Some(CompatValue::Object(members)) = value else {
+            panic!("object expected")
+        };
         assert_eq!(members[0].0, "a");
-        let CompatValue::Array(items) = &members[0].1 else { panic!("array expected") };
+        let CompatValue::Array(items) = &members[0].1 else {
+            panic!("array expected")
+        };
         assert_eq!(items[0], CompatValue::Int(1));
         assert_eq!(items[1], CompatValue::Int(0));
         assert_eq!(items[2], CompatValue::Float(1500.0));
         assert_eq!(items[3], CompatValue::Float(f64::INFINITY));
         assert_eq!(items[4], CompatValue::Str(Cow::Owned("x\u{e9}".to_owned())));
-        assert_eq!(members[1].1, CompatValue::Big("12345678901234567890".to_owned()));
+        assert_eq!(
+            members[1].1,
+            CompatValue::Big("12345678901234567890".to_owned())
+        );
     }
 
     #[test]
@@ -289,7 +319,11 @@ mod tests {
             ("-0.0", -0.0),
             ("9007199254740993.0", 9_007_199_254_740_992.0),
         ] {
-            assert_eq!(python_float(literal).map(f64::to_bits), Some(expected.to_bits()), "{literal}");
+            assert_eq!(
+                python_float(literal).map(f64::to_bits),
+                Some(expected.to_bits()),
+                "{literal}"
+            );
         }
     }
 
@@ -329,7 +363,9 @@ mod tests {
     #[test]
     fn depth_limits_match_each_reference() {
         // codex: values at depth <= 64; an empty container may sit at depth 64.
-        let nested = |levels: usize, inner: &str| format!("{}{}{}", "[".repeat(levels), inner, "]".repeat(levels));
+        let nested = |levels: usize, inner: &str| {
+            format!("{}{}{}", "[".repeat(levels), inner, "]".repeat(levels))
+        };
         assert!(accepts(&nested(65, ""), CODEX).is_some());
         assert!(accepts(&nested(66, ""), CODEX).is_none());
         assert!(accepts(&nested(64, "1"), CODEX).is_some());
@@ -345,7 +381,13 @@ mod tests {
     fn object_lines_require_an_object() {
         let limits = CODEX;
         assert!(accept_object_line(b"{\"a\":1}", limits, big).is_some());
-        for raw in [&b"[1]"[..], b"", b"\xef\xbb\xbf{}", b"{\"a\":\"\x00\"}", b"{\"a\":\"\xff\"}"] {
+        for raw in [
+            &b"[1]"[..],
+            b"",
+            b"\xef\xbb\xbf{}",
+            b"{\"a\":\"\x00\"}",
+            b"{\"a\":\"\xff\"}",
+        ] {
             assert!(accept_object_line(raw, limits, big).is_none(), "{raw:?}");
         }
     }

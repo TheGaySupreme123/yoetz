@@ -13,7 +13,9 @@ use super::super::protocol::timestamp::is_wire_timestamp;
 pub type TimestampParts = (u16, u8, u8, u8, u8, u8, u32);
 
 fn number(bytes: &[u8]) -> u32 {
-    bytes.iter().fold(0, |total, &byte| total * 10 + u32::from(byte - b'0'))
+    bytes
+        .iter()
+        .fold(0, |total, &byte| total * 10 + u32::from(byte - b'0'))
 }
 
 /// The parsed fields of `text`, or `None` when the reference refuses it.
@@ -39,8 +41,14 @@ mod tests {
 
     #[test]
     fn parts() {
-        assert_eq!(parse_wire_timestamp("2024-02-29T23:59:59.999Z"), Some((2024, 2, 29, 23, 59, 59, 999_000)));
-        assert_eq!(parse_wire_timestamp("0001-01-01T00:00:00.001Z"), Some((1, 1, 1, 0, 0, 0, 1000)));
+        assert_eq!(
+            parse_wire_timestamp("2024-02-29T23:59:59.999Z"),
+            Some((2024, 2, 29, 23, 59, 59, 999_000))
+        );
+        assert_eq!(
+            parse_wire_timestamp("0001-01-01T00:00:00.001Z"),
+            Some((1, 1, 1, 0, 0, 0, 1000))
+        );
         for refused in [
             "0000-01-01T00:00:00.000Z",
             "2023-02-29T00:00:00.000Z",

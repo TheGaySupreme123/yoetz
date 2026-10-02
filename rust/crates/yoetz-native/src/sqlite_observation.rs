@@ -35,7 +35,9 @@ pub fn bind_observation_status_fold(source: &Bound<'_, PyDict>) -> PyResult<()> 
             .ok_or_else(|| PyValueError::new_err("observation_fold_binding_missing"))
     };
     let source_class = required("source_class")?;
-    let sources = source_class.getattr("_value2member_map_")?.cast_into::<PyDict>()?;
+    let sources = source_class
+        .getattr("_value2member_map_")?
+        .cast_into::<PyDict>()?;
     let gap = required("gap_class")?;
     let value = |name: &str| -> PyResult<String> { gap.getattr(name)?.getattr("value")?.extract() };
     let bound = Bindings {
@@ -45,7 +47,9 @@ pub fn bind_observation_status_fold(source: &Bound<'_, PyDict>) -> PyResult<()> 
         content_capture_unavailable: value("CONTENT_CAPTURE_UNAVAILABLE")?,
         unsupported_event: value("UNSUPPORTED_EVENT")?,
     };
-    *BINDINGS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(bound));
+    *BINDINGS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(bound));
     Ok(())
 }
 
@@ -79,7 +83,11 @@ pub fn observation_status_fold<'py>(
     rows: &Bound<'py, PyAny>,
     session_commitment: &Bound<'py, PyAny>,
 ) -> PyResult<Option<Bound<'py, PyTuple>>> {
-    let Some(bound) = BINDINGS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone() else {
+    let Some(bound) = BINDINGS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+    else {
         return Ok(None);
     };
     let wanted: Option<&str> = if session_commitment.is_none() {
@@ -155,7 +163,9 @@ pub fn observation_status_fold<'py>(
                 Err(()) => return Ok(None),
             }
         }
-        let unsupported = gap_codes.iter().any(|code| *code == bound.unsupported_event);
+        let unsupported = gap_codes
+            .iter()
+            .any(|code| *code == bound.unsupported_event);
         session.current.extend(gap_codes);
         if unsupported {
             session.unsupported.insert(event_kind.to_owned());
@@ -187,7 +197,10 @@ pub fn observation_status_fold<'py>(
             }
         }
     }
-    Ok(Some(PyTuple::new(py, [covered.into_any(), gaps.into_any(), unsupported.into_any()])?))
+    Ok(Some(PyTuple::new(
+        py,
+        [covered.into_any(), gaps.into_any(), unsupported.into_any()],
+    )?))
 }
 
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {

@@ -46,17 +46,26 @@ pub fn hook_timing_fold<'py>(
     max_entries: &Bound<'py, PyAny>,
     max_file_bytes: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let (Some(host), Some(event), Some(path), Some(outcome)) =
-        (exact_utf8(host), exact_utf8(event), exact_utf8(path), exact_utf8(outcome))
-    else {
+    let (Some(host), Some(event), Some(path), Some(outcome)) = (
+        exact_utf8(host),
+        exact_utf8(event),
+        exact_utf8(path),
+        exact_utf8(outcome),
+    ) else {
         return Ok(defer(py));
     };
-    let (Some(ms), Some(now_ms), Some(max_entries), Some(max_file_bytes)) =
-        (exact_int(sample), exact_int(now_ms), exact_int(max_entries), exact_int(max_file_bytes))
-    else {
+    let (Some(ms), Some(now_ms), Some(max_entries), Some(max_file_bytes)) = (
+        exact_int(sample),
+        exact_int(now_ms),
+        exact_int(max_entries),
+        exact_int(max_file_bytes),
+    ) else {
         return Ok(defer(py));
     };
-    if !(0..=MAX_SAMPLE_MS).contains(&ms) || !(-MAX_NOW_MS..=MAX_NOW_MS).contains(&now_ms) || max_entries <= 0 {
+    if !(0..=MAX_SAMPLE_MS).contains(&ms)
+        || !(-MAX_NOW_MS..=MAX_NOW_MS).contains(&now_ms)
+        || max_entries <= 0
+    {
         return Ok(defer(py));
     }
     let max_entries = usize::try_from(max_entries).unwrap_or(usize::MAX);
@@ -72,7 +81,14 @@ pub fn hook_timing_fold<'py>(
             Read::Defer => return Ok(defer(py)),
         }
     };
-    let sample = Sample { host, event, path, outcome, ms, now_ms };
+    let sample = Sample {
+        host,
+        event,
+        path,
+        outcome,
+        ms,
+        now_ms,
+    };
     let (folded, restarted) = core::fold(document, &sample, max_entries);
     let encoded = core::encode(&folded);
     let restarted = PyBool::new(py, restarted).to_owned().into_any();
@@ -106,7 +122,9 @@ fn to_python<'py>(py: Python<'py>, value: &CompatValue<'_, ()>) -> PyResult<Boun
             dict.into_any()
         }
         CompatValue::Big(()) | CompatValue::Float(_) => {
-            return Err(pyo3::exceptions::PyValueError::new_err("unvalidated_number"));
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "unvalidated_number",
+            ));
         }
     })
 }

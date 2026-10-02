@@ -38,7 +38,8 @@ pub enum RefFragment<'a> {
 /// shapes below: no whitespace or control characters they strip, no `%`, `?`, `;`, `@`, `[`,
 /// `]`, or `\`.
 fn plain_reference_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'#' | b'$' | b'-' | b'.' | b'/' | b':' | b'_' | b'~')
+    byte.is_ascii_alphanumeric()
+        || matches!(byte, b'#' | b'$' | b'-' | b'.' | b'/' | b':' | b'_' | b'~')
 }
 
 /// Split `reference` into its document and fragment when `_validate_references` would find it
@@ -78,7 +79,10 @@ pub fn split_reference(reference: &str) -> Option<(RefDocument<'_>, RefFragment<
 
 /// `int(segment)` for a pointer step into an array, restricted to plain ASCII digits.
 pub fn list_index(segment: &str) -> Option<usize> {
-    if segment.is_empty() || segment.len() > 18 || !segment.bytes().all(|byte| byte.is_ascii_digit()) {
+    if segment.is_empty()
+        || segment.len() > 18
+        || !segment.bytes().all(|byte| byte.is_ascii_digit())
+    {
         return None;
     }
     segment.parse().ok()
@@ -97,12 +101,28 @@ pub enum Segment {
 }
 
 const IN_VALUE: &[&str] = &[
-    "additionalProperties", "contains", "contentSchema", "else", "if", "items", "not",
-    "propertyNames", "then", "unevaluatedItems", "unevaluatedProperties",
+    "additionalProperties",
+    "contains",
+    "contentSchema",
+    "else",
+    "if",
+    "items",
+    "not",
+    "propertyNames",
+    "then",
+    "unevaluatedItems",
+    "unevaluatedProperties",
 ];
 const IN_CHILD: &[&str] = &[
-    "allOf", "anyOf", "oneOf", "prefixItems", "$defs", "definitions", "dependentSchemas",
-    "patternProperties", "properties",
+    "allOf",
+    "anyOf",
+    "oneOf",
+    "prefixItems",
+    "$defs",
+    "definitions",
+    "dependentSchemas",
+    "patternProperties",
+    "properties",
 ];
 
 /// Draft 2020-12 `maybe_in_subresource`: whether the walked `segments` end at a subresource, so
@@ -140,14 +160,20 @@ mod tests {
 
     #[test]
     fn splits_plain_references_only() {
-        assert_eq!(split_reference("#"), Some((RefDocument::Local, RefFragment::Root)));
+        assert_eq!(
+            split_reference("#"),
+            Some((RefDocument::Local, RefFragment::Root))
+        );
         assert_eq!(
             split_reference("#/$defs/a"),
             Some((RefDocument::Local, RefFragment::Pointer("/$defs/a")))
         );
         assert_eq!(
             split_reference("https://h/x.json#/a"),
-            Some((RefDocument::External("https://h/x.json"), RefFragment::Pointer("/a")))
+            Some((
+                RefDocument::External("https://h/x.json"),
+                RefFragment::Pointer("/a")
+            ))
         );
         assert_eq!(
             split_reference("https://h/x.json"),
@@ -179,8 +205,16 @@ mod tests {
         assert!(is_subresource_position(&[key("$defs"), key("x")]));
         assert!(!is_subresource_position(&[key("$defs")]));
         assert!(is_subresource_position(&[key("items")]));
-        assert!(is_subresource_position(&[key("oneOf"), Segment::Index(0), key("not")]));
-        assert!(!is_subresource_position(&[key("oneOf"), Segment::Index(0), key("enum")]));
+        assert!(is_subresource_position(&[
+            key("oneOf"),
+            Segment::Index(0),
+            key("not")
+        ]));
+        assert!(!is_subresource_position(&[
+            key("oneOf"),
+            Segment::Index(0),
+            key("enum")
+        ]));
         assert!(!is_subresource_position(&[key("enum"), Segment::Index(0)]));
     }
 }

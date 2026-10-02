@@ -32,7 +32,10 @@ struct BatchSpans {
 
 impl BatchSpans {
     fn new(members: &[Candidate]) -> Self {
-        let mut spans: Vec<(i64, i64)> = members.iter().map(|&(_, start, end)| (start, end)).collect();
+        let mut spans: Vec<(i64, i64)> = members
+            .iter()
+            .map(|&(_, start, end)| (start, end))
+            .collect();
         spans.sort_unstable();
         let mut reach = Vec::with_capacity(spans.len());
         let mut furthest = i64::MIN;
@@ -40,7 +43,10 @@ impl BatchSpans {
             furthest = furthest.max(end);
             reach.push(furthest);
         }
-        BatchSpans { starts: spans.into_iter().map(|(start, _)| start).collect(), reach }
+        BatchSpans {
+            starts: spans.into_iter().map(|(start, _)| start).collect(),
+            reach,
+        }
     }
 
     /// Some span satisfies `start < gap_end and end > gap_start`.
@@ -76,7 +82,8 @@ pub fn partition_batches<I: AsRef<[i64]>>(
     }
 
     // candidate_index value -> the batches holding it, ascending and without repeats.
-    let mut holders: HashMap<i64, Vec<usize>> = HashMap::with_capacity(candidates.len().min(draft_count));
+    let mut holders: HashMap<i64, Vec<usize>> =
+        HashMap::with_capacity(candidates.len().min(draft_count));
     for (batch, slice) in members.iter().enumerate() {
         for &(index, _, _) in slice.iter() {
             let entry = holders.entry(index).or_default();
@@ -86,7 +93,9 @@ pub fn partition_batches<I: AsRef<[i64]>>(
         }
     }
 
-    let mut selections: Vec<BatchSelection> = (0..batch_count).map(|_| BatchSelection::default()).collect();
+    let mut selections: Vec<BatchSelection> = (0..batch_count)
+        .map(|_| BatchSelection::default())
+        .collect();
     // Last outcome (1-based) appended per batch, so one outcome joins a batch once.
     let mut marker = vec![0_usize; batch_count];
     for (position, indexes) in outcome_indexes.iter().enumerate() {
@@ -133,7 +142,11 @@ mod tests {
             let outcome_hits = outcomes
                 .iter()
                 .enumerate()
-                .filter(|(_, indexes)| indexes.iter().any(|index| slice.iter().any(|c| c.0 == *index)))
+                .filter(|(_, indexes)| {
+                    indexes
+                        .iter()
+                        .any(|index| slice.iter().any(|c| c.0 == *index))
+                })
                 .map(|(position, _)| position)
                 .collect();
             let gap_hits = gaps
@@ -142,7 +155,10 @@ mod tests {
                 .filter(|(_, gap)| slice.iter().any(|c| !(gap.1 <= c.1 || gap.0 >= c.2)))
                 .map(|(position, _)| position)
                 .collect();
-            result.push(BatchSelection { outcomes: outcome_hits, gaps: gap_hits });
+            result.push(BatchSelection {
+                outcomes: outcome_hits,
+                gaps: gap_hits,
+            });
             start += size;
         }
         result
@@ -162,13 +178,26 @@ mod tests {
             let candidates: Vec<Candidate> = (0..count)
                 .map(|position| {
                     let start = next(500);
-                    (if next(5) == 0 { next(10) } else { position as i64 }, start, start + 1 + next(30))
+                    (
+                        if next(5) == 0 {
+                            next(10)
+                        } else {
+                            position as i64
+                        },
+                        start,
+                        start + 1 + next(30),
+                    )
                 })
                 .collect();
-            let drafts = if next(4) == 0 { count + next(10) as usize } else { count };
+            let drafts = if next(4) == 0 {
+                count + next(10) as usize
+            } else {
+                count
+            };
             let size = 1 + next(7) as usize;
-            let outcomes: Vec<Vec<i64>> =
-                (0..next(30)).map(|_| (0..next(4)).map(|_| next(45)).collect()).collect();
+            let outcomes: Vec<Vec<i64>> = (0..next(30))
+                .map(|_| (0..next(4)).map(|_| next(45)).collect())
+                .collect();
             let gaps: Vec<(i64, i64)> = (0..next(30))
                 .map(|_| {
                     let start = next(520);
@@ -186,6 +215,9 @@ mod tests {
     fn refuses_a_non_positive_batch_size() {
         let no_outcomes: [Vec<i64>; 0] = [];
         assert!(partition_batches(&[], 0, 0, &no_outcomes, &[]).is_none());
-        assert_eq!(partition_batches(&[], 0, 100, &no_outcomes, &[]), Some(Vec::new()));
+        assert_eq!(
+            partition_batches(&[], 0, 100, &no_outcomes, &[]),
+            Some(Vec::new())
+        );
     }
 }

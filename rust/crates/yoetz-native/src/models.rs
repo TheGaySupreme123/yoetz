@@ -19,8 +19,8 @@ use yoetz_core::protocol::pointer::{self as core_pointer, INVALID_JSON_POINTER};
 
 use crate::registry::{Slot, protocol_error};
 use crate::walk::{
-    JSON_OBJECT, NATIVE_RECURSION_LIMIT, is_exact, is_mapping_instance, is_plain_scalar, is_sequence_instance, is_type,
-    json_object_index,
+    JSON_OBJECT, NATIVE_RECURSION_LIMIT, is_exact, is_mapping_instance, is_plain_scalar,
+    is_sequence_instance, is_type, json_object_index,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -56,14 +56,24 @@ static MODEL_INFO: Mutex<Option<HashMap<usize, ModelInfo>>> = Mutex::new(None);
 pub fn bind_strip(base_model: Bound<'_, PyAny>, reference: Bound<'_, PyAny>) -> PyResult<()> {
     let py = base_model.py();
     BASE_MODEL_GETATTR.set(base_model.getattr("__getattr__")?.unbind());
-    OBJECT_GETATTRIBUTE.set(py.import("builtins")?.getattr("object")?.getattr("__getattribute__")?.unbind());
+    OBJECT_GETATTRIBUTE.set(
+        py.import("builtins")?
+            .getattr("object")?
+            .getattr("__getattribute__")?
+            .unbind(),
+    );
     BASE_MODEL.set(base_model.unbind());
     STRIP_REFERENCE.set(reference.unbind());
-    *MODEL_INFO.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    *MODEL_INFO
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     Ok(())
 }
 
-fn class_attr<'py>(class: &Bound<'py, PyType>, name: &Bound<'py, PyString>) -> PyResult<Option<Bound<'py, PyAny>>> {
+fn class_attr<'py>(
+    class: &Bound<'py, PyType>,
+    name: &Bound<'py, PyString>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
     match class.getattr(name) {
         Ok(value) => Ok(Some(value)),
         Err(error) if error.is_instance_of::<PyAttributeError>(class.py()) => Ok(None),
@@ -71,7 +81,12 @@ fn class_attr<'py>(class: &Bound<'py, PyType>, name: &Bound<'py, PyString>) -> P
     }
 }
 
-fn build_info(py: Python<'_>, class: &Bound<'_, PyType>, fields: &Bound<'_, PyAny>, declared: Option<&Bound<'_, PyAny>>) -> PyResult<ModelInfo> {
+fn build_info(
+    py: Python<'_>,
+    class: &Bound<'_, PyType>,
+    fields: &Bound<'_, PyAny>,
+    declared: Option<&Bound<'_, PyAny>>,
+) -> PyResult<ModelInfo> {
     let by_dump_key = PyDict::new(py);
     let fields_dict = fields.cast::<PyDict>()?;
     for (name, field) in fields_dict.iter() {
@@ -90,7 +105,8 @@ fn build_info(py: Python<'_>, class: &Bound<'_, PyType>, fields: &Bound<'_, PyAn
     };
     let getattr_hook = class_attr(class, pyo3::intern!(py, "__getattr__"))?;
     let getattribute = class_attr(class, pyo3::intern!(py, "__getattribute__"))?;
-    let private: Option<Bound<'_, PyAny>> = class_attr(class, pyo3::intern!(py, "__private_attributes__"))?;
+    let private: Option<Bound<'_, PyAny>> =
+        class_attr(class, pyo3::intern!(py, "__private_attributes__"))?;
     let root_name = pyo3::intern!(py, "root");
     let private_has_root = match &private {
         Some(mapping) => mapping.contains(root_name)?,
@@ -124,7 +140,9 @@ fn model_info<'py>(py: Python<'py>, class: &Bound<'py, PyType>) -> PyResult<Info
     let declared = class_attr(class, pyo3::intern!(py, "optional_non_null_fields"))?;
     let key = class.as_ptr() as usize;
     {
-        let guard = MODEL_INFO.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let guard = MODEL_INFO
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(info) = guard.as_ref().and_then(|cache| cache.get(&key)) {
             let same_declared = match (&info.declared, &declared) {
                 (Some(cached), Some(current)) => cached.as_ptr() == current.as_ptr(),
@@ -132,7 +150,10 @@ fn model_info<'py>(py: Python<'py>, class: &Bound<'py, PyType>) -> PyResult<Info
                 _ => false,
             };
             let same_fields = info.fields.as_ptr() == fields.as_ptr()
-                && fields.cast::<PyDict>().map(|dict| dict.len() == info.field_count).unwrap_or(false);
+                && fields
+                    .cast::<PyDict>()
+                    .map(|dict| dict.len() == info.field_count)
+                    .unwrap_or(false);
             if same_declared && same_fields {
                 return Ok(InfoView {
                     optional: info.optional.as_ref().map(|value| value.bind(py).clone()),
@@ -150,14 +171,17 @@ fn model_info<'py>(py: Python<'py>, class: &Bound<'py, PyType>) -> PyResult<Info
         plain_root: info.plain_root,
         root_is_field: info.root_is_field,
     };
-    let mut guard = MODEL_INFO.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut guard = MODEL_INFO
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     guard.get_or_insert_with(HashMap::new).insert(key, info);
     Ok(view)
 }
 
 /// `isinstance(value, BaseModel)`.
 fn is_base_model(base: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<bool> {
-    if unsafe { ffi::PyType_IsSubtype(value.get_type().as_ptr().cast(), base.as_ptr().cast()) } != 0 {
+    if unsafe { ffi::PyType_IsSubtype(value.get_type().as_ptr().cast(), base.as_ptr().cast()) } != 0
+    {
         return Ok(true);
     }
     if is_plain_scalar(value)
@@ -171,7 +195,10 @@ fn is_base_model(base: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<
 }
 
 /// `getattr(attribute_owner, name, None)` restricted to `AttributeError`.
-fn getattr_or_none<'py>(value: &Bound<'py, PyAny>, name: &Bound<'py, PyString>) -> PyResult<Option<Bound<'py, PyAny>>> {
+fn getattr_or_none<'py>(
+    value: &Bound<'py, PyAny>,
+    name: &Bound<'py, PyString>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
     match value.getattr(name) {
         Ok(found) => Ok(Some(found)),
         Err(error) if error.is_instance_of::<PyAttributeError>(value.py()) => Ok(None),
@@ -180,7 +207,11 @@ fn getattr_or_none<'py>(value: &Bound<'py, PyAny>, name: &Bound<'py, PyString>) 
 }
 
 /// `getattr(model, "root", None)`.
-fn model_root<'py>(py: Python<'py>, model: &Bound<'py, PyAny>, info: &InfoView<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+fn model_root<'py>(
+    py: Python<'py>,
+    model: &Bound<'py, PyAny>,
+    info: &InfoView<'py>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
     let name = pyo3::intern!(py, "root");
     if info.plain_root && !info.root_is_field {
         // No class attribute, private attribute, or custom hook can supply ``root``: only the
@@ -212,7 +243,12 @@ struct Stripper<'py> {
 }
 
 impl<'py> Stripper<'py> {
-    fn strip(&self, model: &Bound<'py, PyAny>, dumped: &Bound<'py, PyAny>, depth: usize) -> PyResult<Bound<'py, PyAny>> {
+    fn strip(
+        &self,
+        model: &Bound<'py, PyAny>,
+        dumped: &Bound<'py, PyAny>,
+        depth: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let py = self.py;
         if depth > NATIVE_RECURSION_LIMIT {
             return self.reference.call1((model, dumped));
@@ -226,21 +262,38 @@ impl<'py> Stripper<'py> {
             }
             (info.optional, Some(info.by_dump_key))
         } else {
-            let declared = class_attr(&model.get_type(), pyo3::intern!(py, "optional_non_null_fields"))?;
-            (declared.filter(|value| value.is_instance_of::<PyFrozenSet>()), None)
+            let declared = class_attr(
+                &model.get_type(),
+                pyo3::intern!(py, "optional_non_null_fields"),
+            )?;
+            (
+                declared.filter(|value| value.is_instance_of::<PyFrozenSet>()),
+                None,
+            )
         };
         let result = PyDict::new(py);
-        let pairs: Vec<(Bound<'py, PyAny>, Bound<'py, PyAny>)> = if is_exact(dumped, ffi::PyDict_CheckExact) {
-            unsafe { dumped.cast_unchecked::<PyDict>() }.iter().collect()
-        } else {
-            let mut collected = Vec::new();
-            for pair in dumped.call_method0(pyo3::intern!(py, "items"))?.try_iter()? {
-                collected.push(pair?.extract()?);
-            }
-            collected
-        };
+        let pairs: Vec<(Bound<'py, PyAny>, Bound<'py, PyAny>)> =
+            if is_exact(dumped, ffi::PyDict_CheckExact) {
+                unsafe { dumped.cast_unchecked::<PyDict>() }
+                    .iter()
+                    .collect()
+            } else {
+                let mut collected = Vec::new();
+                for pair in dumped
+                    .call_method0(pyo3::intern!(py, "items"))?
+                    .try_iter()?
+                {
+                    collected.push(pair?.extract()?);
+                }
+                collected
+            };
         for (key, value) in pairs {
-            let field_name = match by_dump_key.as_ref().map(|map| map.get_item(&key)).transpose()?.flatten() {
+            let field_name = match by_dump_key
+                .as_ref()
+                .map(|map| map.get_item(&key))
+                .transpose()?
+                .flatten()
+            {
                 Some(name) => name,
                 None => key.clone(),
             };
@@ -259,7 +312,10 @@ impl<'py> Stripper<'py> {
                 result.set_item(&key, self.strip(&attribute, &value, depth + 1)?)?;
             } else if unsafe { ffi::PyList_Check(value.as_ptr()) } != 0
                 && is_sequence_instance(py, &attribute)?
-                && unsafe { ffi::PyUnicode_Check(attribute.as_ptr()) == 0 && ffi::PyBytes_Check(attribute.as_ptr()) == 0 }
+                && unsafe {
+                    ffi::PyUnicode_Check(attribute.as_ptr()) == 0
+                        && ffi::PyBytes_Check(attribute.as_ptr()) == 0
+                }
             {
                 result.set_item(&key, self.children(&attribute, &value, depth)?)?;
             } else {
@@ -270,7 +326,12 @@ impl<'py> Stripper<'py> {
     }
 
     /// The `zip(attribute, value, strict=True)` loop.
-    fn children(&self, attribute: &Bound<'py, PyAny>, value: &Bound<'py, PyAny>, depth: usize) -> PyResult<Bound<'py, PyAny>> {
+    fn children(
+        &self,
+        attribute: &Bound<'py, PyAny>,
+        value: &Bound<'py, PyAny>,
+        depth: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let py = self.py;
         let children = PyList::empty(py);
         let mut left = attribute.try_iter()?;
@@ -278,12 +339,16 @@ impl<'py> Stripper<'py> {
         loop {
             let Some(child) = left.next().transpose()? else {
                 if right.next().transpose()?.is_some() {
-                    return Err(PyValueError::new_err("zip() argument 2 is longer than argument 1"));
+                    return Err(PyValueError::new_err(
+                        "zip() argument 2 is longer than argument 1",
+                    ));
                 }
                 break;
             };
             let Some(child_dump) = right.next().transpose()? else {
-                return Err(PyValueError::new_err("zip() argument 2 is shorter than argument 1"));
+                return Err(PyValueError::new_err(
+                    "zip() argument 2 is shorter than argument 1",
+                ));
             };
             if is_base_model(&self.base, &child)? && is_mapping_instance(py, &child_dump)? {
                 children.append(self.strip(&child, &child_dump, depth + 1)?)?;
@@ -298,11 +363,21 @@ impl<'py> Stripper<'py> {
 /// `_strip_optional_non_null_fields(model, dumped)`.
 #[pyfunction]
 #[pyo3(name = "models_strip_optional_non_null_fields")]
-pub fn strip_optional_non_null_fields<'py>(py: Python<'py>, model: &Bound<'py, PyAny>, dumped: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+pub fn strip_optional_non_null_fields<'py>(
+    py: Python<'py>,
+    model: &Bound<'py, PyAny>,
+    dumped: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
     let (Some(base), Some(reference)) = (BASE_MODEL.get(py), STRIP_REFERENCE.get(py)) else {
         return Err(pyo3::exceptions::PyRuntimeError::new_err("strip_unbound"));
     };
-    Stripper { py, base, reference, public: true }.strip(model, dumped, 0)
+    Stripper {
+        py,
+        base,
+        reference,
+        public: true,
+    }
+    .strip(model, dumped, 0)
 }
 
 static STATUS_STRIP_REFERENCE: Slot = Slot::new();
@@ -318,11 +393,21 @@ pub fn bind_status_strip(base_model: Bound<'_, PyAny>, reference: Bound<'_, PyAn
 /// `yoetz.application.status._strip_optional_non_null_nulls(model, dumped)`.
 #[pyfunction]
 #[pyo3(name = "status_strip_optional_non_null_nulls")]
-pub fn strip_optional_non_null_nulls<'py>(py: Python<'py>, model: &Bound<'py, PyAny>, dumped: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+pub fn strip_optional_non_null_nulls<'py>(
+    py: Python<'py>,
+    model: &Bound<'py, PyAny>,
+    dumped: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
     let (Some(base), Some(reference)) = (BASE_MODEL.get(py), STATUS_STRIP_REFERENCE.get(py)) else {
         return Err(pyo3::exceptions::PyRuntimeError::new_err("strip_unbound"));
     };
-    Stripper { py, base, reference, public: false }.strip(model, dumped, 0)
+    Stripper {
+        py,
+        base,
+        reference,
+        public: false,
+    }
+    .strip(model, dumped, 0)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -349,10 +434,16 @@ static TUPLE_FIELDS: Mutex<Option<HashMap<usize, Arc<TupleFields>>>> = Mutex::ne
 pub fn bind_adapt(reference: Bound<'_, PyAny>, accepts_tuple: Bound<'_, PyAny>) {
     ADAPT_REFERENCE.set(reference.unbind());
     ACCEPTS_TUPLE.set(accepts_tuple.unbind());
-    *TUPLE_FIELDS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    *TUPLE_FIELDS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
 }
 
-fn tuple_fields(py: Python<'_>, class: &Bound<'_, PyAny>, accepts_tuple: &Bound<'_, PyAny>) -> PyResult<Option<Arc<TupleFields>>> {
+fn tuple_fields(
+    py: Python<'_>,
+    class: &Bound<'_, PyAny>,
+    accepts_tuple: &Bound<'_, PyAny>,
+) -> PyResult<Option<Arc<TupleFields>>> {
     let Some(fields) = getattr_or_none(class, pyo3::intern!(py, "__pydantic_fields__"))? else {
         return Ok(None);
     };
@@ -394,8 +485,13 @@ fn tuple_fields(py: Python<'_>, class: &Bound<'_, PyAny>, accepts_tuple: &Bound<
 /// `_ClosedModel._adapt_json_arrays_and_reject_forbidden_nulls(cls, value)`.
 #[pyfunction]
 #[pyo3(name = "models_adapt_closed_input")]
-pub fn adapt_closed_input<'py>(py: Python<'py>, class: &Bound<'py, PyAny>, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
-    let (Some(reference), Some(accepts_tuple)) = (ADAPT_REFERENCE.get(py), ACCEPTS_TUPLE.get(py)) else {
+pub fn adapt_closed_input<'py>(
+    py: Python<'py>,
+    class: &Bound<'py, PyAny>,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let (Some(reference), Some(accepts_tuple)) = (ADAPT_REFERENCE.get(py), ACCEPTS_TUPLE.get(py))
+    else {
         return Err(pyo3::exceptions::PyRuntimeError::new_err("adapt_unbound"));
     };
     if !is_exact(value, ffi::PyDict_CheckExact) {
@@ -406,7 +502,9 @@ pub fn adapt_closed_input<'py>(py: Python<'py>, class: &Bound<'py, PyAny>, value
     }
     let source = unsafe { value.cast_unchecked::<PyDict>() };
     let declared = class.getattr(pyo3::intern!(py, "optional_non_null_fields"))?;
-    if !(is_exact(&declared, ffi::PyFrozenSet_CheckExact) || is_exact(&declared, ffi::PySet_CheckExact)) {
+    if !(is_exact(&declared, ffi::PyFrozenSet_CheckExact)
+        || is_exact(&declared, ffi::PySet_CheckExact))
+    {
         return reference.call1((class, value));
     }
     for field_name in declared.try_iter()? {
@@ -448,7 +546,10 @@ pub fn adapt_closed_input<'py>(py: Python<'py>, class: &Bound<'py, PyAny>, value
 /// `_timestamp_wire(value)`.
 #[pyfunction]
 #[pyo3(name = "models_timestamp_wire")]
-pub fn timestamp_wire<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+pub fn timestamp_wire<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
     if is_exact(value, ffi::PyUnicode_CheckExact) {
         if let Ok(text) = unsafe { value.cast_unchecked::<PyString>() }.to_str() {
             if yoetz_core::protocol::timestamp::is_wire_timestamp(text) {
@@ -488,8 +589,12 @@ pub fn bind_classify(
     max_pointer_bytes: usize,
 ) -> PyResult<()> {
     let py = module_globals.py();
-    let receipt_text_formats = PyFrozenSet::new(py, ["markdown", "text"])?.into_any().unbind();
-    *LEAF_BINDINGS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(LeafBindings {
+    let receipt_text_formats = PyFrozenSet::new(py, ["markdown", "text"])?
+        .into_any()
+        .unbind();
+    *LEAF_BINDINGS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(LeafBindings {
         module_globals: module_globals.unbind(),
         result_methods: result_methods.unbind(),
         status_views: status_views.unbind(),
@@ -519,13 +624,20 @@ fn is_nfc(py: Python<'_>, text: &str) -> bool {
         return false;
     };
     match normalize.bind(py).call1(("NFC", text)) {
-        Ok(normalized) => normalized.extract::<&str>().map(|value| value == text).unwrap_or(false),
+        Ok(normalized) => normalized
+            .extract::<&str>()
+            .map(|value| value == text)
+            .unwrap_or(false),
         Err(_) => false,
     }
 }
 
 /// `mapping.get(key)` for an exact dict or `JsonObject` (`None` when absent).
-fn fast_get<'py>(container: &Bound<'py, PyAny>, json_object: &Bound<'py, PyAny>, key: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
+fn fast_get<'py>(
+    container: &Bound<'py, PyAny>,
+    json_object: &Bound<'py, PyAny>,
+    key: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
     if is_exact(container, ffi::PyDict_CheckExact) {
         return unsafe { container.cast_unchecked::<PyDict>() }.get_item(key);
     }
@@ -551,7 +663,11 @@ struct Classifier<'py> {
 
 impl<'py> Classifier<'py> {
     /// `_traverse_result_leaf`, recording each container visited.
-    fn traverse(&self, result: &Bound<'py, PyAny>, segments: &[Bound<'py, PyString>]) -> PyResult<Step<Traversal<'py>>> {
+    fn traverse(
+        &self,
+        result: &Bound<'py, PyAny>,
+        segments: &[Bound<'py, PyString>],
+    ) -> PyResult<Step<Traversal<'py>>> {
         let mut current = result.clone();
         let mut arrays = Vec::with_capacity(segments.len());
         let mut path = Vec::with_capacity(segments.len());
@@ -563,7 +679,9 @@ impl<'py> Classifier<'py> {
                     None => return Ok(Step::Refused),
                 }
                 arrays.push(false);
-            } else if is_exact(&current, ffi::PyList_CheckExact) || is_exact(&current, ffi::PyTuple_CheckExact) {
+            } else if is_exact(&current, ffi::PyList_CheckExact)
+                || is_exact(&current, ffi::PyTuple_CheckExact)
+            {
                 let Some(index) = core_pointer::array_index(segment.to_str()?) else {
                     return Ok(Step::Refused);
                 };
@@ -598,23 +716,38 @@ impl<'py> Classifier<'py> {
         leaf: &Bound<'py, PyAny>,
     ) -> PyResult<Option<Bound<'py, PyAny>>> {
         let py = self.py;
-        if segments.len() != 3 || segments[0].to_str()? != "accepted_events" || segments[2].to_str()? != "summary" {
+        if segments.len() != 3
+            || segments[0].to_str()? != "accepted_events"
+            || segments[2].to_str()? != "summary"
+        {
             return Ok(None);
         }
         // The traversal resolved ``accepted_events`` (path[1]) and the event (path[2]); the
         // reference re-reads both and refuses anything but a sequence holding a mapping, which
         // is exactly when the traversal indexed path[1] as an array.
         let raw_events = &path[1];
-        if !(is_exact(raw_events, ffi::PyList_CheckExact) || is_exact(raw_events, ffi::PyTuple_CheckExact)) {
+        if !(is_exact(raw_events, ffi::PyList_CheckExact)
+            || is_exact(raw_events, ffi::PyTuple_CheckExact))
+        {
             return Err(invalid(py));
         }
         let event = &path[2];
-        let schema_name = fast_get(event, &self.json_object, pyo3::intern!(py, "schema_name").as_any())?;
-        let schema_version = fast_get(event, &self.json_object, pyo3::intern!(py, "schema_version").as_any())?;
+        let schema_name = fast_get(
+            event,
+            &self.json_object,
+            pyo3::intern!(py, "schema_name").as_any(),
+        )?;
+        let schema_version = fast_get(
+            event,
+            &self.json_object,
+            pyo3::intern!(py, "schema_version").as_any(),
+        )?;
         let (Some(schema_name), Some(schema_version)) = (schema_name, schema_version) else {
             return Err(invalid(py));
         };
-        if !is_exact(&schema_name, ffi::PyUnicode_CheckExact) || !is_exact(&schema_version, ffi::PyUnicode_CheckExact) {
+        if !is_exact(&schema_name, ffi::PyUnicode_CheckExact)
+            || !is_exact(&schema_version, ffi::PyUnicode_CheckExact)
+        {
             return Err(invalid(py));
         }
         let selector = PyTuple::new(py, [schema_name, schema_version])?;
@@ -622,7 +755,10 @@ impl<'py> Classifier<'py> {
             return Ok(Some(selector.into_any()));
         }
         // ``event_map.get("summary")`` is the leaf the traversal reached.
-        if leaf.rich_compare("opaque_unknown", CompareOp::Ne)?.is_truthy()? {
+        if leaf
+            .rich_compare("opaque_unknown", CompareOp::Ne)?
+            .is_truthy()?
+        {
             return Err(invalid(py));
         }
         Ok(Some(pyo3::intern!(py, "<opaque>").clone().into_any()))
@@ -636,7 +772,9 @@ impl<'py> Classifier<'py> {
         pointer: &Bound<'py, PyAny>,
     ) -> PyResult<Step<Bound<'py, PyAny>>> {
         let py = self.py;
-        if !is_exact(method, ffi::PyUnicode_CheckExact) || !bindings.result_methods.bind(py).contains(method)? {
+        if !is_exact(method, ffi::PyUnicode_CheckExact)
+            || !bindings.result_methods.bind(py).contains(method)?
+        {
             return Ok(Step::Refused);
         }
         if !is_fast_mapping(result, &self.json_object) {
@@ -652,10 +790,17 @@ impl<'py> Classifier<'py> {
         let Ok(pointer_text) = unsafe { pointer.cast_unchecked::<PyString>() }.to_str() else {
             return Ok(Step::Refused);
         };
-        let Ok(decoded) = core_pointer::decode_pointer(pointer_text, bindings.max_pointer_bytes, |text| is_nfc(py, text)) else {
+        let Ok(decoded) =
+            core_pointer::decode_pointer(pointer_text, bindings.max_pointer_bytes, |text| {
+                is_nfc(py, text)
+            })
+        else {
             return Ok(Step::Refused);
         };
-        let segments: Vec<Bound<'py, PyString>> = decoded.iter().map(|segment| PyString::new(py, segment)).collect();
+        let segments: Vec<Bound<'py, PyString>> = decoded
+            .iter()
+            .map(|segment| PyString::new(py, segment))
+            .collect();
         let (leaf, arrays, path) = match self.traverse(result, &segments)? {
             Step::Done(found) => found,
             Step::Refused => return Ok(Step::Refused),
@@ -663,23 +808,44 @@ impl<'py> Classifier<'py> {
         };
         let method_text = unsafe { method.cast_unchecked::<PyString>() }.to_str()?;
         if method_text == "receipt" && decoded.len() == 1 && decoded[0] == "human_text" {
-            let receipt_format = fast_get(result, &self.json_object, pyo3::intern!(py, "format").as_any())?
-                .unwrap_or_else(|| py.None().into_bound(py));
+            let receipt_format = fast_get(
+                result,
+                &self.json_object,
+                pyo3::intern!(py, "format").as_any(),
+            )?
+            .unwrap_or_else(|| py.None().into_bound(py));
             if leaf.is_none() {
-                if receipt_format.rich_compare("json", CompareOp::Ne)?.is_truthy()? {
+                if receipt_format
+                    .rich_compare("json", CompareOp::Ne)?
+                    .is_truthy()?
+                {
                     return Ok(Step::Refused);
                 }
-                return Ok(Step::Done(pyo3::intern!(py, "public_structural").clone().into_any()));
+                return Ok(Step::Done(
+                    pyo3::intern!(py, "public_structural").clone().into_any(),
+                ));
             }
-            if !is_exact(&leaf, ffi::PyUnicode_CheckExact) || !bindings.receipt_text_formats.bind(py).contains(&receipt_format)? {
+            if !is_exact(&leaf, ffi::PyUnicode_CheckExact)
+                || !bindings
+                    .receipt_text_formats
+                    .bind(py)
+                    .contains(&receipt_format)?
+            {
                 return Ok(Step::Refused);
             }
         }
         let mut status_view = py.None().into_bound(py);
         if method_text == "status" {
-            let candidate = fast_get(result, &self.json_object, pyo3::intern!(py, "view").as_any())?;
+            let candidate = fast_get(
+                result,
+                &self.json_object,
+                pyo3::intern!(py, "view").as_any(),
+            )?;
             match candidate {
-                Some(view) if is_exact(&view, ffi::PyUnicode_CheckExact) && bindings.status_views.bind(py).contains(&view)? => {
+                Some(view)
+                    if is_exact(&view, ffi::PyUnicode_CheckExact)
+                        && bindings.status_views.bind(py).contains(&view)? =>
+                {
                     status_view = view;
                 }
                 _ => return Ok(Step::Refused),
@@ -695,13 +861,22 @@ impl<'py> Classifier<'py> {
         };
         let shape = PyTuple::new(
             py,
-            segments.iter().zip(arrays.iter()).map(|(segment, &is_array)| {
-                if is_array { py.None().into_bound(py) } else { segment.clone().into_any() }
-            }),
+            segments
+                .iter()
+                .zip(arrays.iter())
+                .map(|(segment, &is_array)| {
+                    if is_array {
+                        py.None().into_bound(py)
+                    } else {
+                        segment.clone().into_any()
+                    }
+                }),
         )?;
         let globals = bindings.module_globals.bind(py);
         let Some(shape_rule) = globals.get_item(pyo3::intern!(py, "_classify_leaf_shape"))? else {
-            return Err(pyo3::exceptions::PyNameError::new_err("name '_classify_leaf_shape' is not defined"));
+            return Err(pyo3::exceptions::PyNameError::new_err(
+                "name '_classify_leaf_shape' is not defined",
+            ));
         };
         let classification = shape_rule.call1((method, status_view, event_selector, shape))?;
         if classification.is_none() {
@@ -721,13 +896,20 @@ pub fn classify_result_leaf<'py>(
     pointer: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
     // Clone the bindings out of the lock: the classification calls back into Python.
-    let bound = LEAF_BINDINGS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+    let bound = LEAF_BINDINGS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
     let Some(bindings) = bound else {
-        return Err(pyo3::exceptions::PyRuntimeError::new_err("classify_unbound"));
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "classify_unbound",
+        ));
     };
     let reference = bindings.reference.bind(py).clone();
     let step = match JSON_OBJECT.get(py) {
-        Some(json_object) => Classifier { py, json_object }.classify(&bindings, method, validated_result, pointer)?,
+        Some(json_object) => {
+            Classifier { py, json_object }.classify(&bindings, method, validated_result, pointer)?
+        }
         None => Step::Defer,
     };
     match step {

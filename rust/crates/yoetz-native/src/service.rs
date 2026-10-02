@@ -13,7 +13,8 @@ use yoetz_core::protocol::pointer::push_escaped;
 
 use crate::registry::Slot;
 use crate::walk::{
-    JSON_OBJECT, NATIVE_RECURSION_LIMIT, is_exact, is_mapping_instance, is_plain_scalar, is_type, json_object_items,
+    JSON_OBJECT, NATIVE_RECURSION_LIMIT, is_exact, is_mapping_instance, is_plain_scalar, is_type,
+    json_object_items,
 };
 
 static REFERENCE: Slot = Slot::new();
@@ -34,7 +35,13 @@ struct Walker<'py> {
 }
 
 impl<'py> Walker<'py> {
-    fn member(&mut self, key: &Bound<'py, PyAny>, item: &Bound<'py, PyAny>, pointer: &mut String, depth: usize) -> PyResult<Result<(), Defer>> {
+    fn member(
+        &mut self,
+        key: &Bound<'py, PyAny>,
+        item: &Bound<'py, PyAny>,
+        pointer: &mut String,
+        depth: usize,
+    ) -> PyResult<Result<(), Defer>> {
         if !is_exact(key, ffi::PyUnicode_CheckExact) {
             return Ok(Err(Defer));
         }
@@ -49,7 +56,12 @@ impl<'py> Walker<'py> {
         outcome
     }
 
-    fn walk(&mut self, value: &Bound<'py, PyAny>, pointer: &mut String, depth: usize) -> PyResult<Result<(), Defer>> {
+    fn walk(
+        &mut self,
+        value: &Bound<'py, PyAny>,
+        pointer: &mut String,
+        depth: usize,
+    ) -> PyResult<Result<(), Defer>> {
         if depth > NATIVE_RECURSION_LIMIT {
             return Ok(Err(Defer));
         }
@@ -65,7 +77,10 @@ impl<'py> Walker<'py> {
             if is_type(value, &class) {
                 for pair in json_object_items(value)?.iter() {
                     let pair = pair.cast_into::<PyTuple>()?;
-                    if self.member(&pair.get_item(0)?, &pair.get_item(1)?, pointer, depth)?.is_err() {
+                    if self
+                        .member(&pair.get_item(0)?, &pair.get_item(1)?, pointer, depth)?
+                        .is_err()
+                    {
                         return Ok(Err(Defer));
                     }
                 }
@@ -76,7 +91,9 @@ impl<'py> Walker<'py> {
             let items: Vec<Bound<'py, PyAny>> = if is_exact(value, ffi::PyList_CheckExact) {
                 unsafe { value.cast_unchecked::<PyList>() }.iter().collect()
             } else {
-                unsafe { value.cast_unchecked::<PyTuple>() }.iter().collect()
+                unsafe { value.cast_unchecked::<PyTuple>() }
+                    .iter()
+                    .collect()
             };
             for (index, item) in items.iter().enumerate() {
                 let mark = pointer.len();
@@ -93,7 +110,10 @@ impl<'py> Walker<'py> {
         if is_mapping_instance(self.py, value)? {
             return Ok(Err(Defer));
         }
-        let row = PyTuple::new(self.py, [PyString::new(self.py, pointer).into_any(), value.clone()])?;
+        let row = PyTuple::new(
+            self.py,
+            [PyString::new(self.py, pointer).into_any(), value.clone()],
+        )?;
         self.rows.push(row.into_any());
         Ok(Ok(()))
     }
@@ -102,7 +122,11 @@ impl<'py> Walker<'py> {
 /// `_leaves(value, pointer="")`.
 #[pyfunction]
 #[pyo3(name = "service_leaves", signature = (value, pointer = None))]
-pub fn leaves<'py>(py: Python<'py>, value: &Bound<'py, PyAny>, pointer: Option<&Bound<'py, PyAny>>) -> PyResult<Bound<'py, PyAny>> {
+pub fn leaves<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+    pointer: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyAny>> {
     let Some(reference) = REFERENCE.get(py) else {
         return Err(pyo3::exceptions::PyRuntimeError::new_err("leaves_unbound"));
     };
@@ -120,7 +144,11 @@ pub fn leaves<'py>(py: Python<'py>, value: &Bound<'py, PyAny>, pointer: Option<&
         };
         start.push_str(text);
     }
-    let mut walker = Walker { py, json_object: JSON_OBJECT.get(py), rows: Vec::new() };
+    let mut walker = Walker {
+        py,
+        json_object: JSON_OBJECT.get(py),
+        rows: Vec::new(),
+    };
     match walker.walk(value, &mut start, 0)? {
         Ok(()) => Ok(PyTuple::new(py, walker.rows)?.into_any()),
         Err(Defer) => defer(),
@@ -152,7 +180,10 @@ impl<'py> Plain<'py> {
         if is_plain_scalar(value) {
             return Ok(value.clone());
         }
-        let is_json_object = self.json_object.as_ref().is_some_and(|class| is_type(value, class));
+        let is_json_object = self
+            .json_object
+            .as_ref()
+            .is_some_and(|class| is_type(value, class));
         if is_exact(value, ffi::PyDict_CheckExact) || is_json_object {
             if let Some(error) = Self::too_deep(depth) {
                 return Err(error);
@@ -161,7 +192,10 @@ impl<'py> Plain<'py> {
             if is_json_object {
                 for pair in json_object_items(value)?.iter() {
                     let pair = pair.cast_into::<PyTuple>()?;
-                    out.set_item(pair.get_item(0)?, self.plain(&pair.get_item(1)?, depth + 1)?)?;
+                    out.set_item(
+                        pair.get_item(0)?,
+                        self.plain(&pair.get_item(1)?, depth + 1)?,
+                    )?;
                 }
             } else {
                 for (key, item) in unsafe { value.cast_unchecked::<PyDict>() }.iter() {
@@ -203,9 +237,15 @@ impl<'py> Plain<'py> {
 /// `_plain_nested_mappings(value, depth=0)`.
 #[pyfunction]
 #[pyo3(name = "service_plain_nested_mappings", signature = (value, depth = None))]
-pub fn plain_nested_mappings<'py>(py: Python<'py>, value: &Bound<'py, PyAny>, depth: Option<&Bound<'py, PyAny>>) -> PyResult<Bound<'py, PyAny>> {
+pub fn plain_nested_mappings<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+    depth: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyAny>> {
     let Some(reference) = PLAIN_REFERENCE.get(py) else {
-        return Err(pyo3::exceptions::PyRuntimeError::new_err("plain_nested_mappings_unbound"));
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "plain_nested_mappings_unbound",
+        ));
     };
     let start = match depth {
         None => 0,
@@ -215,7 +255,12 @@ pub fn plain_nested_mappings<'py>(py: Python<'py>, value: &Bound<'py, PyAny>, de
         },
         Some(depth) => return reference.call1((value, depth)),
     };
-    Plain { py, reference, json_object: JSON_OBJECT.get(py) }.plain(value, start)
+    Plain {
+        py,
+        reference,
+        json_object: JSON_OBJECT.get(py),
+    }
+    .plain(value, start)
 }
 
 static REPLACE_REFERENCE: Slot = Slot::new();
@@ -247,7 +292,10 @@ impl<'py> Replacer<'py> {
             return Ok(Replaced::Done(self.replacement.clone()));
         }
         let part = self.parts[depth].as_str();
-        let is_json_object = self.json_object.as_ref().is_some_and(|class| is_type(value, class));
+        let is_json_object = self
+            .json_object
+            .as_ref()
+            .is_some_and(|class| is_type(value, class));
         if is_exact(value, ffi::PyDict_CheckExact) || is_json_object {
             let source = if is_json_object {
                 let copy = PyDict::new(py);
@@ -275,7 +323,9 @@ impl<'py> Replacer<'py> {
             let mut members: Vec<Bound<'py, PyAny>> = if is_exact(value, ffi::PyList_CheckExact) {
                 unsafe { value.cast_unchecked::<PyList>() }.iter().collect()
             } else {
-                unsafe { value.cast_unchecked::<PyTuple>() }.iter().collect()
+                unsafe { value.cast_unchecked::<PyTuple>() }
+                    .iter()
+                    .collect()
             };
             let Some(index) = yoetz_core::protocol::pointer::array_index(part) else {
                 return Ok(Replaced::Failed("projection_pointer_unresolved"));
@@ -308,7 +358,9 @@ pub fn replace_pointer<'py>(
     replacement: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let Some(reference) = REPLACE_REFERENCE.get(py) else {
-        return Err(pyo3::exceptions::PyRuntimeError::new_err("replace_pointer_unbound"));
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "replace_pointer_unbound",
+        ));
     };
     let defer = || reference.call1((root, pointer, replacement));
     if !is_exact(pointer, ffi::PyUnicode_CheckExact) {
@@ -321,11 +373,19 @@ pub fn replace_pointer<'py>(
     let Some(rest) = text.strip_prefix('/') else {
         return Err(PyValueError::new_err("projection_pointer_invalid"));
     };
-    let parts: Vec<String> = rest.split('/').map(|segment| segment.replace("~1", "/").replace("~0", "~")).collect();
+    let parts: Vec<String> = rest
+        .split('/')
+        .map(|segment| segment.replace("~1", "/").replace("~0", "~"))
+        .collect();
     if parts.len() > NATIVE_RECURSION_LIMIT {
         return defer();
     }
-    let replacer = Replacer { py, parts, replacement: replacement.clone(), json_object: JSON_OBJECT.get(py) };
+    let replacer = Replacer {
+        py,
+        parts,
+        replacement: replacement.clone(),
+        json_object: JSON_OBJECT.get(py),
+    };
     match replacer.replace_at(root, 0)? {
         Replaced::Done(value) => Ok(value),
         Replaced::Failed(reason) => Err(PyValueError::new_err(reason)),

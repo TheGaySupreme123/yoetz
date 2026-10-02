@@ -46,14 +46,19 @@ const CURSOR_KEYS: [&str; 5] = [
 /// Bind the module namespace, the collaborators the twin may stand in for or call (name ->
 /// original), and the Python reference.
 #[pyfunction]
-pub fn envelope_bind(globals: Bound<'_, PyDict>, originals: Bound<'_, PyDict>, reference: Bound<'_, PyAny>) {
+pub fn envelope_bind(
+    globals: Bound<'_, PyDict>,
+    originals: Bound<'_, PyDict>,
+    reference: Bound<'_, PyAny>,
+) {
     GLOBALS.set(globals.into_any().unbind());
     ORIGINALS.set(originals.into_any().unbind());
     REFERENCE.set(reference.unbind());
 }
 
 fn slot<'py>(py: Python<'py>, slot: &Slot) -> PyResult<Bound<'py, PyAny>> {
-    slot.get(py).ok_or_else(|| PyNameError::new_err("yoetz_native_envelope_unbound"))
+    slot.get(py)
+        .ok_or_else(|| PyNameError::new_err("yoetz_native_envelope_unbound"))
 }
 
 /// The collaborators, or `None` when any global differs from the one bound at import.
@@ -72,11 +77,16 @@ fn collaborators<'py>(py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
 }
 
 fn get<'py>(table: &Bound<'py, PyDict>, name: &str) -> PyResult<Bound<'py, PyAny>> {
-    table.get_item(name)?.ok_or_else(|| PyNameError::new_err(name.to_owned()))
+    table
+        .get_item(name)?
+        .ok_or_else(|| PyNameError::new_err(name.to_owned()))
 }
 
 /// The members of an exact `JsonObject` whose key set is exactly `keys`, in `keys` order.
-fn exact_members<'py>(value: &Bound<'py, PyAny>, keys: &[&str]) -> PyResult<Option<Vec<Bound<'py, PyAny>>>> {
+fn exact_members<'py>(
+    value: &Bound<'py, PyAny>,
+    keys: &[&str],
+) -> PyResult<Option<Vec<Bound<'py, PyAny>>>> {
     let py = value.py();
     let Some(class) = JSON_OBJECT.get(py) else {
         return Ok(None);
@@ -116,7 +126,11 @@ fn exact_members<'py>(value: &Bound<'py, PyAny>, keys: &[&str]) -> PyResult<Opti
     Ok(members.into_iter().collect())
 }
 
-fn kwargs<'py>(py: Python<'py>, keys: &[&str], values: &[Bound<'py, PyAny>]) -> PyResult<Bound<'py, PyDict>> {
+fn kwargs<'py>(
+    py: Python<'py>,
+    keys: &[&str],
+    values: &[Bound<'py, PyAny>],
+) -> PyResult<Bound<'py, PyDict>> {
     let arguments = PyDict::new(py);
     for (key, value) in keys.iter().zip(values) {
         arguments.set_item(*key, value)?;
@@ -125,7 +139,10 @@ fn kwargs<'py>(py: Python<'py>, keys: &[&str], values: &[Bound<'py, PyAny>]) -> 
 }
 
 /// The envelope, or `None` to run the reference.
-fn envelope_from_json<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
+fn envelope_from_json<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
     let Some(table) = collaborators(py)? else {
         return Ok(None);
     };
@@ -150,7 +167,8 @@ fn envelope_from_json<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResu
     let Some(cursor_fields) = exact_members(&fields[4], &CURSOR_KEYS)? else {
         return Ok(None);
     };
-    let cursor = get(&table, "ObservationCursor")?.call((), Some(&kwargs(py, &CURSOR_KEYS, &cursor_fields)?))?;
+    let cursor = get(&table, "ObservationCursor")?
+        .call((), Some(&kwargs(py, &CURSOR_KEYS, &cursor_fields)?))?;
     let receipt_time = get(&table, "timestamp_from_string")?.call1((&fields[5],))?;
     let structural = get(&table, "_structural_payload")?.call1((&fields[6],))?;
     let content_refs = get(&table, "_content_object_refs")?.call1((&fields[7],))?;
@@ -166,14 +184,18 @@ fn envelope_from_json<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResu
         content_refs,
         gap_codes,
     ];
-    let envelope = get(&table, "ObservationEnvelope")?.call((), Some(&kwargs(py, &ENVELOPE_KEYS, &arguments)?))?;
+    let envelope = get(&table, "ObservationEnvelope")?
+        .call((), Some(&kwargs(py, &ENVELOPE_KEYS, &arguments)?))?;
     Ok(Some(envelope))
 }
 
 /// `observation_envelope_from_json(value)`, or `None` to run the reference.
 #[pyfunction]
 #[pyo3(name = "envelope_from_json")]
-pub fn envelope_from_json_py<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
+pub fn envelope_from_json_py<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
     envelope_from_json(py, value)
 }
 
@@ -182,7 +204,10 @@ pub fn envelope_from_json_py<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) ->
 /// whose blob is not `bytes`, not an object, or not a valid envelope are skipped. `None` when
 /// the domain twin is unbound.
 #[pyfunction]
-pub fn observation_envelopes_from_rows<'py>(py: Python<'py>, rows: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyTuple>>> {
+pub fn observation_envelopes_from_rows<'py>(
+    py: Python<'py>,
+    rows: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, PyTuple>>> {
     // Unbound when the domain module kept its Python implementations: run the reference loop.
     let Some(reference) = REFERENCE.get(py) else {
         return Ok(None);
@@ -198,9 +223,11 @@ pub fn observation_envelopes_from_rows<'py>(py: Python<'py>, rows: &Bound<'py, P
         if unsafe { ffi::PyDict_CheckExact(parsed.as_ptr()) } == 0 {
             continue;
         }
-        let decoded = crate::values::freeze_json(py, &parsed).and_then(|frozen| match envelope_from_json(py, &frozen)? {
-            Some(envelope) => Ok(envelope),
-            None => reference.call1((frozen,)),
+        let decoded = crate::values::freeze_json(py, &parsed).and_then(|frozen| {
+            match envelope_from_json(py, &frozen)? {
+                Some(envelope) => Ok(envelope),
+                None => reference.call1((frozen,)),
+            }
         });
         match decoded {
             Ok(envelope) => result.push(envelope),

@@ -52,7 +52,8 @@ pub fn shlex_quote<'py>(py: Python<'py>, s: &Bound<'py, PyAny>) -> PyResult<Boun
 #[pyfunction]
 pub fn shlex_join<'py>(py: Python<'py>, words: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
     let pointer = words.as_ptr();
-    let exact_sequence = unsafe { ffi::PyList_CheckExact(pointer) != 0 || ffi::PyTuple_CheckExact(pointer) != 0 };
+    let exact_sequence =
+        unsafe { ffi::PyList_CheckExact(pointer) != 0 || ffi::PyTuple_CheckExact(pointer) != 0 };
     if exact_sequence {
         let items: Vec<Bound<'py, PyAny>> = words.try_iter()?.collect::<PyResult<_>>()?;
         let mut texts: Vec<&str> = Vec::with_capacity(items.len());

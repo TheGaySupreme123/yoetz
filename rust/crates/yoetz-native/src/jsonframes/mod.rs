@@ -16,7 +16,10 @@ mod codex_plan;
 mod codex_rollout_jsonl;
 mod mcp_stdio;
 
-type Members<'a, 'py> = Vec<(std::borrow::Cow<'a, str>, CompatValue<'a, Bound<'py, PyAny>>)>;
+type Members<'a, 'py> = Vec<(
+    std::borrow::Cow<'a, str>,
+    CompatValue<'a, Bound<'py, PyAny>>,
+)>;
 
 /// Build a long integer literal exactly as the stdlib scanner does (`PyLong_FromString` applies
 /// the interpreter's `int_max_str_digits` limit); any failure defers to the reference.
@@ -35,8 +38,14 @@ fn big_int<'py>(py: Python<'py>) -> impl FnMut(&str) -> Option<Bound<'py, PyAny>
 /// The depth limits for a reference that walks values from depth 0 and refuses any value
 /// deeper than `max_depth` (`_validate_json_tree` in the Codex importers).
 fn value_depth_limits(max_depth: i64) -> Option<CompatLimits> {
-    let depth = usize::try_from(max_depth).ok().filter(|depth| *depth <= MAX_COMPAT_DEPTH)?;
-    Some(CompatLimits { max_value_depth: depth, max_container_depth: depth, allow_overflow: false })
+    let depth = usize::try_from(max_depth)
+        .ok()
+        .filter(|depth| *depth <= MAX_COMPAT_DEPTH)?;
+    Some(CompatLimits {
+        max_value_depth: depth,
+        max_container_depth: depth,
+        allow_overflow: false,
+    })
 }
 
 /// The raw bytes of an exact `bytes` object.
@@ -48,7 +57,10 @@ fn exact_bytes<'a>(value: &'a Bound<'_, PyAny>) -> Option<&'a [u8]> {
 }
 
 /// Convert an accepted value. Depth is bounded by the limits the value was accepted under.
-fn to_python<'py>(py: Python<'py>, value: CompatValue<'_, Bound<'py, PyAny>>) -> PyResult<Bound<'py, PyAny>> {
+fn to_python<'py>(
+    py: Python<'py>,
+    value: CompatValue<'_, Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyAny>> {
     Ok(match value {
         CompatValue::Null => py.None().into_bound(py),
         CompatValue::Bool(truth) => PyBool::new(py, truth).to_owned().into_any(),
@@ -67,7 +79,10 @@ fn to_python<'py>(py: Python<'py>, value: CompatValue<'_, Bound<'py, PyAny>>) ->
     })
 }
 
-fn members_to_dict<'py>(py: Python<'py>, members: Members<'_, 'py>) -> PyResult<Bound<'py, PyDict>> {
+fn members_to_dict<'py>(
+    py: Python<'py>,
+    members: Members<'_, 'py>,
+) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
     for (key, item) in members {
         dict.set_item(PyString::new(py, &key), to_python(py, item)?)?;

@@ -78,10 +78,22 @@ static ACCEPTED_IDS: Mutex<Option<AcceptedIds>> = Mutex::new(None);
 
 /// Run `action` on the cache for `validate`, resetting it when `validate` is a different object.
 /// The lock is never held while Python code runs.
-fn with_accepted_ids<T>(validate: &Bound<'_, PyAny>, action: impl FnOnce(&mut HashSet<Box<str>>) -> T) -> T {
-    let mut guard = ACCEPTED_IDS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let cache = guard.get_or_insert_with(|| AcceptedIds { validator: None, texts: HashSet::new() });
-    if !cache.validator.as_ref().is_some_and(|known| known.as_ptr() == validate.as_ptr()) {
+fn with_accepted_ids<T>(
+    validate: &Bound<'_, PyAny>,
+    action: impl FnOnce(&mut HashSet<Box<str>>) -> T,
+) -> T {
+    let mut guard = ACCEPTED_IDS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let cache = guard.get_or_insert_with(|| AcceptedIds {
+        validator: None,
+        texts: HashSet::new(),
+    });
+    if !cache
+        .validator
+        .as_ref()
+        .is_some_and(|known| known.as_ptr() == validate.as_ptr())
+    {
         cache.texts.clear();
         cache.validator = Some(validate.clone().unbind());
     }
@@ -99,7 +111,11 @@ impl<'py> RefValidator<'py> {
     fn new(py: Python<'py>) -> Option<Self> {
         let kinds = ID_KINDS.get(py)?.cast_into::<PyTuple>().ok()?;
         let validate = VALUES_MODULE.get(py)?.getattr("validate_id").ok()?;
-        Some(RefValidator { validate, kinds, seen: HashSet::new() })
+        Some(RefValidator {
+            validate,
+            kinds,
+            seen: HashSet::new(),
+        })
     }
 
     /// Whether `value` (an exact `str` whose prefix selects `kind`) validates to itself.
@@ -143,7 +159,10 @@ impl<'py> RefValidator<'py> {
 
 /// `_basis_ref` fast path: the validated ref itself, or `None` to run the reference.
 #[pyfunction]
-pub fn checks_basis_ref<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> Option<Bound<'py, PyAny>> {
+pub fn checks_basis_ref<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+) -> Option<Bound<'py, PyAny>> {
     let mut validator = RefValidator::new(py)?;
     validator.basis_ref(value)?;
     Some(value.clone())
@@ -187,7 +206,10 @@ pub fn checks_validated_ref_tuple<'py>(
 
 /// `_sorted_unique` fast path over a materialized tuple of exact ASCII `str`s.
 #[pyfunction]
-pub fn checks_sorted_unique<'py>(py: Python<'py>, values: &Bound<'py, PyTuple>) -> Option<Bound<'py, PyTuple>> {
+pub fn checks_sorted_unique<'py>(
+    py: Python<'py>,
+    values: &Bound<'py, PyTuple>,
+) -> Option<Bound<'py, PyTuple>> {
     let mut members: Vec<(&[u8], Bound<'py, PyAny>)> = Vec::with_capacity(values.len());
     let items: Vec<Bound<'py, PyAny>> = values.iter().collect();
     let mut seen: HashSet<&[u8]> = HashSet::with_capacity(items.len());
@@ -207,7 +229,10 @@ pub fn checks_sorted_unique<'py>(py: Python<'py>, values: &Bound<'py, PyTuple>) 
 
 /// `tuple(sorted(facts, key=_fact_key))` fast path (stable, like `sorted`).
 #[pyfunction]
-pub fn checks_sorted_facts<'py>(py: Python<'py>, facts: &Bound<'py, PyTuple>) -> Option<Bound<'py, PyTuple>> {
+pub fn checks_sorted_facts<'py>(
+    py: Python<'py>,
+    facts: &Bound<'py, PyTuple>,
+) -> Option<Bound<'py, PyTuple>> {
     let items: Vec<Bound<'py, PyAny>> = facts.iter().collect();
     let mut codes: Vec<Bound<'py, PyAny>> = Vec::with_capacity(items.len());
     let mut refs: Vec<Vec<Bound<'py, PyAny>>> = Vec::with_capacity(items.len());
@@ -218,7 +243,10 @@ pub fn checks_sorted_facts<'py>(py: Python<'py>, facts: &Bound<'py, PyTuple>) ->
         if unsafe { ffi::PyTuple_CheckExact(subject_refs.as_ptr()) } == 0 {
             return None;
         }
-        let subject_refs: Vec<Bound<'py, PyAny>> = unsafe { subject_refs.cast_unchecked::<PyTuple>() }.iter().collect();
+        let subject_refs: Vec<Bound<'py, PyAny>> =
+            unsafe { subject_refs.cast_unchecked::<PyTuple>() }
+                .iter()
+                .collect();
         for item in &subject_refs {
             exact_text(item).filter(|text| text.is_ascii())?;
         }
@@ -227,7 +255,10 @@ pub fn checks_sorted_facts<'py>(py: Python<'py>, facts: &Bound<'py, PyTuple>) ->
     }
     let key = |index: usize| -> (&[u8], Vec<&[u8]>) {
         let code = exact_text(&codes[index]).unwrap_or_default().as_bytes();
-        let subjects = refs[index].iter().map(|item| exact_text(item).unwrap_or_default().as_bytes()).collect();
+        let subjects = refs[index]
+            .iter()
+            .map(|item| exact_text(item).unwrap_or_default().as_bytes())
+            .collect();
         (code, subjects)
     };
     let keys: Vec<(&[u8], Vec<&[u8]>)> = (0..items.len()).map(key).collect();
@@ -237,18 +268,29 @@ pub fn checks_sorted_facts<'py>(py: Python<'py>, facts: &Bound<'py, PyTuple>) ->
 }
 
 /// The `(key, value)` pairs of an exact `dict` or `mappingproxy`, or `None` for anything else.
-fn exact_mapping_items<'py>(mapping: &Bound<'py, PyAny>) -> Option<Vec<(Bound<'py, PyAny>, Bound<'py, PyAny>)>> {
+fn exact_mapping_items<'py>(
+    mapping: &Bound<'py, PyAny>,
+) -> Option<Vec<(Bound<'py, PyAny>, Bound<'py, PyAny>)>> {
     let pointer = mapping.as_ptr();
     if unsafe { ffi::PyDict_CheckExact(pointer) } != 0 {
-        return Some(unsafe { mapping.cast_unchecked::<PyDict>() }.iter().collect());
+        return Some(
+            unsafe { mapping.cast_unchecked::<PyDict>() }
+                .iter()
+                .collect(),
+        );
     }
-    let is_proxy = unsafe { ffi::Py_TYPE(pointer) == std::ptr::addr_of_mut!(ffi::PyDictProxy_Type) };
+    let is_proxy =
+        unsafe { ffi::Py_TYPE(pointer) == std::ptr::addr_of_mut!(ffi::PyDictProxy_Type) };
     if !is_proxy {
         return None;
     }
     let mut pairs = Vec::new();
     for pair in mapping.call_method0("items").ok()?.try_iter().ok()? {
-        pairs.push(pair.ok()?.extract::<(Bound<'py, PyAny>, Bound<'py, PyAny>)>().ok()?);
+        pairs.push(
+            pair.ok()?
+                .extract::<(Bound<'py, PyAny>, Bound<'py, PyAny>)>()
+                .ok()?,
+        );
     }
     Some(pairs)
 }
@@ -315,8 +357,10 @@ pub fn checks_ref_coverages<'py>(
     weaken: &Bound<'py, PyAny>,
     unknown_event_class: &Bound<'py, PyAny>,
 ) -> PyResult<Option<Bound<'py, PyDict>>> {
-    let exact_dict = |value: &Bound<'py, PyAny>| unsafe { ffi::PyDict_CheckExact(value.as_ptr()) != 0 };
-    if !exact_dict(source_by_ref) || !exact_dict(records_by_event) || !exact_dict(gap_codes_by_root) {
+    let exact_dict =
+        |value: &Bound<'py, PyAny>| unsafe { ffi::PyDict_CheckExact(value.as_ptr()) != 0 };
+    if !exact_dict(source_by_ref) || !exact_dict(records_by_event) || !exact_dict(gap_codes_by_root)
+    {
         return Ok(None);
     }
     let Some(mut validator) = RefValidator::new(py) else {
@@ -335,7 +379,9 @@ pub fn checks_ref_coverages<'py>(
     let output = PyDict::new(py);
     let mut memo: HashMap<(usize, u16), Bound<'py, PyAny>> = HashMap::new();
     let pairs: Vec<(Bound<'py, PyAny>, Bound<'py, PyAny>)> =
-        unsafe { source_by_ref.cast_unchecked::<PyDict>() }.iter().collect();
+        unsafe { source_by_ref.cast_unchecked::<PyDict>() }
+            .iter()
+            .collect();
     for (reference, source_event) in pairs {
         let Ok(Some(source)) = records.get_item(&source_event) else {
             return Ok(None);
@@ -371,12 +417,17 @@ pub fn checks_ref_coverages<'py>(
                 (is_evidence && contains(unavailable_object_by_evidence, &reference)?)
                     || has_code(&unavailable_object_code)?,
                 contains(missing_sources, &source_event)?,
-                is_event && contains(unknown_events, &reference)? && source.get_type().is(unknown_event_class),
+                is_event
+                    && contains(unknown_events, &reference)?
+                    && source.get_type().is(unknown_event_class),
                 has_code(&provenance_codes[0])?,
                 has_code(&provenance_codes[1])?,
                 has_code(&provenance_codes[2])?,
             ];
-            Some(flags.iter().enumerate().fold(0, |mask, (bit, flag)| if *flag { mask | (1 << bit) } else { mask }))
+            Some(flags.iter().enumerate().fold(
+                0,
+                |mask, (bit, flag)| if *flag { mask | (1 << bit) } else { mask },
+            ))
         };
         let Some(mask) = flags() else {
             return Ok(None);
@@ -390,10 +441,21 @@ pub fn checks_ref_coverages<'py>(
             None => {
                 let provenance = PyFrozenSet::new(
                     py,
-                    provenance_codes.iter().enumerate().filter(|(index, _)| mask & (1 << (6 + index)) != 0).map(|(_, item)| item),
+                    provenance_codes
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| mask & (1 << (6 + index)) != 0)
+                        .map(|(_, item)| item),
                 )?;
                 let keywords = PyDict::new(py);
-                let names = ["redacted_event", "unavailable_event", "redacted_object", "unavailable_object", "missing_ref", "unknown_event"];
+                let names = [
+                    "redacted_event",
+                    "unavailable_event",
+                    "redacted_object",
+                    "unavailable_object",
+                    "missing_ref",
+                    "unknown_event",
+                ];
                 for (bit, name) in names.iter().enumerate() {
                     keywords.set_item(*name, mask & (1 << bit) != 0)?;
                 }
@@ -466,7 +528,10 @@ pub fn checks_fold_case_coverages<'py>(
         keyed.push((text, value));
     }
     keyed.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
-    fold_distinct(keyed.into_iter().map(|(_, coverage)| coverage.clone()), weakest)
+    fold_distinct(
+        keyed.into_iter().map(|(_, coverage)| coverage.clone()),
+        weakest,
+    )
 }
 
 /// `_fold_ref_coverages` fast path; any ref missing from the mapping defers to the reference,
@@ -478,7 +543,8 @@ pub fn checks_fold_ref_coverages<'py>(
     weakest: &Bound<'py, PyAny>,
 ) -> PyResult<Option<Bound<'py, PyAny>>> {
     let pointer = coverage_by_ref.as_ptr();
-    let is_proxy = unsafe { ffi::Py_TYPE(pointer) == std::ptr::addr_of_mut!(ffi::PyDictProxy_Type) };
+    let is_proxy =
+        unsafe { ffi::Py_TYPE(pointer) == std::ptr::addr_of_mut!(ffi::PyDictProxy_Type) };
     if refs.is_empty() || !(is_proxy || unsafe { ffi::PyDict_CheckExact(pointer) } != 0) {
         return Ok(None);
     }

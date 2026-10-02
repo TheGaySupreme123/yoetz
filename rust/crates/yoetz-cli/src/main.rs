@@ -59,7 +59,9 @@ fn run(command: &str) -> ExitCode {
             .as_bytes(),
         ),
         "sha256" => match read_stdin() {
-            Ok(input) => write_stdout(format!("{}\n", canonical::sha256_prefixed(&input)).as_bytes()),
+            Ok(input) => {
+                write_stdout(format!("{}\n", canonical::sha256_prefixed(&input)).as_bytes())
+            }
             Err(code) => code,
         },
         "canonical" | "digest" | "check" => {
@@ -77,7 +79,9 @@ fn run(command: &str) -> ExitCode {
             };
             match command {
                 "canonical" => write_stdout(&encoded),
-                "digest" => write_stdout(format!("{}\n", canonical::sha256_prefixed(&encoded)).as_bytes()),
+                "digest" => {
+                    write_stdout(format!("{}\n", canonical::sha256_prefixed(&encoded)).as_bytes())
+                }
                 _ if encoded == input => ExitCode::SUCCESS,
                 _ => refuse("noncanonical_bytes"),
             }

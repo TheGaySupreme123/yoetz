@@ -253,7 +253,10 @@ mod tests {
         assert_eq!(split("'a"), Err(ShlexError::NoClosingQuotation));
         assert_eq!(split("a\\"), Err(ShlexError::NoEscapedCharacter));
         assert_eq!(split("\"a\\"), Err(ShlexError::NoEscapedCharacter));
-        assert_eq!(ShlexError::NoClosingQuotation.message(), "No closing quotation");
+        assert_eq!(
+            ShlexError::NoClosingQuotation.message(),
+            "No closing quotation"
+        );
     }
 
     #[test]

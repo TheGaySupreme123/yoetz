@@ -43,7 +43,10 @@ struct Action<'py> {
 }
 
 /// Exact `str` members of an exact tuple, interned; `None` when any member is not plain.
-fn interned_members(value: &Bound<'_, PyAny>, interner: &mut HashMap<String, u32>) -> Option<Vec<u32>> {
+fn interned_members(
+    value: &Bound<'_, PyAny>,
+    interner: &mut HashMap<String, u32>,
+) -> Option<Vec<u32>> {
     if unsafe { ffi::PyTuple_CheckExact(value.as_ptr()) } == 0 {
         return None;
     }
@@ -90,7 +93,8 @@ pub fn integrity_unresolved_action_scan<'py>(
             return None;
         }
         let frontier: i64 = frontier_object.extract().ok()?;
-        let obligations = interned_members(&payload.getattr("obligation_refs").ok()?, &mut interner)?;
+        let obligations =
+            interned_members(&payload.getattr("obligation_refs").ok()?, &mut interner)?;
         let items = interned_members(&payload.getattr("attempted_items").ok()?, &mut interner)?;
         let subjects = if !obligations.is_empty() {
             Some((Family::Obligations, obligations))
@@ -100,13 +104,23 @@ pub fn integrity_unresolved_action_scan<'py>(
             None
         };
         let is_linked = linked.contains(&id_text);
-        ordered.push((Action { id, id_text, frontier, subjects }, is_linked));
+        ordered.push((
+            Action {
+                id,
+                id_text,
+                frontier,
+                subjects,
+            },
+            is_linked,
+        ));
     }
     ordered.sort_by(|(left, _), (right, _)| {
         (left.frontier, left.id_text.as_bytes()).cmp(&(right.frontier, right.id_text.as_bytes()))
     });
     // Only an action naming subjects can be disjoint from another, so only those are candidates.
-    let keyed: Vec<usize> = (0..ordered.len()).filter(|index| ordered[*index].0.subjects.is_some()).collect();
+    let keyed: Vec<usize> = (0..ordered.len())
+        .filter(|index| ordered[*index].0.subjects.is_some())
+        .collect();
     let output = PyList::empty(py);
     for (position, &index) in keyed.iter().enumerate() {
         let (action, is_linked) = &ordered[index];
@@ -125,7 +139,9 @@ pub fn integrity_unresolved_action_scan<'py>(
                 continue;
             }
             if let Some((other_family, other_members)) = &candidate.subjects {
-                if other_family == family && other_members.iter().all(|member| !own.contains(member)) {
+                if other_family == family
+                    && other_members.iter().all(|member| !own.contains(member))
+                {
                     later.push(&candidate.id);
                 }
             }

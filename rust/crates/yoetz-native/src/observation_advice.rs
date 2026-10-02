@@ -13,7 +13,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyString, PyTuple};
-use yoetz_core::observation_advice::{self as core, CheckFact, CorrelationKey, Envelope, Vocabulary};
+use yoetz_core::observation_advice::{
+    self as core, CheckFact, CorrelationKey, Envelope, Vocabulary,
+};
 
 use crate::registry::Slot;
 
@@ -63,7 +65,9 @@ pub fn advice_bind(
     if field_names.len() != FIELD_COUNT {
         return Err(PyValueError::new_err("observation_advice_invalid"));
     }
-    let set = |values: &Bound<'_, PyAny>| -> PyResult<HashSet<String>> { Ok(texts(values)?.into_iter().collect()) };
+    let set = |values: &Bound<'_, PyAny>| -> PyResult<HashSet<String>> {
+        Ok(texts(values)?.into_iter().collect())
+    };
     let vocabulary = Vocabulary {
         edit_tools: set(&edit_tools)?,
         verification_tools: set(&verification_tools)?,
@@ -75,7 +79,9 @@ pub fn advice_bind(
         originating_tool_actions: set(&originating_tool_actions)?,
     };
     FIELD_NAMES.set(field_names.into_any().unbind());
-    *VOCABULARY.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(vocabulary));
+    *VOCABULARY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(vocabulary));
     Ok(())
 }
 
@@ -114,7 +120,14 @@ fn python_lower(value: &Bound<'_, PyAny>, text: &str) -> Option<String> {
         return Some(text.to_ascii_lowercase());
     }
     let lowered = value.call_method0("lower").ok()?;
-    Some(lowered.cast_into::<PyString>().ok()?.to_str().ok()?.to_owned())
+    Some(
+        lowered
+            .cast_into::<PyString>()
+            .ok()?
+            .to_str()
+            .ok()?
+            .to_owned(),
+    )
 }
 
 /// Reads one structural payload with `Mapping.get` semantics (missing and JSON null are `None`).
@@ -141,7 +154,9 @@ impl<'py> Payload<'py> {
         let value = match &self.index {
             Some(index) => match index.get_item(key) {
                 Ok(value) => value,
-                Err(error) if error.is_instance_of::<pyo3::exceptions::PyKeyError>(index.py()) => return Some(None),
+                Err(error) if error.is_instance_of::<pyo3::exceptions::PyKeyError>(index.py()) => {
+                    return Some(None);
+                }
                 Err(_) => return None,
             },
             None => self.payload.call_method1("get", (key,)).ok()?,
@@ -192,10 +207,14 @@ fn flatten<'py>(
         None => None,
     };
     let success = match payload.get(&fields[SUCCESS])? {
-        Some(value) if unsafe { ffi::PyBool_Check(value.as_ptr()) } != 0 => Some(value.is_truthy().ok()?),
+        Some(value) if unsafe { ffi::PyBool_Check(value.as_ptr()) } != 0 => {
+            Some(value.is_truthy().ok()?)
+        }
         _ => None,
     };
-    let denied = payload.get(&fields[DENIED])?.is_some_and(|value| value.as_ptr() == unsafe { ffi::Py_True() });
+    let denied = payload
+        .get(&fields[DENIED])?
+        .is_some_and(|value| value.as_ptr() == unsafe { ffi::Py_True() });
     // Any non-null action that is not an exact `str` meets set membership tests the flattening
     // does not model; the reference decides.
     let action = match payload.get(&fields[ACTION])? {
@@ -260,7 +279,12 @@ fn flatten<'py>(
     };
     Some((
         flat,
-        Cited { source_identity, key: key_tuple, subagent_id: subagent_object, changed_paths_digest: changed_object },
+        Cited {
+            source_identity,
+            key: key_tuple,
+            subagent_id: subagent_object,
+            changed_paths_digest: changed_object,
+        },
     ))
 }
 
@@ -274,13 +298,23 @@ fn check_fact(check: &Bound<'_, PyAny>) -> Option<CheckFact> {
     } else {
         0
     };
-    Some(CheckFact { passed_current, cursor_event_position })
+    Some(CheckFact {
+        passed_current,
+        cursor_event_position,
+    })
 }
 
 /// Sorted unique `str` refs as the reference's `tuple(sorted(set(refs), key=_ascii))`, or the
 /// raw list when a ref is not ASCII (the reference's own sort then decides, and may raise).
-fn refs<'py>(py: Python<'py>, cited: &[Cited<'py>], positions: &[usize]) -> PyResult<Bound<'py, PyAny>> {
-    let objects: Vec<&Bound<'py, PyAny>> = positions.iter().map(|position| &cited[*position].source_identity).collect();
+fn refs<'py>(
+    py: Python<'py>,
+    cited: &[Cited<'py>],
+    positions: &[usize],
+) -> PyResult<Bound<'py, PyAny>> {
+    let objects: Vec<&Bound<'py, PyAny>> = positions
+        .iter()
+        .map(|position| &cited[*position].source_identity)
+        .collect();
     let mut keyed: Vec<(&str, &Bound<'py, PyAny>)> = Vec::with_capacity(objects.len());
     for object in &objects {
         match unsafe { object.cast_unchecked::<PyString>() }.to_str() {
@@ -305,7 +339,11 @@ pub fn advice_scan<'py>(
     check_facts: &Bound<'py, PyAny>,
     json_object: &Bound<'py, PyAny>,
 ) -> PyResult<Option<Bound<'py, PyTuple>>> {
-    let Some(vocabulary) = VOCABULARY.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone() else {
+    let Some(vocabulary) = VOCABULARY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+    else {
         return Ok(None);
     };
     let Some(fields) = FIELD_NAMES.get(py) else {
@@ -350,22 +388,32 @@ pub fn advice_scan<'py>(
         edits.append((refs(py, &cited, phases)?, key_of(phases[0])))?;
     }
     let optional = |positions: &Option<Vec<usize>>| -> PyResult<Option<Bound<'py, PyAny>>> {
-        positions.as_deref().map(|positions| refs(py, &cited, positions)).transpose()
+        positions
+            .as_deref()
+            .map(|positions| refs(py, &cited, positions))
+            .transpose()
     };
     let subagents = PyList::empty(py);
     for position in &scan.subagent_unaddressed {
-        subagents.append((&cited[*position].subagent_id, &cited[*position].source_identity))?;
+        subagents.append((
+            &cited[*position].subagent_id,
+            &cited[*position].source_identity,
+        ))?;
     }
     let changed = PyList::empty(py);
     for position in &scan.changed_paths {
-        changed.append((&cited[*position].source_identity, &cited[*position].changed_paths_digest))?;
+        changed.append((
+            &cited[*position].source_identity,
+            &cited[*position].changed_paths_digest,
+        ))?;
     }
     Ok(Some(PyTuple::new(
         py,
         [
             failed.into_any(),
             edits.into_any(),
-            optional(&scan.completion_without_verification)?.unwrap_or_else(|| py.None().into_bound(py)),
+            optional(&scan.completion_without_verification)?
+                .unwrap_or_else(|| py.None().into_bound(py)),
             optional(&scan.static_for_live)?.unwrap_or_else(|| py.None().into_bound(py)),
             subagents.into_any(),
             changed.into_any(),

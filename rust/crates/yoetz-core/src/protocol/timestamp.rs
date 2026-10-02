@@ -4,7 +4,10 @@
 //! exists in its month).
 
 fn digits(bytes: &[u8]) -> Option<u32> {
-    bytes.iter().try_fold(0_u32, |total, &byte| byte.is_ascii_digit().then(|| total * 10 + u32::from(byte - b'0')))
+    bytes.iter().try_fold(0_u32, |total, &byte| {
+        byte.is_ascii_digit()
+            .then(|| total * 10 + u32::from(byte - b'0'))
+    })
 }
 
 fn is_leap(year: u32) -> bool {
@@ -46,7 +49,12 @@ pub fn is_wire_timestamp(text: &str) -> bool {
         return false;
     };
     // The pattern: months 01-12, days 01-31, hours 00-23, minutes and seconds 00-59.
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 59 {
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
         return false;
     }
     // strptime: year 0 is out of range, and the day must exist in its month.

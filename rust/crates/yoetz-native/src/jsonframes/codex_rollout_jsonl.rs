@@ -89,7 +89,9 @@ fn first_of_pair<'py>(value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> 
                 && unsafe { ffi::PySequence_Check(pointer) } == 0
             {
                 let name = unsafe { std::ffi::CStr::from_ptr((*kind).tp_name) }.to_string_lossy();
-                return Err(PyTypeError::new_err(format!("cannot unpack non-iterable {name} object")));
+                return Err(PyTypeError::new_err(format!(
+                    "cannot unpack non-iterable {name} object"
+                )));
             }
             return Err(error);
         }
@@ -105,15 +107,22 @@ fn first_of_pair<'py>(value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> 
                         || ffi::PyDict_CheckExact(pointer) != 0
                 };
                 return Err(PyValueError::new_err(if sized {
-                    format!("too many values to unpack (expected 2, got {})", value.len()?)
+                    format!(
+                        "too many values to unpack (expected 2, got {})",
+                        value.len()?
+                    )
                 } else {
                     "too many values to unpack (expected 2)".to_owned()
                 }));
             }
             Ok(first)
         }
-        (Some(_), None) => Err(PyValueError::new_err("not enough values to unpack (expected 2, got 1)")),
-        _ => Err(PyValueError::new_err("not enough values to unpack (expected 2, got 0)")),
+        (Some(_), None) => Err(PyValueError::new_err(
+            "not enough values to unpack (expected 2, got 1)",
+        )),
+        _ => Err(PyValueError::new_err(
+            "not enough values to unpack (expected 2, got 0)",
+        )),
     }
 }
 
@@ -138,7 +147,11 @@ pub fn codex_rollout_accept_redacted_line<'py>(
     let Some(members) = json_compat::accept_object_line(raw, limits, big_int(py)) else {
         return Ok(None);
     };
-    let mut redactor = Redactor { py, redact, unusual: false };
+    let mut redactor = Redactor {
+        py,
+        redact,
+        unusual: false,
+    };
     let result = redactor.object(members)?;
     if redactor.unusual {
         validate.call1((&result,))?;
@@ -147,6 +160,9 @@ pub fn codex_rollout_accept_redacted_line<'py>(
 }
 
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add_function(wrap_pyfunction!(codex_rollout_accept_redacted_line, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        codex_rollout_accept_redacted_line,
+        module
+    )?)?;
     Ok(())
 }

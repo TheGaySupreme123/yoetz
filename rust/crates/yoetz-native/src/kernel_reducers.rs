@@ -55,7 +55,10 @@ impl StrKey {
         }
         // An exact `str` always hashes; the hash is cached on the object.
         let hash = unsafe { ffi::PyObject_Hash(pointer) };
-        Some(StrKey { hash: hash as isize, pointer })
+        Some(StrKey {
+            hash: hash as isize,
+            pointer,
+        })
     }
 }
 
@@ -68,7 +71,8 @@ impl Hash for StrKey {
 impl PartialEq for StrKey {
     fn eq(&self, other: &Self) -> bool {
         self.pointer == other.pointer
-            || (self.hash == other.hash && unsafe { ffi::PyUnicode_Compare(self.pointer, other.pointer) } == 0)
+            || (self.hash == other.hash
+                && unsafe { ffi::PyUnicode_Compare(self.pointer, other.pointer) } == 0)
     }
 }
 
@@ -128,7 +132,8 @@ fn reducers_carry_id_set<'py>(
     let members = PyList::empty(py);
     for item in source.try_iter()? {
         let item = item?;
-        let known = is_exact_str(&item) && unsafe { ffi::PySet_Contains(trusted.as_ptr(), item.as_ptr()) } == 1;
+        let known = is_exact_str(&item)
+            && unsafe { ffi::PySet_Contains(trusted.as_ptr(), item.as_ptr()) } == 1;
         if known {
             members.append(item)?;
         } else {
@@ -153,16 +158,20 @@ fn reducers_index_invariants(
     association_type: &Bound<'_, PyAny>,
 ) -> PyResult<Option<bool>> {
     let py = frontier.py();
-    let (Some(frontier), Some(payloads), Some(evidence), Some(roots)) =
-        (exact_i64(frontier), exact_dict(payloads), exact_dict(evidence), exact_dict(roots))
-    else {
+    let (Some(frontier), Some(payloads), Some(evidence), Some(roots)) = (
+        exact_i64(frontier),
+        exact_dict(payloads),
+        exact_dict(evidence),
+        exact_dict(roots),
+    ) else {
         return Ok(None);
     };
     if observation_findings.cast_exact::<PyFrozenSet>().is_err() {
         return Ok(None);
     }
     let payload_items = dict_items(payloads);
-    let mut accepted: HashSet<StrKey, PassBuild> = HashSet::with_capacity_and_hasher(payload_items.len(), PassBuild::default());
+    let mut accepted: HashSet<StrKey, PassBuild> =
+        HashSet::with_capacity_and_hasher(payload_items.len(), PassBuild::default());
     for (_, value) in &payload_items {
         let Some(key) = StrKey::of(value) else {
             return Ok(None);
@@ -188,7 +197,8 @@ fn reducers_index_invariants(
             }
             let evidence_id = association.getattr(evidence_name)?;
             let source_event_id = association.getattr(source_name)?;
-            let (Some(evidence_key), Some(source_key)) = (StrKey::of(&evidence_id), StrKey::of(&source_event_id))
+            let (Some(evidence_key), Some(source_key)) =
+                (StrKey::of(&evidence_id), StrKey::of(&source_event_id))
             else {
                 return Ok(None);
             };
@@ -249,7 +259,10 @@ fn same_value(left: &Bound<'_, PyAny>, right: &Bound<'_, PyAny>) -> bool {
             if left.len() != right.len() {
                 return false;
             }
-            return left.iter().zip(right.iter()).all(|(x, y)| same_value(&x, &y));
+            return left
+                .iter()
+                .zip(right.iter())
+                .all(|(x, y)| same_value(&x, &y));
         }
     }
     false
@@ -291,7 +304,10 @@ impl<'py> Family<'py> {
         let Some(dict) = exact_dict(dict) else {
             return Ok(None);
         };
-        let names: Vec<Bound<'py, PyString>> = names.iter().map(|name| PyString::intern(py, name)).collect();
+        let names: Vec<Bound<'py, PyString>> = names
+            .iter()
+            .map(|name| PyString::intern(py, name))
+            .collect();
         let mut slots = Vec::with_capacity(dict.len());
         for (key, record) in dict_items(dict) {
             if record.get_type().as_ptr() != record_type.as_ptr() {
@@ -301,9 +317,20 @@ impl<'py> Family<'py> {
             for name in &names {
                 fields.push(record.getattr(name)?);
             }
-            slots.push(Slot { key, record, fields, derived: Derived::Reset });
+            slots.push(Slot {
+                key,
+                record,
+                fields,
+                derived: Derived::Reset,
+            });
         }
-        Ok(Some(Family { dict: dict.clone(), names, reset, slots, index: None }))
+        Ok(Some(Family {
+            dict: dict.clone(),
+            names,
+            reset,
+            slots,
+            index: None,
+        }))
     }
 
     /// `dict.get(key)` for the slot it names (keys never change during the recompute).
@@ -326,7 +353,12 @@ impl<'py> Family<'py> {
         }
     }
 
-    fn replace(&self, replace: &Bound<'py, PyAny>, record: &Bound<'py, PyAny>, values: &[Bound<'py, PyAny>]) -> PyResult<Bound<'py, PyAny>> {
+    fn replace(
+        &self,
+        replace: &Bound<'py, PyAny>,
+        record: &Bound<'py, PyAny>,
+        values: &[Bound<'py, PyAny>],
+    ) -> PyResult<Bound<'py, PyAny>> {
         let kwargs = PyDict::new(self.dict.py());
         for (name, value) in self.names.iter().zip(values) {
             kwargs.set_item(name, value)?;
@@ -336,9 +368,18 @@ impl<'py> Family<'py> {
 
     /// One reference write `dict[key] = replace(dict[key], **values)`. `replace` runs (and may
     /// refuse, exactly as the reference's would) unless the values are the record's own.
-    fn write(&mut self, position: usize, values: Vec<Bound<'py, PyAny>>, replace: &Bound<'py, PyAny>) -> PyResult<()> {
+    fn write(
+        &mut self,
+        position: usize,
+        values: Vec<Bound<'py, PyAny>>,
+        replace: &Bound<'py, PyAny>,
+    ) -> PyResult<()> {
         let slot = &self.slots[position];
-        let unchanged = slot.fields.iter().zip(&values).all(|(field, value)| same_value(field, value));
+        let unchanged = slot
+            .fields
+            .iter()
+            .zip(&values)
+            .all(|(field, value)| same_value(field, value));
         let derived = if unchanged {
             Derived::Original
         } else {
@@ -355,7 +396,11 @@ impl<'py> Family<'py> {
                 Derived::Original => {}
                 Derived::Written(record) => self.dict.set_item(&slot.key, record)?,
                 Derived::Reset => {
-                    let unchanged = slot.fields.iter().zip(&self.reset).all(|(field, value)| same_value(field, value));
+                    let unchanged = slot
+                        .fields
+                        .iter()
+                        .zip(&self.reset)
+                        .all(|(field, value)| same_value(field, value));
                     if !unchanged {
                         let record = self.replace(replace, &slot.record, &self.reset)?;
                         self.dict.set_item(&slot.key, record)?;
@@ -442,33 +487,61 @@ fn reducers_secondary_effects<'py>(
     let none = py.None().into_bound(py);
     let empty = PyTuple::empty(py).into_any();
 
-    let Some(mut plan_family) = Family::load(plans, &plan_record, &["superseded_by_plan_version"], vec![none.clone()])? else {
+    let Some(mut plan_family) = Family::load(
+        plans,
+        &plan_record,
+        &["superseded_by_plan_version"],
+        vec![none.clone()],
+    )?
+    else {
         return Ok(None);
     };
     let Some(mut obligation_family) = Family::load(
         obligations,
         &obligation_record,
-        &["plan_change", "plan_change_reason", "superseded_by_obligation_ids"],
+        &[
+            "plan_change",
+            "plan_change_reason",
+            "superseded_by_obligation_ids",
+        ],
         vec![none.clone(), none.clone(), empty],
     )?
     else {
         return Ok(None);
     };
-    let Some(mut decision_family) = Family::load(decisions, &decision_record, &["superseded_by_event_id"], vec![none.clone()])? else {
+    let Some(mut decision_family) = Family::load(
+        decisions,
+        &decision_record,
+        &["superseded_by_event_id"],
+        vec![none.clone()],
+    )?
+    else {
         return Ok(None);
     };
     let Some(claims) = exact_dict(claims) else {
         return Ok(None);
     };
-    let claim_records: Vec<Bound<'py, PyAny>> = dict_items(claims).into_iter().map(|(_, record)| record).collect();
-    if claim_records.iter().any(|record| record.get_type().as_ptr() != claim_record.as_ptr()) {
+    let claim_records: Vec<Bound<'py, PyAny>> = dict_items(claims)
+        .into_iter()
+        .map(|(_, record)| record)
+        .collect();
+    if claim_records
+        .iter()
+        .any(|record| record.get_type().as_ptr() != claim_record.as_ptr())
+    {
         return Ok(None);
     }
-    let Some(revisions) = sorted_by_fold_order(plan_family.slots.iter().map(|slot| slot.record.clone()), Some(&plan_revised))? else {
+    let Some(revisions) = sorted_by_fold_order(
+        plan_family.slots.iter().map(|slot| slot.record.clone()),
+        Some(&plan_revised),
+    )?
+    else {
         return Ok(None);
     };
-    let Some(ordered_decisions) =
-        sorted_by_fold_order(decision_family.slots.iter().map(|slot| slot.record.clone()), Some(&decision_payload))?
+    let Some(ordered_decisions) = sorted_by_fold_order(
+        decision_family.slots.iter().map(|slot| slot.record.clone()),
+        Some(&decision_payload),
+    )?
     else {
         return Ok(None);
     };
@@ -484,7 +557,10 @@ fn reducers_secondary_effects<'py>(
             let version = payload.getattr(intern!(py, "plan_version"))?;
             plan_family.write(position, vec![version], replace)?;
         }
-        for change in payload.getattr(intern!(py, "obligation_changes"))?.try_iter()? {
+        for change in payload
+            .getattr(intern!(py, "obligation_changes"))?
+            .try_iter()?
+        {
             let change = change?;
             let obligation = change.getattr(intern!(py, "obligation_id"))?;
             if let Some(position) = obligation_family.find(&obligation)? {
@@ -513,7 +589,8 @@ fn reducers_secondary_effects<'py>(
     let mut prior: HashMap<(Vec<u8>, Vec<u8>), PriorContradiction<'py>> = HashMap::new();
     if !prior_contradictions.is_none() {
         if let Some(dict) = trusted_dict(prior_contradictions) {
-            let dict = unsafe { Bound::from_borrowed_ptr(py, dict).cast_into_unchecked::<PyDict>() };
+            let dict =
+                unsafe { Bound::from_borrowed_ptr(py, dict).cast_into_unchecked::<PyDict>() };
             for (key, record) in dict_items(&dict) {
                 if key.get_type().as_ptr() != contradiction_key.as_ptr()
                     || record.get_type().as_ptr() != contradiction_record.as_ptr()
@@ -523,7 +600,9 @@ fn reducers_secondary_effects<'py>(
                 let claim = key.getattr(intern!(py, "disputing_claim_id"))?;
                 let disputed = key.getattr(intern!(py, "disputed_ref"))?;
                 if let (Some(claim), Some(disputed)) = (str_bytes(&claim), str_bytes(&disputed)) {
-                    prior.entry((claim.to_vec(), disputed.to_vec())).or_insert((key.clone(), record));
+                    prior
+                        .entry((claim.to_vec(), disputed.to_vec()))
+                        .or_insert((key.clone(), record));
                 }
             }
         }
@@ -541,11 +620,19 @@ fn reducers_secondary_effects<'py>(
         for disputed in payload.getattr(intern!(py, "disputes_refs"))?.try_iter()? {
             let disputed = disputed?;
             let mut reused = None;
-            if let (Some(claim_bytes), Some(disputed_bytes)) = (str_bytes(&claim), str_bytes(&disputed)) {
-                if let Some((key, existing)) = prior.get(&(claim_bytes.to_vec(), disputed_bytes.to_vec())) {
-                    if same_value(&existing.getattr(intern!(py, "source_event_id"))?, &source_event)
-                        && same_value(&existing.getattr(intern!(py, "source_frontier"))?, &source_frontier)
-                    {
+            if let (Some(claim_bytes), Some(disputed_bytes)) =
+                (str_bytes(&claim), str_bytes(&disputed))
+            {
+                if let Some((key, existing)) =
+                    prior.get(&(claim_bytes.to_vec(), disputed_bytes.to_vec()))
+                {
+                    if same_value(
+                        &existing.getattr(intern!(py, "source_event_id"))?,
+                        &source_event,
+                    ) && same_value(
+                        &existing.getattr(intern!(py, "source_frontier"))?,
+                        &source_frontier,
+                    ) {
                         reused = Some((key.clone(), existing.clone()));
                     }
                 }
@@ -670,8 +757,19 @@ fn reducers_missing_gaps<'py>(
         };
         dicts.push(dict.clone());
     }
-    let [plans, obligations, decisions, assignments, actions, results, evidence, claims, findings, responses, dispositions] =
-        <[Bound<'py, PyDict>; 11]>::try_from(dicts).map_err(|_| corrupt())?;
+    let [
+        plans,
+        obligations,
+        decisions,
+        assignments,
+        actions,
+        results,
+        evidence,
+        claims,
+        findings,
+        responses,
+        dispositions,
+    ] = <[Bound<'py, PyDict>; 11]>::try_from(dicts).map_err(|_| corrupt())?;
     let plan_published = types.get_item(0)?;
     let plan_revised = types.get_item(1)?;
     let claim_v1_1 = types.get_item(2)?;
@@ -693,15 +791,33 @@ fn reducers_missing_gaps<'py>(
     let mut gaps = Gaps {
         markers,
         validators: validators.iter().collect(),
-        visible: vec![obligations.clone(), actions.clone(), results.clone(), evidence.clone(), claims.clone(), findings.clone()],
+        visible: vec![
+            obligations.clone(),
+            actions.clone(),
+            results.clone(),
+            evidence.clone(),
+            claims.clone(),
+            findings.clone(),
+        ],
     };
 
     let payload_name = intern!(py, "payload");
     let source_name = intern!(py, "source_event_id");
     // (collection, fields, the record's own payload type gate)
-    for (index, dict) in [&plans, &obligations, &decisions, &assignments, &actions, &results, &claims, &findings, &responses, &dispositions]
-        .into_iter()
-        .enumerate()
+    for (index, dict) in [
+        &plans,
+        &obligations,
+        &decisions,
+        &assignments,
+        &actions,
+        &results,
+        &claims,
+        &findings,
+        &responses,
+        &dispositions,
+    ]
+    .into_iter()
+    .enumerate()
     {
         for (_, record) in dict_items(dict) {
             let payload = record.getattr(payload_name)?;
@@ -722,15 +838,22 @@ fn reducers_missing_gaps<'py>(
                         }
                     } else if kind.as_ptr() == plan_revised.as_ptr() {
                         for change in each(&payload.getattr(intern!(py, "obligation_changes"))?)? {
-                            require!(gaps, &source, &change.getattr(intern!(py, "obligation_id"))?);
-                            for target in each(&change.getattr(intern!(py, "replacement_obligation_ids"))?)? {
+                            require!(
+                                gaps,
+                                &source,
+                                &change.getattr(intern!(py, "obligation_id"))?
+                            );
+                            for target in
+                                each(&change.getattr(intern!(py, "replacement_obligation_ids"))?)?
+                            {
                                 require!(gaps, &source, &target);
                             }
                         }
                     }
                 }
                 1 => {
-                    for target in each(&payload.getattr(intern!(py, "resolution_evidence_refs"))?)? {
+                    for target in each(&payload.getattr(intern!(py, "resolution_evidence_refs"))?)?
+                    {
                         require!(gaps, &source, &target);
                     }
                 }
@@ -764,7 +887,9 @@ fn reducers_missing_gaps<'py>(
                     }
                     for target in each(&payload.getattr(intern!(py, "disputes_refs"))?)? {
                         match str_bytes(&target) {
-                            Some(text) if text.starts_with(b"clm_") => require!(gaps, &source, &target),
+                            Some(text) if text.starts_with(b"clm_") => {
+                                require!(gaps, &source, &target)
+                            }
                             Some(_) => {}
                             None => return Ok(None),
                         }
@@ -773,7 +898,8 @@ fn reducers_missing_gaps<'py>(
                         for target in each(&payload.getattr(intern!(py, "limitation_refs"))?)? {
                             require!(gaps, &source, &target);
                         }
-                        for target in each(&payload.getattr(intern!(py, "supersedes_claim_refs"))?)? {
+                        for target in each(&payload.getattr(intern!(py, "supersedes_claim_refs"))?)?
+                        {
                             require!(gaps, &source, &target);
                         }
                     }
@@ -781,7 +907,9 @@ fn reducers_missing_gaps<'py>(
                 7 => {
                     for target in each(&payload.getattr(intern!(py, "subject_refs"))?)? {
                         match str_bytes(&target) {
-                            Some(text) if !text.starts_with(b"evt_") => require!(gaps, &source, &target),
+                            Some(text) if !text.starts_with(b"evt_") => {
+                                require!(gaps, &source, &target)
+                            }
                             Some(_) => {}
                             None => return Ok(None),
                         }
@@ -807,7 +935,10 @@ fn reducers_missing_gaps<'py>(
 /// Whether exact tuple *events* starts with the identical objects of exact tuple *prefix*.
 #[pyfunction]
 fn reducers_identical_prefix(prefix: &Bound<'_, PyAny>, events: &Bound<'_, PyAny>) -> bool {
-    let (Ok(prefix), Ok(events)) = (prefix.cast_exact::<PyTuple>(), events.cast_exact::<PyTuple>()) else {
+    let (Ok(prefix), Ok(events)) = (
+        prefix.cast_exact::<PyTuple>(),
+        events.cast_exact::<PyTuple>(),
+    ) else {
         return false;
     };
     if prefix.as_ptr() == events.as_ptr() {

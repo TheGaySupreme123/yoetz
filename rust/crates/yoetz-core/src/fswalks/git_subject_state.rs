@@ -113,13 +113,24 @@ impl Facts {
 
     /// `_same_file_snapshot(before, after)`.
     fn same_snapshot(&self, other: &Facts) -> bool {
-        (self.dev, self.ino, self.mode, self.size, self.mtime, self.ctime, self.nlink)
-            == (other.dev, other.ino, other.mode, other.size, other.mtime, other.ctime, other.nlink)
+        (
+            self.dev, self.ino, self.mode, self.size, self.mtime, self.ctime, self.nlink,
+        ) == (
+            other.dev,
+            other.ino,
+            other.mode,
+            other.size,
+            other.mtime,
+            other.ctime,
+            other.nlink,
+        )
     }
 }
 
 fn last_errno() -> i32 {
-    io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO)
+    io::Error::last_os_error()
+        .raw_os_error()
+        .unwrap_or(libc::EIO)
 }
 
 fn c_path(path: &[u8]) -> Result<CString, i32> {
@@ -130,7 +141,14 @@ fn c_path(path: &[u8]) -> Result<CString, i32> {
 /// `fstatat(dir_fd, path, AT_SYMLINK_NOFOLLOW)`.
 pub fn lstat_at(dir_fd: c_int, path: &CStr) -> Result<Facts, i32> {
     let mut raw = std::mem::MaybeUninit::<libc::stat>::uninit();
-    let result = unsafe { libc::fstatat(dir_fd, path.as_ptr(), raw.as_mut_ptr(), libc::AT_SYMLINK_NOFOLLOW) };
+    let result = unsafe {
+        libc::fstatat(
+            dir_fd,
+            path.as_ptr(),
+            raw.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
     if result != 0 {
         return Err(last_errno());
     }
@@ -198,7 +216,12 @@ unsafe fn errno_location() -> *mut c_int {
     unsafe { libc::__errno_location() }
 }
 
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "dragonfly"))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "dragonfly"
+))]
 unsafe fn errno_location() -> *mut c_int {
     unsafe { libc::__error() }
 }
@@ -271,8 +294,12 @@ pub fn reject_unsafe_tree_entries<E>(
     checkpoint: &mut dyn FnMut() -> Result<(), E>,
 ) -> Result<(), Stop<E>> {
     let root_path = c_path(root).map_err(|_| Failure::UnsafeRoot)?;
-    let root_fd =
-        open_at(libc::AT_FDCWD, &root_path, libc::O_RDONLY | libc::O_DIRECTORY).map_err(|_| Failure::UnsafeRoot)?;
+    let root_fd = open_at(
+        libc::AT_FDCWD,
+        &root_path,
+        libc::O_RDONLY | libc::O_DIRECTORY,
+    )
+    .map_err(|_| Failure::UnsafeRoot)?;
     let mut pending: Vec<Vec<u8>> = vec![Vec::new()];
     let mut entries_seen: u64 = 0;
     let mut path_bytes_seen: u64 = 0;
@@ -283,7 +310,13 @@ pub fn reject_unsafe_tree_entries<E>(
             fd.and_then(Dir::from_fd)
         } else {
             c_path(&relative_dir)
-                .and_then(|path| open_at(root_fd.raw(), &path, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW))
+                .and_then(|path| {
+                    open_at(
+                        root_fd.raw(),
+                        &path,
+                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+                    )
+                })
                 .and_then(Dir::from_fd)
         }
         .map_err(|_| Failure::UnsafeRoot)?;
@@ -347,7 +380,9 @@ pub fn nul_entries(payload: &[u8]) -> Option<Vec<&[u8]>> {
     if *payload.last()? != 0 {
         return None;
     }
-    let entries: Vec<&[u8]> = payload[..payload.len() - 1].split(|byte| *byte == 0).collect();
+    let entries: Vec<&[u8]> = payload[..payload.len() - 1]
+        .split(|byte| *byte == 0)
+        .collect();
     if entries.iter().any(|entry| entry.is_empty()) {
         return None;
     }
@@ -359,7 +394,9 @@ pub fn valid_relative_git_path(path: &[u8]) -> bool {
     !path.is_empty()
         && path[0] != b'/'
         && !path.contains(&0)
-        && path.split(|byte| *byte == b'/').all(|part| !part.is_empty() && part != b"." && part != b"..")
+        && path
+            .split(|byte| *byte == b'/')
+            .all(|part| !part.is_empty() && part != b"." && part != b"..")
 }
 
 /// The parse-and-validate phase of `_reject_unsupported_index_entries`: every entry, in order,
@@ -458,7 +495,8 @@ pub fn hash_untracked<E>(
         }
         previous = Some(path);
         let c_path = c_path(path).map_err(|_| Failure::SymlinkNotObserved)?;
-        let fd = open_at(dir_fd, &c_path, libc::O_RDONLY | libc::O_NOFOLLOW).map_err(|_| Failure::SymlinkNotObserved)?;
+        let fd = open_at(dir_fd, &c_path, libc::O_RDONLY | libc::O_NOFOLLOW)
+            .map_err(|_| Failure::SymlinkNotObserved)?;
         let before = fstat(fd.raw()).map_err(|_| Failure::SymlinkNotObserved)?;
         if !before.is_reg() || before.uid != limits.expected_uid || before.nlink != 1 {
             return Err(Failure::SymlinkUnsupported.into());
@@ -477,7 +515,8 @@ pub fn hash_untracked<E>(
             // min(_READ_CHUNK, size - file_bytes + 1) never goes below zero: the loop stops as
             // soon as file_bytes reaches size + 1 because the next request is for 0 bytes.
             let wanted = (size + 1).saturating_sub(file_bytes).min(chunk as u128) as usize;
-            let count = read_some(fd.raw(), &mut buffer[..wanted]).map_err(|_| Failure::SymlinkNotObserved)?;
+            let count = read_some(fd.raw(), &mut buffer[..wanted])
+                .map_err(|_| Failure::SymlinkNotObserved)?;
             if count == 0 {
                 break;
             }
@@ -493,7 +532,10 @@ pub fn hash_untracked<E>(
         }
         total_bytes += file_bytes;
     }
-    Ok(UntrackedDigest { digest: format!("sha256:{}", hex::encode(hasher.finalize())), total_bytes: total_bytes as u64 })
+    Ok(UntrackedDigest {
+        digest: format!("sha256:{}", hex::encode(hasher.finalize())),
+        total_bytes: total_bytes as u64,
+    })
 }
 
 #[cfg(test)]
@@ -523,7 +565,10 @@ mod tests {
     #[test]
     fn index_entries_parse_before_mode_checks() {
         let entries: Vec<&[u8]> = vec![b"100644 abc 0\tok", b"160000 abc 0\tsub"];
-        assert_eq!(check_index_entries(&entries), Err(Failure::SubmodulePresent));
+        assert_eq!(
+            check_index_entries(&entries),
+            Err(Failure::SubmodulePresent)
+        );
         let entries: Vec<&[u8]> = vec![b"100644 abc\tok"];
         assert_eq!(check_index_entries(&entries), Err(Failure::GitFailed));
         let entries: Vec<&[u8]> = vec![b"120000 abc 0\t../x"];

@@ -28,7 +28,10 @@ pub fn is_table_header(line: &[u8]) -> bool {
     if rest.first() == Some(&b']') {
         rest = &rest[1..];
     }
-    let blanks = rest.iter().take_while(|byte| matches!(**byte, b' ' | b'\t')).count();
+    let blanks = rest
+        .iter()
+        .take_while(|byte| matches!(**byte, b' ' | b'\t'))
+        .count();
     let rest = &rest[blanks..];
     rest.is_empty() || rest[0] == b'#'
 }
@@ -62,7 +65,10 @@ pub fn exact_table_span(raw: &[u8], expected: &[u8]) -> Option<(usize, usize)> {
         offset += line.len();
     }
     let candidate = rstrip_crlf(&raw[start..end]);
-    if candidate.len() + 1 != expected.len() || !expected.starts_with(candidate) || expected[candidate.len()] != b'\n' {
+    if candidate.len() + 1 != expected.len()
+        || !expected.starts_with(candidate)
+        || expected[candidate.len()] != b'\n'
+    {
         return None;
     }
     Some((start, end))
@@ -95,10 +101,28 @@ mod tests {
 
     #[test]
     fn header_pattern() {
-        for good in [&b"[a]"[..], b"  [[a.b]] # x", b"[[a]", b"[a]]", b"\t[a] \t", b"[[]", b"[a]#", b"[a b]"] {
+        for good in [
+            &b"[a]"[..],
+            b"  [[a.b]] # x",
+            b"[[a]",
+            b"[a]]",
+            b"\t[a] \t",
+            b"[[]",
+            b"[a]#",
+            b"[a b]",
+        ] {
             assert!(is_table_header(good), "{:?}", String::from_utf8_lossy(good));
         }
-        for bad in [&b"[]"[..], b"a", b"[a] x", b"[a]]]", b"x[a]", b"[a", b"", b"[]]"] {
+        for bad in [
+            &b"[]"[..],
+            b"a",
+            b"[a] x",
+            b"[a]]]",
+            b"x[a]",
+            b"[a",
+            b"",
+            b"[]]",
+        ] {
             assert!(!is_table_header(bad), "{:?}", String::from_utf8_lossy(bad));
         }
     }
@@ -108,7 +132,10 @@ mod tests {
         let table = b"[mcp_servers.yoetz]\ncommand = \"yoetz\"\n";
         let raw = b"[a]\nx = 1\n\n[mcp_servers.yoetz]\ncommand = \"yoetz\"\n";
         assert_eq!(exact_table_span(raw, table), Some((11, raw.len())));
-        assert_eq!(strip_exact_table(raw, table), Some(b"[a]\nx = 1\n".to_vec()));
+        assert_eq!(
+            strip_exact_table(raw, table),
+            Some(b"[a]\nx = 1\n".to_vec())
+        );
         let edited = b"[mcp_servers.yoetz]\ncommand = \"yoetz\"\nextra = 1\n";
         assert_eq!(exact_table_span(edited, table), None);
     }

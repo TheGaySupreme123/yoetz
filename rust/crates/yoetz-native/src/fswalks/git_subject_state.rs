@@ -68,7 +68,11 @@ fn prefix_set(ignored: &Bound<'_, PyAny>) -> PyResult<HashSet<Vec<u8>>> {
 /// `_overwrite`) once it has parsed: a malformed listing is refused before the overwrite.
 fn take_entries(listing: &Bound<'_, PyByteArray>) -> Result<Vec<Vec<u8>>, Failure> {
     let data = listing.to_vec();
-    let entries = core::nul_entries(&data).ok_or(Failure::GitFailed)?.into_iter().map(<[u8]>::to_vec).collect();
+    let entries = core::nul_entries(&data)
+        .ok_or(Failure::GitFailed)?
+        .into_iter()
+        .map(<[u8]>::to_vec)
+        .collect();
     // Exclusive access: no other reference reads the buffer while the GIL is held.
     unsafe { listing.as_bytes_mut() }.fill(0);
     Ok(entries)
@@ -86,9 +90,14 @@ pub fn git_reject_tree_entries(
     expected_uid: u32,
 ) -> PyResult<()> {
     let prefixes = prefix_set(ignored_prefixes)?;
-    let limits = core::TreeLimits { max_files, path_output_limit, expected_uid };
+    let limits = core::TreeLimits {
+        max_files,
+        path_output_limit,
+        expected_uid,
+    };
     let root = root.to_vec();
-    let result = py.detach(|| core::reject_unsafe_tree_entries(&root, &prefixes, &limits, &mut checkpoint));
+    let result =
+        py.detach(|| core::reject_unsafe_tree_entries(&root, &prefixes, &limits, &mut checkpoint));
     result.map_err(|stop| stopped(fail, stop, "tree_file_limit"))
 }
 
@@ -100,9 +109,11 @@ pub fn git_reject_unsupported_index_entries(
     staged: &Bound<'_, PyByteArray>,
     dir_fd: i32,
 ) -> PyResult<()> {
-    let entries = take_entries(staged).map_err(|failure| raise(fail, failure, "tree_file_limit"))?;
+    let entries =
+        take_entries(staged).map_err(|failure| raise(fail, failure, "tree_file_limit"))?;
     let borrowed: Vec<&[u8]> = entries.iter().map(Vec::as_slice).collect();
-    let tracked = core::check_index_entries(&borrowed).map_err(|failure| raise(fail, failure, "tree_file_limit"))?;
+    let tracked = core::check_index_entries(&borrowed)
+        .map_err(|failure| raise(fail, failure, "tree_file_limit"))?;
     let result = py.detach(|| core::stat_tracked_paths(dir_fd, &tracked, &mut checkpoint));
     result.map_err(|stop| stopped(fail, stop, "tree_file_limit"))
 }
@@ -122,21 +133,35 @@ pub fn git_hash_untracked(
     read_chunk: usize,
     expected_uid: u32,
 ) -> PyResult<(String, u64, usize)> {
-    let entries = take_entries(inventory).map_err(|failure| raise(fail, failure, "untracked_file_limit"))?;
+    let entries =
+        take_entries(inventory).map_err(|failure| raise(fail, failure, "untracked_file_limit"))?;
     if entries.len() as u64 > max_files {
-        return Err(raise(fail, Failure::FileLimit(entries.len() as u64), "untracked_file_limit"));
+        return Err(raise(
+            fail,
+            Failure::FileLimit(entries.len() as u64),
+            "untracked_file_limit",
+        ));
     }
     let borrowed: Vec<&[u8]> = entries.iter().map(Vec::as_slice).collect();
-    let limits = core::UntrackedLimits { max_hash_bytes, already_hashed, read_chunk, expected_uid };
+    let limits = core::UntrackedLimits {
+        max_hash_bytes,
+        already_hashed,
+        read_chunk,
+        expected_uid,
+    };
     let domain = domain.to_vec();
-    let result = py.detach(|| core::hash_untracked(dir_fd, &domain, &borrowed, &limits, &mut checkpoint));
+    let result =
+        py.detach(|| core::hash_untracked(dir_fd, &domain, &borrowed, &limits, &mut checkpoint));
     let digest = result.map_err(|stop| stopped(fail, stop, "untracked_file_limit"))?;
     Ok((digest.digest, digest.total_bytes, entries.len()))
 }
 
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(git_reject_tree_entries, module)?)?;
-    module.add_function(wrap_pyfunction!(git_reject_unsupported_index_entries, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        git_reject_unsupported_index_entries,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(git_hash_untracked, module)?)?;
     Ok(())
 }

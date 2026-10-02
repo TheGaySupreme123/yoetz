@@ -29,21 +29,28 @@ static FALSY_ERRORS: PyOnceLock<Py<PyTuple>> = PyOnceLock::new();
 
 /// Bind the reference module namespace and the constant strings the twins emit.
 #[pyfunction]
-pub fn bind_codex_session_stream(globals: Bound<'_, PyDict>, gap_codes: Bound<'_, PyTuple>, decisions: Bound<'_, PyTuple>) {
+pub fn bind_codex_session_stream(
+    globals: Bound<'_, PyDict>,
+    gap_codes: Bound<'_, PyTuple>,
+    decisions: Bound<'_, PyTuple>,
+) {
     GLOBALS.set(globals.into_any().unbind());
     GAP_CODES.set(gap_codes.into_any().unbind());
     DECISIONS.set(decisions.into_any().unbind());
 }
 
 fn slot<'py>(py: Python<'py>, slot: &Slot) -> PyResult<Bound<'py, PyAny>> {
-    slot.get(py).ok_or_else(|| PyNameError::new_err("yoetz_native_codex_session_stream_unbound"))
+    slot.get(py)
+        .ok_or_else(|| PyNameError::new_err("yoetz_native_codex_session_stream_unbound"))
 }
 
 /// A global of the stream module, read at call time like the reference does.
 fn global<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
     let globals = slot(py, &GLOBALS)?;
     let globals = globals.cast::<PyDict>()?;
-    globals.get_item(name)?.ok_or_else(|| PyNameError::new_err(name.to_owned()))
+    globals
+        .get_item(name)?
+        .ok_or_else(|| PyNameError::new_err(name.to_owned()))
 }
 
 fn bound_item<'py>(py: Python<'py>, slot_ref: &Slot, index: usize) -> PyResult<Bound<'py, PyAny>> {
@@ -61,7 +68,11 @@ fn exact_str<'a>(value: &'a Bound<'_, PyAny>) -> Option<&'a str> {
 /// `_token(value)`: the same object when it is a bounded token, else `None`.
 fn token<'py>(value: Bound<'py, PyAny>) -> Option<Bound<'py, PyAny>> {
     // A lone surrogate is never in the token alphabet, so a failed UTF-8 view is not a token.
-    if exact_str(&value).is_some_and(core::token) { Some(value) } else { None }
+    if exact_str(&value).is_some_and(core::token) {
+        Some(value)
+    } else {
+        None
+    }
 }
 
 #[pyfunction]
@@ -78,17 +89,24 @@ struct Reader<'py> {
 }
 
 impl<'py> Reader<'py> {
-    fn new(py: Python<'py>, value: &Bound<'py, PyAny>, json_object: &Bound<'py, PyAny>) -> PyResult<Self> {
+    fn new(
+        py: Python<'py>,
+        value: &Bound<'py, PyAny>,
+        json_object: &Bound<'py, PyAny>,
+    ) -> PyResult<Self> {
         if value.get_type().as_ptr() == json_object.as_ptr() {
             if let Ok(index) = value.getattr(intern!(py, "_index")) {
                 return Ok(Reader { target: index });
             }
         }
-        Ok(Reader { target: value.clone() })
+        Ok(Reader {
+            target: value.clone(),
+        })
     }
 
     fn get(&self, key: &Bound<'py, PyString>) -> PyResult<Bound<'py, PyAny>> {
-        self.target.call_method1(intern!(self.target.py(), "get"), (key,))
+        self.target
+            .call_method1(intern!(self.target.py(), "get"), (key,))
     }
 
     fn contains(&self, key: &Bound<'py, PyString>) -> PyResult<bool> {
@@ -123,7 +141,10 @@ fn consistent_alias_token<'py>(
     }
     if let Some(first) = values.first() {
         let first_text = exact_str(first).unwrap_or_default();
-        if values[1..].iter().any(|value| exact_str(value).unwrap_or_default() != first_text) {
+        if values[1..]
+            .iter()
+            .any(|value| exact_str(value).unwrap_or_default() != first_text)
+        {
             return Ok((None, supplied));
         }
     }
@@ -173,10 +194,22 @@ fn structural_body<'py>(
 }
 
 /// `_mcp_item_failed(body)`.
-fn mcp_item_failed<'py>(py: Python<'py>, body: &Reader<'py>, json_object: &Bound<'py, PyAny>) -> PyResult<bool> {
+fn mcp_item_failed<'py>(
+    py: Python<'py>,
+    body: &Reader<'py>,
+    json_object: &Bound<'py, PyAny>,
+) -> PyResult<bool> {
     let falsy = FALSY_ERRORS
         .get_or_try_init(py, || -> PyResult<Py<PyTuple>> {
-            Ok(PyTuple::new(py, [py.None().into_bound(py), false.into_pyobject(py)?.to_owned().into_any(), PyString::new(py, "").into_any()])?.unbind())
+            Ok(PyTuple::new(
+                py,
+                [
+                    py.None().into_bound(py),
+                    false.into_pyobject(py)?.to_owned().into_any(),
+                    PyString::new(py, "").into_any(),
+                ],
+            )?
+            .unbind())
         })?
         .bind(py);
     let error = body.get(intern!(py, "error"))?;
@@ -203,7 +236,9 @@ fn spawn_parent_thread<'py>(
     if !is_instance(&source, json_object)? {
         return Ok((None, false));
     }
-    let subagent = Reader::new(py, &source, json_object)?.target.call_method1(intern!(py, "get"), (thread_source,))?;
+    let subagent = Reader::new(py, &source, json_object)?
+        .target
+        .call_method1(intern!(py, "get"), (thread_source,))?;
     if !is_instance(&subagent, json_object)? {
         return Ok((None, false));
     }
@@ -240,7 +275,10 @@ fn child_session_header<'py>(
     };
     let thread_source = global(py, "_SUBAGENT_THREAD_SOURCE")?;
     let payload = Reader::new(py, &payload, json_object)?;
-    if payload.get(intern!(py, "thread_source"))?.ne(&thread_source)? {
+    if payload
+        .get(intern!(py, "thread_source"))?
+        .ne(&thread_source)?
+    {
         return Ok((None, Vec::new(), false));
     }
     let (parent, spawn_supplied) = spawn_parent_thread(py, &payload, json_object, &thread_source)?;
@@ -265,8 +303,13 @@ fn child_session_header<'py>(
         return Ok((None, Vec::new(), true));
     }
     let mut spawning: Vec<Bound<'py, PyAny>> = Vec::with_capacity(2);
-    for candidate in [token(payload.get(intern!(py, "session_id"))?), Some(parent)].into_iter().flatten() {
-        if !same_token(&candidate, &child) && !spawning.iter().any(|known| same_token(known, &candidate)) {
+    for candidate in [token(payload.get(intern!(py, "session_id"))?), Some(parent)]
+        .into_iter()
+        .flatten()
+    {
+        if !same_token(&candidate, &child)
+            && !spawning.iter().any(|known| same_token(known, &candidate))
+        {
             spawning.push(candidate);
         }
     }
@@ -288,7 +331,10 @@ pub fn codex_stream_child_session_header<'py>(
 
 /// `_structural_body(record)`.
 #[pyfunction]
-pub fn codex_stream_structural_body<'py>(py: Python<'py>, record: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
+pub fn codex_stream_structural_body<'py>(
+    py: Python<'py>,
+    record: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
     let json_object = global(py, "JsonObject")?;
     let value = record.getattr(intern!(py, "value"))?;
     let reader = Reader::new(py, &value, &json_object)?;
@@ -307,13 +353,28 @@ pub fn codex_stream_mcp_item_failed(py: Python<'_>, body: &Bound<'_, PyAny>) -> 
 #[pyfunction]
 pub fn codex_stream_tables(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
     let tables = PyDict::new(py);
-    tables.set_item("_OVERSIZED_PARTIAL_PREFIX", PyBytes::new(py, core::OVERSIZED_PARTIAL_PREFIX))?;
-    tables.set_item("_OVERSIZED_PARTIAL_DOMAIN", PyBytes::new(py, core::OVERSIZED_PARTIAL_DOMAIN))?;
-    tables.set_item("_OVERSIZED_LINE_DOMAIN", PyBytes::new(py, core::OVERSIZED_LINE_DOMAIN))?;
+    tables.set_item(
+        "_OVERSIZED_PARTIAL_PREFIX",
+        PyBytes::new(py, core::OVERSIZED_PARTIAL_PREFIX),
+    )?;
+    tables.set_item(
+        "_OVERSIZED_PARTIAL_DOMAIN",
+        PyBytes::new(py, core::OVERSIZED_PARTIAL_DOMAIN),
+    )?;
+    tables.set_item(
+        "_OVERSIZED_LINE_DOMAIN",
+        PyBytes::new(py, core::OVERSIZED_LINE_DOMAIN),
+    )?;
     tables.set_item("_MAX_CANONICAL_INTEGER", core::MAX_CANONICAL_INTEGER as i64)?;
     tables.set_item("_JSONL_SUFFIXES", PyTuple::new(py, core::JSONL_SUFFIXES)?)?;
-    tables.set_item("_PAIRING_CLOSE_EVENTS", PyTuple::new(py, ["SessionEnd", "Stop"])?)?;
-    tables.set_item("_TOKEN_ALPHABET", "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:/+-")?;
+    tables.set_item(
+        "_PAIRING_CLOSE_EVENTS",
+        PyTuple::new(py, ["SessionEnd", "Stop"])?,
+    )?;
+    tables.set_item(
+        "_TOKEN_ALPHABET",
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:/+-",
+    )?;
     tables.set_item("_TOKEN_LEADING_REFUSED", "._:/+-")?;
     tables.set_item("_TOKEN_MAX_CHARS", 128)?;
     Ok(tables)
@@ -330,12 +391,25 @@ pub fn codex_stream_structural<'py>(
 ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
     let json_object = global(py, "JsonObject")?;
     let (item_types, known_wrappers) = if profile.is_none() {
-        (global(py, "_ROLLOUT_ITEM_TYPES")?, global(py, "_ROLLOUT_WRAPPER_TYPES")?)
+        (
+            global(py, "_ROLLOUT_ITEM_TYPES")?,
+            global(py, "_ROLLOUT_WRAPPER_TYPES")?,
+        )
     } else {
         let frozen = |name: &Bound<'py, PyString>| -> PyResult<Bound<'py, PyAny>> {
-            Ok(pyo3::types::PyFrozenSet::new(py, profile.getattr(name)?.try_iter()?.collect::<PyResult<Vec<_>>>()?)?.into_any())
+            Ok(pyo3::types::PyFrozenSet::new(
+                py,
+                profile
+                    .getattr(name)?
+                    .try_iter()?
+                    .collect::<PyResult<Vec<_>>>()?,
+            )?
+            .into_any())
         };
-        (frozen(intern!(py, "item_types"))?, frozen(intern!(py, "wrapper_types"))?)
+        (
+            frozen(intern!(py, "item_types"))?,
+            frozen(intern!(py, "wrapper_types"))?,
+        )
     };
     let unsupported = bound_item(py, &GAP_CODES, 0)?;
     let missing_subagent = bound_item(py, &GAP_CODES, 1)?;
@@ -400,9 +474,11 @@ pub fn codex_stream_structural<'py>(
             }
         }
         if !key_material.is_none() && item_is("CommandExecution")? {
-            let normalized = global(py, "normalize_observed_command")?.call1((body.get(intern!(py, "command"))?,))?;
+            let normalized = global(py, "normalize_observed_command")?
+                .call1((body.get(intern!(py, "command"))?,))?;
             if !normalized.is_none() {
-                let commitment = global(py, "observed_command_commitment")?.call1((key_material, normalized))?;
+                let commitment =
+                    global(py, "observed_command_commitment")?.call1((key_material, normalized))?;
                 fields.set_item(intern!(py, "command_commitment"), commitment)?;
             }
         }
@@ -418,7 +494,11 @@ pub fn codex_stream_structural<'py>(
         }
         let (subagent_id, _supplied) = consistent_alias_token(
             &body,
-            &[intern!(py, "subagent_id"), intern!(py, "agent_id"), intern!(py, "agent_thread_id")],
+            &[
+                intern!(py, "subagent_id"),
+                intern!(py, "agent_id"),
+                intern!(py, "agent_thread_id"),
+            ],
         )?;
         if let Some(subagent_id) = subagent_id {
             fields.set_item(intern!(py, "subagent_id"), subagent_id)?;
@@ -426,7 +506,11 @@ pub fn codex_stream_structural<'py>(
         if subagent_activity {
             let (parent, supplied) = consistent_alias_token(
                 &body,
-                &[intern!(py, "parent_tool_call_id"), intern!(py, "tool_call_id"), intern!(py, "tool_use_id")],
+                &[
+                    intern!(py, "parent_tool_call_id"),
+                    intern!(py, "tool_call_id"),
+                    intern!(py, "tool_use_id"),
+                ],
             )?;
             if let Some(parent) = parent {
                 fields.set_item(intern!(py, "parent_tool_call_id"), parent)?;
@@ -435,7 +519,8 @@ pub fn codex_stream_structural<'py>(
                 missing_gap = true;
             }
             pop(&fields, intern!(py, "tool_call_id"))?;
-            let activity_kind = token(body.get(intern!(py, "kind"))?).unwrap_or_else(|| py.None().into_bound(py));
+            let activity_kind =
+                token(body.get(intern!(py, "kind"))?).unwrap_or_else(|| py.None().into_bound(py));
             if !global(py, "_SUBAGENT_ACTIVITY_KINDS")?.contains(activity_kind)? {
                 unsupported_gap = true;
             }
@@ -463,7 +548,12 @@ pub fn codex_stream_structural<'py>(
     if unsupported_gap {
         gaps.push(unsupported);
     }
-    gaps.sort_by(|left, right| exact_str(left).unwrap_or_default().as_bytes().cmp(exact_str(right).unwrap_or_default().as_bytes()));
+    gaps.sort_by(|left, right| {
+        exact_str(left)
+            .unwrap_or_default()
+            .as_bytes()
+            .cmp(exact_str(right).unwrap_or_default().as_bytes())
+    });
     Ok((structural, PyTuple::new(py, gaps)?))
 }
 
@@ -540,7 +630,16 @@ fn row_facts<'py>(
         }
         core::RowSource::Other => {}
     }
-    Ok(Some((source, event_kind, identity, call_id, commitment, exit_fact, stated, hooked_item)))
+    Ok(Some((
+        source,
+        event_kind,
+        identity,
+        call_id,
+        commitment,
+        exit_fact,
+        stated,
+        hooked_item,
+    )))
 }
 
 /// `_rollout_item_decisions(envelopes, session_commitment, evicted_open_calls)`, or `None` to
@@ -592,20 +691,29 @@ pub fn codex_stream_rollout_item_decisions<'py>(
     }
     let rows: Vec<core::RolloutRow<'_>> = facts
         .iter()
-        .map(|(source, kind, identity, call_id, commitment, exit_fact, stated, hooked_item)| core::RolloutRow {
-            source: *source,
-            event_kind: exact_str(kind).unwrap_or_default(),
-            source_identity: exact_str(identity).unwrap_or_default(),
-            call_id: call_id.as_ref().and_then(exact_str),
-            commitment: commitment.as_ref().and_then(exact_str),
-            exit_fact: *exit_fact,
-            stated: *stated,
-            hooked_item: *hooked_item,
-        })
+        .map(
+            |(source, kind, identity, call_id, commitment, exit_fact, stated, hooked_item)| {
+                core::RolloutRow {
+                    source: *source,
+                    event_kind: exact_str(kind).unwrap_or_default(),
+                    source_identity: exact_str(identity).unwrap_or_default(),
+                    call_id: call_id.as_ref().and_then(exact_str),
+                    commitment: commitment.as_ref().and_then(exact_str),
+                    exit_fact: *exit_fact,
+                    stated: *stated,
+                    hooked_item: *hooked_item,
+                }
+            },
+        )
         .collect();
     let evicted_text: Vec<(&str, &str)> = evicted
         .iter()
-        .map(|(commitment, call)| (exact_str(commitment).unwrap_or_default(), exact_str(call).unwrap_or_default()))
+        .map(|(commitment, call)| {
+            (
+                exact_str(commitment).unwrap_or_default(),
+                exact_str(call).unwrap_or_default(),
+            )
+        })
         .collect();
     let decided = core::rollout_item_decisions(&rows, &evicted_text);
     let names = slot(py, &DECISIONS)?;
@@ -625,13 +733,19 @@ pub fn codex_stream_rollout_item_decisions<'py>(
 
 /// `rollout_filename_matches_token(filename, token)` for an ASCII `str` name, else `None`.
 #[pyfunction]
-pub fn codex_stream_filename_matches(filename: &Bound<'_, PyAny>, token_value: &Bound<'_, PyAny>) -> Option<bool> {
+pub fn codex_stream_filename_matches(
+    filename: &Bound<'_, PyAny>,
+    token_value: &Bound<'_, PyAny>,
+) -> Option<bool> {
     // `type(token) is not str or _token(token) is None` answers before the name is read.
     let Some(token_text) = exact_str(token_value).filter(|text| core::token(text)) else {
         return Some(false);
     };
     let name = exact_str(filename).filter(|name| name.is_ascii())?;
-    Some(core::rollout_filename_matches(core::posix_name(name), token_text))
+    Some(core::rollout_filename_matches(
+        core::posix_name(name),
+        token_text,
+    ))
 }
 
 fn ascii<'a>(value: &'a Bound<'_, PyAny>) -> Option<&'a str> {
@@ -664,14 +778,22 @@ pub fn codex_stream_encode_oversized_partial<'py>(
     source_identity: &Bound<'py, PyAny>,
     key_material: &Bound<'py, PyAny>,
 ) -> (bool, Option<Bound<'py, PyBytes>>) {
-    let (Some(line_start), Some(prefix), Some(session), Some(generation), Some(identity), Some(key)) = (
+    let (
+        Some(line_start),
+        Some(prefix),
+        Some(session),
+        Some(generation),
+        Some(identity),
+        Some(key),
+    ) = (
         exact_int(line_start),
         exact_str(prefix_commitment),
         ascii(session_commitment),
         exact_int(source_generation),
         ascii(source_identity),
         exact_bytes(key_material),
-    ) else {
+    )
+    else {
         return (false, None);
     };
     match core::encode_oversized_partial(line_start, prefix, session, generation, identity, key) {
@@ -745,10 +867,16 @@ pub fn codex_stream_source_file_identity(
         }
         value.extract::<i128>().ok()
     };
-    let (Some(device), Some(inode), Some(key)) = (exact(&device), exact(&inode), exact_bytes(key_material)) else {
+    let (Some(device), Some(inode), Some(key)) =
+        (exact(&device), exact(&inode), exact_bytes(key_material))
+    else {
         return Ok(None);
     };
-    Ok(Some(core::source_file_identity(&core::bounded(device), &core::bounded(inode), key)))
+    Ok(Some(core::source_file_identity(
+        &core::bounded(device),
+        &core::bounded(inode),
+        key,
+    )))
 }
 
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -758,13 +886,28 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(codex_stream_structural_body, module)?)?;
     module.add_function(wrap_pyfunction!(codex_stream_mcp_item_failed, module)?)?;
     module.add_function(wrap_pyfunction!(codex_stream_child_session_header, module)?)?;
-    module.add_function(wrap_pyfunction!(codex_stream_consistent_alias_token, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        codex_stream_consistent_alias_token,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(codex_stream_structural, module)?)?;
-    module.add_function(wrap_pyfunction!(codex_stream_rollout_item_decisions, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        codex_stream_rollout_item_decisions,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(codex_stream_filename_matches, module)?)?;
-    module.add_function(wrap_pyfunction!(codex_stream_encode_oversized_partial, module)?)?;
-    module.add_function(wrap_pyfunction!(codex_stream_decode_oversized_partial, module)?)?;
-    module.add_function(wrap_pyfunction!(codex_stream_oversized_line_commitment, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        codex_stream_encode_oversized_partial,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        codex_stream_decode_oversized_partial,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        codex_stream_oversized_line_commitment,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(codex_stream_source_file_identity, module)?)?;
     Ok(())
 }

@@ -14,7 +14,9 @@ use yoetz_core::fswalks::managed_tree::{self as core, Member};
 const DETACH_BYTES: usize = 64 * 1024;
 
 /// Borrow ASCII `(path, data)` pairs in insertion order, or `None` for any other shape.
-fn members<'a>(files: &'a Bound<'_, PyAny>) -> Option<Vec<(Bound<'a, PyString>, Bound<'a, PyBytes>)>> {
+fn members<'a>(
+    files: &'a Bound<'_, PyAny>,
+) -> Option<Vec<(Bound<'a, PyString>, Bound<'a, PyBytes>)>> {
     let dict = files.cast_exact::<PyDict>().ok()?;
     let mut pairs = Vec::with_capacity(dict.len());
     for (key, value) in dict.iter() {
@@ -40,7 +42,10 @@ pub fn managed_tree_digest(py: Python<'_>, files: &Bound<'_, PyAny>) -> PyResult
         let Ok(path) = path.to_str() else {
             return Ok(None);
         };
-        borrowed.push(Member { path, data: value.as_bytes() });
+        borrowed.push(Member {
+            path,
+            data: value.as_bytes(),
+        });
     }
     core::sort_ascii(&mut borrowed);
     let total: usize = borrowed.iter().map(|member| member.data.len()).sum();

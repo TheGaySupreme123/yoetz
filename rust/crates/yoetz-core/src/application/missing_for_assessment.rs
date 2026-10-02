@@ -83,7 +83,11 @@ fn inside<S: AsRef<str>>(path: &str, roots: &[S]) -> Option<String> {
 }
 
 /// `_normal_path(text, roots, known_path=...)` as `(path, certain)`.
-pub fn normal_path<S: AsRef<str>>(text: &str, roots: &[S], known_path: bool) -> Option<(String, bool)> {
+pub fn normal_path<S: AsRef<str>>(
+    text: &str,
+    roots: &[S],
+    known_path: bool,
+) -> Option<(String, bool)> {
     let text = text.trim_matches(is_python_space);
     if text.is_empty() || text.chars().any(is_python_space) || text.contains("://") {
         return None;
@@ -91,7 +95,10 @@ pub fn normal_path<S: AsRef<str>>(text: &str, roots: &[S], known_path: bool) -> 
     if text.starts_with('/') {
         return inside(&posix_normpath(text), roots).map(|relative| (relative, true));
     }
-    let parts: Vec<&str> = text.split('/').filter(|part| !part.is_empty() && *part != ".").collect();
+    let parts: Vec<&str> = text
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect();
     let Some(name) = parts.last() else {
         return Some((WHOLE_TREE.to_owned(), true));
     };
@@ -119,7 +126,8 @@ pub const SUMMARY_DIFF_OPTIONS: &[&str] = &[
 ];
 
 /// The `_REVISION` pattern `is_revision` implements.
-pub const REVISION_PATTERN: &str = r"(?:HEAD|FETCH_HEAD|ORIG_HEAD|MERGE_HEAD|@)(?:[~^][0-9]*)*|[0-9a-f]{7,40}|.*\.\..*";
+pub const REVISION_PATTERN: &str =
+    r"(?:HEAD|FETCH_HEAD|ORIG_HEAD|MERGE_HEAD|@)(?:[~^][0-9]*)*|[0-9a-f]{7,40}|.*\.\..*";
 
 /// `_REVISION.fullmatch(token)` for
 /// `(?:HEAD|FETCH_HEAD|ORIG_HEAD|MERGE_HEAD|@)(?:[~^][0-9]*)*|[0-9a-f]{7,40}|.*\.\..*`.
@@ -129,14 +137,20 @@ pub fn is_revision(token: &str) -> bool {
             let bytes = rest.as_bytes();
             if bytes.is_empty()
                 || ((bytes[0] == b'~' || bytes[0] == b'^')
-                    && bytes.iter().all(|&byte| byte == b'~' || byte == b'^' || byte.is_ascii_digit()))
+                    && bytes
+                        .iter()
+                        .all(|&byte| byte == b'~' || byte == b'^' || byte.is_ascii_digit()))
             {
                 return true;
             }
         }
     }
     let bytes = token.as_bytes();
-    if (7..=40).contains(&bytes.len()) && bytes.iter().all(|&byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')) {
+    if (7..=40).contains(&bytes.len())
+        && bytes
+            .iter()
+            .all(|&byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
         return true;
     }
     // `.` matches anything but a line feed.
@@ -180,7 +194,10 @@ pub fn diff_scope<S: AsRef<str>>(command: &str, roots: &[S]) -> Option<Vec<Strin
             continue;
         }
         if !literal && token.starts_with('-') {
-            if SUMMARY_DIFF_OPTIONS.contains(&token) || token.starts_with("--stat") || token.starts_with("--dirstat") {
+            if SUMMARY_DIFF_OPTIONS.contains(&token)
+                || token.starts_with("--stat")
+                || token.starts_with("--dirstat")
+            {
                 return None;
             }
             continue;
@@ -209,10 +226,16 @@ mod tests {
     #[test]
     fn diff_scope_forms() {
         let roots = ["/work/repo"];
-        assert_eq!(diff_scope("git diff src/a.py", &roots), Some(vec!["src/a.py".to_owned()]));
+        assert_eq!(
+            diff_scope("git diff src/a.py", &roots),
+            Some(vec!["src/a.py".to_owned()])
+        );
         assert_eq!(diff_scope("git diff", &roots), Some(vec![]));
         assert_eq!(diff_scope("git diff --stat", &roots), None);
-        assert_eq!(diff_scope("git -C /work/repo diff HEAD~1 -- /work/repo/x", &roots), Some(vec!["x".to_owned()]));
+        assert_eq!(
+            diff_scope("git -C /work/repo diff HEAD~1 -- /work/repo/x", &roots),
+            Some(vec!["x".to_owned()])
+        );
         assert_eq!(diff_scope("git -C /other diff", &roots), None);
         assert_eq!(diff_scope("pytest", &roots), None);
         assert!(is_revision("HEAD^2~3"));
@@ -222,7 +245,10 @@ mod tests {
 
     #[test]
     fn python_whitespace() {
-        assert_eq!(normal_path("\u{1c} src/a.py\u{3000}", &["/w"], false), Some(("src/a.py".to_owned(), true)));
+        assert_eq!(
+            normal_path("\u{1c} src/a.py\u{3000}", &["/w"], false),
+            Some(("src/a.py".to_owned(), true))
+        );
         assert_eq!(normal_path("a\u{1f}b", &["/w"], false), None);
         assert!(!is_python_space('\u{200b}'));
     }

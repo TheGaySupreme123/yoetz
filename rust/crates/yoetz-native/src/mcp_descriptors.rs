@@ -59,7 +59,11 @@ fn sequence_members<'py>(value: &Bound<'py, PyAny>) -> PyResult<Option<Vec<Bound
         return Ok(Some(members));
     }
     if is_exact(value, ffi::PyTuple_CheckExact) {
-        return Ok(Some(unsafe { value.cast_unchecked::<PyTuple>() }.iter().collect()));
+        return Ok(Some(
+            unsafe { value.cast_unchecked::<PyTuple>() }
+                .iter()
+                .collect(),
+        ));
     }
     Ok(None)
 }
@@ -85,7 +89,13 @@ fn exact_text<'a>(value: &'a Bound<'_, PyAny>) -> Option<&'a str> {
     unsafe { value.cast_unchecked::<PyString>() }.to_str().ok()
 }
 
-fn thaw<'py>(py: Python<'py>, value: &Bound<'py, PyAny>, fallback: &Bound<'py, PyAny>, stringify: bool, depth: usize) -> PyResult<Bound<'py, PyAny>> {
+fn thaw<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+    fallback: &Bound<'py, PyAny>,
+    stringify: bool,
+    depth: usize,
+) -> PyResult<Bound<'py, PyAny>> {
     if is_plain_scalar(value) {
         return Ok(value.clone());
     }
@@ -95,7 +105,11 @@ fn thaw<'py>(py: Python<'py>, value: &Bound<'py, PyAny>, fallback: &Bound<'py, P
     if let Some(entries) = dict_entries(value)? {
         let thawed = PyDict::new(py);
         for (key, item) in entries {
-            let key = if stringify && !is_exact(&key, ffi::PyUnicode_CheckExact) { key.str()?.into_any() } else { key };
+            let key = if stringify && !is_exact(&key, ffi::PyUnicode_CheckExact) {
+                key.str()?.into_any()
+            } else {
+                key
+            };
             thawed.set_item(key, thaw(py, &item, fallback, stringify, depth + 1)?)?;
         }
         return Ok(thawed.into_any());
@@ -117,7 +131,12 @@ fn thaw<'py>(py: Python<'py>, value: &Bound<'py, PyAny>, fallback: &Bound<'py, P
 /// `yoetz.mcp.server` (`stringify_keys=True`, which applies `str` to every key).
 #[pyfunction]
 #[pyo3(name = "mcp_thaw_json", signature = (value, fallback, stringify_keys = false))]
-pub fn thaw_json<'py>(py: Python<'py>, value: &Bound<'py, PyAny>, fallback: &Bound<'py, PyAny>, stringify_keys: bool) -> PyResult<Bound<'py, PyAny>> {
+pub fn thaw_json<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+    fallback: &Bound<'py, PyAny>,
+    stringify_keys: bool,
+) -> PyResult<Bound<'py, PyAny>> {
     thaw(py, value, fallback, stringify_keys, 0)
 }
 
@@ -140,11 +159,22 @@ struct Rewrite<'py> {
 }
 
 impl<'py> Rewrite<'py> {
-    fn defer(&self, value: &Bound<'py, PyAny>, current_uri: &Bound<'py, PyString>) -> PyResult<Bound<'py, PyAny>> {
-        self.fallback.call1((value, current_uri, &self.root_uri, &self.inline_uris))
+    fn defer(
+        &self,
+        value: &Bound<'py, PyAny>,
+        current_uri: &Bound<'py, PyString>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.fallback
+            .call1((value, current_uri, &self.root_uri, &self.inline_uris))
     }
 
-    fn rewrite(&self, py: Python<'py>, value: &Bound<'py, PyAny>, current_uri: &Bound<'py, PyString>, depth: usize) -> PyResult<Bound<'py, PyAny>> {
+    fn rewrite(
+        &self,
+        py: Python<'py>,
+        value: &Bound<'py, PyAny>,
+        current_uri: &Bound<'py, PyString>,
+        depth: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
         if is_plain_scalar(value) {
             return Ok(value.clone());
         }
@@ -177,7 +207,10 @@ impl<'py> Rewrite<'py> {
                             None => (text, None),
                         };
                         let uri_object = PyString::new(py, uri);
-                        if fragment.is_none() && entries.len() == 1 && self.inline_uris.contains(&uri_object)? {
+                        if fragment.is_none()
+                            && entries.len() == 1
+                            && self.inline_uris.contains(&uri_object)?
+                        {
                             let document = self.inline_document.call1((&uri_object,))?;
                             return self.rewrite(py, &document, &uri_object, depth + 1);
                         }
@@ -195,7 +228,10 @@ impl<'py> Rewrite<'py> {
                             if !current.is_ascii() {
                                 return self.defer(value, current_uri);
                             }
-                            rewritten = Some(PyString::new(py, &format!("#/$defs/{}{}", bundle_key(current), rest)));
+                            rewritten = Some(PyString::new(
+                                py,
+                                &format!("#/$defs/{}{}", bundle_key(current), rest),
+                            ));
                         }
                     }
                 }
@@ -294,7 +330,11 @@ pub fn external_schema_documents<'py>(
         let candidate = match frame {
             Frame::Node(candidate) => candidate,
             Frame::ValuesOf(mapping) => {
-                stack.push(Frame::Iter(mapping.call_method0(pyo3::intern!(py, "values"))?.try_iter()?));
+                stack.push(Frame::Iter(
+                    mapping
+                        .call_method0(pyo3::intern!(py, "values"))?
+                        .try_iter()?,
+                ));
                 continue;
             }
             Frame::Members(members, index) => {
@@ -327,12 +367,20 @@ pub fn external_schema_documents<'py>(
             if let Some(reference) = reference {
                 if unsafe { ffi::PyUnicode_Check(reference.as_ptr()) } != 0 {
                     let uri: Option<Bound<'py, PyAny>> = match exact_text(&reference) {
-                        Some(text) => text
-                            .starts_with(namespace_text.as_str())
-                            .then(|| PyString::new(py, text.split_once('#').map_or(text, |(uri, _)| uri)).into_any()),
+                        Some(text) => text.starts_with(namespace_text.as_str()).then(|| {
+                            PyString::new(py, text.split_once('#').map_or(text, |(uri, _)| uri))
+                                .into_any()
+                        }),
                         None => {
-                            if reference.call_method1(pyo3::intern!(py, "startswith"), (namespace,))?.is_truthy()? {
-                                Some(reference.call_method1(pyo3::intern!(py, "partition"), ("#",))?.get_item(0)?)
+                            if reference
+                                .call_method1(pyo3::intern!(py, "startswith"), (namespace,))?
+                                .is_truthy()?
+                            {
+                                Some(
+                                    reference
+                                        .call_method1(pyo3::intern!(py, "partition"), ("#",))?
+                                        .get_item(0)?,
+                                )
                             } else {
                                 None
                             }
@@ -351,7 +399,11 @@ pub fn external_schema_documents<'py>(
                 }
             }
             if exact_dict {
-                let members: Vec<Bound<'py, PyAny>> = unsafe { candidate.cast_unchecked::<PyDict>() }.values().iter().collect();
+                let members: Vec<Bound<'py, PyAny>> =
+                    unsafe { candidate.cast_unchecked::<PyDict>() }
+                        .values()
+                        .iter()
+                        .collect();
                 stack.push(Frame::Members(members, 0));
             } else {
                 stack.push(Frame::ValuesOf(candidate));
@@ -373,7 +425,12 @@ pub fn external_schema_documents<'py>(
     Ok(documents)
 }
 
-fn legacy_arrays<'py>(py: Python<'py>, candidate: &Bound<'py, PyAny>, fallback: &Bound<'py, PyAny>, depth: usize) -> PyResult<Bound<'py, PyAny>> {
+fn legacy_arrays<'py>(
+    py: Python<'py>,
+    candidate: &Bound<'py, PyAny>,
+    fallback: &Bound<'py, PyAny>,
+    depth: usize,
+) -> PyResult<Bound<'py, PyAny>> {
     if is_plain_scalar(candidate) {
         return Ok(candidate.clone());
     }
@@ -397,10 +454,15 @@ fn legacy_arrays<'py>(py: Python<'py>, candidate: &Bound<'py, PyAny>, fallback: 
         let raw_items = mapping.get_item(items_key)?;
         let max_items = mapping.get_item(pyo3::intern!(py, "maxItems"))?;
         let fixed_prefix = match &max_items {
-            Some(max_items) if is_exact(max_items, ffi::PyLong_CheckExact) => max_items.eq(prefix_items.len()?)?,
+            Some(max_items) if is_exact(max_items, ffi::PyLong_CheckExact) => {
+                max_items.eq(prefix_items.len()?)?
+            }
             _ => false,
         };
-        let alternatives = unsafe { Bound::from_owned_ptr_or_err(py, ffi::PySequence_List(prefix_items.as_ptr()))?.cast_into_unchecked::<PyList>() };
+        let alternatives = unsafe {
+            Bound::from_owned_ptr_or_err(py, ffi::PySequence_List(prefix_items.as_ptr()))?
+                .cast_into_unchecked::<PyList>()
+        };
         let raw_is_mapping = match &raw_items {
             Some(raw_items) => is_mapping_instance(py, raw_items)?,
             None => false,
@@ -410,7 +472,9 @@ fn legacy_arrays<'py>(py: Python<'py>, candidate: &Bound<'py, PyAny>, fallback: 
                 alternatives.append(raw_items)?;
             }
         }
-        let raw_is_false = raw_items.as_ref().is_some_and(|raw| raw.as_ptr() == unsafe { ffi::Py_False() });
+        let raw_is_false = raw_items
+            .as_ref()
+            .is_some_and(|raw| raw.as_ptr() == unsafe { ffi::Py_False() });
         if fixed_prefix || raw_is_false || raw_is_mapping {
             if alternatives.len() == 1 {
                 mapping.set_item(items_key, alternatives.get_item(0)?)?;
@@ -440,11 +504,21 @@ fn legacy_arrays<'py>(py: Python<'py>, candidate: &Bound<'py, PyAny>, fallback: 
 /// `_legacy_compatible_output_arrays(candidate)`; `fallback` is the Python reference.
 #[pyfunction]
 #[pyo3(name = "mcp_legacy_compatible_output_arrays")]
-pub fn legacy_compatible_output_arrays<'py>(py: Python<'py>, candidate: &Bound<'py, PyAny>, fallback: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+pub fn legacy_compatible_output_arrays<'py>(
+    py: Python<'py>,
+    candidate: &Bound<'py, PyAny>,
+    fallback: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
     legacy_arrays(py, candidate, fallback, 0)
 }
 
-fn flatten<'py>(py: Python<'py>, candidate: &Bound<'py, PyAny>, fallback: &Bound<'py, PyAny>, thaw_fallback: &Bound<'py, PyAny>, depth: usize) -> PyResult<Bound<'py, PyAny>> {
+fn flatten<'py>(
+    py: Python<'py>,
+    candidate: &Bound<'py, PyAny>,
+    fallback: &Bound<'py, PyAny>,
+    thaw_fallback: &Bound<'py, PyAny>,
+    depth: usize,
+) -> PyResult<Bound<'py, PyAny>> {
     if is_plain_scalar(candidate) {
         return Ok(candidate.clone());
     }
@@ -452,7 +526,10 @@ fn flatten<'py>(py: Python<'py>, candidate: &Bound<'py, PyAny>, fallback: &Bound
         return fallback.call1((candidate,));
     }
     if let Some(entries) = dict_entries(candidate)? {
-        if entries.iter().any(|(key, _)| !is_exact(key, ffi::PyUnicode_CheckExact)) {
+        if entries
+            .iter()
+            .any(|(key, _)| !is_exact(key, ffi::PyUnicode_CheckExact))
+        {
             return fallback.call1((candidate,));
         }
         let mapping = PyDict::new(py);
@@ -499,12 +576,20 @@ fn flatten<'py>(py: Python<'py>, candidate: &Bound<'py, PyAny>, fallback: &Bound
             return Ok(mapping.into_any());
         }
         let head_digest = properties.get_item(head_key)?;
-        let Some(head_digest) = head_digest.filter(|head| unsafe { ffi::PyDict_Check(head.as_ptr()) } != 0) else {
+        let Some(head_digest) =
+            head_digest.filter(|head| unsafe { ffi::PyDict_Check(head.as_ptr()) } != 0)
+        else {
             return fallback.call1((candidate,));
         };
         mapping.del_item(all_of)?;
-        head_digest.set_item(pyo3::intern!(py, "pattern"), "^(genesis|sha256:[0-9a-f]{64})$")?;
-        head_digest.set_item(pyo3::intern!(py, "description"), "Genesis is valid only with sequence 0.")?;
+        head_digest.set_item(
+            pyo3::intern!(py, "pattern"),
+            "^(genesis|sha256:[0-9a-f]{64})$",
+        )?;
+        head_digest.set_item(
+            pyo3::intern!(py, "description"),
+            "Genesis is valid only with sequence 0.",
+        )?;
         return Ok(mapping.into_any());
     }
     if let Some(members) = sequence_members(candidate)? {
@@ -585,7 +670,10 @@ impl<'py> LocalDefs<'py> {
             return Ok(None);
         };
         match &self.prefix {
-            Some(prefix) => Ok(text.strip_prefix(prefix.as_str()).filter(|rest| !rest.contains('/')).map(str::to_owned)),
+            Some(prefix) => Ok(text
+                .strip_prefix(prefix.as_str())
+                .filter(|rest| !rest.contains('/'))
+                .map(str::to_owned)),
             None => {
                 // `_local_def_key`.
                 let Some(rest) = text.strip_prefix("#/$defs/") else {
@@ -599,7 +687,12 @@ impl<'py> LocalDefs<'py> {
         }
     }
 
-    fn resolve(&mut self, py: Python<'py>, candidate: &Bound<'py, PyAny>, depth: usize) -> Step<Bound<'py, PyAny>> {
+    fn resolve(
+        &mut self,
+        py: Python<'py>,
+        candidate: &Bound<'py, PyAny>,
+        depth: usize,
+    ) -> Step<Bound<'py, PyAny>> {
         if is_plain_scalar(candidate) {
             return Ok(candidate.clone());
         }
@@ -697,7 +790,13 @@ pub fn inline_local_defs<'py>(
                 retained_keys.insert(exact_str_text(&key)?.ok_or(Undecided)?.to_owned());
             }
         }
-        Ok(LocalDefs { definitions: definitions.clone(), prefix, retained: retained_keys, resolving: Vec::new(), thaw_fallback: thaw_fallback.clone() })
+        Ok(LocalDefs {
+            definitions: definitions.clone(),
+            prefix,
+            retained: retained_keys,
+            resolving: Vec::new(),
+            thaw_fallback: thaw_fallback.clone(),
+        })
     })();
     let Ok(mut pass) = prepared else {
         return Ok(undecided.clone());
@@ -708,7 +807,11 @@ pub fn inline_local_defs<'py>(
     }
 }
 
-fn collect_defs<'py>(candidate: &Bound<'py, PyAny>, found: &Bound<'py, PySet>, depth: usize) -> Step<()> {
+fn collect_defs<'py>(
+    candidate: &Bound<'py, PyAny>,
+    found: &Bound<'py, PySet>,
+    depth: usize,
+) -> Step<()> {
     let py = candidate.py();
     if is_plain_scalar(candidate) {
         return Ok(());
@@ -749,7 +852,11 @@ fn collect_defs<'py>(candidate: &Bound<'py, PyAny>, found: &Bound<'py, PySet>, d
 /// `_referenced_top_level_defs(value)`, or `undecided` when only the reference can tell.
 #[pyfunction]
 #[pyo3(name = "mcp_referenced_top_level_defs")]
-pub fn referenced_top_level_defs<'py>(py: Python<'py>, value: &Bound<'py, PyAny>, undecided: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+pub fn referenced_top_level_defs<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+    undecided: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
     let found = PySet::empty(py)?;
     match collect_defs(value, &found, 0) {
         Ok(()) => Ok(found.into_any()),
@@ -757,7 +864,11 @@ pub fn referenced_top_level_defs<'py>(py: Python<'py>, value: &Bound<'py, PyAny>
     }
 }
 
-fn collect_descriptions<'py>(candidate: &Bound<'py, PyAny>, found: &mut Vec<Bound<'py, PyAny>>, depth: usize) -> Step<()> {
+fn collect_descriptions<'py>(
+    candidate: &Bound<'py, PyAny>,
+    found: &mut Vec<Bound<'py, PyAny>>,
+    depth: usize,
+) -> Step<()> {
     let py = candidate.py();
     if is_plain_scalar(candidate) {
         return Ok(());
@@ -784,7 +895,9 @@ fn collect_descriptions<'py>(candidate: &Bound<'py, PyAny>, found: &mut Vec<Boun
             if !is_exact(key, ffi::PyUnicode_CheckExact) {
                 return Err(Undecided);
             }
-            if unsafe { key.cast_unchecked::<PyString>() }.to_str().ok() == Some("description") && is_exact(item, ffi::PyUnicode_CheckExact) {
+            if unsafe { key.cast_unchecked::<PyString>() }.to_str().ok() == Some("description")
+                && is_exact(item, ffi::PyUnicode_CheckExact)
+            {
                 found.push(item.clone());
             }
         }
@@ -808,7 +921,11 @@ fn collect_descriptions<'py>(candidate: &Bound<'py, PyAny>, found: &mut Vec<Boun
 /// `_presentation_description_strings(schema)`, or `undecided` when only the reference can tell.
 #[pyfunction]
 #[pyo3(name = "mcp_presentation_description_strings")]
-pub fn presentation_description_strings<'py>(py: Python<'py>, schema: &Bound<'py, PyAny>, undecided: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+pub fn presentation_description_strings<'py>(
+    py: Python<'py>,
+    schema: &Bound<'py, PyAny>,
+    undecided: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
     let mut found = Vec::new();
     match collect_descriptions(schema, &mut found, 0) {
         Ok(()) => Ok(PyTuple::new(py, found)?.into_any()),

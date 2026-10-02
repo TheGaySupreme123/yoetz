@@ -13,9 +13,7 @@ use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyDict, PyInt, PyList, PyString, PyTuple};
-use yoetz_core::protocol::canonical::{
-    self as core, MAX_JSON_DEPTH, MAX_SAFE_INTEGER, Reason,
-};
+use yoetz_core::protocol::canonical::{self as core, MAX_JSON_DEPTH, MAX_SAFE_INTEGER, Reason};
 use yoetz_core::protocol::json::{self, JsonSink, JsonText};
 
 use crate::registry::{Slot, protocol_error};
@@ -95,7 +93,13 @@ struct Encoder<'py> {
 
 impl<'py> Encoder<'py> {
     fn new(py: Python<'py>, base_depth: usize) -> Self {
-        Encoder { py, out: Vec::with_capacity(1024), fragment: CANONICAL_FRAGMENT.get(py), base_depth, levels: -1 }
+        Encoder {
+            py,
+            out: Vec::with_capacity(1024),
+            fragment: CANONICAL_FRAGMENT.get(py),
+            base_depth,
+            levels: -1,
+        }
     }
 
     #[inline]
@@ -142,7 +146,8 @@ impl<'py> Encoder<'py> {
         }
         if unsafe { ffi::PyBool_Check(pointer) } != 0 {
             let truth = pointer == unsafe { ffi::Py_True() };
-            self.out.extend_from_slice(if truth { b"true" } else { b"false" });
+            self.out
+                .extend_from_slice(if truth { b"true" } else { b"false" });
             return Ok(());
         }
         if is_exact(value, ffi::PyLong_CheckExact) {
@@ -160,7 +165,9 @@ impl<'py> Encoder<'py> {
         if is_exact(value, ffi::PyUnicode_CheckExact) {
             let text = unsafe { value.cast_unchecked::<PyString>() };
             return match text.to_str() {
-                Ok(slice) => core::encode_str_into(&mut self.out, slice).map_err(|reason| self.fail(reason)),
+                Ok(slice) => {
+                    core::encode_str_into(&mut self.out, slice).map_err(|reason| self.fail(reason))
+                }
                 Err(_) => Err(self.fail(first_offender(text))),
             };
         }
@@ -224,7 +231,10 @@ impl<'py> Encoder<'py> {
 type MappingMembers<'py> = (Vec<Bound<'py, PyString>>, Vec<Bound<'py, PyAny>>);
 
 /// Collect a mapping's members, validating every key in insertion order first.
-fn mapping_members<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResult<MappingMembers<'py>> {
+fn mapping_members<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<MappingMembers<'py>> {
     let capacity = if is_exact(value, ffi::PyDict_CheckExact) {
         unsafe { value.cast_unchecked::<PyDict>() }.len()
     } else {
@@ -247,7 +257,10 @@ fn mapping_members<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResult<
         for (key, item) in dict.iter() {
             admit(key, item)?;
         }
-    } else if crate::walk::JSON_OBJECT.get(py).is_some_and(|class| crate::walk::is_type(value, &class)) {
+    } else if crate::walk::JSON_OBJECT
+        .get(py)
+        .is_some_and(|class| crate::walk::is_type(value, &class))
+    {
         // An exact ``JsonObject``'s ``items()`` yields its ``_items`` pairs in order.
         for pair in crate::walk::json_object_items(value)?.iter() {
             let pair = pair.cast_into::<PyTuple>()?;
@@ -262,7 +275,11 @@ fn mapping_members<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResult<
     Ok((keys, items))
 }
 
-fn encode_value<'py>(py: Python<'py>, value: &Bound<'py, PyAny>, depth: usize) -> PyResult<Encoder<'py>> {
+fn encode_value<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+    depth: usize,
+) -> PyResult<Encoder<'py>> {
     let mut encoder = Encoder::new(py, depth);
     encoder.encode(value, depth)?;
     Ok(encoder)
@@ -275,7 +292,10 @@ pub fn bind_canonical_fragment(class: Bound<'_, PyAny>) {
 
 /// `canonical_encode(value) -> bytes`.
 #[pyfunction]
-pub fn canonical_encode<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBytes>> {
+pub fn canonical_encode<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyBytes>> {
     let encoder = encode_value(py, value, 0)?;
     Ok(PyBytes::new(py, &encoder.out))
 }
@@ -283,15 +303,24 @@ pub fn canonical_encode<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyRe
 /// `_canonical_text(value, *, depth=0) -> str`.
 #[pyfunction]
 #[pyo3(signature = (value, *, depth = 0))]
-pub fn canonical_text<'py>(py: Python<'py>, value: &Bound<'py, PyAny>, depth: usize) -> PyResult<Bound<'py, PyString>> {
+pub fn canonical_text<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+    depth: usize,
+) -> PyResult<Bound<'py, PyString>> {
     let encoder = encode_value(py, value, depth)?;
     // The encoder only emits UTF-8 copied from valid str slices and ASCII syntax.
-    Ok(PyString::new(py, unsafe { std::str::from_utf8_unchecked(&encoder.out) }))
+    Ok(PyString::new(py, unsafe {
+        std::str::from_utf8_unchecked(&encoder.out)
+    }))
 }
 
 /// `(canonical text, container levels)` in one pass, for `canonical_fragment`.
 #[pyfunction]
-pub fn canonical_fragment_parts<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResult<(Bound<'py, PyString>, i64)> {
+pub fn canonical_fragment_parts<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<(Bound<'py, PyString>, i64)> {
     let encoder = encode_value(py, value, 0)?;
     let text = PyString::new(py, unsafe { std::str::from_utf8_unchecked(&encoder.out) });
     Ok((text, encoder.levels))
@@ -307,7 +336,11 @@ pub fn canonical_digest(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<St
 /// `ensure_canonical_value(value, *, depth=0) -> None`.
 #[pyfunction]
 #[pyo3(signature = (value, *, depth = 0))]
-pub fn ensure_canonical_value(py: Python<'_>, value: &Bound<'_, PyAny>, depth: usize) -> PyResult<()> {
+pub fn ensure_canonical_value(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    depth: usize,
+) -> PyResult<()> {
     encode_value(py, value, depth)?;
     Ok(())
 }
@@ -319,9 +352,16 @@ pub fn container_levels(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<i6
     levels_of(py, value, fragment.as_ref(), 0)
 }
 
-fn levels_of(py: Python<'_>, value: &Bound<'_, PyAny>, fragment: Option<&Bound<'_, PyAny>>, recursion: usize) -> PyResult<i64> {
+fn levels_of(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    fragment: Option<&Bound<'_, PyAny>>,
+    recursion: usize,
+) -> PyResult<i64> {
     if recursion > MAX_LEVELS_RECURSION {
-        return Err(PyRecursionError::new_err("maximum recursion depth exceeded"));
+        return Err(PyRecursionError::new_err(
+            "maximum recursion depth exceeded",
+        ));
     }
     if let Some(fragment) = fragment {
         if value.get_type().as_ptr() == fragment.as_ptr() {
@@ -338,7 +378,9 @@ fn levels_of(py: Python<'_>, value: &Bound<'_, PyAny>, fragment: Option<&Bound<'
     if is_actual_mapping(py, value) {
         let mut deepest = -1;
         let values = if is_exact(value, ffi::PyDict_CheckExact) {
-            unsafe { value.cast_unchecked::<PyDict>() }.values().into_any()
+            unsafe { value.cast_unchecked::<PyDict>() }
+                .values()
+                .into_any()
         } else {
             value.call_method0("values")?
         };
@@ -353,26 +395,36 @@ fn levels_of(py: Python<'_>, value: &Bound<'_, PyAny>, fragment: Option<&Bound<'
 /// `_validate_string(value) -> None`.
 #[pyfunction]
 pub fn validate_string(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<()> {
-    let text = value.cast::<PyString>().map_err(|_| PyTypeError::new_err("expected string or bytes-like object"))?;
+    let text = value
+        .cast::<PyString>()
+        .map_err(|_| PyTypeError::new_err("expected string or bytes-like object"))?;
     validate_pystr(py, text)?;
     Ok(())
 }
 
 /// `_encode_string(value) -> str`.
 #[pyfunction]
-pub fn encode_string<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyString>> {
-    let text = value.cast::<PyString>().map_err(|_| PyTypeError::new_err("expected string or bytes-like object"))?;
+pub fn encode_string<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyString>> {
+    let text = value
+        .cast::<PyString>()
+        .map_err(|_| PyTypeError::new_err("expected string or bytes-like object"))?;
     let slice = validate_pystr(py, text)?;
     let mut out = Vec::with_capacity(slice.len() + 2);
     core::encode_str_into(&mut out, slice).map_err(|reason| protocol_error(py, reason))?;
-    Ok(PyString::new(py, unsafe { std::str::from_utf8_unchecked(&out) }))
+    Ok(PyString::new(py, unsafe {
+        std::str::from_utf8_unchecked(&out)
+    }))
 }
 
 /// `ensure_canonical_set(values) -> None`.
 #[pyfunction]
 pub fn ensure_canonical_set(py: Python<'_>, values: &Bound<'_, PyAny>) -> PyResult<()> {
     let pointer = values.as_ptr();
-    let is_sequence = unsafe { ffi::PyList_Check(pointer) != 0 || ffi::PyTuple_Check(pointer) != 0 };
+    let is_sequence =
+        unsafe { ffi::PyList_Check(pointer) != 0 || ffi::PyTuple_Check(pointer) != 0 };
     if !is_sequence {
         return Err(protocol_error(py, core::UNSUPPORTED_JSON_TYPE));
     }
@@ -417,7 +469,11 @@ pub fn canonical_integer_string(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyR
 /// `parse_canonical_integer_string(value, *, signed=False) -> int`.
 #[pyfunction]
 #[pyo3(signature = (value, *, signed = false))]
-pub fn parse_canonical_integer_string(py: Python<'_>, value: &Bound<'_, PyAny>, signed: bool) -> PyResult<i64> {
+pub fn parse_canonical_integer_string(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    signed: bool,
+) -> PyResult<i64> {
     if !is_exact(value, ffi::PyUnicode_CheckExact) {
         return Err(protocol_error(py, core::NONCANONICAL_INTEGER_STRING));
     }
@@ -435,20 +491,25 @@ pub fn request_digest(py: Python<'_>, identity: &Bound<'_, PyAny>) -> PyResult<S
     canonical_digest(py, identity)
 }
 
-fn reject_ledger_assigned_fields(py: Python<'_>, node: &Bound<'_, PyAny>, depth: usize) -> PyResult<()> {
+fn reject_ledger_assigned_fields(
+    py: Python<'_>,
+    node: &Bound<'_, PyAny>,
+    depth: usize,
+) -> PyResult<()> {
     if is_actual_mapping(py, node) {
         if depth >= MAX_JSON_DEPTH {
             return Err(protocol_error(py, core::NESTING_TOO_DEEP));
         }
-        let pairs: Vec<(Bound<'_, PyAny>, Bound<'_, PyAny>)> = if is_exact(node, ffi::PyDict_CheckExact) {
-            unsafe { node.cast_unchecked::<PyDict>() }.iter().collect()
-        } else {
-            let mut collected = Vec::new();
-            for pair in node.call_method0("items")?.try_iter()? {
-                collected.push(pair?.extract()?);
-            }
-            collected
-        };
+        let pairs: Vec<(Bound<'_, PyAny>, Bound<'_, PyAny>)> =
+            if is_exact(node, ffi::PyDict_CheckExact) {
+                unsafe { node.cast_unchecked::<PyDict>() }.iter().collect()
+            } else {
+                let mut collected = Vec::new();
+                for pair in node.call_method0("items")?.try_iter()? {
+                    collected.push(pair?.extract()?);
+                }
+                collected
+            };
         for (key, item) in pairs {
             if is_exact(&key, ffi::PyUnicode_CheckExact) {
                 if let Ok(name) = unsafe { key.cast_unchecked::<PyString>() }.to_str() {
@@ -508,7 +569,8 @@ impl<'py> PySink<'py> {
                         points.as_ptr() as *const c_void,
                         points.len() as ffi::Py_ssize_t,
                     );
-                    Ok(Bound::from_owned_ptr_or_err(self.py, pointer)?.cast_into_unchecked::<PyString>())
+                    Ok(Bound::from_owned_ptr_or_err(self.py, pointer)?
+                        .cast_into_unchecked::<PyString>())
                 }
             }
         }
@@ -529,14 +591,18 @@ impl<'py> JsonSink for PySink<'py> {
         Ok(self.py.None().into_bound(self.py))
     }
     fn boolean(&mut self, value: bool) -> PyResult<Self::Value> {
-        Ok(pyo3::types::PyBool::new(self.py, value).to_owned().into_any())
+        Ok(pyo3::types::PyBool::new(self.py, value)
+            .to_owned()
+            .into_any())
     }
     fn integer(&mut self, literal: &str) -> PyResult<Self::Value> {
         if literal == "-0" {
             return Err(self.fail(core::FLOAT_FORBIDDEN));
         }
         if literal.len() <= 18 {
-            let number: i64 = literal.parse().map_err(|_| self.fail(core::INTEGER_OUT_OF_SAFE_RANGE))?;
+            let number: i64 = literal
+                .parse()
+                .map_err(|_| self.fail(core::INTEGER_OUT_OF_SAFE_RANGE))?;
             if !(-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(&number) {
                 return Err(self.fail(core::INTEGER_OUT_OF_SAFE_RANGE));
             }
@@ -580,7 +646,12 @@ impl<'py> JsonSink for PySink<'py> {
         self.depth += 1;
         Ok(Vec::new())
     }
-    fn insert(&mut self, object: &mut Self::Object, key: Self::Key, value: Self::Value) -> PyResult<()> {
+    fn insert(
+        &mut self,
+        object: &mut Self::Object,
+        key: Self::Key,
+        value: Self::Value,
+    ) -> PyResult<()> {
         object.push((key, value));
         Ok(())
     }
@@ -601,7 +672,11 @@ impl<'py> JsonSink for PySink<'py> {
 /// `strict_json_parse(data, *, validate=True)`.
 #[pyfunction]
 #[pyo3(signature = (data, *, validate = true))]
-pub fn strict_json_parse<'py>(py: Python<'py>, data: &Bound<'py, PyAny>, validate: bool) -> PyResult<Bound<'py, PyAny>> {
+pub fn strict_json_parse<'py>(
+    py: Python<'py>,
+    data: &Bound<'py, PyAny>,
+    validate: bool,
+) -> PyResult<Bound<'py, PyAny>> {
     let owned;
     let raw: &[u8] = if is_exact(data, ffi::PyByteArray_CheckExact) {
         owned = unsafe { data.cast_unchecked::<pyo3::types::PyByteArray>() }.to_vec();
@@ -612,7 +687,11 @@ pub fn strict_json_parse<'py>(py: Python<'py>, data: &Bound<'py, PyAny>, validat
         return Err(protocol_error(py, core::INPUT_NOT_BYTES));
     };
     let text = json::precheck(raw).map_err(|reason| protocol_error(py, reason))?;
-    let mut sink = PySink { py, depth: 0, suspect: false };
+    let mut sink = PySink {
+        py,
+        depth: 0,
+        suspect: false,
+    };
     let value = json::scan(text, &mut sink)?;
     if validate && sink.suspect {
         encode_value(py, &value, 0)?;

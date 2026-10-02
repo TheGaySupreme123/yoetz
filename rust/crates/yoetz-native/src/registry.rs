@@ -18,7 +18,10 @@ impl Slot {
     }
 
     pub fn set(&self, value: Py<PyAny>) {
-        *self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(value);
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(value);
     }
 
     pub fn get<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyAny>> {

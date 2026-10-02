@@ -43,7 +43,10 @@ impl Grammar {
 }
 
 /// The exact-`str` members of an exact `tuple` within `maximum`, or `None`.
-pub(crate) fn exact_str_members<'py>(value: &Bound<'py, PyAny>, maximum: usize) -> Option<Vec<Bound<'py, PyString>>> {
+pub(crate) fn exact_str_members<'py>(
+    value: &Bound<'py, PyAny>,
+    maximum: usize,
+) -> Option<Vec<Bound<'py, PyString>>> {
     if unsafe { ffi::PyTuple_CheckExact(value.as_ptr()) } == 0 {
         return None;
     }
@@ -65,8 +68,14 @@ pub(crate) fn exact_str_members<'py>(value: &Bound<'py, PyAny>, maximum: usize) 
 
 /// `_ordered_ids(value, kind=kind, maximum=maximum)`.
 #[pyfunction]
-pub fn importer_ordered_ids<'py>(py: Python<'py>, value: &Bound<'py, PyAny>, kind: &Bound<'py, PyAny>, maximum: usize) -> PyResult<Option<Bound<'py, PyTuple>>> {
-    let (Some(grammar), Some(members)) = (Grammar::of(kind), exact_str_members(value, maximum)) else {
+pub fn importer_ordered_ids<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+    kind: &Bound<'py, PyAny>,
+    maximum: usize,
+) -> PyResult<Option<Bound<'py, PyTuple>>> {
+    let (Some(grammar), Some(members)) = (Grammar::of(kind), exact_str_members(value, maximum))
+    else {
         return Ok(None);
     };
     let mut seen: HashSet<&str> = HashSet::with_capacity(members.len());
@@ -87,7 +96,12 @@ pub fn importer_ordered_ids<'py>(py: Python<'py>, value: &Bound<'py, PyAny>, kin
 
 /// `_sorted_ids(value, kind=kind, maximum=maximum)`; `kind` may be `None`.
 #[pyfunction]
-pub fn importer_sorted_ids<'py>(py: Python<'py>, value: &Bound<'py, PyAny>, kind: &Bound<'py, PyAny>, maximum: usize) -> PyResult<Option<Bound<'py, PyTuple>>> {
+pub fn importer_sorted_ids<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+    kind: &Bound<'py, PyAny>,
+    maximum: usize,
+) -> PyResult<Option<Bound<'py, PyTuple>>> {
     let grammar = if kind.is_none() {
         None
     } else {

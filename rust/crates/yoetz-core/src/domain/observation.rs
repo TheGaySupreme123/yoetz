@@ -226,7 +226,9 @@ pub fn is_token(value: &str) -> bool {
     if bytes.is_empty() || bytes.len() > 128 || !bytes[0].is_ascii_alphanumeric() {
         return false;
     }
-    bytes[1..].iter().all(|&byte| byte.is_ascii_alphanumeric() || b"._:/+-".contains(&byte))
+    bytes[1..]
+        .iter()
+        .all(|&byte| byte.is_ascii_alphanumeric() || b"._:/+-".contains(&byte))
 }
 
 /// `_GAP_RE.fullmatch(value)`: `^[a-z][a-z0-9_]{0,127}$` (ASCII).
@@ -235,12 +237,18 @@ pub fn is_gap_code(value: &str) -> bool {
     if bytes.is_empty() || bytes.len() > 128 || !bytes[0].is_ascii_lowercase() {
         return false;
     }
-    bytes[1..].iter().all(|&byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    bytes[1..]
+        .iter()
+        .all(|&byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 /// Python `str.isalpha()` for one character, ASCII only (`None` when non-ASCII).
 fn ascii_isalpha(c: char) -> Option<bool> {
-    if c.is_ascii() { Some(c.is_ascii_alphabetic()) } else { None }
+    if c.is_ascii() {
+        Some(c.is_ascii_alphabetic())
+    } else {
+        None
+    }
 }
 
 /// `_looks_like_path(value)`. `None` when the answer needs Python's Unicode `str.isalpha()`.
@@ -254,7 +262,8 @@ pub fn looks_like_path(value: &str) -> Option<bool> {
         }
     }
     let mut chars = value.chars();
-    let (Some(first), Some(second), Some(third)) = (chars.next(), chars.next(), chars.next()) else {
+    let (Some(first), Some(second), Some(third)) = (chars.next(), chars.next(), chars.next())
+    else {
         return Some(false);
     };
     if second != ':' {
@@ -275,7 +284,10 @@ pub fn looks_like_path(value: &str) -> Option<bool> {
 
 /// `key.endswith(("_path", "_paths", "_cwd", "_directory"))`.
 pub fn has_path_suffix(key: &str) -> bool {
-    key.ends_with("_path") || key.ends_with("_paths") || key.ends_with("_cwd") || key.ends_with("_directory")
+    key.ends_with("_path")
+        || key.ends_with("_paths")
+        || key.ends_with("_cwd")
+        || key.ends_with("_directory")
 }
 
 /// `OBSERVATION_WORKSPACE_DOMAIN`.
@@ -323,10 +335,17 @@ mod tests {
     fn hmac_matches_rfc_4231() {
         // RFC 4231 test case 2 ("Jefe"), split across domain and message.
         let commitment = hmac_commitment(b"Jefe", b"what do ya want ", b"for nothing?");
-        assert_eq!(commitment, "hmac-sha256:5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+        assert_eq!(
+            commitment,
+            "hmac-sha256:5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
         let long_key = [0xaa_u8; 131];
         assert_eq!(
-            hmac_commitment(&long_key, b"Test Using Larger Than Block-Size Key - Hash Key First", b""),
+            hmac_commitment(
+                &long_key,
+                b"Test Using Larger Than Block-Size Key - Hash Key First",
+                b""
+            ),
             "hmac-sha256:60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
         );
     }
@@ -340,9 +359,18 @@ mod tests {
 
     #[test]
     fn strips_exact_shell_wrappers() {
-        assert_eq!(normalize_observed_command_str("bash -lc 'ls  -la'").as_deref(), Some("ls -la"));
-        assert_eq!(normalize_observed_command_str("bash -lc \"ls\"").as_deref(), Some("bash -lc \"ls\""));
-        assert_eq!(normalize_observed_command_argv(&["/bin/bash", "-lc", "git status"]).as_deref(), Some("git status"));
+        assert_eq!(
+            normalize_observed_command_str("bash -lc 'ls  -la'").as_deref(),
+            Some("ls -la")
+        );
+        assert_eq!(
+            normalize_observed_command_str("bash -lc \"ls\"").as_deref(),
+            Some("bash -lc \"ls\"")
+        );
+        assert_eq!(
+            normalize_observed_command_argv(&["/bin/bash", "-lc", "git status"]).as_deref(),
+            Some("git status")
+        );
         assert_eq!(normalize_observed_command_argv(&["sh", "-c", ""]), None);
         assert_eq!(normalize_observed_command_str("   "), None);
         assert_eq!(normalize_observed_command_str("a\0"), None);

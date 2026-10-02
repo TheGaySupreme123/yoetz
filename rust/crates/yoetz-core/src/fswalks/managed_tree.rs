@@ -124,7 +124,10 @@ mod tests {
     fn link_scan_matches_findall() {
         assert_eq!(markdown_link_targets("[a](b) [c](d#e)"), vec!["b", "d#e"]);
         assert_eq!(markdown_link_targets("[[a](b)"), vec!["b"]);
-        assert_eq!(markdown_link_targets("[](b) [a] (c) [a](b"), Vec::<&str>::new());
+        assert_eq!(
+            markdown_link_targets("[](b) [a] (c) [a](b"),
+            Vec::<&str>::new()
+        );
         assert_eq!(markdown_link_targets("[a]()[x](y)"), vec!["y"]);
         assert_eq!(markdown_link_targets("[a\n](b\n)"), vec!["b\n"]);
         assert_eq!(markdown_link_targets("[a]([b](c))"), vec!["[b](c"]);

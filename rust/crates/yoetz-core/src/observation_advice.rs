@@ -103,7 +103,9 @@ fn is_pre_tool(envelope: &Envelope) -> bool {
 pub fn is_observed_command_identity(value: &str) -> bool {
     value.len() == COMMITMENT_PREFIX.len() + 64
         && value.starts_with(COMMITMENT_PREFIX)
-        && value.as_bytes()[COMMITMENT_PREFIX.len()..].iter().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        && value.as_bytes()[COMMITMENT_PREFIX.len()..]
+            .iter()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -130,8 +132,12 @@ fn live_failures(runs: &[Run<'_>]) -> HashSet<usize> {
     let mut live = HashSet::new();
     for run in runs.iter().rev() {
         if run.outcome == Outcome::Failure {
-            let superseded = run.identity.is_some_and(|identity| passed_after.contains(identity));
-            let rerun = run.identity.is_some_and(|identity| ran_after.contains(identity));
+            let superseded = run
+                .identity
+                .is_some_and(|identity| passed_after.contains(identity));
+            let rerun = run
+                .identity
+                .is_some_and(|identity| ran_after.contains(identity));
             if !superseded && !rerun && !edited_after {
                 live.insert(run.envelope);
             }
@@ -158,7 +164,10 @@ struct OrderedMap<K, V> {
 
 impl<K: Clone + Eq + std::hash::Hash, V> OrderedMap<K, V> {
     fn new() -> Self {
-        OrderedMap { slots: Vec::new(), index: HashMap::new() }
+        OrderedMap {
+            slots: Vec::new(),
+            index: HashMap::new(),
+        }
     }
 
     fn insert(&mut self, key: K, value: V) {
@@ -214,7 +223,11 @@ impl<'a> Rules<'a> {
             let (Some(key), Some(tool)) = (&envelope.key, &envelope.tool) else {
                 continue;
             };
-            if envelope.action.as_deref().is_some_and(|action| vocabulary.originating_tool_actions.contains(action)) {
+            if envelope
+                .action
+                .as_deref()
+                .is_some_and(|action| vocabulary.originating_tool_actions.contains(action))
+            {
                 originating.insert(key, tool);
             } else {
                 fallback.entry(key).or_insert(tool);
@@ -234,11 +247,18 @@ impl<'a> Rules<'a> {
                 }
             })
             .collect();
-        Rules { envelopes, vocabulary, resolved }
+        Rules {
+            envelopes,
+            vocabulary,
+            resolved,
+        }
     }
 
     fn is_routine_read(&self, envelope: &Envelope) -> bool {
-        envelope.action.as_deref().is_some_and(|action| self.vocabulary.routine_read_actions.contains(action))
+        envelope
+            .action
+            .as_deref()
+            .is_some_and(|action| self.vocabulary.routine_read_actions.contains(action))
     }
 
     fn observed_check_success(&self, envelope: &Envelope, tool: Option<&str>) -> bool {
@@ -258,11 +278,16 @@ impl<'a> Rules<'a> {
         if tool.is_some_and(|tool| self.vocabulary.edit_tools.contains(tool)) {
             return true;
         }
-        matches!(envelope.action.as_deref(), Some("write" | "edit" | "delete")) || envelope.changed_paths_digest.is_some()
+        matches!(
+            envelope.action.as_deref(),
+            Some("write" | "edit" | "delete")
+        ) || envelope.changed_paths_digest.is_some()
     }
 
     fn is_post_tool(&self, envelope: &Envelope) -> bool {
-        self.vocabulary.post_tool_event_kinds.contains(&envelope.event_kind)
+        self.vocabulary
+            .post_tool_event_kinds
+            .contains(&envelope.event_kind)
     }
 
     fn failed_commands(&self) -> Option<Vec<usize>> {
@@ -276,8 +301,10 @@ impl<'a> Rules<'a> {
                 continue;
             }
             let tool = self.resolved[position];
-            let failed = envelope.exit_status.is_some_and(|status| status != 0) || envelope.success == Some(false);
-            let passed = !failed && (envelope.exit_status == Some(0) || envelope.success == Some(true));
+            let failed = envelope.exit_status.is_some_and(|status| status != 0)
+                || envelope.success == Some(false);
+            let passed =
+                !failed && (envelope.exit_status == Some(0) || envelope.success == Some(true));
             if tool.is_some_and(|tool| self.vocabulary.command_tools.contains(tool)) {
                 let identity = envelope.command_commitment.as_deref();
                 let mut run = |outcome| -> Option<()> {
@@ -285,7 +312,12 @@ impl<'a> Rules<'a> {
                     if identity.is_some_and(|value| !is_observed_command_identity(value)) {
                         return None;
                     }
-                    runs.push(Run { envelope: position, outcome, identity, edit: false });
+                    runs.push(Run {
+                        envelope: position,
+                        outcome,
+                        identity,
+                        edit: false,
+                    });
                     Some(())
                 };
                 if failed {
@@ -297,12 +329,27 @@ impl<'a> Rules<'a> {
                 } else if identity.is_some() && self.is_post_tool(envelope) {
                     run(Outcome::Unknown)?;
                 }
-            } else if self.is_post_tool(envelope) && self.is_edit_envelope(envelope, tool) && passed && !envelope.denied {
-                runs.push(Run { envelope: position, outcome: Outcome::Success, identity: None, edit: true });
+            } else if self.is_post_tool(envelope)
+                && self.is_edit_envelope(envelope, tool)
+                && passed
+                && !envelope.denied
+            {
+                runs.push(Run {
+                    envelope: position,
+                    outcome: Outcome::Success,
+                    identity: None,
+                    edit: true,
+                });
             }
         }
         let live = live_failures(&runs);
-        Some(unresolved.values().copied().filter(|position| live.contains(position)).collect())
+        Some(
+            unresolved
+                .values()
+                .copied()
+                .filter(|position| live.contains(position))
+                .collect(),
+        )
     }
 
     fn edits_after_check(&self, checks: &[CheckFact]) -> Vec<Vec<usize>> {
@@ -328,11 +375,17 @@ impl<'a> Rules<'a> {
             if !self.is_edit_envelope(envelope, self.resolved[position]) {
                 continue;
             }
-            grouped.get_mut_or_insert_with(&key, Vec::new).push(position);
+            grouped
+                .get_mut_or_insert_with(&key, Vec::new)
+                .push(position);
         }
         grouped
             .values()
-            .filter(|phases| phases.iter().any(|phase| self.envelopes[*phase].event_position > last_success))
+            .filter(|phases| {
+                phases
+                    .iter()
+                    .any(|phase| self.envelopes[*phase].event_position > last_success)
+            })
             .cloned()
             .collect()
     }
@@ -340,7 +393,10 @@ impl<'a> Rules<'a> {
     fn completion_without_verification(&self, checks: &[CheckFact]) -> Option<Vec<usize>> {
         let refs: Vec<usize> = (0..self.envelopes.len())
             .filter(|position| {
-                matches!(self.envelopes[*position].claim_kind.as_deref(), Some("completion" | "done" | "finished"))
+                matches!(
+                    self.envelopes[*position].claim_kind.as_deref(),
+                    Some("completion" | "done" | "finished")
+                )
             })
             .collect();
         if refs.is_empty() {
@@ -351,7 +407,9 @@ impl<'a> Rules<'a> {
             .envelopes
             .iter()
             .enumerate()
-            .any(|(position, envelope)| self.observed_check_success(envelope, self.resolved[position]));
+            .any(|(position, envelope)| {
+                self.observed_check_success(envelope, self.resolved[position])
+            });
         if has_pass || has_observed_pass {
             return None;
         }
@@ -362,11 +420,23 @@ impl<'a> Rules<'a> {
         let mut live_claims = Vec::new();
         let mut static_support = Vec::new();
         for (position, envelope) in self.envelopes.iter().enumerate() {
-            let blob = format!("{}:{}:{}", envelope.claim_lower, envelope.hint_lower, envelope.tool_lower);
-            if self.vocabulary.live_claim_hints.iter().any(|token| blob.contains(token.as_str())) {
+            let blob = format!(
+                "{}:{}:{}",
+                envelope.claim_lower, envelope.hint_lower, envelope.tool_lower
+            );
+            if self
+                .vocabulary
+                .live_claim_hints
+                .iter()
+                .any(|token| blob.contains(token.as_str()))
+            {
                 live_claims.push(position);
             }
-            if self.vocabulary.static_check_hints.iter().any(|token| blob.contains(token.as_str()))
+            if self
+                .vocabulary
+                .static_check_hints
+                .iter()
+                .any(|token| blob.contains(token.as_str()))
                 && !self.is_routine_read(envelope)
                 && (envelope.exit_status == Some(0) || envelope.success == Some(true))
             {
@@ -376,10 +446,10 @@ impl<'a> Rules<'a> {
         if live_claims.is_empty() || static_support.is_empty() {
             return None;
         }
-        let live_verified = self
-            .envelopes
-            .iter()
-            .any(|envelope| envelope.hint_lower.contains("live") && self.observed_check_success(envelope, envelope.tool.as_deref()));
+        let live_verified = self.envelopes.iter().any(|envelope| {
+            envelope.hint_lower.contains("live")
+                && self.observed_check_success(envelope, envelope.tool.as_deref())
+        });
         if live_verified {
             return None;
         }
@@ -394,17 +464,26 @@ impl<'a> Rules<'a> {
             let sub = envelope.subagent_id.as_deref();
             if let Some(sub) = sub {
                 if envelope.event_kind == "SubagentStop"
-                    && (matches!(envelope.result_status.as_deref(), Some("finding" | "failed" | "issue"))
-                        || envelope.success == Some(false))
+                    && (matches!(
+                        envelope.result_status.as_deref(),
+                        Some("finding" | "failed" | "issue")
+                    ) || envelope.success == Some(false))
                 {
                     findings.insert(sub, position);
                 }
-                if matches!(envelope.event_kind.as_str(), "PostToolUse" | "UserPromptSubmit")
-                    && matches!(envelope.result_status.as_deref(), Some("resolved" | "addressed" | "fixed"))
-                {
+                if matches!(
+                    envelope.event_kind.as_str(),
+                    "PostToolUse" | "UserPromptSubmit"
+                ) && matches!(
+                    envelope.result_status.as_deref(),
+                    Some("resolved" | "addressed" | "fixed")
+                ) {
                     addressed.insert(sub);
                 }
-                if matches!(envelope.claim_kind.as_deref(), Some("resolved" | "addressed")) {
+                if matches!(
+                    envelope.claim_kind.as_deref(),
+                    Some("resolved" | "addressed")
+                ) {
                     addressed.insert(sub);
                 }
             }
@@ -424,15 +503,22 @@ impl<'a> Rules<'a> {
         for (position, envelope) in self.envelopes.iter().enumerate() {
             let claim = envelope.claim_lower.as_str();
             let hint = envelope.hint_lower.as_str();
-            if claim.contains("semantic") || claim.contains("live-dispatch") || claim.contains("live_dispatch") {
+            if claim.contains("semantic")
+                || claim.contains("live-dispatch")
+                || claim.contains("live_dispatch")
+            {
                 claims.push(position);
             }
             if (hint.contains("semantic") || envelope.attempt_present)
-                && (hint.contains("semantic") || matches!(claim, "semantic_attempt" | "dispatch_attempt"))
+                && (hint.contains("semantic")
+                    || matches!(claim, "semantic_attempt" | "dispatch_attempt"))
             {
                 attempted = true;
             }
-            if matches!(envelope.action.as_deref(), Some("semantic_dispatch" | "live_dispatch")) {
+            if matches!(
+                envelope.action.as_deref(),
+                Some("semantic_dispatch" | "live_dispatch")
+            ) {
                 attempted = true;
             }
         }
@@ -449,7 +535,9 @@ pub fn scan(envelopes: &[Envelope], checks: &[CheckFact], vocabulary: &Vocabular
         completion_without_verification: rules.completion_without_verification(checks),
         static_for_live: rules.static_for_live(),
         subagent_unaddressed: rules.subagent_unaddressed(),
-        changed_paths: (0..envelopes.len()).filter(|position| envelopes[*position].changed_paths_digest.is_some()).collect(),
+        changed_paths: (0..envelopes.len())
+            .filter(|position| envelopes[*position].changed_paths_digest.is_some())
+            .collect(),
         semantic_without_attempt: rules.semantic_without_attempt(),
     })
 }
@@ -459,7 +547,12 @@ mod tests {
     use super::*;
 
     fn vocabulary() -> Vocabulary {
-        let set = |items: &[&str]| items.iter().map(|item| item.to_string()).collect::<HashSet<_>>();
+        let set = |items: &[&str]| {
+            items
+                .iter()
+                .map(|item| item.to_string())
+                .collect::<HashSet<_>>()
+        };
         Vocabulary {
             edit_tools: set(&["apply_patch", "Edit"]),
             verification_tools: set(&["pytest"]),
@@ -473,7 +566,12 @@ mod tests {
     }
 
     fn key(raw: &str) -> Option<CorrelationKey> {
-        Some(CorrelationKey { source: "codex_hook".into(), session: "s".into(), generation: 1, raw: raw.into() })
+        Some(CorrelationKey {
+            source: "codex_hook".into(),
+            session: "s".into(),
+            generation: 1,
+            raw: raw.into(),
+        })
     }
 
     fn post(raw: &str, tool: &str, exit_status: i64, position: i64) -> Envelope {
@@ -497,7 +595,12 @@ mod tests {
 
     #[test]
     fn failure_stays_live_and_reinsertion_moves_to_end() {
-        let envelopes = [post("a", "shell", 1, 1), post("b", "shell", 1, 2), post("a", "shell", 0, 3), post("a", "shell", 2, 4)];
+        let envelopes = [
+            post("a", "shell", 1, 1),
+            post("b", "shell", 1, 2),
+            post("a", "shell", 0, 3),
+            post("a", "shell", 2, 4),
+        ];
         let scan = scan(&envelopes, &[], &vocabulary()).expect("scan");
         assert_eq!(scan.failed, vec![1, 3]);
     }

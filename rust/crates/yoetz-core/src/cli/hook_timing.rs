@@ -13,8 +13,8 @@ use crate::protocol::json_compat::{self, CompatLimits, CompatValue};
 
 pub const FORMAT: &str = "yoetz.hook-pass-timing/1";
 pub const BUCKET_UPPER_BOUNDS_MS: [i64; 27] = [
-    5, 10, 25, 50, 75, 100, 125, 150, 200, 250, 300, 400, 500, 600, 700, 800, 900, 1_000, 1_250, 1_500,
-    2_000, 2_500, 3_000, 4_000, 5_000, 7_500, 10_000,
+    5, 10, 25, 50, 75, 100, 125, 150, 200, 250, 300, 400, 500, 600, 700, 800, 900, 1_000, 1_250,
+    1_500, 2_000, 2_500, 3_000, 4_000, 5_000, 7_500, 10_000,
 ];
 pub const BUCKETS: usize = BUCKET_UPPER_BOUNDS_MS.len() + 1;
 const MAX_MS: i64 = 3_600_000;
@@ -47,7 +47,13 @@ pub const EVENTS: [&str; 22] = [
     "stop",
 ];
 pub const UNKNOWN_EVENT: &str = "unknown_event";
-pub const PATHS: [&str; 5] = ["observe", "sync_fallback_spool", "structural", "ordinary", "invalid_profile"];
+pub const PATHS: [&str; 5] = [
+    "observe",
+    "sync_fallback_spool",
+    "structural",
+    "ordinary",
+    "invalid_profile",
+];
 pub const OUTCOMES: [&str; 4] = ["ingested", "followup_deferred", "not_ingested", "failed"];
 
 /// A validated histogram (`all`, or one hour slot when `hour` is set).
@@ -63,7 +69,13 @@ pub struct Histogram {
 
 impl Histogram {
     fn empty(hour: Option<i64>) -> Self {
-        Histogram { hour, count: 0, sum_ms: 0, max: None, buckets: [0; BUCKETS] }
+        Histogram {
+            hour,
+            count: 0,
+            sum_ms: 0,
+            max: None,
+            buckets: [0; BUCKETS],
+        }
     }
 
     fn observe(&mut self, ms: i64, at_ms: i64) {
@@ -103,7 +115,10 @@ fn bounded(value: i64) -> i64 {
 
 /// `_bucket(ms)`.
 pub fn bucket(ms: i64) -> usize {
-    BUCKET_UPPER_BOUNDS_MS.iter().position(|bound| ms <= *bound).unwrap_or(BUCKETS - 1)
+    BUCKET_UPPER_BOUNDS_MS
+        .iter()
+        .position(|bound| ms <= *bound)
+        .unwrap_or(BUCKETS - 1)
 }
 
 pub type Value<'a> = CompatValue<'a, ()>;
@@ -111,7 +126,11 @@ type Members<'a> = [(Cow<'a, str>, Value<'a>)];
 
 fn member<'v, 'a>(members: &'v Members<'a>, name: &str) -> &'v Value<'a> {
     // Callers check the exact key set first.
-    &members.iter().find(|(key, _)| key == name).expect("validated key set").1
+    &members
+        .iter()
+        .find(|(key, _)| key == name)
+        .expect("validated key set")
+        .1
 }
 
 fn has_keys(members: &Members<'_>, keys: &[&str]) -> bool {
@@ -135,17 +154,23 @@ fn moment_of(value: &Value<'_>) -> Option<i64> {
 
 const HISTOGRAM_KEYS: [&str; 5] = ["count", "sum_ms", "max_ms", "max_at_ms", "buckets"];
 const SLOT_KEYS: [&str; 6] = ["count", "sum_ms", "max_ms", "max_at_ms", "buckets", "hour"];
-const ENTRY_KEYS: [&str; 8] = ["host", "event", "path", "first_ms", "last_ms", "outcomes", "all", "slots"];
+const ENTRY_KEYS: [&str; 8] = [
+    "host", "event", "path", "first_ms", "last_ms", "outcomes", "all", "slots",
+];
 const DOCUMENT_KEYS: [&str; 4] = ["format", "since_ms", "evicted_entry_count", "entries"];
 
 fn valid_histogram(raw: &Value<'_>, slot: bool) -> Option<Histogram> {
-    let CompatValue::Object(members) = raw else { return None };
+    let CompatValue::Object(members) = raw else {
+        return None;
+    };
     if !has_keys(members, if slot { &SLOT_KEYS } else { &HISTOGRAM_KEYS }) {
         return None;
     }
     let count = count_of(member(members, "count"))?;
     let sum_ms = count_of(member(members, "sum_ms"))?;
-    let CompatValue::Array(items) = member(members, "buckets") else { return None };
+    let CompatValue::Array(items) = member(members, "buckets") else {
+        return None;
+    };
     if items.len() != BUCKETS {
         return None;
     }
@@ -164,7 +189,9 @@ fn valid_histogram(raw: &Value<'_>, slot: bool) -> Option<Histogram> {
         }
         None
     } else {
-        let CompatValue::Int(maximum) = maximum else { return None };
+        let CompatValue::Int(maximum) = maximum else {
+            return None;
+        };
         if !(0..=MAX_MS).contains(maximum) {
             return None;
         }
@@ -184,7 +211,13 @@ fn valid_histogram(raw: &Value<'_>, slot: bool) -> Option<Histogram> {
     } else {
         None
     };
-    Some(Histogram { hour, count, sum_ms, max, buckets })
+    Some(Histogram {
+        hour,
+        count,
+        sum_ms,
+        max,
+        buckets,
+    })
 }
 
 fn text_of<'v>(value: &'v Value<'_>) -> Option<&'v str> {
@@ -195,20 +228,27 @@ fn text_of<'v>(value: &'v Value<'_>) -> Option<&'v str> {
 }
 
 fn valid_entry(raw: &Value<'_>) -> Option<Entry> {
-    let CompatValue::Object(members) = raw else { return None };
+    let CompatValue::Object(members) = raw else {
+        return None;
+    };
     if !has_keys(members, &ENTRY_KEYS) {
         return None;
     }
     let host = text_of(member(members, "host"))?;
     let event = text_of(member(members, "event"))?;
     let path = text_of(member(members, "path"))?;
-    if !HOSTS.contains(&host) || (!EVENTS.contains(&event) && event != UNKNOWN_EVENT) || !PATHS.contains(&path) {
+    if !HOSTS.contains(&host)
+        || (!EVENTS.contains(&event) && event != UNKNOWN_EVENT)
+        || !PATHS.contains(&path)
+    {
         return None;
     }
     let first_ms = moment_of(member(members, "first_ms"))?;
     let last_ms = moment_of(member(members, "last_ms"))?;
     let all = valid_histogram(member(members, "all"), false)?;
-    let CompatValue::Object(outcome_members) = member(members, "outcomes") else { return None };
+    let CompatValue::Object(outcome_members) = member(members, "outcomes") else {
+        return None;
+    };
     let mut outcomes = Vec::with_capacity(outcome_members.len());
     let mut outcome_total: i64 = 0;
     for (name, item) in outcome_members.iter() {
@@ -222,7 +262,9 @@ fn valid_entry(raw: &Value<'_>) -> Option<Entry> {
     if outcome_total != all.count {
         return None;
     }
-    let CompatValue::Array(slot_items) = member(members, "slots") else { return None };
+    let CompatValue::Array(slot_items) = member(members, "slots") else {
+        return None;
+    };
     if slot_items.len() > 2 {
         return None;
     }
@@ -247,25 +289,35 @@ fn valid_entry(raw: &Value<'_>) -> Option<Entry> {
 
 /// `_valid_document(json.loads(raw))` for a decoded value.
 fn valid_document(raw: &Value<'_>, max_entries: usize) -> Option<Document> {
-    let CompatValue::Object(members) = raw else { return None };
+    let CompatValue::Object(members) = raw else {
+        return None;
+    };
     if !has_keys(members, &DOCUMENT_KEYS) || text_of(member(members, "format"))? != FORMAT {
         return None;
     }
     let since_ms = moment_of(member(members, "since_ms"))?;
     let evicted_entry_count = count_of(member(members, "evicted_entry_count"))?;
-    let CompatValue::Array(items) = member(members, "entries") else { return None };
+    let CompatValue::Array(items) = member(members, "entries") else {
+        return None;
+    };
     if items.len() > max_entries {
         return None;
     }
     let mut entries: Vec<Entry> = Vec::with_capacity(items.len() + 1);
     for item in items {
         let entry = valid_entry(item)?;
-        if entries.iter().any(|prior| prior.host == entry.host && prior.event == entry.event && prior.path == entry.path) {
+        if entries.iter().any(|prior| {
+            prior.host == entry.host && prior.event == entry.event && prior.path == entry.path
+        }) {
             return None;
         }
         entries.push(entry);
     }
-    Some(Document { since_ms, evicted_entry_count, entries })
+    Some(Document {
+        since_ms,
+        evicted_entry_count,
+        entries,
+    })
 }
 
 /// What decoding a stored document decided.
@@ -283,7 +335,11 @@ pub fn decode(raw: &[u8]) -> Option<Value<'_>> {
     // ``json.loads(bytes)`` detects UTF-16/32 from NUL bytes and BOMs and decodes with
     // ``surrogatepass``; only plain strict UTF-8 is decided here.
     let text = json_compat::precheck_line(raw)?;
-    let limits = CompatLimits { max_value_depth: 64, max_container_depth: 64, allow_overflow: true };
+    let limits = CompatLimits {
+        max_value_depth: 64,
+        max_container_depth: 64,
+        allow_overflow: true,
+    };
     // A long integer never validates (every count is a safe integer), so its value is unused.
     json_compat::accept(text, limits, |_| Some(()))
 }
@@ -295,7 +351,9 @@ pub fn validate(value: &Value<'_>, max_entries: usize) -> Option<Document> {
 
 /// `json.loads(raw)` + `_valid_document` for the bytes `_read_descriptor` read.
 pub fn read_document(raw: &[u8], max_entries: usize) -> Read {
-    let Some(value) = decode(raw) else { return Read::Defer };
+    let Some(value) = decode(raw) else {
+        return Read::Defer;
+    };
     match valid_document(&value, max_entries) {
         Some(document) => Read::Valid(document),
         None => Read::Invalid,
@@ -313,16 +371,22 @@ pub struct Sample<'s> {
 }
 
 /// `_updated_document(document, ...)`'s fold. `max_entries` must be positive.
-pub fn fold(document: Option<Document>, sample: &Sample<'_>, max_entries: usize) -> (Document, bool) {
+pub fn fold(
+    document: Option<Document>,
+    sample: &Sample<'_>,
+    max_entries: usize,
+) -> (Document, bool) {
     let now_ms = sample.now_ms;
     let hour = now_ms.div_euclid(HOUR_MS);
     let restarted = document.is_none();
-    let mut document =
-        document.unwrap_or(Document { since_ms: now_ms, evicted_entry_count: 0, entries: Vec::new() });
-    let position = document
-        .entries
-        .iter()
-        .position(|item| item.host == sample.host && item.event == sample.event && item.path == sample.path);
+    let mut document = document.unwrap_or(Document {
+        since_ms: now_ms,
+        evicted_entry_count: 0,
+        entries: Vec::new(),
+    });
+    let position = document.entries.iter().position(|item| {
+        item.host == sample.host && item.event == sample.event && item.path == sample.path
+    });
     let index = match position {
         Some(index) => index,
         None => {
@@ -353,14 +417,21 @@ pub fn fold(document: Option<Document>, sample: &Sample<'_>, max_entries: usize)
     let entry = &mut document.entries[index];
     entry.first_ms = entry.first_ms.min(now_ms);
     entry.last_ms = entry.last_ms.max(now_ms);
-    match entry.outcomes.iter_mut().find(|(name, _)| name == sample.outcome) {
+    match entry
+        .outcomes
+        .iter_mut()
+        .find(|(name, _)| name == sample.outcome)
+    {
         Some((_, count)) => *count = bounded(*count + 1),
         None => entry.outcomes.push((sample.outcome.to_owned(), 1)),
     }
     entry.all.observe(sample.ms, now_ms);
     let mut slots: Vec<Histogram> = std::mem::take(&mut entry.slots)
         .into_iter()
-        .filter(|slot| slot.hour.is_some_and(|slot_hour| hour - 1 <= slot_hour && slot_hour <= hour))
+        .filter(|slot| {
+            slot.hour
+                .is_some_and(|slot_hour| hour - 1 <= slot_hour && slot_hour <= hour)
+        })
         .collect();
     match slots.iter_mut().find(|slot| slot.hour == Some(hour)) {
         Some(current) => current.observe(sample.ms, now_ms),
@@ -488,7 +559,14 @@ mod tests {
     use super::*;
 
     fn sample(now_ms: i64, ms: i64) -> Sample<'static> {
-        Sample { host: "codex", event: "Stop", path: "observe", outcome: "ingested", ms, now_ms }
+        Sample {
+            host: "codex",
+            event: "Stop",
+            path: "observe",
+            outcome: "ingested",
+            ms,
+            now_ms,
+        }
     }
 
     #[test]
@@ -496,16 +574,27 @@ mod tests {
         let (document, restarted) = fold(None, &sample(7_200_000, 120), 48);
         assert!(restarted);
         let encoded = encode(&document);
-        let Read::Valid(read) = read_document(encoded.as_bytes(), 48) else { panic!("{encoded}") };
+        let Read::Valid(read) = read_document(encoded.as_bytes(), 48) else {
+            panic!("{encoded}")
+        };
         assert_eq!(read, document);
         let (document, restarted) = fold(Some(read), &sample(10_800_000, 20_000), 48);
         assert!(!restarted);
         let entry = &document.entries[0];
         assert_eq!(entry.all.count, 2);
         assert_eq!(entry.all.max, Some((20_000, 10_800_000)));
-        assert_eq!(entry.slots.iter().map(|slot| slot.hour).collect::<Vec<_>>(), [Some(2), Some(3)]);
-        assert!(matches!(read_document(encode(&document).as_bytes(), 48), Read::Valid(_)));
-        assert_eq!(read_document(encode(&document).as_bytes(), 0), Read::Invalid);
+        assert_eq!(
+            entry.slots.iter().map(|slot| slot.hour).collect::<Vec<_>>(),
+            [Some(2), Some(3)]
+        );
+        assert!(matches!(
+            read_document(encode(&document).as_bytes(), 48),
+            Read::Valid(_)
+        ));
+        assert_eq!(
+            read_document(encode(&document).as_bytes(), 0),
+            Read::Invalid
+        );
     }
 
     #[test]

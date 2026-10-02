@@ -48,9 +48,18 @@ pub fn prefixed(prefix: &str, path: &[u8]) -> String {
 }
 
 /// `_new_file_diff(path, content, executable)` with `_BINARY_PROBE_BYTES = binary_probe`.
-pub fn new_file_diff(path: &[u8], content: &[u8], executable: bool, binary_probe: usize) -> (Vec<u8>, String) {
+pub fn new_file_diff(
+    path: &[u8],
+    content: &[u8],
+    executable: bool,
+    binary_probe: usize,
+) -> (Vec<u8>, String) {
     let mode = if executable { "100755" } else { "100644" };
-    let mut head = format!("diff --git {} {}\nnew file mode {mode}\n", prefixed("a/", path), prefixed("b/", path));
+    let mut head = format!(
+        "diff --git {} {}\nnew file mode {mode}\n",
+        prefixed("a/", path),
+        prefixed("b/", path)
+    );
     if content.is_empty() {
         return (head.into_bytes(), "0".to_owned());
     }
@@ -63,7 +72,11 @@ pub fn new_file_diff(path: &[u8], content: &[u8], executable: bool, binary_probe
         return (head.into_bytes(), "-".to_owned());
     }
     let trailing_newline = content.ends_with(b"\n");
-    let body = if trailing_newline { &content[..content.len() - 1] } else { content };
+    let body = if trailing_newline {
+        &content[..content.len() - 1]
+    } else {
+        content
+    };
     // content.split(b"\n") minus the empty tail after a trailing newline.
     let count = memchr::memchr_iter(b'\n', body).count() + 1;
     head.push_str("--- /dev/null\n+++ ");

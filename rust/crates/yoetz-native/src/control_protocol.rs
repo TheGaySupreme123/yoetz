@@ -11,7 +11,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::registry::Slot;
-use crate::walk::{JSON_OBJECT, NATIVE_RECURSION_LIMIT, is_exact, is_plain_scalar, is_type, json_object_items};
+use crate::walk::{
+    JSON_OBJECT, NATIVE_RECURSION_LIMIT, is_exact, is_plain_scalar, is_type, json_object_items,
+};
 
 static REFERENCE: Slot = Slot::new();
 
@@ -29,7 +31,13 @@ struct Walker<'py> {
 }
 
 impl<'py> Walker<'py> {
-    fn member(&self, key: &Bound<'py, PyAny>, member: &Bound<'py, PyAny>, out: &Bound<'py, PyDict>, depth: usize) -> PyResult<()> {
+    fn member(
+        &self,
+        key: &Bound<'py, PyAny>,
+        member: &Bound<'py, PyAny>,
+        out: &Bound<'py, PyDict>,
+        depth: usize,
+    ) -> PyResult<()> {
         if !is_exact(key, ffi::PyUnicode_CheckExact) {
             return Err(PyTypeError::new_err("control_object_key_invalid"));
         }
@@ -85,14 +93,23 @@ impl<'py> Walker<'py> {
 /// `_plain_wire_value(value)`.
 #[pyfunction]
 #[pyo3(name = "control_plain_wire_value")]
-pub fn plain_wire_value<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+pub fn plain_wire_value<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
     if is_plain_scalar(value) {
         return Ok(value.clone());
     }
     let Some(reference) = REFERENCE.get(py) else {
-        return Err(pyo3::exceptions::PyRuntimeError::new_err("plain_wire_value_unbound"));
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "plain_wire_value_unbound",
+        ));
     };
-    let walker = Walker { py, reference, json_object: JSON_OBJECT.get(py) };
+    let walker = Walker {
+        py,
+        reference,
+        json_object: JSON_OBJECT.get(py),
+    };
     walker.plain(value, 0)
 }
 

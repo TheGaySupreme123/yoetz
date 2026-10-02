@@ -112,7 +112,11 @@ pub fn translate_python_pattern(pattern: &str) -> Option<String> {
 /// Compile a Python pattern for `search` when the translation is exact.
 pub fn compile_python_pattern(pattern: &str) -> Option<Regex> {
     let translated = translate_python_pattern(pattern)?;
-    RegexBuilder::new(&translated).unicode(true).size_limit(1 << 26).build().ok()
+    RegexBuilder::new(&translated)
+        .unicode(true)
+        .size_limit(1 << 26)
+        .build()
+        .ok()
 }
 
 fn push_literal(out: &mut String, literal: char) {
@@ -281,13 +285,19 @@ pub fn is_rfc3339_date_time(value: &str) -> Option<bool> {
         return Some(false);
     }
     for (byte, shape) in bytes.iter().zip(SHAPE.iter()) {
-        let fits = if *shape == b'd' { byte.is_ascii_digit() } else { byte == shape };
+        let fits = if *shape == b'd' {
+            byte.is_ascii_digit()
+        } else {
+            byte == shape
+        };
         if !fits {
             return Some(false);
         }
     }
     let number = |start: usize, width: usize| -> u32 {
-        bytes[start..start + width].iter().fold(0, |acc, digit| acc * 10 + u32::from(digit - b'0'))
+        bytes[start..start + width]
+            .iter()
+            .fold(0, |acc, digit| acc * 10 + u32::from(digit - b'0'))
     };
     let (year, month, day) = (number(0, 4), number(5, 2), number(8, 2));
     let (hour, minute, second) = (number(11, 2), number(14, 2), number(17, 2));
@@ -312,7 +322,9 @@ mod tests {
     use super::*;
 
     fn search(pattern: &str, text: &str) -> bool {
-        compile_python_pattern(pattern).expect("translatable").is_match(text)
+        compile_python_pattern(pattern)
+            .expect("translatable")
+            .is_match(text)
     }
 
     #[test]
@@ -357,8 +369,26 @@ mod tests {
     #[test]
     fn refuses_outside_the_subset() {
         for pattern in [
-            r"\d", r"\w", r"\s", r"\b", r"(?=a)", r"(?!a)", r"(?<=a)", r"(?P<n>a)", r"(a)\1",
-            "(?i)a", "a*+", "a**", "a{", "a{x}", "a$b", r"\ud800", "(a", "a)", "*a", r"[\d]",
+            r"\d",
+            r"\w",
+            r"\s",
+            r"\b",
+            r"(?=a)",
+            r"(?!a)",
+            r"(?<=a)",
+            r"(?P<n>a)",
+            r"(a)\1",
+            "(?i)a",
+            "a*+",
+            "a**",
+            "a{",
+            "a{x}",
+            "a$b",
+            r"\ud800",
+            "(a",
+            "a)",
+            "*a",
+            r"[\d]",
         ] {
             assert!(translate_python_pattern(pattern).is_none(), "{pattern}");
         }
@@ -367,11 +397,26 @@ mod tests {
     #[test]
     fn date_time() {
         assert_eq!(is_rfc3339_date_time("2024-02-29T23:59:59.999Z"), Some(true));
-        assert_eq!(is_rfc3339_date_time("2023-02-29T00:00:00.000Z"), Some(false));
-        assert_eq!(is_rfc3339_date_time("0000-01-01T00:00:00.000Z"), Some(false));
-        assert_eq!(is_rfc3339_date_time("2026-01-01T23:59:60.000Z"), Some(false));
+        assert_eq!(
+            is_rfc3339_date_time("2023-02-29T00:00:00.000Z"),
+            Some(false)
+        );
+        assert_eq!(
+            is_rfc3339_date_time("0000-01-01T00:00:00.000Z"),
+            Some(false)
+        );
+        assert_eq!(
+            is_rfc3339_date_time("2026-01-01T23:59:60.000Z"),
+            Some(false)
+        );
         assert_eq!(is_rfc3339_date_time("2026-01-01T24:00:00.000Z"), None);
-        assert_eq!(is_rfc3339_date_time("2026-01-01T23:59:59.000Z\n"), Some(false));
-        assert_eq!(is_rfc3339_date_time("2026-01-01t23:59:59.000Z"), Some(false));
+        assert_eq!(
+            is_rfc3339_date_time("2026-01-01T23:59:59.000Z\n"),
+            Some(false)
+        );
+        assert_eq!(
+            is_rfc3339_date_time("2026-01-01t23:59:59.000Z"),
+            Some(false)
+        );
     }
 }

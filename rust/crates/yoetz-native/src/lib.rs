@@ -11,52 +11,55 @@ use pyo3::prelude::*;
 
 mod registry;
 
-mod canonical;
-mod observability_privacy;
-mod missing_for_assessment;
-mod observation;
-mod observation_selection;
-mod shlex;
-mod jsonframes;
-mod control_protocol;
-mod control_pipeline;
+mod app_observation_advice;
 mod bundle_upgrade;
-mod ids;
-mod models;
-mod service;
-mod values;
-mod walk;
-mod schemas;
-mod schemas_catalog;
-mod mcp_descriptors;
-mod fswalks;
-mod objects_envelope;
-mod secret_memory;
-mod sqlite_connection;
-mod sqlite_observation;
-mod hookcli;
-mod observation_local;
+mod canonical;
 mod codex_session_stream;
+mod control_pipeline;
+mod control_protocol;
+mod deterministic_checks;
+mod events;
+mod fswalks;
+mod hookcli;
+mod ids;
+mod jsonframes;
 mod kernel_projections;
 mod kernel_reducers;
-mod deterministic_checks;
+mod mcp_descriptors;
+mod missing_for_assessment;
+mod models;
+mod objects_envelope;
+mod observability_privacy;
+mod observation;
 mod observation_advice;
-mod work_integrity;
-mod events;
-mod semantic_case;
-mod values_timestamp;
-mod observation_materialize;
-mod app_observation_advice;
 mod observation_coordinator;
+mod observation_envelope;
+mod observation_local;
+mod observation_materialize;
+mod observation_selection;
 mod ports_importer;
 mod ports_objects;
-mod observation_envelope;
+mod schemas;
+mod schemas_catalog;
+mod secret_memory;
+mod semantic_case;
+mod service;
+mod shlex;
+mod sqlite_connection;
+mod sqlite_observation;
+mod values;
+mod values_timestamp;
+mod walk;
+mod work_integrity;
 
 #[pymodule]
 fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("INTERFACE_VERSION", yoetz_core::INTERFACE_VERSION)?;
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
-    module.add_function(wrap_pyfunction!(registry::bind_protocol_value_error, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        registry::bind_protocol_value_error,
+        module
+    )?)?;
 
     canonical::register(module)?;
     observability_privacy::register(module)?;

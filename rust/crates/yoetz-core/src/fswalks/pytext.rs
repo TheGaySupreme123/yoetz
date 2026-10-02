@@ -64,7 +64,10 @@ pub fn universal_newlines(text: &str) -> Cow<'_, str> {
 /// `str.isspace()` for one ASCII character.
 #[inline]
 pub fn is_ascii_py_space(byte: u8) -> bool {
-    matches!(byte, b' ' | b'\t' | b'\n' | 0x0B | 0x0C | b'\r' | 0x1C..=0x1F)
+    matches!(
+        byte,
+        b' ' | b'\t' | b'\n' | 0x0B | 0x0C | b'\r' | 0x1C..=0x1F
+    )
 }
 
 /// `str.strip()` for an ASCII-only string.
@@ -114,7 +117,10 @@ pub fn ascii_py_int(text: &str) -> Option<Option<i64>> {
         Some(b'+') => (false, &body[1..]),
         _ => (false, body),
     };
-    if digits.is_empty() || !digits[0].is_ascii_digit() || !digits[digits.len() - 1].is_ascii_digit() {
+    if digits.is_empty()
+        || !digits[0].is_ascii_digit()
+        || !digits[digits.len() - 1].is_ascii_digit()
+    {
         return None;
     }
     let mut value: Option<i64> = Some(0);
@@ -132,9 +138,15 @@ pub fn ascii_py_int(text: &str) -> Option<Option<i64>> {
         }
         previous_underscore = false;
         let digit = i64::from(byte - b'0');
-        value = value.and_then(|current| current.checked_mul(10)).and_then(|current| {
-            if negative { current.checked_sub(digit) } else { current.checked_add(digit) }
-        });
+        value = value
+            .and_then(|current| current.checked_mul(10))
+            .and_then(|current| {
+                if negative {
+                    current.checked_sub(digit)
+                } else {
+                    current.checked_add(digit)
+                }
+            });
     }
     Some(value)
 }
@@ -214,9 +226,15 @@ mod tests {
 
     #[test]
     fn splitting_matches_python() {
-        assert_eq!(ascii_splitlines("a\r\nb\rc\x0bd\n"), vec!["a", "b", "c", "d"]);
+        assert_eq!(
+            ascii_splitlines("a\r\nb\rc\x0bd\n"),
+            vec!["a", "b", "c", "d"]
+        );
         assert_eq!(ascii_splitlines(""), Vec::<&str>::new());
-        assert_eq!(bytes_splitlines_keepends(b"a\r\nb\rc\x0bd"), vec![&b"a\r\n"[..], b"b\r", b"c\x0bd"]);
+        assert_eq!(
+            bytes_splitlines_keepends(b"a\r\nb\rc\x0bd"),
+            vec![&b"a\r\n"[..], b"b\r", b"c\x0bd"]
+        );
         assert_eq!(universal_newlines("a\r\nb\rc"), "a\nb\nc");
     }
 }

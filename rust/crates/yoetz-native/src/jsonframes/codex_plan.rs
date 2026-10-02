@@ -24,7 +24,11 @@ fn attribute_i64(record: &Bound<'_, PyAny>, name: &str) -> PyResult<Option<i64>>
 fn sequence<'py>(value: &Bound<'py, PyAny>) -> Option<Vec<Bound<'py, PyAny>>> {
     let pointer = value.as_ptr();
     if unsafe { ffi::PyTuple_CheckExact(pointer) } != 0 {
-        return Some(unsafe { value.cast_unchecked::<PyTuple>() }.iter().collect());
+        return Some(
+            unsafe { value.cast_unchecked::<PyTuple>() }
+                .iter()
+                .collect(),
+        );
     }
     if unsafe { ffi::PyList_CheckExact(pointer) } != 0 {
         return Some(unsafe { value.cast_unchecked::<PyList>() }.iter().collect());
@@ -80,22 +84,36 @@ pub fn codex_plan_batch_partition<'py>(
     }
     let mut gap_spans: Vec<(i64, i64)> = Vec::with_capacity(gap_rows.len());
     for row in &gap_rows {
-        let (Some(start), Some(end)) = (attribute_i64(row, "byte_start")?, attribute_i64(row, "byte_end")?)
-        else {
+        let (Some(start), Some(end)) = (
+            attribute_i64(row, "byte_start")?,
+            attribute_i64(row, "byte_end")?,
+        ) else {
             return Ok(None);
         };
         gap_spans.push((start, end));
     }
-    let Some(selections) =
-        codex_plan::partition_batches(&spans, draft_count, batch_size, &outcome_indexes, &gap_spans)
-    else {
+    let Some(selections) = codex_plan::partition_batches(
+        &spans,
+        draft_count,
+        batch_size,
+        &outcome_indexes,
+        &gap_spans,
+    ) else {
         return Ok(None);
     };
     let result = PyList::empty(py);
     for selection in selections {
-        let selected_outcomes =
-            PyTuple::new(py, selection.outcomes.iter().map(|&position| &outcome_rows[position]))?;
-        let selected_gaps = PyTuple::new(py, selection.gaps.iter().map(|&position| &gap_rows[position]))?;
+        let selected_outcomes = PyTuple::new(
+            py,
+            selection
+                .outcomes
+                .iter()
+                .map(|&position| &outcome_rows[position]),
+        )?;
+        let selected_gaps = PyTuple::new(
+            py,
+            selection.gaps.iter().map(|&position| &gap_rows[position]),
+        )?;
         result.append((selected_outcomes, selected_gaps))?;
     }
     Ok(Some(result))

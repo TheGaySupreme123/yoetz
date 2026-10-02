@@ -89,7 +89,9 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 /// Return whether `text` contains a byte the encoder must escape.
 #[inline]
 pub fn needs_escape(text: &str) -> bool {
-    text.as_bytes().iter().any(|byte| NEEDS_ESCAPE[*byte as usize])
+    text.as_bytes()
+        .iter()
+        .any(|byte| NEEDS_ESCAPE[*byte as usize])
 }
 
 /// Refuse a NUL character; a Rust `str` cannot hold a lone surrogate.
@@ -356,7 +358,11 @@ pub fn container_levels(value: &Value) -> i64 {
     match value {
         Value::Array(items) => 1 + items.iter().map(container_levels).max().unwrap_or(-1),
         Value::Object(members) => {
-            1 + members.iter().map(|(_, item)| container_levels(item)).max().unwrap_or(-1)
+            1 + members
+                .iter()
+                .map(|(_, item)| container_levels(item))
+                .max()
+                .unwrap_or(-1)
         }
         _ => -1,
     }
@@ -402,7 +408,9 @@ pub fn entry_digest(preimage: &Value) -> Result<String, Reason> {
     keys.sort_unstable();
     keys.dedup();
     if keys.len() != ACCEPTED_ENTRY_PREIMAGE_KEYS.len()
-        || keys.iter().any(|key| !ACCEPTED_ENTRY_PREIMAGE_KEYS.contains(key))
+        || keys
+            .iter()
+            .any(|key| !ACCEPTED_ENTRY_PREIMAGE_KEYS.contains(key))
     {
         return Err(NOT_AN_ACCEPTED_ENVELOPE);
     }
@@ -452,7 +460,10 @@ mod tests {
             String::from_utf8(out).unwrap(),
             "\"a\\\"b\\\\c\\b\\t\\n\\f\\r\\u0001\\u001f\u{7f}é\""
         );
-        assert_eq!(encode_str_into(&mut Vec::new(), "a\0"), Err(NUL_BYTE_FORBIDDEN));
+        assert_eq!(
+            encode_str_into(&mut Vec::new(), "a\0"),
+            Err(NUL_BYTE_FORBIDDEN)
+        );
     }
 
     #[test]
@@ -485,8 +496,14 @@ mod tests {
     fn integer_strings() {
         assert_eq!(parse_canonical_integer_string("0", false), Ok(0));
         assert_eq!(parse_canonical_integer_string("-5", true), Ok(-5));
-        assert_eq!(parse_canonical_integer_string("-0", true), Err(NONCANONICAL_INTEGER_STRING));
-        assert_eq!(parse_canonical_integer_string("01", false), Err(NONCANONICAL_INTEGER_STRING));
+        assert_eq!(
+            parse_canonical_integer_string("-0", true),
+            Err(NONCANONICAL_INTEGER_STRING)
+        );
+        assert_eq!(
+            parse_canonical_integer_string("01", false),
+            Err(NONCANONICAL_INTEGER_STRING)
+        );
         assert_eq!(
             parse_canonical_integer_string("9223372036854775808", false),
             Err(NONCANONICAL_INTEGER_STRING)

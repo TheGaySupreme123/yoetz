@@ -32,7 +32,9 @@ pub fn advice_identity_bind(
     suppression: &Bound<'_, PyBytes>,
     delivery: &Bound<'_, PyBytes>,
 ) {
-    *DOMAINS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Domains {
+    *DOMAINS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Domains {
         finding: finding.as_bytes().to_vec(),
         finding_prefix: finding_prefix.to_owned(),
         suppression: suppression.as_bytes().to_vec(),
@@ -41,7 +43,9 @@ pub fn advice_identity_bind(
 }
 
 fn with_domains<T>(body: impl FnOnce(&Domains) -> Option<T>) -> PyResult<Option<T>> {
-    let guard = DOMAINS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let guard = DOMAINS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let Some(domains) = guard.as_ref() else {
         return Err(PyValueError::new_err("advice_identity_unbound"));
     };
@@ -55,20 +59,37 @@ pub fn advice_stable_finding_id(
     detail_token: &Bound<'_, PyAny>,
     evidence_digest: &Bound<'_, PyAny>,
 ) -> PyResult<Option<String>> {
-    let (Some(rule), Some(detail), Some(evidence)) = (exact_str(rule_code), exact_str(detail_token), exact_str(evidence_digest)) else {
+    let (Some(rule), Some(detail), Some(evidence)) = (
+        exact_str(rule_code),
+        exact_str(detail_token),
+        exact_str(evidence_digest),
+    ) else {
         return Ok(None);
     };
     with_domains(|domains| {
-        let parts: [&[u8]; 6] = [&domains.finding, rule.as_bytes(), b"\0", detail.as_bytes(), b"\0", evidence.as_bytes()];
+        let parts: [&[u8]; 6] = [
+            &domains.finding,
+            rule.as_bytes(),
+            b"\0",
+            detail.as_bytes(),
+            b"\0",
+            evidence.as_bytes(),
+        ];
         Some(domains.finding_prefix.clone() + &stable_uuid4(parts))
     })
 }
 
-fn material(finding_ids: &Bound<'_, PyAny>, evidence_digest: &Bound<'_, PyAny>, next_action: &Bound<'_, PyAny>) -> Option<Vec<u8>> {
+fn material(
+    finding_ids: &Bound<'_, PyAny>,
+    evidence_digest: &Bound<'_, PyAny>,
+    next_action: &Bound<'_, PyAny>,
+) -> Option<Vec<u8>> {
     let ids = exact_strs(finding_ids, true)?;
     let evidence = exact_str(evidence_digest)?;
     let action = exact_str(next_action)?;
-    let mut out = Vec::with_capacity(ids.iter().map(|id| id.len() + 1).sum::<usize>() + evidence.len() + action.len() + 2);
+    let mut out = Vec::with_capacity(
+        ids.iter().map(|id| id.len() + 1).sum::<usize>() + evidence.len() + action.len() + 2,
+    );
     for (index, id) in ids.iter().enumerate() {
         if index > 0 {
             out.push(b',');
@@ -103,19 +124,29 @@ pub fn advice_suppression_identity(
     let Some(bytes) = material(finding_ids, evidence_digest, next_action) else {
         return Ok(None);
     };
-    with_domains(|domains| Some(prefixed_hex48("suppress-", [domains.suppression.as_slice(), bytes.as_slice()])))
+    with_domains(|domains| {
+        Some(prefixed_hex48(
+            "suppress-",
+            [domains.suppression.as_slice(), bytes.as_slice()],
+        ))
+    })
 }
 
 fn text_members(pairs: &[(&str, &Bound<'_, PyAny>)]) -> Option<Vec<(String, Value)>> {
     pairs
         .iter()
-        .map(|(key, value)| exact_str(value).map(|text| ((*key).to_owned(), Value::Str(text.to_owned()))))
+        .map(|(key, value)| {
+            exact_str(value).map(|text| ((*key).to_owned(), Value::Str(text.to_owned())))
+        })
         .collect()
 }
 
 /// `_delivery_condition_identity(candidate)` over the candidate's two fields.
 #[pyfunction]
-pub fn advice_condition_identity(detail_token: &Bound<'_, PyAny>, rule_code: &Bound<'_, PyAny>) -> Option<String> {
+pub fn advice_condition_identity(
+    detail_token: &Bound<'_, PyAny>,
+    rule_code: &Bound<'_, PyAny>,
+) -> Option<String> {
     let members = text_members(&[("detail_token", detail_token), ("rule_code", rule_code)])?;
     let encoded = canonical::encode(&Value::Object(members)).ok()?;
     Some(prefixed_hex48("condition-", [encoded.as_slice()]))
@@ -131,7 +162,12 @@ pub fn advice_delivery_identity(
     rule_code: &Bound<'_, PyAny>,
     summary: &Bound<'_, PyAny>,
 ) -> PyResult<Option<String>> {
-    let mut pairs = vec![("detail", detail), ("next_action", next_action), ("rule_code", rule_code), ("summary", summary)];
+    let mut pairs = vec![
+        ("detail", detail),
+        ("next_action", next_action),
+        ("rule_code", rule_code),
+        ("summary", summary),
+    ];
     if !condition_identity.is_none() {
         pairs.push(("condition_identity", condition_identity));
     }
@@ -142,7 +178,12 @@ pub fn advice_delivery_identity(
     let Ok(encoded) = canonical::encode(&condition) else {
         return Ok(None);
     };
-    with_domains(|domains| Some(prefixed_hex48("deliver-", [domains.delivery.as_slice(), encoded.as_slice()])))
+    with_domains(|domains| {
+        Some(prefixed_hex48(
+            "deliver-",
+            [domains.delivery.as_slice(), encoded.as_slice()],
+        ))
+    })
 }
 
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {

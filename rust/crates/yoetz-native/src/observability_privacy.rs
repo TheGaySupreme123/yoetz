@@ -40,7 +40,10 @@ type ScanProfile<'py> = (Vec<Bound<'py, PyBytes>>, Vec<(Bound<'py, PyBytes>, u32
 /// The marker bytes and `(regex source, flags)` pairs the native scanner implements.
 #[pyfunction]
 pub fn privacy_scan_profile<'py>(py: Python<'py>) -> ScanProfile<'py> {
-    let markers = PRIVATE_KEY_MARKERS.iter().map(|marker| PyBytes::new(py, marker)).collect();
+    let markers = PRIVATE_KEY_MARKERS
+        .iter()
+        .map(|marker| PyBytes::new(py, marker))
+        .collect();
     let patterns = PATTERN_SOURCES
         .iter()
         .map(|(source, flags)| (PyBytes::new(py, source), *flags))

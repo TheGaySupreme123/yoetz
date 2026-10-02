@@ -23,8 +23,13 @@ fn exact_int(value: &Bound<'_, PyAny>) -> Option<i64> {
 
 /// `(canonical manifest bytes, "sha256:" content digest)` for one stored chunk, or `None`.
 #[pyfunction]
-pub fn coordinator_captured_content_manifest<'py>(py: Python<'py>, chunk: &Bound<'py, PyAny>) -> PyResult<Option<(Bound<'py, PyBytes>, String)>> {
-    let kind = chunk.getattr(pyo3::intern!(py, "content_kind"))?.getattr(pyo3::intern!(py, "value"))?;
+pub fn coordinator_captured_content_manifest<'py>(
+    py: Python<'py>,
+    chunk: &Bound<'py, PyAny>,
+) -> PyResult<Option<(Bound<'py, PyBytes>, String)>> {
+    let kind = chunk
+        .getattr(pyo3::intern!(py, "content_kind"))?
+        .getattr(pyo3::intern!(py, "value"))?;
     let correlation = chunk.getattr(pyo3::intern!(py, "correlation_identity"))?;
     let source = chunk.getattr(pyo3::intern!(py, "source_commitment"))?;
     let media = chunk.getattr(pyo3::intern!(py, "media_type"))?;
@@ -32,17 +37,27 @@ pub fn coordinator_captured_content_manifest<'py>(py: Python<'py>, chunk: &Bound
     let part_count = chunk.getattr(pyo3::intern!(py, "part_count"))?;
     let redacted = chunk.getattr(pyo3::intern!(py, "redacted"))?;
     let content = chunk.getattr(pyo3::intern!(py, "content"))?;
-    let (Some(content_kind), Some(correlation_identity), Some(source_commitment), Some(media_type), Some(part_index), Some(part_count)) = (
+    let (
+        Some(content_kind),
+        Some(correlation_identity),
+        Some(source_commitment),
+        Some(media_type),
+        Some(part_index),
+        Some(part_count),
+    ) = (
         exact_str(&kind),
         exact_str(&correlation),
         exact_str(&source),
         exact_str(&media),
         exact_int(&part_index),
         exact_int(&part_count),
-    ) else {
+    )
+    else {
         return Ok(None);
     };
-    if unsafe { ffi::PyBool_Check(redacted.as_ptr()) } == 0 || unsafe { ffi::PyBytes_CheckExact(content.as_ptr()) } == 0 {
+    if unsafe { ffi::PyBool_Check(redacted.as_ptr()) } == 0
+        || unsafe { ffi::PyBytes_CheckExact(content.as_ptr()) } == 0
+    {
         return Ok(None);
     }
     let fields = ManifestFields {
@@ -55,7 +70,9 @@ pub fn coordinator_captured_content_manifest<'py>(py: Python<'py>, chunk: &Bound
         redacted: redacted.is_truthy()?,
     };
     let data = unsafe { content.cast_unchecked::<PyBytes>() }.as_bytes();
-    Ok(core::encode_manifest(&fields, data).ok().map(|(encoded, digest)| (PyBytes::new(py, &encoded), digest)))
+    Ok(core::encode_manifest(&fields, data)
+        .ok()
+        .map(|(encoded, digest)| (PyBytes::new(py, &encoded), digest)))
 }
 
 fn scalar<'py>(py: Python<'py>, value: &Value) -> Option<Bound<'py, PyAny>> {
@@ -71,7 +88,10 @@ fn scalar<'py>(py: Python<'py>, value: &Value) -> Option<Bound<'py, PyAny>> {
 /// `(content_kind, part_index, part_count, redacted, correlation_identity, source_commitment,
 /// content_digest, content_bytes)` read from one verified manifest object, or `None`.
 #[pyfunction]
-pub fn coordinator_verified_captured_content<'py>(py: Python<'py>, material: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyTuple>>> {
+pub fn coordinator_verified_captured_content<'py>(
+    py: Python<'py>,
+    material: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, PyTuple>>> {
     if unsafe { ffi::PyBytes_CheckExact(material.as_ptr()) } == 0 {
         return Ok(None);
     }
@@ -102,7 +122,13 @@ pub fn coordinator_verified_captured_content<'py>(py: Python<'py>, material: &Bo
 }
 
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add_function(wrap_pyfunction!(coordinator_captured_content_manifest, module)?)?;
-    module.add_function(wrap_pyfunction!(coordinator_verified_captured_content, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        coordinator_captured_content_manifest,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        coordinator_verified_captured_content,
+        module
+    )?)?;
     Ok(())
 }

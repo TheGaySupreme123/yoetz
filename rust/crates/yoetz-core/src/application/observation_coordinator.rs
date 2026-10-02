@@ -75,7 +75,10 @@ fn sextet(byte: u8) -> Option<u32> {
 /// then exactly the padding the data length needs), or `None` for anything else. CPython's
 /// strict decoder accepts every such text and, like this one, ignores non-zero trailing bits.
 pub fn b64_decode_padded(text: &[u8]) -> Option<Vec<u8>> {
-    let data_len = text.iter().position(|&byte| byte == b'=').unwrap_or(text.len());
+    let data_len = text
+        .iter()
+        .position(|&byte| byte == b'=')
+        .unwrap_or(text.len());
     let (data, padding) = text.split_at(data_len);
     let expected_padding = match data.len() % 4 {
         0 => 0,
@@ -89,7 +92,10 @@ pub fn b64_decode_padded(text: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(data.len() / 4 * 3 + 2);
     let mut chunks = data.chunks_exact(4);
     for chunk in &mut chunks {
-        let word = (sextet(chunk[0])? << 18) | (sextet(chunk[1])? << 12) | (sextet(chunk[2])? << 6) | sextet(chunk[3])?;
+        let word = (sextet(chunk[0])? << 18)
+            | (sextet(chunk[1])? << 12)
+            | (sextet(chunk[2])? << 6)
+            | sextet(chunk[3])?;
         out.push((word >> 16) as u8);
         out.push((word >> 8) as u8);
         out.push(word as u8);
@@ -121,13 +127,28 @@ pub struct ManifestFields<'a> {
 }
 
 /// The canonical manifest bytes and `sha256:` content digest for one chunk.
-pub fn encode_manifest(fields: &ManifestFields<'_>, content: &[u8]) -> Result<(Vec<u8>, String), Reason> {
+pub fn encode_manifest(
+    fields: &ManifestFields<'_>,
+    content: &[u8],
+) -> Result<(Vec<u8>, String), Reason> {
     let value = Value::Object(vec![
         ("format".to_owned(), Value::Str(MANIFEST_FORMAT.to_owned())),
-        ("content_kind".to_owned(), Value::Str(fields.content_kind.to_owned())),
-        ("correlation_identity".to_owned(), Value::Str(fields.correlation_identity.to_owned())),
-        ("source_commitment".to_owned(), Value::Str(fields.source_commitment.to_owned())),
-        ("media_type".to_owned(), Value::Str(fields.media_type.to_owned())),
+        (
+            "content_kind".to_owned(),
+            Value::Str(fields.content_kind.to_owned()),
+        ),
+        (
+            "correlation_identity".to_owned(),
+            Value::Str(fields.correlation_identity.to_owned()),
+        ),
+        (
+            "source_commitment".to_owned(),
+            Value::Str(fields.source_commitment.to_owned()),
+        ),
+        (
+            "media_type".to_owned(),
+            Value::Str(fields.media_type.to_owned()),
+        ),
         ("part_index".to_owned(), Value::Int(fields.part_index)),
         ("part_count".to_owned(), Value::Int(fields.part_count)),
         ("redacted".to_owned(), Value::Bool(fields.redacted)),
@@ -150,7 +171,10 @@ pub struct VerifiedManifest {
 }
 
 fn take(members: &mut [(String, Value)], key: &str) -> Option<Value> {
-    members.iter_mut().find(|(name, _)| name == key).map(|(_, value)| std::mem::replace(value, Value::Null))
+    members
+        .iter_mut()
+        .find(|(name, _)| name == key)
+        .map(|(_, value)| std::mem::replace(value, Value::Null))
 }
 
 /// Verify one stored manifest object, or `None` to leave the input to the reference.
@@ -162,12 +186,17 @@ pub fn verify_manifest(material: &[u8]) -> Option<VerifiedManifest> {
         return None;
     };
     // Canonical objects carry no duplicate keys, so nine members naming nine keys is set equality.
-    if members.len() != MANIFEST_KEYS.len() || !members.iter().all(|(key, _)| MANIFEST_KEYS.contains(&key.as_str())) {
+    if members.len() != MANIFEST_KEYS.len()
+        || !members
+            .iter()
+            .all(|(key, _)| MANIFEST_KEYS.contains(&key.as_str()))
+    {
         return None;
     }
     let format = take(&mut members, "format")?;
     let media_type = take(&mut members, "media_type")?;
-    if format.as_str() != Some(MANIFEST_FORMAT) || media_type.as_str() != Some(MANIFEST_MEDIA_TYPE) {
+    if format.as_str() != Some(MANIFEST_FORMAT) || media_type.as_str() != Some(MANIFEST_MEDIA_TYPE)
+    {
         return None;
     }
     let Value::Str(encoded) = take(&mut members, "content_b64")? else {
@@ -203,7 +232,19 @@ mod tests {
         assert_eq!(b64_encode(b"A"), "QQ==");
         assert_eq!(b64_decode_padded(b"QR==").unwrap(), b"A");
         assert_eq!(b64_decode_padded(b"").unwrap(), b"");
-        for bad in [&b"QQ="[..], b"QQ", b"QQ===", b"Q===", b"====", b"QUI=x", b"QQ==QQ==", b"=QQ=", b"QU=D", b"QQ= =", b"Q\nQ="] {
+        for bad in [
+            &b"QQ="[..],
+            b"QQ",
+            b"QQ===",
+            b"Q===",
+            b"====",
+            b"QUI=x",
+            b"QQ==QQ==",
+            b"=QQ=",
+            b"QU=D",
+            b"QQ= =",
+            b"Q\nQ=",
+        ] {
             assert!(b64_decode_padded(bad).is_none(), "{bad:?}");
         }
     }

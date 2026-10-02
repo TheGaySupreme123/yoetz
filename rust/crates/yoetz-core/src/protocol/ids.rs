@@ -45,7 +45,11 @@ pub fn is_uuid_shape(text: &[u8]) -> bool {
 
 /// `validate_id` after the kind and type checks: `char_count` is the string's length in code
 /// points (`str.__len__`), `prefix` the kind's four-byte prefix.
-pub fn validate_id_text(candidate: Candidate<'_>, char_count: usize, prefix: &str) -> Result<(), Reason> {
+pub fn validate_id_text(
+    candidate: Candidate<'_>,
+    char_count: usize,
+    prefix: &str,
+) -> Result<(), Reason> {
     if char_count != ID_TOTAL_LENGTH {
         return Err(ID_WRONG_LENGTH);
     }
@@ -80,7 +84,8 @@ pub fn validate_actor_id_text(candidate: Candidate<'_>, char_count: usize) -> Re
     let Candidate::Text(text) = candidate else {
         return Err(ACTOR_ID_MALFORMED);
     };
-    let admitted = |byte: &u8| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-');
+    let admitted =
+        |byte: &u8| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-');
     if text.is_empty() || !text.as_bytes().iter().all(admitted) {
         return Err(ACTOR_ID_MALFORMED);
     }
@@ -105,13 +110,34 @@ mod tests {
     #[test]
     fn refusals_follow_the_reference_order() {
         assert_eq!(check("req_"), Err(ID_WRONG_LENGTH));
-        assert_eq!(check("req_00000000-0000-4000-8000-00000000000\u{e9}"), Err(ID_NOT_ASCII));
-        assert_eq!(check("req_00000000-0000-4000-8000-00000000000 "), Err(ID_NOT_ASCII));
-        assert_eq!(check("tsk_00000000-0000-4000-8000-000000000001"), Err(ID_WRONG_PREFIX));
-        assert_eq!(check("req_00000000-0000-4000-8000-00000000000A"), Err(ID_MALFORMED_UUID));
-        assert_eq!(check("req_00000000-0000-1000-8000-000000000001"), Err(ID_UUID_NOT_VERSION_4));
-        assert_eq!(check("req_00000000-0000-4000-c000-000000000001"), Err(ID_UUID_WRONG_VARIANT));
-        assert_eq!(validate_id_text(Candidate::NotUtf8, 40, "req_"), Err(ID_NOT_ASCII));
+        assert_eq!(
+            check("req_00000000-0000-4000-8000-00000000000\u{e9}"),
+            Err(ID_NOT_ASCII)
+        );
+        assert_eq!(
+            check("req_00000000-0000-4000-8000-00000000000 "),
+            Err(ID_NOT_ASCII)
+        );
+        assert_eq!(
+            check("tsk_00000000-0000-4000-8000-000000000001"),
+            Err(ID_WRONG_PREFIX)
+        );
+        assert_eq!(
+            check("req_00000000-0000-4000-8000-00000000000A"),
+            Err(ID_MALFORMED_UUID)
+        );
+        assert_eq!(
+            check("req_00000000-0000-1000-8000-000000000001"),
+            Err(ID_UUID_NOT_VERSION_4)
+        );
+        assert_eq!(
+            check("req_00000000-0000-4000-c000-000000000001"),
+            Err(ID_UUID_WRONG_VARIANT)
+        );
+        assert_eq!(
+            validate_id_text(Candidate::NotUtf8, 40, "req_"),
+            Err(ID_NOT_ASCII)
+        );
     }
 
     #[test]

@@ -52,13 +52,18 @@ fn unbound() -> PyErr {
 }
 
 fn namespace(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
-    Ok(NAMESPACE.get(py).ok_or_else(unbound)?.cast_into::<PyDict>()?)
+    Ok(NAMESPACE
+        .get(py)
+        .ok_or_else(unbound)?
+        .cast_into::<PyDict>()?)
 }
 
 fn global<'py>(namespace: &Bound<'py, PyDict>, name: &str) -> PyResult<Bound<'py, PyAny>> {
     match namespace.get_item(PyString::intern(namespace.py(), name))? {
         Some(value) => Ok(value),
-        None => Err(pyo3::exceptions::PyNameError::new_err(format!("name '{name}' is not defined"))),
+        None => Err(pyo3::exceptions::PyNameError::new_err(format!(
+            "name '{name}' is not defined"
+        ))),
     }
 }
 
@@ -106,7 +111,9 @@ fn cell<'py>(value: &Bound<'py, PyAny>) -> Option<Cell<'py>> {
         return Some(Cell::Null);
     }
     if is_exact(value, ffi::PyUnicode_CheckExact) {
-        return Some(Cell::Str(unsafe { value.cast_unchecked::<PyString>() }.clone()));
+        return Some(Cell::Str(
+            unsafe { value.cast_unchecked::<PyString>() }.clone(),
+        ));
     }
     if is_exact(value, ffi::PyLong_CheckExact) {
         return Some(Cell::Int(value.clone()));
@@ -117,7 +124,10 @@ fn cell<'py>(value: &Bound<'py, PyAny>) -> Option<Cell<'py>> {
     if is_exact(value, ffi::PyBytes_CheckExact) {
         let raw = unsafe { value.cast_unchecked::<PyBytes>() }.as_bytes();
         let digest = hex::encode(Sha256::digest(raw));
-        return Some(Cell::Blob { digest, size: raw.len() });
+        return Some(Cell::Blob {
+            digest,
+            size: raw.len(),
+        });
     }
     None
 }
@@ -153,7 +163,8 @@ fn encode_cell(out: &mut Vec<u8>, cell: &Cell<'_>) -> Result<(), Reason> {
         Cell::Bool(false) => out.extend_from_slice(b"false"),
         Cell::Int(value) => {
             let mut overflow: std::os::raw::c_int = 0;
-            let number = unsafe { ffi::PyLong_AsLongLongAndOverflow(value.as_ptr(), &mut overflow) };
+            let number =
+                unsafe { ffi::PyLong_AsLongLongAndOverflow(value.as_ptr(), &mut overflow) };
             if overflow != 0 || !(-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(&number) {
                 return Err(core::INTEGER_OUT_OF_SAFE_RANGE);
             }
@@ -173,7 +184,9 @@ fn encode_cell(out: &mut Vec<u8>, cell: &Cell<'_>) -> Result<(), Reason> {
 }
 
 /// Normalize every member of one row; `None` is the first unsupported cell.
-fn row_cells<'py>(members: impl Iterator<Item = PyResult<Bound<'py, PyAny>>>) -> PyResult<Option<Vec<Cell<'py>>>> {
+fn row_cells<'py>(
+    members: impl Iterator<Item = PyResult<Bound<'py, PyAny>>>,
+) -> PyResult<Option<Vec<Cell<'py>>>> {
     let mut cells = Vec::new();
     for member in members {
         match cell(&member?) {
@@ -198,7 +211,11 @@ fn encode_row(out: &mut Vec<u8>, cells: &[Cell<'_>]) -> Result<(), Reason> {
 }
 
 /// The Python value `_cell_value` returns for `cell`.
-fn cell_object<'py>(py: Python<'py>, namespace: &Bound<'py, PyDict>, value: Cell<'py>) -> PyResult<Bound<'py, PyAny>> {
+fn cell_object<'py>(
+    py: Python<'py>,
+    namespace: &Bound<'py, PyDict>,
+    value: Cell<'py>,
+) -> PyResult<Bound<'py, PyAny>> {
     Ok(match value {
         Cell::Null => py.None().into_bound(py),
         Cell::Bool(truth) => pyo3::types::PyBool::new(py, truth).to_owned().into_any(),
@@ -228,7 +245,10 @@ pub fn cell_value<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResult<B
 /// `_sorted_row_values(rows)`.
 #[pyfunction]
 #[pyo3(name = "bundle_sorted_row_values")]
-pub fn sorted_row_values<'py>(py: Python<'py>, rows: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+pub fn sorted_row_values<'py>(
+    py: Python<'py>,
+    rows: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
     let namespace = namespace(py)?;
     if !dependencies_original(py, &namespace) {
         return REFERENCE_SORTED.get(py).ok_or_else(unbound)?.call1((rows,));
@@ -263,12 +283,19 @@ pub fn sorted_row_values<'py>(py: Python<'py>, rows: &Bound<'py, PyAny>) -> PyRe
 /// `_stream_rows_digest(cursor, *, table) -> (digest, count)`.
 #[pyfunction]
 #[pyo3(name = "bundle_stream_rows_digest", signature = (cursor, *, table))]
-pub fn stream_rows_digest<'py>(py: Python<'py>, cursor: &Bound<'py, PyAny>, table: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+pub fn stream_rows_digest<'py>(
+    py: Python<'py>,
+    cursor: &Bound<'py, PyAny>,
+    table: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
     let namespace = namespace(py)?;
     if !dependencies_original(py, &namespace) || !is_exact(table, ffi::PyUnicode_CheckExact) {
         let kwargs = PyDict::new(py);
         kwargs.set_item("table", table)?;
-        return REFERENCE_STREAM.get(py).ok_or_else(unbound)?.call((cursor,), Some(&kwargs));
+        return REFERENCE_STREAM
+            .get(py)
+            .ok_or_else(unbound)?
+            .call((cursor,), Some(&kwargs));
     }
     let table = unsafe { table.cast_unchecked::<PyString>() };
     let mut digest = Sha256::new();
@@ -319,7 +346,10 @@ mod tests {
             Cell::Null,
             Cell::Bool(true),
             Cell::Bool(false),
-            Cell::Blob { digest: hex::encode(Sha256::digest(b"")), size: 0 },
+            Cell::Blob {
+                digest: hex::encode(Sha256::digest(b"")),
+                size: 0,
+            },
         ];
         let mut out = Vec::new();
         encode_row(&mut out, &cells).unwrap();
@@ -332,4 +362,3 @@ mod tests {
         assert_eq!(empty, b"[]");
     }
 }
-

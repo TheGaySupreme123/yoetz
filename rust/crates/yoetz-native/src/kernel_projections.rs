@@ -39,7 +39,11 @@ pub(crate) fn trusted_dict(value: &Bound<'_, PyAny>) -> Option<*mut ffi::PyObjec
             0
         }
         let mut found: *mut ffi::PyObject = ptr::null_mut();
-        traverse(pointer, first_referent, (&mut found as *mut *mut ffi::PyObject).cast());
+        traverse(
+            pointer,
+            first_referent,
+            (&mut found as *mut *mut ffi::PyObject).cast(),
+        );
         if found.is_null() || ffi::PyDict_CheckExact(found) == 0 {
             return None;
         }
@@ -48,7 +52,9 @@ pub(crate) fn trusted_dict(value: &Bound<'_, PyAny>) -> Option<*mut ffi::PyObjec
 }
 
 /// Every `(key, value)` of an exact dict, in insertion order, as owned references.
-pub(crate) fn dict_items<'py>(dict: &Bound<'py, PyDict>) -> Vec<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
+pub(crate) fn dict_items<'py>(
+    dict: &Bound<'py, PyDict>,
+) -> Vec<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
     let py = dict.py();
     let mut items = Vec::with_capacity(dict.len());
     let mut position: ffi::Py_ssize_t = 0;
@@ -56,7 +62,10 @@ pub(crate) fn dict_items<'py>(dict: &Bound<'py, PyDict>) -> Vec<(Bound<'py, PyAn
     let mut value: *mut ffi::PyObject = ptr::null_mut();
     unsafe {
         while ffi::PyDict_Next(dict.as_ptr(), &mut position, &mut key, &mut value) != 0 {
-            items.push((Bound::from_borrowed_ptr(py, key), Bound::from_borrowed_ptr(py, value)));
+            items.push((
+                Bound::from_borrowed_ptr(py, key),
+                Bound::from_borrowed_ptr(py, value),
+            ));
         }
     }
     items
@@ -64,7 +73,9 @@ pub(crate) fn dict_items<'py>(dict: &Bound<'py, PyDict>) -> Vec<(Bound<'py, PyAn
 
 #[inline]
 fn is_simple_key(key: &Bound<'_, PyAny>) -> bool {
-    unsafe { ffi::PyUnicode_CheckExact(key.as_ptr()) != 0 || ffi::PyLong_CheckExact(key.as_ptr()) != 0 }
+    unsafe {
+        ffi::PyUnicode_CheckExact(key.as_ptr()) != 0 || ffi::PyLong_CheckExact(key.as_ptr()) != 0
+    }
 }
 
 /// `admit(key, value)` must return exactly a `(key, value)` pair.
@@ -117,7 +128,12 @@ fn carry<'py>(
             let mut trusted_key: *mut ffi::PyObject = ptr::null_mut();
             let mut trusted_value: *mut ffi::PyObject = ptr::null_mut();
             let more = unsafe {
-                ffi::PyDict_Next(trusted.as_ptr(), &mut trusted_position, &mut trusted_key, &mut trusted_value)
+                ffi::PyDict_Next(
+                    trusted.as_ptr(),
+                    &mut trusted_position,
+                    &mut trusted_key,
+                    &mut trusted_value,
+                )
             };
             if more != 0 && trusted_key == key.as_ptr() && (!lookup || is_simple_key(key)) {
                 carried = Some(trusted_value == value.as_ptr());
@@ -149,7 +165,8 @@ fn carry<'py>(
         }
     }
     if !key_changed {
-        let copied = unsafe { Bound::from_owned_ptr_or_err(py, ffi::PyDict_Copy(source.as_ptr()))? };
+        let copied =
+            unsafe { Bound::from_owned_ptr_or_err(py, ffi::PyDict_Copy(source.as_ptr()))? };
         let copied = unsafe { copied.cast_into_unchecked::<PyDict>() };
         for (index, new_key, new_value) in &misses {
             if new_value.as_ptr() != items[*index].1.as_ptr() {

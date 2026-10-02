@@ -116,15 +116,24 @@ mod tests {
 
     #[test]
     fn uuid_text_forces_version_and_variant() {
-        assert_eq!(uuid4_text([0xFF; 16]), "ffffffff-ffff-4fff-bfff-ffffffffffff");
+        assert_eq!(
+            uuid4_text([0xFF; 16]),
+            "ffffffff-ffff-4fff-bfff-ffffffffffff"
+        );
         assert_eq!(uuid4_text([0; 16]), "00000000-0000-4000-8000-000000000000");
     }
 
     #[test]
     fn hex_digest_prefix() {
         let digest = format!("sha256:{}", "AB".repeat(32));
-        assert_eq!(uuid4_from_hex_digest(&digest).unwrap(), "abababab-abab-4bab-abab-abababababab");
-        assert_eq!(uuid4_from_hex_digest(&"ab".repeat(16)).unwrap(), "abababab-abab-4bab-abab-abababababab");
+        assert_eq!(
+            uuid4_from_hex_digest(&digest).unwrap(),
+            "abababab-abab-4bab-abab-abababababab"
+        );
+        assert_eq!(
+            uuid4_from_hex_digest(&"ab".repeat(16)).unwrap(),
+            "abababab-abab-4bab-abab-abababababab"
+        );
         assert!(uuid4_from_hex_digest("sha256:abcd").is_none());
         assert!(uuid4_from_hex_digest(&format!("ab {}", "a".repeat(40))).is_none());
         assert!(uuid4_from_hex_digest(&format!("{}g", "a".repeat(31))).is_none());

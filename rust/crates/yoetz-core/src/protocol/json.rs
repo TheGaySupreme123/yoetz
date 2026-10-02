@@ -297,7 +297,11 @@ impl<'a> Scanner<'a> {
 
 /// Scan `text` (already prechecked) into the sink's value.
 pub fn scan<S: JsonSink>(text: &str, sink: &mut S) -> Result<S::Value, S::Error> {
-    let mut scanner = Scanner { text, bytes: text.as_bytes(), pos: 0 };
+    let mut scanner = Scanner {
+        text,
+        bytes: text.as_bytes(),
+        pos: 0,
+    };
     let mut stack: Vec<Frame<S>> = Vec::new();
     scanner.skip_ws();
     'value: loop {
@@ -393,7 +397,9 @@ pub fn scan<S: JsonSink>(text: &str, sink: &mut S) -> Result<S::Value, S::Error>
                         }
                         Some(b']') => {
                             scanner.pos += 1;
-                            let Some(Frame::Array(array)) = stack.pop() else { unreachable!() };
+                            let Some(Frame::Array(array)) = stack.pop() else {
+                                unreachable!()
+                            };
                             value = sink.end_array(array)?;
                         }
                         _ => return Err(sink.fail(MALFORMED_JSON)),
@@ -415,7 +421,9 @@ pub fn scan<S: JsonSink>(text: &str, sink: &mut S) -> Result<S::Value, S::Error>
                         }
                         Some(b'}') => {
                             scanner.pos += 1;
-                            let Some(Frame::Object(object, _)) = stack.pop() else { unreachable!() };
+                            let Some(Frame::Object(object, _)) = stack.pop() else {
+                                unreachable!()
+                            };
                             value = sink.end_object(object)?;
                         }
                         _ => return Err(sink.fail(MALFORMED_JSON)),
@@ -558,7 +566,8 @@ mod tests {
 
     #[test]
     fn parses_nested_values() {
-        let value = parse(b" {\"b\": [1, true, null, \"x\\u00e9\\ud83d\\ude00\"], \"a\": {}} ").unwrap();
+        let value =
+            parse(b" {\"b\": [1, true, null, \"x\\u00e9\\ud83d\\ude00\"], \"a\": {}} ").unwrap();
         assert_eq!(
             String::from_utf8(super::super::canonical::encode(&value).unwrap()).unwrap(),
             "{\"a\":{},\"b\":[1,true,null,\"x\u{e9}\u{1f600}\"]}"

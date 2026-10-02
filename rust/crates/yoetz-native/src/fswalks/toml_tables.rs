@@ -10,7 +10,10 @@ use yoetz_core::fswalks::toml_tables as core;
 
 /// `exact_table_span(raw, table)`.
 #[pyfunction]
-pub fn toml_exact_table_span(raw: &[u8], table: &Bound<'_, PyString>) -> PyResult<Option<(usize, usize)>> {
+pub fn toml_exact_table_span(
+    raw: &[u8],
+    table: &Bound<'_, PyString>,
+) -> PyResult<Option<(usize, usize)>> {
     Ok(core::exact_table_span(raw, table.to_str()?.as_bytes()))
 }
 

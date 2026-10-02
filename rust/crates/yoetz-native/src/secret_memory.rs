@@ -49,7 +49,8 @@ enum Export {
 /// writability check).
 fn export_writable(py: Python<'_>, mapping: &Bound<'_, PyAny>) -> PyResult<Export> {
     let mut view = std::mem::MaybeUninit::<ffi::Py_buffer>::uninit();
-    let status = unsafe { ffi::PyObject_GetBuffer(mapping.as_ptr(), view.as_mut_ptr(), ffi::PyBUF_SIMPLE) };
+    let status =
+        unsafe { ffi::PyObject_GetBuffer(mapping.as_ptr(), view.as_mut_ptr(), ffi::PyBUF_SIMPLE) };
     if status != 0 {
         let error = PyErr::fetch(py);
         if error.is_instance_of::<PyBufferError>(py) || error.is_instance_of::<PyValueError>(py) {
@@ -57,7 +58,9 @@ fn export_writable(py: Python<'_>, mapping: &Bound<'_, PyAny>) -> PyResult<Expor
         }
         return Err(error);
     }
-    let exported = Exported { view: unsafe { view.assume_init() } };
+    let exported = Exported {
+        view: unsafe { view.assume_init() },
+    };
     if exported.view.readonly != 0 {
         return Ok(Export::ReadOnly);
     }
@@ -67,7 +70,11 @@ fn export_writable(py: Python<'_>, mapping: &Bound<'_, PyAny>) -> PyResult<Expor
 /// `_lock_mapping` with a live libc: `mlock(address, size) == 0`; `None` when the reference
 /// must decide (a read-only mapping).
 #[pyfunction]
-pub fn secret_memory_lock(py: Python<'_>, mapping: &Bound<'_, PyAny>, size: usize) -> PyResult<Option<bool>> {
+pub fn secret_memory_lock(
+    py: Python<'_>,
+    mapping: &Bound<'_, PyAny>,
+    size: usize,
+) -> PyResult<Option<bool>> {
     Ok(match export_writable(py, mapping)? {
         Export::Held(buffer) => Some(unsafe { libc::mlock(buffer.address(), size) } == 0),
         Export::Refused => Some(false),
@@ -78,7 +85,11 @@ pub fn secret_memory_lock(py: Python<'_>, mapping: &Bound<'_, PyAny>, size: usiz
 /// `_unlock_mapping` with a live libc: `munlock(address, size)`, result ignored. `False` when
 /// the reference must decide (a read-only mapping).
 #[pyfunction]
-pub fn secret_memory_unlock(py: Python<'_>, mapping: &Bound<'_, PyAny>, size: usize) -> PyResult<bool> {
+pub fn secret_memory_unlock(
+    py: Python<'_>,
+    mapping: &Bound<'_, PyAny>,
+    size: usize,
+) -> PyResult<bool> {
     Ok(match export_writable(py, mapping)? {
         Export::Held(buffer) => {
             unsafe { libc::munlock(buffer.address(), size) };
@@ -93,7 +104,11 @@ pub fn secret_memory_unlock(py: Python<'_>, mapping: &Bound<'_, PyAny>, size: us
 /// ignored; the reference passes the Linux constant 16 literally. `False` when the reference
 /// must decide (a read-only mapping).
 #[pyfunction]
-pub fn secret_memory_dontdump(py: Python<'_>, mapping: &Bound<'_, PyAny>, size: usize) -> PyResult<bool> {
+pub fn secret_memory_dontdump(
+    py: Python<'_>,
+    mapping: &Bound<'_, PyAny>,
+    size: usize,
+) -> PyResult<bool> {
     Ok(match export_writable(py, mapping)? {
         Export::Held(buffer) => {
             #[cfg(target_os = "linux")]
@@ -113,7 +128,11 @@ pub fn secret_memory_dontdump(py: Python<'_>, mapping: &Bound<'_, PyAny>, size: 
 /// and leave the position at 0. Returns `False` when the reference must decide (a read-only
 /// mapping, or `size` beyond the mapping, where the reference's chunked writes differ).
 #[pyfunction]
-pub fn secret_memory_zeroize(py: Python<'_>, mapping: &Bound<'_, PyAny>, size: usize) -> PyResult<bool> {
+pub fn secret_memory_zeroize(
+    py: Python<'_>,
+    mapping: &Bound<'_, PyAny>,
+    size: usize,
+) -> PyResult<bool> {
     match export_writable(py, mapping)? {
         Export::Held(buffer) => {
             if size > buffer.len() {
@@ -141,21 +160,33 @@ pub fn secret_memory_zeroize(py: Python<'_>, mapping: &Bound<'_, PyAny>, size: u
 }
 
 fn mapping_closed(mapping: &Bound<'_, PyAny>) -> bool {
-    mapping.getattr("closed").and_then(|closed| closed.is_truthy()).unwrap_or(false)
+    mapping
+        .getattr("closed")
+        .and_then(|closed| closed.is_truthy())
+        .unwrap_or(false)
 }
 
 /// `_suppress_core_dumps`: lower the soft `RLIMIT_CORE` to 0, keeping the hard limit.
 #[pyfunction]
 pub fn secret_memory_suppress_core_dumps() -> bool {
-    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
     if unsafe { libc::getrlimit(libc::RLIMIT_CORE, &mut limit) } != 0 {
         return false;
     }
-    let lowered = libc::rlimit { rlim_cur: 0, rlim_max: limit.rlim_max };
+    let lowered = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: limit.rlim_max,
+    };
     if unsafe { libc::setrlimit(libc::RLIMIT_CORE, &lowered) } != 0 {
         return false;
     }
-    let mut observed = libc::rlimit { rlim_cur: 1, rlim_max: 0 };
+    let mut observed = libc::rlimit {
+        rlim_cur: 1,
+        rlim_max: 0,
+    };
     if unsafe { libc::getrlimit(libc::RLIMIT_CORE, &mut observed) } != 0 {
         return false;
     }

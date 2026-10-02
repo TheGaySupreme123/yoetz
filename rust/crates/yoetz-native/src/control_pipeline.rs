@@ -30,7 +30,10 @@ use pyo3::types::{PyBytes, PyDict, PyList, PyString, PyTuple};
 use yoetz_core::protocol::canonical::utf16_cmp;
 
 use crate::registry::Slot;
-use crate::walk::{JSON_OBJECT, NATIVE_RECURSION_LIMIT, is_exact, is_mapping_instance, is_plain_scalar, is_type, json_object_items};
+use crate::walk::{
+    JSON_OBJECT, NATIVE_RECURSION_LIMIT, is_exact, is_mapping_instance, is_plain_scalar, is_type,
+    json_object_items,
+};
 
 /// The `control_protocol` module namespace (its `globals()`).
 static NAMESPACE: Slot = Slot::new();
@@ -102,22 +105,34 @@ fn unbound() -> PyErr {
 
 impl<'py> Pipeline<'py> {
     fn new(py: Python<'py>) -> PyResult<Self> {
-        let namespace = NAMESPACE.get(py).ok_or_else(unbound)?.cast_into::<PyDict>()?;
+        let namespace = NAMESPACE
+            .get(py)
+            .ok_or_else(unbound)?
+            .cast_into::<PyDict>()?;
         let error = ERROR.get(py).ok_or_else(unbound)?;
-        Ok(Pipeline { py, namespace, error })
+        Ok(Pipeline {
+            py,
+            namespace,
+            error,
+        })
     }
 
     /// The module global `name`, read now (a `NameError` if it was deleted, like the reference).
     fn global(&self, name: &str) -> PyResult<Bound<'py, PyAny>> {
         match self.namespace.get_item(PyString::intern(self.py, name))? {
             Some(value) => Ok(value),
-            None => Err(pyo3::exceptions::PyNameError::new_err(format!("name '{name}' is not defined"))),
+            None => Err(pyo3::exceptions::PyNameError::new_err(format!(
+                "name '{name}' is not defined"
+            ))),
         }
     }
 
     /// Whether the module global `name` is still the object `original` holds.
     fn is_original(&self, name: &str, original: &Slot) -> bool {
-        match (self.namespace.get_item(PyString::intern(self.py, name)), original.get(self.py)) {
+        match (
+            self.namespace.get_item(PyString::intern(self.py, name)),
+            original.get(self.py),
+        ) {
             (Ok(Some(current)), Some(original)) => current.is(&original),
             _ => {
                 let _ = PyErr::take(self.py);
@@ -148,7 +163,10 @@ impl<'py> Pipeline<'py> {
         let py = self.py;
         let folded = error.is_instance_of::<PyTypeError>(py)
             || error.is_instance_of::<PyValueError>(py)
-            || (with_struct && STRUCT_ERROR.get(py).is_some_and(|class| error.matches(py, &class).unwrap_or(false)));
+            || (with_struct
+                && STRUCT_ERROR
+                    .get(py)
+                    .is_some_and(|class| error.matches(py, &class).unwrap_or(false)));
         if !folded {
             return error;
         }
@@ -171,7 +189,11 @@ impl<'py> Pipeline<'py> {
     /// is known to be a plain tree.
     fn plain(&self, value: &Bound<'py, PyAny>) -> PyResult<(Bound<'py, PyAny>, bool)> {
         let function = self.global("_plain_wire_value")?;
-        if ORIGINAL_PLAIN.get(self.py).is_some_and(|original| function.is(&original)) && is_plain_tree(value, 0) {
+        if ORIGINAL_PLAIN
+            .get(self.py)
+            .is_some_and(|original| function.is(&original))
+            && is_plain_tree(value, 0)
+        {
             return Ok((value.clone(), true));
         }
         Ok((function.call1((value,))?, false))
@@ -204,14 +226,23 @@ impl<'py> Pipeline<'py> {
             return Err(self.fail("frame_invalid"));
         }
         let version = self.schema_version(name)?;
-        self.global("validate_schema_instance")?.call1((schema_name, version, &wire))?;
+        self.global("validate_schema_instance")?
+            .call1((schema_name, version, &wire))?;
         let freeze = self.global("freeze_json")?;
-        let freeze_original = ORIGINAL_FREEZE.get(py).is_some_and(|original| freeze.is(&original));
+        let freeze_original = ORIGINAL_FREEZE
+            .get(py)
+            .is_some_and(|original| freeze.is(&original));
         let json_object = JSON_OBJECT.get(py).ok_or_else(unbound)?;
-        if freeze_original && is_type(value, &json_object) && self.is_original("_plain_wire_value", &ORIGINAL_PLAIN) {
+        if freeze_original
+            && is_type(value, &json_object)
+            && self.is_original("_plain_wire_value", &ORIGINAL_PLAIN)
+        {
             return Ok((Some(value.clone()), wire, true));
         }
-        if !need_frozen && freeze_original && self.is_original("validate_schema_instance", &ORIGINAL_VALIDATE) {
+        if !need_frozen
+            && freeze_original
+            && self.is_original("validate_schema_instance", &ORIGINAL_VALIDATE)
+        {
             if !plain_tree {
                 plain_tree = is_plain_tree(&wire, 0);
             }
@@ -236,7 +267,9 @@ impl<'py> Pipeline<'py> {
     ) -> PyResult<Validated<'py>> {
         let exact_name = if is_exact(schema_name, ffi::PyUnicode_CheckExact) {
             let text = unsafe { schema_name.cast_unchecked::<PyString>() };
-            text.to_str().ok().map(|name| (text.clone(), name.to_owned()))
+            text.to_str()
+                .ok()
+                .map(|name| (text.clone(), name.to_owned()))
         } else {
             None
         };
@@ -244,10 +277,18 @@ impl<'py> Pipeline<'py> {
             // Only the module's own literals reach here in practice; anything else takes the
             // reference, whose set membership test decides an unhashable name.
             let reference = REFERENCE_VALIDATED_WIRE.get(self.py).ok_or_else(unbound)?;
-            return Ok(Validated { frozen: Some(reference.call1((value, schema_name))?), wire: None, plain_tree: false });
+            return Ok(Validated {
+                frozen: Some(reference.call1((value, schema_name))?),
+                wire: None,
+                plain_tree: false,
+            });
         };
         match self.validated_body(value, &text, &name, need_frozen) {
-            Ok((frozen, wire, plain_tree)) => Ok(Validated { frozen, wire: Some(wire), plain_tree }),
+            Ok((frozen, wire, plain_tree)) => Ok(Validated {
+                frozen,
+                wire: Some(wire),
+                plain_tree,
+            }),
             Err(error) => Err(self.map_error(error, false)),
         }
     }
@@ -261,10 +302,17 @@ impl<'py> Pipeline<'py> {
         need_frozen: bool,
     ) -> PyResult<Validated<'py>> {
         let function = self.global("_validated_wire")?;
-        if ORIGINAL_VALIDATED_WIRE.get(self.py).is_some_and(|original| function.is(&original)) {
+        if ORIGINAL_VALIDATED_WIRE
+            .get(self.py)
+            .is_some_and(|original| function.is(&original))
+        {
             return self.validated(value, schema_name, need_frozen);
         }
-        Ok(Validated { frozen: Some(function.call1((value, schema_name))?), wire: None, plain_tree: false })
+        Ok(Validated {
+            frozen: Some(function.call1((value, schema_name))?),
+            wire: None,
+            plain_tree: false,
+        })
     }
 
     fn frame_limit(&self, name: &str) -> Option<usize> {
@@ -285,8 +333,12 @@ impl<'py> Pipeline<'py> {
         build: &dyn Fn() -> PyResult<Bound<'py, PyAny>>,
     ) -> PyResult<()> {
         let function = self.global("_validate_frame_size")?;
-        let limits = if ORIGINAL_FRAME_SIZE.get(self.py).is_some_and(|original| function.is(&original)) {
-            self.frame_limit("MAX_CONTROL_FRAME_BYTES").zip(self.frame_limit("MAX_ORDINARY_CONTROL_FRAME_BYTES"))
+        let limits = if ORIGINAL_FRAME_SIZE
+            .get(self.py)
+            .is_some_and(|original| function.is(&original))
+        {
+            self.frame_limit("MAX_CONTROL_FRAME_BYTES")
+                .zip(self.frame_limit("MAX_ORDINARY_CONTROL_FRAME_BYTES"))
         } else {
             None
         };
@@ -304,7 +356,11 @@ impl<'py> Pipeline<'py> {
             if frame.is_none() {
                 *frame = Some(build()?);
             }
-            if !self.global("_is_bounded_import")?.call1((frame.as_ref(),))?.is_truthy()? {
+            if !self
+                .global("_is_bounded_import")?
+                .call1((frame.as_ref(),))?
+                .is_truthy()?
+            {
                 return Err(self.fail("frame_too_large"));
             }
         }
@@ -317,8 +373,12 @@ impl<'py> Pipeline<'py> {
         let parsed = parse.call1((payload,))?;
         let encode = self.global("canonical_encode")?;
         let canonical = if is_exact(payload, ffi::PyBytes_CheckExact)
-            && ORIGINAL_PARSE.get(py).is_some_and(|original| parse.is(&original))
-            && ORIGINAL_ENCODE.get(py).is_some_and(|original| encode.is(&original))
+            && ORIGINAL_PARSE
+                .get(py)
+                .is_some_and(|original| parse.is(&original))
+            && ORIGINAL_ENCODE
+                .get(py)
+                .is_some_and(|original| encode.is(&original))
         {
             // `canonical_encode(strict_json_parse(data)) == data` decided over the bytes alone;
             // the parse above already succeeded, so only the comparison remains.
@@ -331,7 +391,10 @@ impl<'py> Pipeline<'py> {
             return Err(self.fail("frame_invalid"));
         }
         let schema_name = self.global("_schema_name_for_frame")?.call1((&parsed,))?;
-        let value = self.validated_global(&parsed, &schema_name, true)?.frozen.ok_or_else(unbound)?;
+        let value = self
+            .validated_global(&parsed, &schema_name, true)?
+            .frozen
+            .ok_or_else(unbound)?;
         let length = payload.len()?;
         let mut frame = Some(value.clone());
         self.frame_size(payload, length, &mut frame, &|| Ok(value.clone()))?;
@@ -345,11 +408,20 @@ impl<'py> Pipeline<'py> {
             return Err(self.fail("frame_invalid"));
         }
         let schema_name = self.global("_schema_name_for_frame")?.call1((&wire,))?;
-        let Validated { frozen: mut frame, wire: validated_wire, plain_tree } = self.validated_global(&wire, &schema_name, false)?;
+        let Validated {
+            frozen: mut frame,
+            wire: validated_wire,
+            plain_tree,
+        } = self.validated_global(&wire, &schema_name, false)?;
         let encode = self.global("canonical_encode")?;
         let payload = match (&frame, &validated_wire) {
             (Some(frame), _) => encode.call1((frame,))?,
-            (None, Some(validated_wire)) if plain_tree && ORIGINAL_ENCODE.get(py).is_some_and(|original| encode.is(&original)) => {
+            (None, Some(validated_wire))
+                if plain_tree
+                    && ORIGINAL_ENCODE
+                        .get(py)
+                        .is_some_and(|original| encode.is(&original)) =>
+            {
                 // The frozen frame is structurally this plain tree: same canonical bytes.
                 encode.call1((validated_wire,))?
             }
@@ -390,9 +462,9 @@ fn is_plain_tree(value: &Bound<'_, PyAny>, depth: usize) -> bool {
     }
     if is_exact(value, ffi::PyDict_CheckExact) {
         let dict = unsafe { value.cast_unchecked::<PyDict>() };
-        return dict
-            .iter()
-            .all(|(key, member)| is_exact(&key, ffi::PyUnicode_CheckExact) && is_plain_tree(&member, depth + 1));
+        return dict.iter().all(|(key, member)| {
+            is_exact(&key, ffi::PyUnicode_CheckExact) && is_plain_tree(&member, depth + 1)
+        });
     }
     if is_exact(value, ffi::PyList_CheckExact) {
         let list = unsafe { value.cast_unchecked::<PyList>() };
@@ -404,9 +476,16 @@ fn is_plain_tree(value: &Bound<'_, PyAny>, depth: usize) -> bool {
 /// `_validated_wire(value, schema_name)`.
 #[pyfunction]
 #[pyo3(name = "control_validated_wire")]
-pub fn validated_wire<'py>(py: Python<'py>, value: &Bound<'py, PyAny>, schema_name: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+pub fn validated_wire<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+    schema_name: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
     let pipeline = Pipeline::new(py)?;
-    pipeline.validated(value, schema_name, true)?.frozen.ok_or_else(unbound)
+    pipeline
+        .validated(value, schema_name, true)?
+        .frozen
+        .ok_or_else(unbound)
 }
 
 /// `validate_request(request)`.
@@ -414,7 +493,11 @@ pub fn validated_wire<'py>(py: Python<'py>, value: &Bound<'py, PyAny>, schema_na
 #[pyo3(name = "control_validate_request")]
 pub fn validate_request(py: Python<'_>, request: &Bound<'_, PyAny>) -> PyResult<()> {
     let pipeline = Pipeline::new(py)?;
-    pipeline.validated_global(request, PyString::intern(py, "control-request").as_any(), false)?;
+    pipeline.validated_global(
+        request,
+        PyString::intern(py, "control-request").as_any(),
+        false,
+    )?;
     Ok(())
 }
 
@@ -427,29 +510,48 @@ pub fn validate_result(py: Python<'_>, result: &Bound<'_, PyAny>) -> PyResult<()
     if !is_type(result, &class) {
         return Err(PyTypeError::new_err("control_result_invalid"));
     }
-    pipeline.validated_global(result, PyString::intern(py, "control-result").as_any(), false)?;
+    pipeline.validated_global(
+        result,
+        PyString::intern(py, "control-result").as_any(),
+        false,
+    )?;
     Ok(())
 }
 
 /// `_decode_control_payload(payload)`.
 #[pyfunction]
 #[pyo3(name = "control_decode_control_payload")]
-pub fn decode_control_payload<'py>(py: Python<'py>, payload: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+pub fn decode_control_payload<'py>(
+    py: Python<'py>,
+    payload: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
     let pipeline = Pipeline::new(py)?;
-    pipeline.decode_body(payload).map_err(|error| pipeline.map_error(error, false))
+    pipeline
+        .decode_body(payload)
+        .map_err(|error| pipeline.map_error(error, false))
 }
 
 /// `encode_control_frame(value)`.
 #[pyfunction]
 #[pyo3(name = "control_encode_control_frame")]
-pub fn encode_control_frame<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBytes>> {
+pub fn encode_control_frame<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyBytes>> {
     let pipeline = Pipeline::new(py)?;
-    pipeline.encode_body(value).map_err(|error| pipeline.map_error(error, true))
+    pipeline
+        .encode_body(value)
+        .map_err(|error| pipeline.map_error(error, true))
 }
 
 /// The thawed twin of an exact `JsonObject` tree: what `strict_json_parse(canonical_encode(x))`
 /// returns, keys in canonical (UTF-16) order. `None` for anything that is not such a tree.
-fn thaw<'py>(py: Python<'py>, class: &Bound<'py, PyAny>, value: &Bound<'py, PyAny>, depth: usize) -> PyResult<Option<Bound<'py, PyAny>>> {
+fn thaw<'py>(
+    py: Python<'py>,
+    class: &Bound<'py, PyAny>,
+    value: &Bound<'py, PyAny>,
+    depth: usize,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
     if value.is_none()
         || is_exact(value, ffi::PyBool_Check)
         || is_exact(value, ffi::PyLong_CheckExact)
@@ -462,7 +564,8 @@ fn thaw<'py>(py: Python<'py>, class: &Bound<'py, PyAny>, value: &Bound<'py, PyAn
     }
     if is_type(value, class) {
         let items = json_object_items(value)?;
-        let mut pairs: Vec<(Bound<'py, PyString>, Bound<'py, PyAny>)> = Vec::with_capacity(items.len());
+        let mut pairs: Vec<(Bound<'py, PyString>, Bound<'py, PyAny>)> =
+            Vec::with_capacity(items.len());
         for pair in items.iter() {
             let pair = pair.cast_into::<PyTuple>()?;
             let key = pair.get_item(0)?;
@@ -505,7 +608,10 @@ fn thaw<'py>(py: Python<'py>, class: &Bound<'py, PyAny>, value: &Bound<'py, PyAn
 /// `_plain_mapping_for_model(value)`.
 #[pyfunction]
 #[pyo3(name = "control_plain_mapping_for_model")]
-pub fn plain_mapping_for_model<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+pub fn plain_mapping_for_model<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
     let pipeline = Pipeline::new(py)?;
     if !is_mapping_instance(py, value)? {
         return Err(pipeline.fail("frame_invalid"));

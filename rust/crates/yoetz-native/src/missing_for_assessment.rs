@@ -59,7 +59,9 @@ pub fn diff_scope<'py>(
     if unsafe { ffi::PyFrozenSet_CheckExact(roots.as_ptr()) } == 0 {
         return fallback(py, command, roots);
     }
-    let members: Vec<Bound<'py, PyAny>> = unsafe { roots.cast_unchecked::<PyFrozenSet>() }.iter().collect();
+    let members: Vec<Bound<'py, PyAny>> = unsafe { roots.cast_unchecked::<PyFrozenSet>() }
+        .iter()
+        .collect();
     let mut root_texts: Vec<&str> = Vec::with_capacity(members.len());
     for member in &members {
         match exact_utf8(member) {

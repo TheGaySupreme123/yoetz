@@ -128,7 +128,9 @@ pub fn is_key_slot(text: &str) -> bool {
     let bytes = text.as_bytes();
     match bytes.split_first() {
         Some((first, rest)) => {
-            first.is_ascii_alphanumeric() && rest.len() <= 127 && rest.iter().all(|&b| is_key_slot_char(b))
+            first.is_ascii_alphanumeric()
+                && rest.len() <= 127
+                && rest.iter().all(|&b| is_key_slot_char(b))
         }
         None => false,
     }
@@ -137,7 +139,10 @@ pub fn is_key_slot(text: &str) -> bool {
 fn is_media_char(byte: u8) -> bool {
     byte.is_ascii_lowercase()
         || byte.is_ascii_digit()
-        || matches!(byte, b'!' | b'#' | b'$' | b'&' | b'^' | b'_' | b'.' | b'+' | b'-')
+        || matches!(
+            byte,
+            b'!' | b'#' | b'$' | b'&' | b'^' | b'_' | b'.' | b'+' | b'-'
+        )
 }
 
 /// `ObjectMetadata` media-type acceptance: at most 128 characters and
@@ -312,12 +317,19 @@ pub fn decode_frame(data: &[u8], max_header: usize, max_plaintext: u64) -> Optio
     }
     let header = header_from_value(parsed, max_plaintext)?;
     let size = usize::try_from(header.plaintext_size).ok()?;
-    let expected = header_end.checked_add(NONCE_BYTES + TAG_BYTES)?.checked_add(size)?;
+    let expected = header_end
+        .checked_add(NONCE_BYTES + TAG_BYTES)?
+        .checked_add(size)?;
     if data.len() != expected {
         return None;
     }
     let nonce_end = header_end + NONCE_BYTES;
-    Some(Frame { header, header_end, nonce_end, ciphertext_end: nonce_end + size })
+    Some(Frame {
+        header,
+        header_end,
+        nonce_end,
+        ciphertext_end: nonce_end + size,
+    })
 }
 
 #[cfg(test)]

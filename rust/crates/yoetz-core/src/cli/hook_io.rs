@@ -77,7 +77,13 @@ const IDENTITY_BOOLS: [&str; 16] = [
     "permission_denied",
     "success",
 ];
-const IDENTITY_INTS: [&str; 5] = ["duration", "exitCode", "exitStatus", "exit_code", "exit_status"];
+const IDENTITY_INTS: [&str; 5] = [
+    "duration",
+    "exitCode",
+    "exitStatus",
+    "exit_code",
+    "exit_status",
+];
 const IDENTITY_OBJECTS: [&str; 8] = [
     "data",
     "result",
@@ -185,7 +191,11 @@ fn decimal_literal(literal: &str) -> Option<DecimalLiteral> {
     } else if exponent + significant.len() as i128 - 1 > DECIMAL_EMAX || exponent < DECIMAL_ETINY {
         return None;
     }
-    Some(DecimalLiteral { negative, digits: significant, exponent })
+    Some(DecimalLiteral {
+        negative,
+        digits: significant,
+        exponent,
+    })
 }
 
 /// `_normalize_cursor_duration` for an accepted decimal literal.
@@ -207,11 +217,17 @@ fn cursor_duration(value: &DecimalLiteral) -> Result<i64, Reason> {
     let whole_digits = whole_digits as usize;
     let mut whole: i64 = 0;
     for index in 0..whole_digits {
-        let digit = value.digits.as_bytes().get(index).map_or(0, |byte| i64::from(byte - b'0'));
+        let digit = value
+            .digits
+            .as_bytes()
+            .get(index)
+            .map_or(0, |byte| i64::from(byte - b'0'));
         whole = whole * 10 + digit;
     }
     let fraction_nonzero = value.digits.len() > whole_digits
-        && value.digits.as_bytes()[whole_digits..].iter().any(|byte| *byte != b'0');
+        && value.digits.as_bytes()[whole_digits..]
+            .iter()
+            .any(|byte| *byte != b'0');
     if whole > MAX_SAFE_INTEGER || (whole == MAX_SAFE_INTEGER && fraction_nonzero) {
         return Err(INTEGER_OUT_OF_SAFE_RANGE);
     }
@@ -384,13 +400,22 @@ impl<'a> JsonSink for CursorSink<'a> {
         Ok(())
     }
     fn end_array(&mut self, array: Self::Array) -> Result<Self::Value, Reason> {
-        Ok(if self.close() { CursorValue::Array(array) } else { CursorValue::Null })
+        Ok(if self.close() {
+            CursorValue::Array(array)
+        } else {
+            CursorValue::Null
+        })
     }
     fn begin_object(&mut self) -> Result<Self::Object, Reason> {
         self.open(Container::Object);
         Ok(Vec::new())
     }
-    fn insert(&mut self, object: &mut Self::Object, key: Self::Key, value: Self::Value) -> Result<(), Reason> {
+    fn insert(
+        &mut self,
+        object: &mut Self::Object,
+        key: Self::Key,
+        value: Self::Value,
+    ) -> Result<(), Reason> {
         object.push((key, value));
         Ok(())
     }
@@ -399,7 +424,11 @@ impl<'a> JsonSink for CursorSink<'a> {
         if has_duplicate(&object) {
             return Err(DUPLICATE_OBJECT_KEY);
         }
-        Ok(if self.close() { CursorValue::Object(object) } else { CursorValue::Null })
+        Ok(if self.close() {
+            CursorValue::Object(object)
+        } else {
+            CursorValue::Null
+        })
     }
 }
 
@@ -423,7 +452,9 @@ fn first_profile_fault(value: &CursorValue<'_>) -> Option<Reason> {
             }
             let mut order: Vec<&(CursorKey<'_>, CursorValue<'_>)> = members.iter().collect();
             order.sort_by(|left, right| utf16_key_cmp(&left.0, &right.0));
-            order.into_iter().find_map(|(_, item)| first_profile_fault(item))
+            order
+                .into_iter()
+                .find_map(|(_, item)| first_profile_fault(item))
         }
         _ => None,
     }
@@ -431,12 +462,20 @@ fn first_profile_fault(value: &CursorValue<'_>) -> Option<Reason> {
 
 /// `_parse_cursor_hook_document(data)`: the normalized root object's members, or the
 /// reference's exact refusal.
-pub fn parse_cursor_hook_document(raw: &[u8]) -> Result<Vec<(CursorKey<'_>, CursorValue<'_>)>, Reason> {
+pub fn parse_cursor_hook_document(
+    raw: &[u8],
+) -> Result<Vec<(CursorKey<'_>, CursorValue<'_>)>, Reason> {
     if raw.is_empty() {
         return Err(INVALID_EVENT_VALUE_TYPE);
     }
     let text = json::precheck(raw)?;
-    let mut sink = CursorSink { text, stack: Vec::new(), root_duration_key: false, deferred: None, faulty: false };
+    let mut sink = CursorSink {
+        text,
+        stack: Vec::new(),
+        root_duration_key: false,
+        deferred: None,
+        faulty: false,
+    };
     let value = json::scan(text, &mut sink)?;
     if let Some(reason) = sink.deferred {
         return Err(reason);
@@ -483,8 +522,10 @@ fn identity_field<'a>(key: &str, value: &CursorValue<'a>, depth: usize) -> Kept<
     }
     if key == "error" {
         // ``value not in (None, False, "")``: ``0 == False`` also drops.
-        let unset = matches!(value, CursorValue::Null | CursorValue::Bool(false) | CursorValue::Int(0))
-            || matches!(value, CursorValue::Str(text) if text.is_empty());
+        let unset = matches!(
+            value,
+            CursorValue::Null | CursorValue::Bool(false) | CursorValue::Int(0)
+        ) || matches!(value, CursorValue::Str(text) if text.is_empty());
         return (!unset).then_some(CursorValue::Bool(true));
     }
     if key == "model_params" {
@@ -496,7 +537,9 @@ fn identity_field<'a>(key: &str, value: &CursorValue<'a>, depth: usize) -> Kept<
         }
         let mut kept = Vec::new();
         for item in items {
-            let CursorValue::Object(members) = item else { continue };
+            let CursorValue::Object(members) = item else {
+                continue;
+            };
             if depth >= MAX_IDENTITY_DEPTH {
                 continue;
             }
@@ -532,7 +575,10 @@ fn identity_field<'a>(key: &str, value: &CursorValue<'a>, depth: usize) -> Kept<
     None
 }
 
-fn identity_object<'a>(members: &[(CursorKey<'a>, CursorValue<'a>)], depth: usize) -> Vec<(CursorKey<'a>, CursorValue<'a>)> {
+fn identity_object<'a>(
+    members: &[(CursorKey<'a>, CursorValue<'a>)],
+    depth: usize,
+) -> Vec<(CursorKey<'a>, CursorValue<'a>)> {
     let mut kept = Vec::new();
     for (key, item) in members {
         // Keys of an accepted document are valid text.
@@ -545,7 +591,9 @@ fn identity_object<'a>(members: &[(CursorKey<'a>, CursorValue<'a>)], depth: usiz
 }
 
 /// `_cursor_identity_payload(parsed)` for an accepted document's members.
-pub fn cursor_identity_payload<'a>(members: &[(CursorKey<'a>, CursorValue<'a>)]) -> Vec<(CursorKey<'a>, CursorValue<'a>)> {
+pub fn cursor_identity_payload<'a>(
+    members: &[(CursorKey<'a>, CursorValue<'a>)],
+) -> Vec<(CursorKey<'a>, CursorValue<'a>)> {
     identity_object(members, 0)
 }
 
@@ -559,9 +607,14 @@ mod tests {
 
     #[test]
     fn duration_truncates_and_vendor_floats_drop() {
-        let members = parse_cursor_hook_document(br#"{"duration": 12.9, "meta": {"x": 1.5, "duration": 2.5}, "n": [0.5]}"#).unwrap();
+        let members = parse_cursor_hook_document(
+            br#"{"duration": 12.9, "meta": {"x": 1.5, "duration": 2.5}, "n": [0.5]}"#,
+        )
+        .unwrap();
         assert_eq!(members[0].1, CursorValue::Int(12));
-        let CursorValue::Object(meta) = &members[1].1 else { panic!() };
+        let CursorValue::Object(meta) = &members[1].1 else {
+            panic!()
+        };
         assert_eq!(meta[0].1, CursorValue::Null);
         assert_eq!(meta[1].1, CursorValue::Null);
         assert_eq!(members[2].1, CursorValue::Array(vec![CursorValue::Null]));
@@ -569,25 +622,49 @@ mod tests {
 
     #[test]
     fn refusals_keep_reference_phases() {
-        assert_eq!(parse_cursor_hook_document(b""), Err(INVALID_EVENT_VALUE_TYPE));
+        assert_eq!(
+            parse_cursor_hook_document(b""),
+            Err(INVALID_EVENT_VALUE_TYPE)
+        );
         assert_eq!(refusal("1.5"), FLOAT_FORBIDDEN);
         assert_eq!(refusal("[1]"), UNSUPPORTED_JSON_TYPE);
         assert_eq!(refusal(r#"{"a": -0}"#), FLOAT_FORBIDDEN);
         assert_eq!(refusal(r#"{"a": NaN}"#), FLOAT_FORBIDDEN);
-        assert_eq!(refusal(r#"{"a": 1e999999999999999999999}"#), FLOAT_FORBIDDEN);
+        assert_eq!(
+            refusal(r#"{"a": 1e999999999999999999999}"#),
+            FLOAT_FORBIDDEN
+        );
         assert_eq!(refusal(r#"{"duration": -0.0}"#), INVALID_DURATION);
         assert_eq!(refusal(r#"{"duration": -1.5}"#), INVALID_DURATION);
-        assert_eq!(refusal(r#"{"duration": 9007199254740991.5}"#), INTEGER_OUT_OF_SAFE_RANGE);
+        assert_eq!(
+            refusal(r#"{"duration": 9007199254740991.5}"#),
+            INTEGER_OUT_OF_SAFE_RANGE
+        );
         assert_eq!(refusal(r#"{"duration": 1e17}"#), INTEGER_OUT_OF_SAFE_RANGE);
-        assert_eq!(refusal(r#"{"a": 9007199254740992}"#), INTEGER_OUT_OF_SAFE_RANGE);
+        assert_eq!(
+            refusal(r#"{"a": 9007199254740992}"#),
+            INTEGER_OUT_OF_SAFE_RANGE
+        );
         // A scan refusal outranks an earlier normalization refusal.
-        assert_eq!(refusal(r#"{"duration": -1.5, "a": 1, "a": 2}"#), DUPLICATE_OBJECT_KEY);
+        assert_eq!(
+            refusal(r#"{"duration": -1.5, "a": 1, "a": 2}"#),
+            DUPLICATE_OBJECT_KEY
+        );
         // Normalization outranks the profile walk.
-        assert_eq!(refusal(r#"{"s": "\u0000", "duration": -1.5}"#), INVALID_DURATION);
+        assert_eq!(
+            refusal(r#"{"s": "\u0000", "duration": -1.5}"#),
+            INVALID_DURATION
+        );
         // Keys in insertion order precede values in UTF-16 order.
-        assert_eq!(refusal(r#"{"b": "\ud800", "a\u0000": 1}"#), NUL_BYTE_FORBIDDEN);
+        assert_eq!(
+            refusal(r#"{"b": "\ud800", "a\u0000": 1}"#),
+            NUL_BYTE_FORBIDDEN
+        );
         assert_eq!(refusal(r#"{"b": "\u0000", "a": "\ud800"}"#), LONE_SURROGATE);
-        assert_eq!(refusal(r#"{"a": 1, "\ud800": 1, "\ud800": 2}"#), DUPLICATE_OBJECT_KEY);
+        assert_eq!(
+            refusal(r#"{"a": 1, "\ud800": 1, "\ud800": 2}"#),
+            DUPLICATE_OBJECT_KEY
+        );
     }
 
     #[test]
@@ -596,7 +673,10 @@ mod tests {
             CursorValue::Int(value) => value,
             ref other => panic!("{other:?}"),
         };
-        assert_eq!(ok(r#"{"duration": 9007199254740991.0}"#), 9_007_199_254_740_991);
+        assert_eq!(
+            ok(r#"{"duration": 9007199254740991.0}"#),
+            9_007_199_254_740_991
+        );
         assert_eq!(ok(r#"{"duration": 0.0}"#), 0);
         assert_eq!(ok(r#"{"duration": 1e-999}"#), 0);
         assert_eq!(ok(r#"{"duration": 12.5e1}"#), 125);
@@ -622,8 +702,14 @@ mod tests {
         let names: Vec<_> = view.iter().map(|(key, _)| key.clone()).collect();
         assert_eq!(
             names,
-            ["session_id", "tool_input", "workspace_roots", "duration", "model_params"]
-                .map(|name| CursorKey::Text(Cow::Borrowed(name)))
+            [
+                "session_id",
+                "tool_input",
+                "workspace_roots",
+                "duration",
+                "model_params"
+            ]
+            .map(|name| CursorKey::Text(Cow::Borrowed(name)))
         );
         assert_eq!(view[2].1, CursorValue::Null);
         assert_eq!(view[3].1, CursorValue::Int(3));

@@ -40,13 +40,18 @@ pub(crate) fn exact_str<'a>(value: &'a Bound<'_, PyAny>) -> Option<&'a str> {
 pub(crate) fn exact_strs(value: &Bound<'_, PyAny>, lists: bool) -> Option<Vec<String>> {
     let pointer = value.as_ptr();
     let items: Vec<Bound<'_, PyAny>> = if unsafe { ffi::PyTuple_CheckExact(pointer) } != 0 {
-        unsafe { value.cast_unchecked::<PyTuple>() }.iter().collect()
+        unsafe { value.cast_unchecked::<PyTuple>() }
+            .iter()
+            .collect()
     } else if lists && unsafe { ffi::PyList_CheckExact(pointer) } != 0 {
         unsafe { value.cast_unchecked::<PyList>() }.iter().collect()
     } else {
         return None;
     };
-    items.iter().map(|item| exact_str(item).map(str::to_owned)).collect()
+    items
+        .iter()
+        .map(|item| exact_str(item).map(str::to_owned))
+        .collect()
 }
 
 /// Bind the module's domains and mapping-version tables.
@@ -58,7 +63,9 @@ pub fn materialize_bind(
     legacy_versions: Vec<String>,
     session_bound_versions: Vec<String>,
 ) {
-    *BINDING.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Binding {
+    *BINDING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Binding {
         id_domain: id_domain.as_bytes().to_vec(),
         logical_domain: logical_domain.to_owned(),
         current_version: current_version.to_owned(),
@@ -68,7 +75,9 @@ pub fn materialize_bind(
 }
 
 fn with_binding<T>(body: impl FnOnce(&Binding) -> Option<T>) -> PyResult<Option<T>> {
-    let guard = BINDING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let guard = BINDING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let Some(binding) = guard.as_ref() else {
         return Err(PyValueError::new_err("materialize_unbound"));
     };
@@ -89,29 +98,44 @@ pub fn materialize_stable_observation_id(
         return Ok(None);
     };
     // ``IdKind`` mixes in ``str``: a member's text is its ``value``.
-    let Some(kind_value) = kind.cast::<PyString>().ok().and_then(|text| text.to_str().ok()) else {
-        return Ok(None);
-    };
-    let (Some(task), Some(source), Some(mapping), Some(role)) =
-        (exact_str(task_id), exact_str(source_identity), exact_str(mapping_version), exact_str(role))
+    let Some(kind_value) = kind
+        .cast::<PyString>()
+        .ok()
+        .and_then(|text| text.to_str().ok())
     else {
         return Ok(None);
     };
+    let (Some(task), Some(source), Some(mapping), Some(role)) = (
+        exact_str(task_id),
+        exact_str(source_identity),
+        exact_str(mapping_version),
+        exact_str(role),
+    ) else {
+        return Ok(None);
+    };
     with_binding(|binding| {
-        let uuid = core::stable_observation_uuid(&binding.id_domain, [kind_value, task, source, mapping, role]);
+        let uuid = core::stable_observation_uuid(
+            &binding.id_domain,
+            [kind_value, task, source, mapping, role],
+        );
         Some(prefix + &uuid)
     })
 }
 
 /// `_logical_identity_digest(components)`.
 #[pyfunction]
-pub fn materialize_logical_identity_digest(components: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+pub fn materialize_logical_identity_digest(
+    components: &Bound<'_, PyAny>,
+) -> PyResult<Option<String>> {
     let Some(parts) = exact_strs(components, false) else {
         return Ok(None);
     };
     with_binding(|binding| {
         let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
-        Some(core::logical_identity_digest(&binding.logical_domain, &parts))
+        Some(core::logical_identity_digest(
+            &binding.logical_domain,
+            &parts,
+        ))
     })
 }
 
@@ -136,7 +160,8 @@ pub fn materialize_operation_digest(
     let session = (!session_id.is_none()).then(|| exact_str(session_id));
     let writer = (!writer_id.is_none()).then(|| exact_str(writer_id));
     with_binding(|binding| {
-        let supported = mapping == binding.current_version || binding.legacy_versions.iter().any(|item| item == mapping);
+        let supported = mapping == binding.current_version
+            || binding.legacy_versions.iter().any(|item| item == mapping);
         if !supported {
             return None;
         }
@@ -146,10 +171,17 @@ pub fn materialize_operation_digest(
             ("kind".to_owned(), text("observation_materialize")),
             ("task_id".to_owned(), text(task)),
             ("logical_identity".to_owned(), text(logical)),
-            ("roles".to_owned(), Value::Array(roles.into_iter().map(Value::Str).collect())),
+            (
+                "roles".to_owned(),
+                Value::Array(roles.into_iter().map(Value::Str).collect()),
+            ),
             ("mapping_version".to_owned(), text(mapping)),
         ];
-        if binding.session_bound_versions.iter().any(|item| item == mapping) {
+        if binding
+            .session_bound_versions
+            .iter()
+            .any(|item| item == mapping)
+        {
             let (Some(Some(session)), Some(Some(writer))) = (session, writer) else {
                 return None;
             };
@@ -173,7 +205,10 @@ pub fn stable_uuid4_from_hex_digest(digest: &Bound<'_, PyAny>, prefix: &str) -> 
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(materialize_bind, module)?)?;
     module.add_function(wrap_pyfunction!(materialize_stable_observation_id, module)?)?;
-    module.add_function(wrap_pyfunction!(materialize_logical_identity_digest, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        materialize_logical_identity_digest,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(materialize_operation_digest, module)?)?;
     module.add_function(wrap_pyfunction!(stable_uuid4_from_hex_digest, module)?)?;
     Ok(())

@@ -6,7 +6,9 @@
 use std::collections::HashMap;
 use std::io::Read;
 
-use super::pytext::{ascii_ignore, ascii_py_int, ascii_splitlines, ascii_strip, universal_newlines, utf8_ignore};
+use super::pytext::{
+    ascii_ignore, ascii_py_int, ascii_splitlines, ascii_strip, universal_newlines, utf8_ignore,
+};
 
 pub const MAX_TOKENS: usize = 12;
 pub const MAX_COMM: usize = 32;
@@ -64,7 +66,9 @@ pub fn cursor_helper_comm(value: &str) -> bool {
         return true;
     }
     (value.starts_with("Cursor") || value.starts_with("cursor-helper"))
-        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'(' | b')' | b'-'))
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'(' | b')' | b'-'))
 }
 
 /// `_yoetz_launcher_token(value)`.
@@ -84,12 +88,18 @@ fn valid_project_selector(value: &str) -> bool {
     if !value.starts_with('/') || value.starts_with("//") {
         return false;
     }
-    if value.chars().any(|character| (character as u32) < 32 || character as u32 == 127) {
+    if value
+        .chars()
+        .any(|character| (character as u32) < 32 || character as u32 == 127)
+    {
         return false;
     }
     // PurePosixPath drops empty and "." components; the selector must not be the root and must
     // not contain a ".." part.
-    let mut parts = value[1..].split('/').filter(|part| !part.is_empty() && *part != ".").peekable();
+    let mut parts = value[1..]
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .peekable();
     if parts.peek().is_none() {
         return false;
     }
@@ -99,7 +109,12 @@ fn valid_project_selector(value: &str) -> bool {
 /// `_classify_cursor_project_suffix(suffix)`.
 fn classify_cursor_project_suffix<S: AsRef<str>>(suffix: &[S]) -> Option<Kind> {
     const PREFIX: [&str; 5] = ["mcp", "serve", "--host", "cursor", "--project-root"];
-    if suffix.len() < PREFIX.len() + 1 || !suffix.iter().zip(PREFIX).all(|(token, part)| token.as_ref() == part) {
+    if suffix.len() < PREFIX.len() + 1
+        || !suffix
+            .iter()
+            .zip(PREFIX)
+            .all(|(token, part)| token.as_ref() == part)
+    {
         return None;
     }
     if !valid_project_selector(suffix[PREFIX.len()].as_ref()) {
@@ -116,7 +131,11 @@ fn classify_cursor_project_suffix<S: AsRef<str>>(suffix: &[S]) -> Option<Kind> {
 }
 
 fn same<S: AsRef<str>, T: AsRef<str>>(left: &[S], right: &[T]) -> bool {
-    left.len() == right.len() && left.iter().zip(right).all(|(a, b)| a.as_ref() == b.as_ref())
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(a, b)| a.as_ref() == b.as_ref())
 }
 
 fn explicit_path(token: &str) -> bool {
@@ -124,7 +143,11 @@ fn explicit_path(token: &str) -> bool {
 }
 
 /// `_launcher_match(tokens, serve_index, expected_launcher)`.
-fn launcher_match<S: AsRef<str>, T: AsRef<str>>(tokens: &[S], serve_index: usize, expected: &[T]) -> Launcher {
+fn launcher_match<S: AsRef<str>, T: AsRef<str>>(
+    tokens: &[S],
+    serve_index: usize,
+    expected: &[T],
+) -> Launcher {
     let width = expected.len();
     if serve_index >= width && same(&tokens[serve_index - width..serve_index], expected) {
         return Launcher::Matched;
@@ -166,15 +189,19 @@ pub fn classify_serve_argv<S: AsRef<str>, T: AsRef<str>>(
     };
     let suffix = &tokens[serve_index..];
     let launcher = match expected_launcher {
-        Some(expected) if !expected.is_empty() => Some(launcher_match(tokens, serve_index, expected)),
+        Some(expected) if !expected.is_empty() => {
+            Some(launcher_match(tokens, serve_index, expected))
+        }
         _ => None,
     };
     if let Some(kind) = classify_cursor_project_suffix(suffix) {
         return (Some(kind), launcher);
     }
     let policy: [&[&str]; 2] = [&["mcp", "serve"], &["mcp", "serve", "--host", "cursor"]];
-    let strict: [&[&str]; 2] =
-        [&["mcp", "serve", "--semantic", "off"], &["mcp", "serve", "--host", "cursor", "--semantic", "off"]];
+    let strict: [&[&str]; 2] = [
+        &["mcp", "serve", "--semantic", "off"],
+        &["mcp", "serve", "--host", "cursor", "--semantic", "off"],
+    ];
     if policy.iter().any(|candidate| same(suffix, candidate)) {
         return (Some(Kind::Policy), launcher);
     }
@@ -249,7 +276,10 @@ pub fn linux_snapshots<T: AsRef<str>>(
             }
         }
     }
-    let lookup_comm = |pid: Option<i64>| -> &str { pid.and_then(|key| comm_by_pid.get(&key)).map_or("", String::as_str) };
+    let lookup_comm = |pid: Option<i64>| -> &str {
+        pid.and_then(|key| comm_by_pid.get(&key))
+            .map_or("", String::as_str)
+    };
     let mut classified = Vec::new();
     for (path, pid) in &pid_dirs {
         if classified.len() > max_processes {
@@ -261,15 +291,22 @@ pub fn linux_snapshots<T: AsRef<str>>(
         if raw.is_empty() || raw.len() > MAX_CMDLINE {
             continue;
         }
-        let tokens: Vec<std::borrow::Cow<'_, str>> =
-            raw.split(|byte| *byte == 0).filter(|part| !part.is_empty()).map(utf8_ignore).collect();
+        let tokens: Vec<std::borrow::Cow<'_, str>> = raw
+            .split(|byte| *byte == 0)
+            .filter(|part| !part.is_empty())
+            .map(utf8_ignore)
+            .collect();
         let (Some(kind), launcher) = classify_serve_argv(&tokens, expected_launcher) else {
             continue;
         };
         // `ppid_by_pid.get(pid)`: a parent outside i64 is a key no process has.
         let parent: Option<Option<i64>> = ppid_by_pid.get(pid).copied();
         let parent_key = parent.flatten();
-        let parent_comm = if parent.is_some() { lookup_comm(parent_key) } else { "" };
+        let parent_comm = if parent.is_some() {
+            lookup_comm(parent_key)
+        } else {
+            ""
+        };
         let grand: Option<i64> = match parent {
             Some(_) => match parent_key.and_then(|key| ppid_by_pid.get(&key)) {
                 Some(value) => *value,
@@ -277,9 +314,17 @@ pub fn linux_snapshots<T: AsRef<str>>(
             },
             None => Some(0),
         };
-        let grand_comm = if grand != Some(0) { lookup_comm(grand) } else { "" };
+        let grand_comm = if grand != Some(0) {
+            lookup_comm(grand)
+        } else {
+            ""
+        };
         let helper = cursor_helper_comm(parent_comm) || cursor_helper_comm(grand_comm);
-        classified.push(Snapshot { cursor_helper: helper, kind, launcher });
+        classified.push(Snapshot {
+            cursor_helper: helper,
+            kind,
+            launcher,
+        });
     }
     Some(classified)
 }
@@ -293,22 +338,72 @@ mod tests {
         let console = ["/opt/yoetz/bin/yoetz"];
         let serve = ["mcp", "serve"];
         let argv: Vec<&str> = console.iter().chain(serve.iter()).copied().collect();
-        assert_eq!(classify_serve_argv(&argv, Some(&console[..])), (Some(Kind::Policy), Some(Launcher::Matched)));
         assert_eq!(
-            classify_serve_argv(&["/opt/older/bin/yoetz", "mcp", "serve"], Some(&console[..])),
+            classify_serve_argv(&argv, Some(&console[..])),
+            (Some(Kind::Policy), Some(Launcher::Matched))
+        );
+        assert_eq!(
+            classify_serve_argv(
+                &["/opt/older/bin/yoetz", "mcp", "serve"],
+                Some(&console[..])
+            ),
             (Some(Kind::Policy), Some(Launcher::Different))
         );
-        assert_eq!(classify_serve_argv(&["yoetz", "mcp", "serve"], Some(&console[..])), (Some(Kind::Policy), Some(Launcher::Unresolved)));
-        assert_eq!(classify_serve_argv(&["unrelated"], Some(&console[..])), (None, None));
-        assert_eq!(classify_serve_argv(&["yoetz", "mcp", "serve", "--host", "cursor", "--project-root", "/w", "--semantic", "off"], None::<&[&str]>), (Some(Kind::Strict), None));
-        assert_eq!(classify_serve_argv(&["yoetz", "mcp", "serve", "--host", "cursor", "--project-root", "/./", ], None::<&[&str]>), (Some(Kind::Foreign), None));
-        let long: Vec<&str> = ["yoetz", "mcp", "serve"].into_iter().chain(std::iter::repeat_n("x", 10)).collect();
-        assert_eq!(classify_serve_argv(&long, None::<&[&str]>), (Some(Kind::Foreign), None));
+        assert_eq!(
+            classify_serve_argv(&["yoetz", "mcp", "serve"], Some(&console[..])),
+            (Some(Kind::Policy), Some(Launcher::Unresolved))
+        );
+        assert_eq!(
+            classify_serve_argv(&["unrelated"], Some(&console[..])),
+            (None, None)
+        );
+        assert_eq!(
+            classify_serve_argv(
+                &[
+                    "yoetz",
+                    "mcp",
+                    "serve",
+                    "--host",
+                    "cursor",
+                    "--project-root",
+                    "/w",
+                    "--semantic",
+                    "off"
+                ],
+                None::<&[&str]>
+            ),
+            (Some(Kind::Strict), None)
+        );
+        assert_eq!(
+            classify_serve_argv(
+                &[
+                    "yoetz",
+                    "mcp",
+                    "serve",
+                    "--host",
+                    "cursor",
+                    "--project-root",
+                    "/./",
+                ],
+                None::<&[&str]>
+            ),
+            (Some(Kind::Foreign), None)
+        );
+        let long: Vec<&str> = ["yoetz", "mcp", "serve"]
+            .into_iter()
+            .chain(std::iter::repeat_n("x", 10))
+            .collect();
+        assert_eq!(
+            classify_serve_argv(&long, None::<&[&str]>),
+            (Some(Kind::Foreign), None)
+        );
     }
 
     #[test]
     fn helper_comm() {
-        assert!(cursor_helper_comm("/Applications/Cursor.app/Contents/MacOS/Cursor Helper (Plugin)"));
+        assert!(cursor_helper_comm(
+            "/Applications/Cursor.app/Contents/MacOS/Cursor Helper (Plugin)"
+        ));
         assert!(cursor_helper_comm("cursor"));
         assert!(!cursor_helper_comm("Cursor\u{e9}"));
         assert!(!cursor_helper_comm("Cursor_x"));

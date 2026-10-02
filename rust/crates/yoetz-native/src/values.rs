@@ -14,7 +14,9 @@ use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 use yoetz_core::protocol::canonical::{self as core, MAX_JSON_DEPTH, MAX_SAFE_INTEGER, Reason};
 
 use crate::registry::{PROTOCOL_VALUE_ERROR, protocol_error};
-use crate::walk::{JSON_OBJECT, is_actual_mapping, is_exact, is_type, json_object_items, protocol_error_from};
+use crate::walk::{
+    JSON_OBJECT, is_actual_mapping, is_exact, is_type, json_object_items, protocol_error_from,
+};
 
 /// Bind `JsonObject`.
 #[pyfunction]
@@ -48,7 +50,10 @@ fn ensure_text(py: Python<'_>, text: &Bound<'_, PyString>) -> PyResult<()> {
 }
 
 /// `_validate_object_key(value)`.
-fn validate_object_key<'py>(py: Python<'py>, key: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyString>> {
+fn validate_object_key<'py>(
+    py: Python<'py>,
+    key: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyString>> {
     if !is_exact(key, ffi::PyUnicode_CheckExact) {
         return Err(protocol_error(py, core::OBJECT_KEY_NOT_STRING));
     }
@@ -73,7 +78,10 @@ fn mapping_read_error(py: Python<'_>, error: PyErr) -> PyErr {
 }
 
 /// The members of a mapping: every key validated (in iteration order), then every value read.
-fn mapping_members<'py>(py: Python<'py>, mapping: &Bound<'py, PyAny>) -> PyResult<Vec<(Bound<'py, PyString>, Bound<'py, PyAny>)>> {
+fn mapping_members<'py>(
+    py: Python<'py>,
+    mapping: &Bound<'py, PyAny>,
+) -> PyResult<Vec<(Bound<'py, PyString>, Bound<'py, PyAny>)>> {
     if is_exact(mapping, ffi::PyDict_CheckExact) {
         let dict = unsafe { mapping.cast_unchecked::<PyDict>() };
         let mut keys = Vec::with_capacity(dict.len());
@@ -84,14 +92,18 @@ fn mapping_members<'py>(py: Python<'py>, mapping: &Bound<'py, PyAny>) -> PyResul
         for key in keys {
             // A dict cannot hold a duplicate key; a key validated above is still present
             // unless a key's own hooks mutated the dict, which an exact str cannot.
-            let value = dict.get_item(&key)?.ok_or_else(|| protocol_error(py, core::UNSUPPORTED_JSON_TYPE))?;
+            let value = dict
+                .get_item(&key)?
+                .ok_or_else(|| protocol_error(py, core::UNSUPPORTED_JSON_TYPE))?;
             members.push((key, value));
         }
         return Ok(members);
     }
     let mut keys: Vec<Bound<'py, PyString>> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    let iterator = mapping.try_iter().map_err(|error| mapping_read_error(py, error))?;
+    let iterator = mapping
+        .try_iter()
+        .map_err(|error| mapping_read_error(py, error))?;
     for raw_key in iterator {
         let raw_key = raw_key.map_err(|error| mapping_read_error(py, error))?;
         let key = validate_object_key(py, &raw_key)?;
@@ -104,7 +116,9 @@ fn mapping_members<'py>(py: Python<'py>, mapping: &Bound<'py, PyAny>) -> PyResul
     }
     let mut members = Vec::with_capacity(keys.len());
     for key in keys {
-        let value = mapping.get_item(&key).map_err(|error| mapping_read_error(py, error))?;
+        let value = mapping
+            .get_item(&key)
+            .map_err(|error| mapping_read_error(py, error))?;
         members.push((key, value));
     }
     Ok(members)
@@ -125,21 +139,42 @@ pub fn new_json_object<'py>(
     let items = PyTuple::new(py, items)?;
     unsafe {
         let empty = PyTuple::empty(py);
-        let new = (*std::ptr::addr_of!(ffi::PyBaseObject_Type)).tp_new.expect("object.__new__");
-        let instance = new(class.as_ptr().cast::<ffi::PyTypeObject>(), empty.as_ptr(), std::ptr::null_mut());
+        let new = (*std::ptr::addr_of!(ffi::PyBaseObject_Type))
+            .tp_new
+            .expect("object.__new__");
+        let instance = new(
+            class.as_ptr().cast::<ffi::PyTypeObject>(),
+            empty.as_ptr(),
+            std::ptr::null_mut(),
+        );
         let instance = Bound::from_owned_ptr_or_err(py, instance)?;
         let proxy = Bound::from_owned_ptr_or_err(py, ffi::PyDictProxy_New(index.as_ptr()))?;
-        if ffi::PyObject_GenericSetAttr(instance.as_ptr(), pyo3::intern!(py, "_items").as_ptr(), items.as_ptr()) < 0 {
+        if ffi::PyObject_GenericSetAttr(
+            instance.as_ptr(),
+            pyo3::intern!(py, "_items").as_ptr(),
+            items.as_ptr(),
+        ) < 0
+        {
             return Err(PyErr::fetch(py));
         }
-        if ffi::PyObject_GenericSetAttr(instance.as_ptr(), pyo3::intern!(py, "_index").as_ptr(), proxy.as_ptr()) < 0 {
+        if ffi::PyObject_GenericSetAttr(
+            instance.as_ptr(),
+            pyo3::intern!(py, "_index").as_ptr(),
+            proxy.as_ptr(),
+        ) < 0
+        {
             return Err(PyErr::fetch(py));
         }
         Ok(instance)
     }
 }
 
-fn check_frozen_depth(py: Python<'_>, class: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>, depth: usize) -> PyResult<()> {
+fn check_frozen_depth(
+    py: Python<'_>,
+    class: &Bound<'_, PyAny>,
+    value: &Bound<'_, PyAny>,
+    depth: usize,
+) -> PyResult<()> {
     if depth >= MAX_JSON_DEPTH {
         return Err(protocol_error(py, core::NESTING_TOO_DEEP));
     }
@@ -150,7 +185,12 @@ fn check_frozen_depth(py: Python<'_>, class: &Bound<'_, PyAny>, value: &Bound<'_
     Ok(())
 }
 
-fn check_member_depth(py: Python<'_>, class: &Bound<'_, PyAny>, item: &Bound<'_, PyAny>, depth: usize) -> PyResult<()> {
+fn check_member_depth(
+    py: Python<'_>,
+    class: &Bound<'_, PyAny>,
+    item: &Bound<'_, PyAny>,
+    depth: usize,
+) -> PyResult<()> {
     if is_type(item, class) {
         check_frozen_depth(py, class, item, depth)
     } else if is_exact(item, ffi::PyTuple_CheckExact) {
@@ -166,7 +206,12 @@ fn check_member_depth(py: Python<'_>, class: &Bound<'_, PyAny>, item: &Bound<'_,
     }
 }
 
-fn freeze<'py>(py: Python<'py>, class: &Bound<'py, PyAny>, value: &Bound<'py, PyAny>, depth: usize) -> PyResult<Bound<'py, PyAny>> {
+fn freeze<'py>(
+    py: Python<'py>,
+    class: &Bound<'py, PyAny>,
+    value: &Bound<'py, PyAny>,
+    depth: usize,
+) -> PyResult<Bound<'py, PyAny>> {
     let pointer = value.as_ptr();
     if value.is_none() || unsafe { ffi::PyBool_Check(pointer) } != 0 {
         return Ok(value.clone());
@@ -226,13 +271,19 @@ fn freeze<'py>(py: Python<'py>, class: &Bound<'py, PyAny>, value: &Bound<'py, Py
 }
 
 fn json_object_class(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
-    JSON_OBJECT.get(py).ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("json_object_unbound"))
+    JSON_OBJECT
+        .get(py)
+        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("json_object_unbound"))
 }
 
 /// `_freeze_json(value, *, depth)`.
 #[pyfunction]
 #[pyo3(name = "values_freeze_json_at", signature = (value, *, depth))]
-pub fn freeze_json_at<'py>(py: Python<'py>, value: &Bound<'py, PyAny>, depth: usize) -> PyResult<Bound<'py, PyAny>> {
+pub fn freeze_json_at<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+    depth: usize,
+) -> PyResult<Bound<'py, PyAny>> {
     let class = json_object_class(py)?;
     freeze(py, &class, value, depth)
 }

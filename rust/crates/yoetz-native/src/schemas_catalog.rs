@@ -16,7 +16,8 @@ use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyList, PyString, PyTuple};
 use yoetz_core::protocol::schema_refs::{
-    RefDocument, RefFragment, Segment, is_subresource_position, list_index, split_reference, unescape_segment, utf16_cmp,
+    RefDocument, RefFragment, Segment, is_subresource_position, list_index, split_reference,
+    unescape_segment, utf16_cmp,
 };
 
 use crate::walk::{NATIVE_RECURSION_LIMIT, is_exact};
@@ -26,13 +27,19 @@ fn key_text<'a>(key: &'a Bound<'_, PyString>) -> &'a str {
     key.to_str().unwrap_or("")
 }
 
-fn freeze<'py>(py: Python<'py>, value: &Bound<'py, PyAny>, fallback: &Bound<'py, PyAny>, depth: usize) -> PyResult<Bound<'py, PyAny>> {
+fn freeze<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+    fallback: &Bound<'py, PyAny>,
+    depth: usize,
+) -> PyResult<Bound<'py, PyAny>> {
     if is_exact(value, ffi::PyDict_CheckExact) {
         if depth >= NATIVE_RECURSION_LIMIT {
             return fallback.call1((value,));
         }
         let source = unsafe { value.cast_unchecked::<PyDict>() };
-        let mut entries: Vec<(Bound<'py, PyString>, Bound<'py, PyAny>)> = Vec::with_capacity(source.len());
+        let mut entries: Vec<(Bound<'py, PyString>, Bound<'py, PyAny>)> =
+            Vec::with_capacity(source.len());
         for (key, member) in source.iter() {
             if !is_exact(&key, ffi::PyUnicode_CheckExact) {
                 // `str.encode` is the reference's to fail (or not) on this key.
@@ -46,7 +53,9 @@ fn freeze<'py>(py: Python<'py>, value: &Bound<'py, PyAny>, fallback: &Bound<'py,
             entries.push((key, member));
         }
         // Canonical catalog bytes already hold every object's keys in this order.
-        let ordered = entries.windows(2).all(|pair| utf16_cmp(key_text(&pair[0].0), key_text(&pair[1].0)).is_lt());
+        let ordered = entries
+            .windows(2)
+            .all(|pair| utf16_cmp(key_text(&pair[0].0), key_text(&pair[1].0)).is_lt());
         if !ordered {
             entries.sort_by(|left, right| utf16_cmp(key_text(&left.0), key_text(&right.0)));
         }
@@ -76,11 +85,19 @@ fn freeze<'py>(py: Python<'py>, value: &Bound<'py, PyAny>, fallback: &Bound<'py,
 /// `_freeze_json(value)`; `fallback` is the Python reference.
 #[pyfunction]
 #[pyo3(name = "schemas_freeze_json")]
-pub fn freeze_json<'py>(py: Python<'py>, value: &Bound<'py, PyAny>, fallback: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+pub fn freeze_json<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+    fallback: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
     freeze(py, value, fallback, 0)
 }
 
-fn uses_dynamic<'py>(value: &Bound<'py, PyAny>, fallback: &Bound<'py, PyAny>, depth: usize) -> PyResult<bool> {
+fn uses_dynamic<'py>(
+    value: &Bound<'py, PyAny>,
+    fallback: &Bound<'py, PyAny>,
+    depth: usize,
+) -> PyResult<bool> {
     if is_exact(value, ffi::PyDict_CheckExact) {
         if depth >= NATIVE_RECURSION_LIMIT {
             return fallback.call1((value,))?.is_truthy();
@@ -122,13 +139,20 @@ fn uses_dynamic<'py>(value: &Bound<'py, PyAny>, fallback: &Bound<'py, PyAny>, de
 /// `_uses_dynamic_reference(value)`; `fallback` is the Python reference.
 #[pyfunction]
 #[pyo3(name = "schemas_uses_dynamic_reference")]
-pub fn uses_dynamic_reference<'py>(value: &Bound<'py, PyAny>, fallback: &Bound<'py, PyAny>) -> PyResult<bool> {
+pub fn uses_dynamic_reference<'py>(
+    value: &Bound<'py, PyAny>,
+    fallback: &Bound<'py, PyAny>,
+) -> PyResult<bool> {
     uses_dynamic(value, fallback, 0)
 }
 
 /// Whether `referencing` resolves pointer `fragment` within `root`, with every value it asks
 /// for an `$id` answering `None`. `false` means undecided.
-fn pointer_resolves<'py>(py: Python<'py>, root: &Bound<'py, PyAny>, fragment: &str) -> PyResult<bool> {
+fn pointer_resolves<'py>(
+    py: Python<'py>,
+    root: &Bound<'py, PyAny>,
+    fragment: &str,
+) -> PyResult<bool> {
     let mut contents = root.clone();
     let mut segments: Vec<Segment> = Vec::new();
     for raw in fragment[1..].split('/') {
@@ -198,14 +222,19 @@ fn reference_resolves<'py>(
 /// returns without raising; `False` when only the Python loop can tell.
 #[pyfunction]
 #[pyo3(name = "schemas_references_resolvable")]
-pub fn references_resolvable<'py>(py: Python<'py>, plain_by_id: &Bound<'py, PyAny>) -> PyResult<bool> {
+pub fn references_resolvable<'py>(
+    py: Python<'py>,
+    plain_by_id: &Bound<'py, PyAny>,
+) -> PyResult<bool> {
     if !is_exact(plain_by_id, ffi::PyDict_CheckExact) {
         return Ok(false);
     }
     let source = unsafe { plain_by_id.cast_unchecked::<PyDict>() };
     let mut documents: HashMap<String, Bound<'py, PyAny>> = HashMap::with_capacity(source.len());
     for (schema_id, plain) in source.iter() {
-        if !is_exact(&schema_id, ffi::PyUnicode_CheckExact) || !is_exact(&plain, ffi::PyDict_CheckExact) {
+        if !is_exact(&schema_id, ffi::PyUnicode_CheckExact)
+            || !is_exact(&plain, ffi::PyDict_CheckExact)
+        {
             return Ok(false);
         }
         let Ok(text) = unsafe { schema_id.cast_unchecked::<PyString>() }.to_str() else {
@@ -221,11 +250,15 @@ pub fn references_resolvable<'py>(py: Python<'py>, plain_by_id: &Bound<'py, PyAn
                     if !is_exact(&key, ffi::PyUnicode_CheckExact) {
                         return Ok(false);
                     }
-                    if unsafe { key.cast_unchecked::<PyString>() }.to_str().is_ok_and(|text| text == "$ref") {
+                    if unsafe { key.cast_unchecked::<PyString>() }
+                        .to_str()
+                        .is_ok_and(|text| text == "$ref")
+                    {
                         if !is_exact(&item, ffi::PyUnicode_CheckExact) {
                             return Ok(false);
                         }
-                        let Ok(reference) = unsafe { item.cast_unchecked::<PyString>() }.to_str() else {
+                        let Ok(reference) = unsafe { item.cast_unchecked::<PyString>() }.to_str()
+                        else {
                             return Ok(false);
                         };
                         if !reference_resolves(py, &documents, current, reference)? {

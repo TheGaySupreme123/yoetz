@@ -48,7 +48,13 @@ struct Ordered {
 
 impl Ordered {
     fn new() -> Self {
-        Ordered { map: HashMap::new(), nodes: Vec::new(), free: Vec::new(), head: NIL, tail: NIL }
+        Ordered {
+            map: HashMap::new(),
+            nodes: Vec::new(),
+            free: Vec::new(),
+            head: NIL,
+            tail: NIL,
+        }
     }
 
     fn len(&self) -> usize {
@@ -103,14 +109,25 @@ impl Ordered {
     }
 
     /// `od[key] = (item, value)`: replace in place, or append. Returns the replaced pair.
-    fn assign(&mut self, key: MemoKey, item: Py<PyAny>, value: Py<PyAny>) -> Option<(Py<PyAny>, Py<PyAny>)> {
+    fn assign(
+        &mut self,
+        key: MemoKey,
+        item: Py<PyAny>,
+        value: Py<PyAny>,
+    ) -> Option<(Py<PyAny>, Py<PyAny>)> {
         if let Some(&index) = self.map.get(&key) {
             let node = self.node_mut(index);
             let old_item = std::mem::replace(&mut node.item, item);
             let old_value = std::mem::replace(&mut node.value, value);
             return Some((old_item, old_value));
         }
-        let node = Node { key: key.clone(), item, value, prev: NIL, next: NIL };
+        let node = Node {
+            key: key.clone(),
+            item,
+            value,
+            prev: NIL,
+            next: NIL,
+        };
         let index = match self.free.pop() {
             Some(index) => {
                 self.nodes[index] = Some(node);
@@ -163,10 +180,17 @@ pub struct IdentityMemo {
 
 impl IdentityMemo {
     fn lock(&self) -> std::sync::MutexGuard<'_, Ordered> {
-        self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn lookup<'py>(&self, py: Python<'py>, key: &MemoKey, item: &Bound<'py, PyAny>) -> Option<Bound<'py, PyAny>> {
+    fn lookup<'py>(
+        &self,
+        py: Python<'py>,
+        key: &MemoKey,
+        item: &Bound<'py, PyAny>,
+    ) -> Option<Bound<'py, PyAny>> {
         let mut entries = self.lock();
         let index = *entries.map.get(key)?;
         let node = entries.node(index);
@@ -222,7 +246,10 @@ impl IdentityMemo {
 }
 
 fn identity_key(item: &Bound<'_, PyAny>) -> MemoKey {
-    MemoKey { id: item.as_ptr() as usize, tag: None }
+    MemoKey {
+        id: item.as_ptr() as usize,
+        tag: None,
+    }
 }
 
 #[pymethods]
@@ -230,7 +257,11 @@ impl IdentityMemo {
     #[new]
     #[pyo3(signature = (capacity, *, lru = true))]
     fn new(capacity: usize, lru: bool) -> Self {
-        IdentityMemo { capacity, lru, entries: Mutex::new(Ordered::new()) }
+        IdentityMemo {
+            capacity,
+            lru,
+            entries: Mutex::new(Ordered::new()),
+        }
     }
 
     /// The cached value for `item` (moving it to the end of an LRU memo), else `None`.
@@ -255,13 +286,19 @@ impl IdentityMemo {
 
     /// A callable `item -> value` over this memo that builds misses with `factory(item)`.
     fn bind(slf: Bound<'_, Self>, factory: Bound<'_, PyAny>) -> MemoCall {
-        MemoCall { memo: slf.unbind(), factory: factory.unbind() }
+        MemoCall {
+            memo: slf.unbind(),
+            factory: factory.unbind(),
+        }
     }
 
     /// A callable `(tag, item) -> value` over this memo, keyed by `(tag, id(item))`, that builds
     /// misses with `factory(tag, item)`.
     fn bind_tagged(slf: Bound<'_, Self>, factory: Bound<'_, PyAny>) -> TaggedMemoCall {
-        TaggedMemoCall { memo: slf.unbind(), factory: factory.unbind() }
+        TaggedMemoCall {
+            memo: slf.unbind(),
+            factory: factory.unbind(),
+        }
     }
 
     fn __len__(&self) -> usize {
@@ -278,19 +315,31 @@ pub struct MemoCall {
 
 #[pymethods]
 impl MemoCall {
-    fn __call__<'py>(&self, py: Python<'py>, item: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    fn __call__<'py>(
+        &self,
+        py: Python<'py>,
+        item: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let factory = self.factory.bind(py);
-        self.memo.get().get_or_build(py, identity_key(item), item, || factory.call1((item,)))
+        self.memo
+            .get()
+            .get_or_build(py, identity_key(item), item, || factory.call1((item,)))
     }
 
     /// `tuple(self(item) for item in items)`.
-    fn many<'py>(&self, py: Python<'py>, items: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyTuple>> {
+    fn many<'py>(
+        &self,
+        py: Python<'py>,
+        items: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyTuple>> {
         let memo = self.memo.get();
         let factory = self.factory.bind(py);
         let mut values = Vec::new();
         for item in items.try_iter()? {
             let item = item?;
-            values.push(memo.get_or_build(py, identity_key(&item), &item, || factory.call1((&item,)))?);
+            values.push(
+                memo.get_or_build(py, identity_key(&item), &item, || factory.call1((&item,)))?,
+            );
         }
         PyTuple::new(py, values)
     }
@@ -316,8 +365,13 @@ impl TaggedMemoCall {
         let Some(text) = exact_str(tag) else {
             return factory.call1((tag, item));
         };
-        let key = MemoKey { id: item.as_ptr() as usize, tag: Some(text.into()) };
-        self.memo.get().get_or_build(py, key, item, || factory.call1((tag, item)))
+        let key = MemoKey {
+            id: item.as_ptr() as usize,
+            tag: Some(text.into()),
+        };
+        self.memo
+            .get()
+            .get_or_build(py, key, item, || factory.call1((tag, item)))
     }
 }
 
@@ -422,7 +476,11 @@ pub fn observation_local_dedup_eviction_key<'py>(
         let lane = match lanes_dict.get_item(key)? {
             Some(lane) => lane,
             // `f"_unknown:{key}"`, which can coincide with a real lane of that spelling.
-            None => PyString::new(py, &format!("_unknown:{}", exact_str(key).unwrap_or_default())).into_any(),
+            None => PyString::new(
+                py,
+                &format!("_unknown:{}", exact_str(key).unwrap_or_default()),
+            )
+            .into_any(),
         };
         if exact_str(&lane).is_none() {
             return Ok((false, None));
@@ -431,7 +489,10 @@ pub fn observation_local_dedup_eviction_key<'py>(
     }
     let mut lanes = Vec::with_capacity(lane_objects.len());
     for lane in &lane_objects {
-        lanes.push(core::HashedStr { hash: str_hash(lane)?, text: exact_str(lane).unwrap_or_default() });
+        lanes.push(core::HashedStr {
+            hash: str_hash(lane)?,
+            text: exact_str(lane).unwrap_or_default(),
+        });
     }
     let position = core::dedup_eviction_position(&lanes);
     Ok((true, position.map(|index| ordered[index].clone())))
@@ -454,7 +515,11 @@ pub fn observation_local_dedup_sessions<'py>(
         if exact_str(&key).is_none() {
             return Ok(None);
         }
-        values.push(lanes.get_item(&key)?.unwrap_or_else(|| py.None().into_bound(py)));
+        values.push(
+            lanes
+                .get_item(&key)?
+                .unwrap_or_else(|| py.None().into_bound(py)),
+        );
     }
     Ok(Some(PyTuple::new(py, values)?))
 }
@@ -486,7 +551,11 @@ fn scalar_text(value: &Bound<'_, PyAny>, out: &mut Vec<u8>) -> Option<()> {
 }
 
 /// One member's canonical text: a scalar, or a nested object of the bound `JsonObject` class.
-fn member_text(py: Python<'_>, value: &Bound<'_, PyAny>, json_object: &Bound<'_, PyAny>) -> Option<Vec<u8>> {
+fn member_text(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    json_object: &Bound<'_, PyAny>,
+) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     if value.get_type().as_ptr() == json_object.as_ptr() {
         // A frozen object is already validated; only its nesting depth is checked again, and
@@ -501,7 +570,10 @@ fn member_text(py: Python<'_>, value: &Bound<'_, PyAny>, json_object: &Bound<'_,
 
 fn digest_members(members: &mut [(&str, Vec<u8>)]) -> Option<String> {
     for index in 1..members.len() {
-        if members[..index].iter().any(|(key, _)| *key == members[index].0) {
+        if members[..index]
+            .iter()
+            .any(|(key, _)| *key == members[index].0)
+        {
             return None;
         }
     }
@@ -539,8 +611,11 @@ pub fn observation_local_flat_digest(
         keys.push(key);
         values.push(text);
     }
-    let mut members: Vec<(&str, Vec<u8>)> =
-        keys.iter().zip(values).map(|(key, value)| (exact_str(key).unwrap_or_default(), value)).collect();
+    let mut members: Vec<(&str, Vec<u8>)> = keys
+        .iter()
+        .zip(values)
+        .map(|(key, value)| (exact_str(key).unwrap_or_default(), value))
+        .collect();
     Ok(digest_members(&mut members))
 }
 
@@ -553,16 +628,33 @@ pub fn observation_local_dedup_digest(
     envelope: &Bound<'_, PyAny>,
 ) -> PyResult<Option<String>> {
     let session = envelope.getattr(pyo3::intern!(py, "session_commitment"))?;
-    let source = envelope.getattr(pyo3::intern!(py, "source"))?.getattr(pyo3::intern!(py, "value"))?;
+    let source = envelope
+        .getattr(pyo3::intern!(py, "source"))?
+        .getattr(pyo3::intern!(py, "value"))?;
     let source_identity = envelope.getattr(pyo3::intern!(py, "source_identity"))?;
     let event_kind = envelope.getattr(pyo3::intern!(py, "event_kind"))?;
     let cursor = envelope.getattr(pyo3::intern!(py, "cursor"))?;
     let cursor_fields = [
-        ("source_generation", cursor.getattr(pyo3::intern!(py, "source_generation"))?),
-        ("byte_position", cursor.getattr(pyo3::intern!(py, "byte_position"))?),
-        ("event_position", cursor.getattr(pyo3::intern!(py, "event_position"))?),
-        ("last_source_commitment", cursor.getattr(pyo3::intern!(py, "last_source_commitment"))?),
-        ("mapping_version", cursor.getattr(pyo3::intern!(py, "mapping_version"))?),
+        (
+            "source_generation",
+            cursor.getattr(pyo3::intern!(py, "source_generation"))?,
+        ),
+        (
+            "byte_position",
+            cursor.getattr(pyo3::intern!(py, "byte_position"))?,
+        ),
+        (
+            "event_position",
+            cursor.getattr(pyo3::intern!(py, "event_position"))?,
+        ),
+        (
+            "last_source_commitment",
+            cursor.getattr(pyo3::intern!(py, "last_source_commitment"))?,
+        ),
+        (
+            "mapping_version",
+            cursor.getattr(pyo3::intern!(py, "mapping_version"))?,
+        ),
     ];
     let mut nested: Vec<(&str, Vec<u8>)> = Vec::with_capacity(5);
     for (key, value) in &cursor_fields {
@@ -609,8 +701,14 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<IdentityMemo>()?;
     module.add_class::<MemoCall>()?;
     module.add_class::<TaggedMemoCall>()?;
-    module.add_function(wrap_pyfunction!(observation_local_ordered_dedup_keys, module)?)?;
-    module.add_function(wrap_pyfunction!(observation_local_dedup_eviction_key, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        observation_local_ordered_dedup_keys,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        observation_local_dedup_eviction_key,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(observation_local_dedup_sessions, module)?)?;
     module.add_function(wrap_pyfunction!(observation_local_flat_digest, module)?)?;
     module.add_function(wrap_pyfunction!(observation_local_dedup_digest, module)?)?;
