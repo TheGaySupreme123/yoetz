@@ -292,10 +292,10 @@ def scenario_process() -> dict[str, float]:
     ]
     return {
         "process: import yoetz.mcp.server (wall)": _best(
-            run([python, "-c", "import yoetz.mcp.server"]), repeat=5
+            run([python, "-c", "import yoetz.mcp.server"]), repeat=15
         ),
         "process: one Claude Code PreToolUse hook (wall)": _best(
-            run(hook, b'{"session_id":"native-bench"}'), repeat=5
+            run(hook, b'{"session_id":"native-bench"}'), repeat=15
         ),
     }
 
