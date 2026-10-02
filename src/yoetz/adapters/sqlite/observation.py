@@ -2414,5 +2414,32 @@ def _bind_native() -> None:
 
     globals().update(_fold_status_rows=native_fold_status_rows)
 
+    rows = native_functions("observation_envelopes_from_rows")
+    if rows is None:
+        return
+    (native_envelopes_from_rows,) = rows
+    python_envelopes_from_rows = SqliteObservationStore._envelopes_from_rows  # pyright: ignore[reportPrivateUsage]
+    bound_json_object = JsonObject
+    bound_from_json = observation_envelope_from_json
+
+    def envelopes_from_rows(rows: Iterable[object]) -> tuple[ObservationEnvelope, ...]:
+        # The batch parses, freezes, and decodes natively (deferring per row to the domain
+        # reference); a replaced parser, ``json.loads``, ``JsonObject``, or decoder keeps the
+        # reference loop.
+        if (
+            strict_json_parse is bound_parse
+            and json.loads is stdlib_loads
+            and JsonObject is bound_json_object
+            and observation_envelope_from_json is bound_from_json
+        ):
+            decoded = native_envelopes_from_rows(rows)
+            if decoded is not None:
+                return cast(tuple[ObservationEnvelope, ...], decoded)
+        return python_envelopes_from_rows(rows)
+
+    envelopes_from_rows.__name__ = python_envelopes_from_rows.__name__
+    envelopes_from_rows.__qualname__ = python_envelopes_from_rows.__qualname__
+    SqliteObservationStore._envelopes_from_rows = staticmethod(envelopes_from_rows)  # type: ignore[method-assign]  # pyright: ignore[reportPrivateUsage]
+
 
 _bind_native()
