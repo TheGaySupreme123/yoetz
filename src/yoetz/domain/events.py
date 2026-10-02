@@ -4959,7 +4959,7 @@ class AcceptedEvent:
                     is not EvidenceImmutability.IMMUTABLE_SNAPSHOT
                 ):
                     raise ProtocolValueError("evidence_digest_provenance_invalid")
-        if compute_entry_digest(accepted_record_digest_preimage(self)) != self.entry_digest:
+        if _record_entry_digest(self) != self.entry_digest:
             raise ProtocolValueError("entry_digest_mismatch")
 
 
@@ -5012,7 +5012,7 @@ class UnknownEvent:
             object.__setattr__(self, "payload", frozen)
             if canonical_digest(frozen) != self.canonical_payload_digest:
                 raise ProtocolValueError("invalid_projection_locator")
-        if compute_entry_digest(accepted_record_digest_preimage(self)) != self.entry_digest:
+        if _record_entry_digest(self) != self.entry_digest:
             raise ProtocolValueError("entry_digest_mismatch")
 
 
@@ -5112,3 +5112,65 @@ def accepted_record_digest_preimage(record: LedgerRecord) -> JsonObject:
 
     full = accepted_record_to_json(record)
     return JsonObject(tuple((key, value) for key, value in full.items() if key != "entry_digest"))
+
+
+def _record_entry_digest(record: LedgerRecord) -> str:
+    """Digest the record's accepted-entry preimage (the post-init integrity check)."""
+
+    return compute_entry_digest(accepted_record_digest_preimage(record))
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions(
+        "bind_events",
+        "events_entry_digest",
+        "validate_ascii_sorted_unique",
+        "id_tuple",
+        "evidence_result_tuple",
+    )
+    if resolved is None:
+        return
+    (
+        bind_events,
+        native_entry_digest,
+        native_validate_ascii_sorted_unique,
+        native_id_tuple,
+        native_evidence_result_tuple,
+    ) = resolved
+    bind_events(globals(), Coverage, _validate_ascii_sorted_unique, MAX_REF_LIST)
+
+    python_record_entry_digest = _record_entry_digest
+    bound_entry_digest = compute_entry_digest
+    python_preimage = accepted_record_digest_preimage
+    python_to_json = accepted_record_to_json
+    python_coverage_to_json = coverage_to_json
+
+    def native_record_entry_digest(record: LedgerRecord) -> str:
+        """Digest the record's accepted-entry preimage (the post-init integrity check)."""
+
+        # The native twin writes the preimage bytes directly. Every step the reference takes
+        # through a module global must still be the original, or the reference answers.
+        record_type = type(record)
+        if (
+            (record_type is AcceptedEvent or record_type is UnknownEvent)
+            and compute_entry_digest is bound_entry_digest
+            and accepted_record_digest_preimage is python_preimage
+            and accepted_record_to_json is python_to_json
+            and coverage_to_json is python_coverage_to_json
+        ):
+            digest = native_entry_digest(record)
+            if digest is not None:
+                return cast(str, digest)
+        return python_record_entry_digest(record)
+
+    globals().update(
+        _record_entry_digest=native_record_entry_digest,
+        _validate_ascii_sorted_unique=native_validate_ascii_sorted_unique,
+        _id_tuple=native_id_tuple,
+        _evidence_result_tuple=native_evidence_result_tuple,
+    )
+
+
+_bind_native()

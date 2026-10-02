@@ -38,6 +38,7 @@ mod kernel_reducers;
 mod deterministic_checks;
 mod observation_advice;
 mod work_integrity;
+mod events;
 
 #[pymodule]
 fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -71,5 +72,6 @@ fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     deterministic_checks::register(module)?;
     observation_advice::register(module)?;
     work_integrity::register(module)?;
+    events::register(module)?;
     Ok(())
 }
