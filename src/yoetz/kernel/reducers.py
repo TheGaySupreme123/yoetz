@@ -1671,19 +1671,6 @@ def build_replay_index(events: tuple[LedgerRecord, ...]) -> ReplayIndex:
 
     if type(events) is not tuple:
         raise _corrupt()
-    return _build_replay_index_from(events, None)
-
-
-def _build_replay_index_from(
-    events: tuple[LedgerRecord, ...], seed: tuple[int, ReplayIndex] | None
-) -> ReplayIndex:
-    """Index *events*; ``seed`` is ``(n, index)`` for an index already built over ``events[:n]``.
-
-    A seeded build starts from that validated index's maps and folds only ``events[n:]``. The
-    immutable result is then constructed with the seed as its trusted prior, so the carried
-    entries are not re-validated while every new entry and every whole-index invariant is.
-    """
-
     frontier = 0
     head_digest = "genesis"
     first_task_statement_sequence: int | None = None
@@ -1692,20 +1679,7 @@ def _build_replay_index_from(
     redaction_root_by_object: dict[ObjectId, EventId] = {}
     observed_event_ids: set[EventId] = set()
     observation_finding_event_ids: set[EventId] = set()
-    suffix: Iterable[LedgerRecord] = events
-    prior: ReplayIndex | None = None
-    if seed is not None:
-        start, prior = seed
-        frontier = prior.frontier
-        head_digest = prior.head_digest
-        first_task_statement_sequence = prior.first_task_statement_sequence
-        payload_event_by_object = _dict_copy(prior.payload_event_by_object)
-        evidence_sources_by_object = _dict_copy(prior.evidence_sources_by_object)
-        redaction_root_by_object = _dict_copy(prior.redaction_root_by_object)
-        observed_event_ids = set(prior.observed_event_ids)
-        observation_finding_event_ids = set(prior.observation_finding_event_ids)
-        suffix = events[start:]
-    for event in suffix:
+    for event in events:
         _next_record(frontier, head_digest, event)
         if is_observed_run_record(event):
             observed_event_ids.add(event.event_id)
@@ -1766,20 +1740,16 @@ def _build_replay_index_from(
         if first_task_statement_sequence is None and may_carry_task_statement(event):
             first_task_statement_sequence = frontier
 
-    token = _TRUSTED_PRIOR_INDEX.set(prior)
-    try:
-        return ReplayIndex(
-            frontier=frontier,
-            head_digest=head_digest,
-            payload_event_by_object=payload_event_by_object,
-            evidence_sources_by_object=evidence_sources_by_object,
-            redaction_root_by_object=redaction_root_by_object,
-            observed_event_ids=frozenset(observed_event_ids),
-            observation_finding_event_ids=frozenset(observation_finding_event_ids),
-            first_task_statement_sequence=first_task_statement_sequence,
-        )
-    finally:
-        _TRUSTED_PRIOR_INDEX.reset(token)
+    return ReplayIndex(
+        frontier=frontier,
+        head_digest=head_digest,
+        payload_event_by_object=payload_event_by_object,
+        evidence_sources_by_object=evidence_sources_by_object,
+        redaction_root_by_object=redaction_root_by_object,
+        observed_event_ids=frozenset(observed_event_ids),
+        observation_finding_event_ids=frozenset(observation_finding_event_ids),
+        first_task_statement_sequence=first_task_statement_sequence,
+    )
 
 
 def validate_replay_index(index: ReplayIndex, events: tuple[LedgerRecord, ...]) -> None:

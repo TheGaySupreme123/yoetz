@@ -164,3 +164,17 @@ suite.
   hooks themselves fast.
 - I/O-bound orchestration (asyncio service, SQLite through apsw, cryptography, git subprocesses,
   the terminal interface) stays Python; its cost is not in Python bytecode.
+- Recursion depth. Wire and file JSON is refused past `MAX_JSON_DEPTH` (64) on both paths, so
+  every structure Yoetz parses is walked identically. Only an in-process Python object nested past
+  the native walk limit (192 levels) behaves differently: the walker hands that subtree to the
+  Python reference, so the call still succeeds or raises `RecursionError` as CPython decides, but
+  the depth at which `RecursionError` fires is not the pure-Python one (for example about 1,190
+  instead of 996 levels for control-frame conversion, about 690 instead of 997 for schema
+  freezing, whose reference recursion re-enters through the native twin).
+- Refusals cost more than in pure Python. Error replay runs the native attempt and then the
+  Python reference, so a rejected input costs one native pass plus the reference (a canonical
+  refusal takes about 13 µs instead of 7 µs); accepted inputs, the common case, take only the
+  native pass.
+- No replay caches. The kernel twins keep no ledger state between calls (a cached index or
+  projection would retain event payloads past the reference's lifetime), so extending an existing
+  replay costs the same as in pure Python per appended record.

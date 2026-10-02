@@ -64,7 +64,18 @@ def scenario_canonical() -> dict[str, float]:
         f"canonical: canonical_digest ({len(raw) // 1024} KiB state)": _best(
             lambda: canonical_digest(document)  # pyright: ignore[reportArgumentType]
         ),
+        "canonical: refuse a small object holding a float": _best(
+            lambda: _refuse(canonical_encode), number=2_000
+        ),
     }
+
+
+def _refuse(encode: Callable[[Any], bytes]) -> None:
+    try:
+        encode({"id": "a", "values": [1, 2, 3], "ratio": 0.5})
+    except ValueError:
+        return
+    raise AssertionError("canonical_encode accepted a float")
 
 
 def scenario_privacy_scan() -> dict[str, float]:
@@ -193,15 +204,22 @@ def scenario_replay() -> dict[str, float]:
         return ledger._state.records
 
     records = asyncio.run(build())
-    # Fresh record objects per run, as a restart or reload presents them: replay keeps the last
-    # replayed tuple and continues from it when the new one starts with the identical objects,
-    # which would turn a repeated replay of the same tuple into a warm extension.
+    # Fresh record objects per run, as a restart or reload presents them.
     fresh = iter([tuple(copy.copy(record) for record in records) for _ in range(4)])
 
     def cold() -> object:
         return reducers.replay_with_index(next(fresh))
 
-    return {f"kernel: genesis replay of a {len(records)}-record ledger": _best(cold, repeat=3)}
+    prior_records, appended = records[:-1], records[-1:]
+    prior_projection = reducers.replay(prior_records)
+
+    def extend() -> object:
+        return reducers.replay_extension_with_index(prior_projection, prior_records, appended)
+
+    return {
+        f"kernel: genesis replay of a {len(records)}-record ledger": _best(cold, repeat=3),
+        f"kernel: extend a {len(prior_records)}-record replay by one record": _best(extend),
+    }
 
 
 def scenario_hooks() -> dict[str, float]:
