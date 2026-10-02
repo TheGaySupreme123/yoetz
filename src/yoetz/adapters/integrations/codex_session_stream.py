@@ -2919,3 +2919,287 @@ def _reconcile_session_stream_path(
         "truncated": advance.truncated,
         "resolved": True,
     }
+
+
+def _bind_native() -> None:
+    """Bind the accelerator's twins for this module's pure per-record steps.
+
+    Every wrapper defers to the Python reference while a collaborator its twin inlines or
+    bypasses is no longer the bound original (``_token``, ``_structural_body``,
+    ``_hook_post_stated``, ``JsonObject``, ``canonical_encode``, ``hmac.new``, ...), and whenever
+    the twin reports input it does not model, so a refusal is always the reference's own.
+    """
+
+    import sys
+
+    from yoetz._native import NATIVE_ENV, native_functions
+
+    resolved = native_functions(
+        "bind_codex_session_stream",
+        "codex_stream_tables",
+        "codex_stream_token",
+        "codex_stream_consistent_alias_token",
+        "codex_stream_structural_body",
+        "codex_stream_mcp_item_failed",
+        "codex_stream_child_session_header",
+        "codex_stream_structural",
+        "codex_stream_rollout_item_decisions",
+        "codex_stream_filename_matches",
+        "codex_stream_encode_oversized_partial",
+        "codex_stream_decode_oversized_partial",
+        "codex_stream_oversized_line_commitment",
+        "codex_stream_source_file_identity",
+    )
+    if resolved is None:
+        return
+    (
+        bind,
+        tables,
+        native_token,
+        native_alias,
+        native_structural_body,
+        native_mcp_item_failed,
+        native_child_header,
+        native_structural,
+        native_decisions,
+        native_filename,
+        native_encode_partial,
+        native_decode_partial,
+        native_line_commitment,
+        native_file_identity,
+    ) = resolved
+    native = tables()
+    # The twins hard-code these constants; a drifted copy keeps Python.
+    if not (
+        native["_OVERSIZED_PARTIAL_PREFIX"] == _OVERSIZED_PARTIAL_PREFIX
+        and native["_OVERSIZED_PARTIAL_DOMAIN"] == _OVERSIZED_PARTIAL_DOMAIN
+        and native["_OVERSIZED_LINE_DOMAIN"] == _OVERSIZED_LINE_DOMAIN
+        and native["_MAX_CANONICAL_INTEGER"] == _MAX_CANONICAL_INTEGER
+        and native["_JSONL_SUFFIXES"] == _JSONL_SUFFIXES
+        and frozenset(native["_PAIRING_CLOSE_EVENTS"]) == _PAIRING_CLOSE_EVENTS
+        and all(
+            (_token("a" + chr(code)) is not None) == (chr(code) in native["_TOKEN_ALPHABET"])
+            for code in range(256)
+        )
+        and all(
+            (_token(ch) is not None) == (ch not in native["_TOKEN_LEADING_REFUSED"])
+            for ch in native["_TOKEN_ALPHABET"]
+        )
+        and _token("a" * native["_TOKEN_MAX_CHARS"]) is not None
+        and _token("a" * (native["_TOKEN_MAX_CHARS"] + 1)) is None
+    ):
+        if os.environ.get(NATIVE_ENV, "") == "require":
+            raise ImportError("yoetz_native_table_mismatch")
+        return
+    bind(
+        globals(),
+        (
+            ObservationGapCode.UNSUPPORTED_EVENT.value,
+            ObservationGapCode.MISSING_SUBAGENT_IDENTITY.value,
+        ),
+        (_ITEM_CARRIER, _ITEM_COPY, _ITEM_PENDING, _ITEM_UNPAIRED),
+    )
+
+    python_alias = _consistent_alias_token
+    python_structural = structural_from_stream_record
+    python_spawn_parent_thread = _spawn_parent_thread
+    python_child_session_identity = _child_session_identity
+    python_decisions = _rollout_item_decisions
+    python_hook_post_stated = _hook_post_stated
+    python_hooked_tool_item = _hooked_tool_item
+    python_filename = rollout_filename_matches_token
+    python_encode_partial = _encode_oversized_partial
+    python_decode_partial = _decode_oversized_partial
+    python_line_commitment = _oversized_line_commitment
+    python_file_identity = _source_file_identity
+    bound_json_object = JsonObject
+    bound_close_events = _PAIRING_CLOSE_EVENTS
+    bound_suffixes = _JSONL_SUFFIXES
+    bound_hmac_new = hmac.new
+    bound_sha256 = hashlib.sha256
+    bound_canonical_encode = canonical_encode
+
+    def hmac_intact() -> bool:
+        return hmac.new is bound_hmac_new and hashlib.sha256 is bound_sha256
+
+    def native_consistent_alias_token(
+        body: Mapping[str, JsonValue], names: tuple[str, ...]
+    ) -> tuple[str | None, bool]:
+        if _token is native_token and type(names) is tuple:
+            result = native_alias(body, names)
+            if result is not None:
+                return cast(tuple[str | None, bool], result)
+        return python_alias(body, names)
+
+    def native_structural_from_stream_record(
+        record: CodexParsedRecord,
+        *,
+        profile: CodexCapabilityProfile | None = None,
+        key_material: bytes | None = None,
+    ) -> tuple[JsonObject, tuple[str, ...]]:
+        if (
+            _token is native_token
+            and _normalize_tool_name is native_token
+            and _structural_body is native_structural_body
+            and _mcp_item_failed is native_mcp_item_failed
+            and _consistent_alias_token is native_consistent_alias_token
+            and _child_session_identity is python_child_session_identity
+            and _child_session_header is native_child_header
+            and _spawn_parent_thread is python_spawn_parent_thread
+        ):
+            return cast(
+                tuple[JsonObject, tuple[str, ...]],
+                native_structural(record, profile, key_material),
+            )
+        return python_structural(record, profile=profile, key_material=key_material)
+
+    def native_rollout_item_decisions(
+        envelopes: tuple[ObservationEnvelope, ...],
+        session_commitment: str,
+        evicted_open_calls: tuple[tuple[str, str], ...] = (),
+    ) -> dict[str, str]:
+        if (
+            _token is native_token
+            and _hook_post_stated is python_hook_post_stated
+            and _hooked_tool_item is python_hooked_tool_item
+            and _PAIRING_CLOSE_EVENTS is bound_close_events
+        ):
+            decided = native_decisions(
+                envelopes,
+                session_commitment,
+                evicted_open_calls,
+                ObservationSource.CODEX_HOOK,
+                ObservationSource.CODEX_SESSION_STREAM,
+            )
+            if decided is not None:
+                return cast(dict[str, str], decided)
+        return python_decisions(envelopes, session_commitment, evicted_open_calls)
+
+    def native_rollout_filename_matches_token(filename: str | Path, token: str) -> bool:
+        if _token is native_token and _JSONL_SUFFIXES is bound_suffixes:
+            matched = native_filename(filename, token)
+            if matched is not None:
+                return cast(bool, matched)
+        return python_filename(filename, token)
+
+    def native_encode_oversized_partial(
+        *,
+        line_start: int,
+        prefix_commitment: str,
+        session_commitment: str,
+        source_generation: int,
+        source_identity: str,
+        key_material: bytes,
+    ) -> bytes:
+        if hmac_intact():
+            handled, encoded = native_encode_partial(
+                line_start,
+                prefix_commitment,
+                session_commitment,
+                source_generation,
+                source_identity,
+                key_material,
+            )
+            if handled:
+                if encoded is None:
+                    raise ValueError("session_stream_partial_invalid")
+                return cast(bytes, encoded)
+        return python_encode_partial(
+            line_start=line_start,
+            prefix_commitment=prefix_commitment,
+            session_commitment=session_commitment,
+            source_generation=source_generation,
+            source_identity=source_identity,
+            key_material=key_material,
+        )
+
+    def native_decode_oversized_partial(
+        value: bytes,
+        *,
+        session_commitment: str,
+        source_generation: int,
+        source_identity: str,
+        key_material: bytes,
+    ) -> _OversizedLineState | None:
+        if hmac_intact():
+            outcome, state = native_decode_partial(
+                value, session_commitment, source_generation, source_identity, key_material
+            )
+            if outcome == 1:
+                return None
+            if outcome == 2:
+                raise ValueError("session_stream_partial_invalid")
+            if outcome == 3:
+                line_start, prefix_digest = state
+                return _OversizedLineState(line_start, prefix_digest)
+        return python_decode_partial(
+            value,
+            session_commitment=session_commitment,
+            source_generation=source_generation,
+            source_identity=source_identity,
+            key_material=key_material,
+        )
+
+    def native_oversized_line_commitment(
+        *,
+        state: _OversizedLineState,
+        byte_end: int,
+        session_commitment: str,
+        source_generation: int,
+        source_identity: str,
+        key_material: bytes,
+    ) -> str:
+        if hmac_intact():
+            commitment = native_line_commitment(
+                state.line_start,
+                state.prefix_digest,
+                byte_end,
+                session_commitment,
+                source_generation,
+                source_identity,
+                key_material,
+            )
+            if commitment is not None:
+                return cast(str, commitment)
+        return python_line_commitment(
+            state=state,
+            byte_end=byte_end,
+            session_commitment=session_commitment,
+            source_generation=source_generation,
+            source_identity=source_identity,
+            key_material=key_material,
+        )
+
+    def native_source_file_identity(facts: os.stat_result, key_material: bytes) -> str:
+        if (
+            hmac_intact()
+            and canonical_encode is bound_canonical_encode
+            and JsonObject is bound_json_object
+        ):
+            identity = native_file_identity(facts, key_material)
+            if identity is not None:
+                return cast(str, identity)
+        return python_file_identity(facts, key_material)
+
+    rebound: dict[str, object] = {
+        "_token": native_token,
+        # ``_normalize_tool_name`` returns its ``_token`` in every branch.
+        "_normalize_tool_name": native_token,
+        "_consistent_alias_token": native_consistent_alias_token,
+        "_structural_body": native_structural_body,
+        "_mcp_item_failed": native_mcp_item_failed,
+        "_child_session_header": native_child_header,
+        "structural_from_stream_record": native_structural_from_stream_record,
+        "_rollout_item_decisions": native_rollout_item_decisions,
+        "_encode_oversized_partial": native_encode_oversized_partial,
+        "_decode_oversized_partial": native_decode_oversized_partial,
+        "_oversized_line_commitment": native_oversized_line_commitment,
+        "_source_file_identity": native_source_file_identity,
+    }
+    # The twin reads a file name the way ``PurePosixPath`` does.
+    if sys.platform != "win32":
+        rebound["rollout_filename_matches_token"] = native_rollout_filename_matches_token
+    globals().update(rebound)
+
+
+_bind_native()

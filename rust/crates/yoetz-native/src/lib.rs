@@ -31,6 +31,8 @@ mod secret_memory;
 mod sqlite_connection;
 mod sqlite_observation;
 mod hookcli;
+mod observation_local;
+mod codex_session_stream;
 
 #[pymodule]
 fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -57,5 +59,7 @@ fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     sqlite_connection::register(module)?;
     sqlite_observation::register(module)?;
     hookcli::register(module)?;
+    observation_local::register(module)?;
+    codex_session_stream::register(module)?;
     Ok(())
 }
