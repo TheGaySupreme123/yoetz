@@ -1,8 +1,8 @@
 //! `yoetz.adapters.integrations.toml_tables` over exact `bytes` and UTF-8 encodable `str`.
 //!
-//! The Python wrappers only call these for exact `bytes` input and a non-empty table or block;
-//! everything else (and a string with a lone surrogate, which the reference refuses with
-//! `UnicodeEncodeError`) stays on the reference.
+//! The Python wrappers only call these for exact `bytes` input and a non-empty table; anything
+//! else stays on the reference. A table with a lone surrogate raises the same strict-codec
+//! `UnicodeEncodeError` the reference's `table.encode("utf-8")` raises.
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyString};
@@ -27,19 +27,8 @@ pub fn toml_strip_exact_table<'py>(
     }
 }
 
-/// `append_table_block(raw, block)` for a non-empty block.
-#[pyfunction]
-pub fn toml_append_table_block<'py>(
-    py: Python<'py>,
-    raw: &[u8],
-    block: &Bound<'py, PyString>,
-) -> PyResult<Bound<'py, PyBytes>> {
-    Ok(PyBytes::new(py, &core::append_table_block(raw, block.to_str()?.as_bytes())))
-}
-
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(toml_exact_table_span, module)?)?;
     module.add_function(wrap_pyfunction!(toml_strip_exact_table, module)?)?;
-    module.add_function(wrap_pyfunction!(toml_append_table_block, module)?)?;
     Ok(())
 }

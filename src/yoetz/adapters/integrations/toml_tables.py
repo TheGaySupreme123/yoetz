@@ -89,20 +89,18 @@ def append_table_block(raw: bytes, block: str) -> bytes:
 def _bind_native() -> None:
     from yoetz._native import native_functions
 
-    resolved = native_functions(
-        "toml_exact_table_span", "toml_strip_exact_table", "toml_append_table_block"
-    )
+    # ``append_table_block`` stays in Python: it is one concatenation, already as fast as a call.
+    resolved = native_functions("toml_exact_table_span", "toml_strip_exact_table")
     if resolved is None:
         return
-    native_span, native_strip, native_append = resolved
+    native_span, native_strip = resolved
     python_span = exact_table_span
     python_strip = strip_exact_table
-    python_append = append_table_block
     header_re = _TOML_TABLE_HEADER_RE
 
     # Only exact ``bytes``/``str`` take the native path: a ``bytearray`` or subclass keeps the
-    # reference's own semantics (including in-place ``+=`` on a ``bytearray``), and an empty
-    # table keeps the reference's ``IndexError``. A replaced header pattern defers too.
+    # reference's own semantics, and an empty table keeps the reference's ``IndexError``. A
+    # replaced header pattern defers too.
     def native_exact_table_span(raw: bytes, table: str) -> tuple[int, int] | None:
         if (
             type(raw) is bytes
@@ -124,15 +122,9 @@ def _bind_native() -> None:
             return cast(bytes, native_strip(raw, table))
         return python_strip(raw, table)
 
-    def native_append_table_block(raw: bytes, block: str) -> bytes:
-        if type(raw) is bytes and type(block) is str and block:
-            return cast(bytes, native_append(raw, block))
-        return python_append(raw, block)
-
     globals().update(
         exact_table_span=native_exact_table_span,
         strip_exact_table=native_strip_exact_table,
-        append_table_block=native_append_table_block,
     )
 
 

@@ -1,4 +1,5 @@
-//! Twin of `yoetz.adapters.integrations.toml_tables` (pure bytes).
+//! Twins of `exact_table_span` and `strip_exact_table` in
+//! `yoetz.adapters.integrations.toml_tables` (pure bytes).
 
 use super::pytext::{bytes_splitlines_keepends, rstrip_crlf};
 
@@ -88,20 +89,6 @@ pub fn strip_exact_table(raw: &[u8], table: &[u8]) -> Option<Vec<u8>> {
     Some(merged)
 }
 
-/// `append_table_block(raw, block)` with `block` already UTF-8 encoded and non-empty.
-pub fn append_table_block(raw: &[u8], block: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(raw.len() + block.len() + 2);
-    out.extend_from_slice(raw);
-    if !raw.is_empty() && !raw.ends_with(b"\n") {
-        out.push(b'\n');
-    }
-    if !raw.is_empty() {
-        out.push(b'\n');
-    }
-    out.extend_from_slice(block);
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,14 +104,12 @@ mod tests {
     }
 
     #[test]
-    fn span_strip_append() {
+    fn span_and_strip() {
         let table = b"[mcp_servers.yoetz]\ncommand = \"yoetz\"\n";
         let raw = b"[a]\nx = 1\n\n[mcp_servers.yoetz]\ncommand = \"yoetz\"\n";
         assert_eq!(exact_table_span(raw, table), Some((11, raw.len())));
         assert_eq!(strip_exact_table(raw, table), Some(b"[a]\nx = 1\n".to_vec()));
         let edited = b"[mcp_servers.yoetz]\ncommand = \"yoetz\"\nextra = 1\n";
         assert_eq!(exact_table_span(edited, table), None);
-        assert_eq!(append_table_block(b"[a]", table), b"[a]\n\n[mcp_servers.yoetz]\ncommand = \"yoetz\"\n".to_vec());
-        assert_eq!(append_table_block(b"", b"x"), b"x".to_vec());
     }
 }
