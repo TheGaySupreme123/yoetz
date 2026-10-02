@@ -757,7 +757,67 @@ pub fn referenced_top_level_defs<'py>(py: Python<'py>, value: &Bound<'py, PyAny>
     }
 }
 
+fn collect_descriptions<'py>(candidate: &Bound<'py, PyAny>, found: &mut Vec<Bound<'py, PyAny>>, depth: usize) -> Step<()> {
+    let py = candidate.py();
+    if is_plain_scalar(candidate) {
+        return Ok(());
+    }
+    if depth >= NATIVE_RECURSION_LIMIT {
+        return Err(Undecided);
+    }
+    if is_exact(candidate, ffi::PyDict_CheckExact) {
+        let mapping = unsafe { candidate.cast_unchecked::<PyDict>() };
+        if let Some(description) = mapping.get_item(pyo3::intern!(py, "description"))? {
+            if is_exact(&description, ffi::PyUnicode_CheckExact) {
+                found.push(description);
+            }
+        }
+        let values: Vec<Bound<'py, PyAny>> = mapping.values().iter().collect();
+        for item in values {
+            collect_descriptions(&item, found, depth + 1)?;
+        }
+        return Ok(());
+    }
+    if let Some(entries) = dict_entries(candidate)? {
+        // A mapping proxy over a `dict`: its `get` is that dict's, found among exact `str` keys.
+        for (key, item) in &entries {
+            if !is_exact(key, ffi::PyUnicode_CheckExact) {
+                return Err(Undecided);
+            }
+            if unsafe { key.cast_unchecked::<PyString>() }.to_str().ok() == Some("description") && is_exact(item, ffi::PyUnicode_CheckExact) {
+                found.push(item.clone());
+            }
+        }
+        for (_, item) in &entries {
+            collect_descriptions(item, found, depth + 1)?;
+        }
+        return Ok(());
+    }
+    if let Some(members) = sequence_members(candidate)? {
+        for member in members {
+            collect_descriptions(&member, found, depth + 1)?;
+        }
+        return Ok(());
+    }
+    if is_foreign_container(py, candidate)? {
+        return Err(Undecided);
+    }
+    Ok(())
+}
+
+/// `_presentation_description_strings(schema)`, or `undecided` when only the reference can tell.
+#[pyfunction]
+#[pyo3(name = "mcp_presentation_description_strings")]
+pub fn presentation_description_strings<'py>(py: Python<'py>, schema: &Bound<'py, PyAny>, undecided: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let mut found = Vec::new();
+    match collect_descriptions(schema, &mut found, 0) {
+        Ok(()) => Ok(PyTuple::new(py, found)?.into_any()),
+        Err(Undecided) => Ok(undecided.clone()),
+    }
+}
+
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_function(wrap_pyfunction!(presentation_description_strings, module)?)?;
     module.add_function(wrap_pyfunction!(thaw_json, module)?)?;
     module.add_function(wrap_pyfunction!(rewrite_schema_refs, module)?)?;
     module.add_function(wrap_pyfunction!(external_schema_documents, module)?)?;

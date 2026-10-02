@@ -2210,6 +2210,7 @@ def _bind_native() -> None:
         "mcp_flatten_frontier_conditions",
         "mcp_inline_local_defs",
         "mcp_referenced_top_level_defs",
+        "mcp_presentation_description_strings",
     )
     if resolved is None:
         return
@@ -2221,6 +2222,7 @@ def _bind_native() -> None:
         native_flatten,
         native_inline,
         native_referenced,
+        native_descriptions,
     ) = resolved
     python_mutable_json = _mutable_json
     python_rewrite_schema_refs = _rewrite_schema_refs
@@ -2229,6 +2231,7 @@ def _bind_native() -> None:
     python_inline_nested_local_defs = _inline_nested_local_defs
     python_inline_presentation_refs = _inline_presentation_refs
     python_referenced_top_level_defs = _referenced_top_level_defs
+    python_presentation_description_strings = _presentation_description_strings
     original_bundle_key = _bundle_key
     # Whole-call twins answer this when only the reference, run from the start, can decide.
     undecided = object()
@@ -2351,6 +2354,12 @@ def _bind_native() -> None:
             return python_referenced_top_level_defs(value)
         return cast(set[str], found)
 
+    def native_presentation_description_strings(schema: Mapping[str, JsonValue]) -> tuple[str, ...]:
+        found = native_descriptions(schema, undecided)
+        if found is undecided:
+            return python_presentation_description_strings(schema)
+        return cast(tuple[str, ...], found)
+
     globals().update(
         _mutable_json=native_mutable_json,
         _rewrite_schema_refs=native_rewrite_schema_refs,
@@ -2360,6 +2369,7 @@ def _bind_native() -> None:
         _inline_nested_local_defs=native_inline_nested_local_defs,
         _inline_presentation_refs=native_inline_presentation_refs,
         _referenced_top_level_defs=native_referenced_top_level_defs,
+        _presentation_description_strings=native_presentation_description_strings,
     )
 
 
