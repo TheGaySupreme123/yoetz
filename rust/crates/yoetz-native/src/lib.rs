@@ -12,6 +12,9 @@ use pyo3::prelude::*;
 mod registry;
 
 mod canonical;
+mod deterministic_checks;
+mod observation_advice;
+mod work_integrity;
 
 #[pymodule]
 fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -20,5 +23,8 @@ fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(registry::bind_protocol_value_error, module)?)?;
 
     canonical::register(module)?;
+    deterministic_checks::register(module)?;
+    observation_advice::register(module)?;
+    work_integrity::register(module)?;
     Ok(())
 }

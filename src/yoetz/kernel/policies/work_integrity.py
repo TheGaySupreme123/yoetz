@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from typing import Final, cast
 
 from yoetz.domain.events import (
@@ -14,6 +14,7 @@ from yoetz.domain.events import (
 )
 from yoetz.domain.findings import FindingKind, FindingOrigin
 from yoetz.domain.values import (
+    ActionId,
     EvidenceId,
     ObligationId,
     ResultId,
@@ -382,6 +383,29 @@ def _orphan_result_findings(case: DeterministicCase) -> list[DeterministicAssess
 
 
 def _unresolved_action_findings(case: DeterministicCase) -> list[DeterministicAssessment]:
+    output: list[DeterministicAssessment] = []
+    for action_id, later in _unresolved_action_scan(case):
+        output.append(
+            build_policy_assessment(
+                case,
+                WORK_INTEGRITY_POLICY_PACK,
+                FindingKind.ACTION_WITHOUT_RESULT,
+                (policy_public_root(case, action_id),),
+                (
+                    _fact("action_present", action_id),
+                    _fact("subsequent_unrelated_work_present", action_id, *later),
+                ),
+                (_fact("linked_result_absent", action_id),),
+            )
+        )
+    return output
+
+
+def _unresolved_action_scan(
+    case: DeterministicCase,
+) -> Iterator[tuple[ActionId, tuple[ActionId, ...]]]:
+    """Yield each unlinked action with the later actions on disjoint subjects, in frontier order."""
+
     linked_actions = {
         record.payload.action_id
         for record in case.projection.results.values()
@@ -397,7 +421,6 @@ def _unresolved_action_findings(case: DeterministicCase) -> list[DeterministicAs
             key=lambda item: (item[1].source_frontier, _ascii(item[0])),
         )
     )
-    output: list[DeterministicAssessment] = []
     for action_id, record in actions:
         action = record.payload
         if action is None or action_id in linked_actions:
@@ -422,20 +445,7 @@ def _unresolved_action_findings(case: DeterministicCase) -> list[DeterministicAs
         )
         if not later:
             continue
-        output.append(
-            build_policy_assessment(
-                case,
-                WORK_INTEGRITY_POLICY_PACK,
-                FindingKind.ACTION_WITHOUT_RESULT,
-                (policy_public_root(case, action_id),),
-                (
-                    _fact("action_present", action_id),
-                    _fact("subsequent_unrelated_work_present", action_id, *later),
-                ),
-                (_fact("linked_result_absent", action_id),),
-            )
-        )
-    return output
+        yield action_id, later
 
 
 def _state_pairs(
@@ -687,3 +697,28 @@ def work_integrity_findings(
             for key in sorted(deduped, key=lambda refs: tuple(_ascii(ref) for ref in refs))
         )
     return tuple(output)
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions("integrity_unresolved_action_scan")
+    if resolved is None:
+        return
+    (native_scan,) = resolved
+    python_scan = _unresolved_action_scan
+
+    def unresolved_action_scan(
+        case: DeterministicCase,
+    ) -> Iterator[tuple[ActionId, tuple[ActionId, ...]]]:
+        """Yield each unlinked action with the later actions on disjoint subjects."""
+
+        # The twin returns the reference's exact pairs, or ``None`` for any input it cannot read
+        # exactly; the reference then runs (and raises, if it raises).
+        found = native_scan(case.projection.actions, case.projection.results)
+        return python_scan(case) if found is None else iter(found)
+
+    globals().update(_unresolved_action_scan=unresolved_action_scan)
+
+
+_bind_native()
