@@ -99,6 +99,23 @@ fn id_verdict(kind: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<Ver
     })
 }
 
+/// The prefix of an exact bound `IdKind` member other than `ACTOR`, or `None` (also before
+/// `ids_bind_kinds` ran). Callers that need the reference's refusal defer to it on `None`.
+pub(crate) fn kind_prefix(kind: &Bound<'_, PyAny>) -> Option<String> {
+    let guard = KINDS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let kinds = guard.as_ref()?;
+    if kind.get_type().as_ptr() != kinds.class.as_ptr() || kind.as_ptr() == kinds.actor.as_ptr() {
+        return None;
+    }
+    kinds.prefixes.get(&(kind.as_ptr() as usize)).cloned()
+}
+
+/// Whether `kind` is the bound `IdKind.ACTOR` member.
+pub(crate) fn is_actor_kind(kind: &Bound<'_, PyAny>) -> bool {
+    let guard = KINDS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.as_ref().is_some_and(|kinds| kind.as_ptr() == kinds.actor.as_ptr())
+}
+
 /// `validate_id(kind, value) -> value` (the same object).
 #[pyfunction]
 #[pyo3(name = "ids_validate_id")]

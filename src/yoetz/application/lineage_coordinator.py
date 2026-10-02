@@ -1088,3 +1088,32 @@ class LineageManifestCoordinator:
             )
             raise
         return await run_prepared_append(parent_runtime.ledger, prepared)
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions("stable_uuid4_from_hex_digest")
+    if resolved is None:
+        return
+    (native_uuid4,) = resolved
+    python_stable_id = _stable_id
+    prefixes: dict[IdKind, str] = {IdKind.EVENT: "evt_", IdKind.REQUEST: "req_"}
+
+    def native_stable_id(kind: IdKind, digest: str) -> str:
+        """Derive a UUIDv4-shaped id from a manifest digest for retry-safe appends."""
+
+        # Only a known kind and 32 plain hex digits; the reference raises for anything else.
+        prefix = prefixes.get(kind) if type(kind) is IdKind else None
+        if prefix is not None:
+            derived = native_uuid4(digest, prefix)
+            if derived is not None:
+                return cast(str, derived)
+        return python_stable_id(kind, digest)
+
+    native_stable_id.__name__ = python_stable_id.__name__
+    native_stable_id.__qualname__ = python_stable_id.__qualname__
+    globals().update(_stable_id=native_stable_id)
+
+
+_bind_native()

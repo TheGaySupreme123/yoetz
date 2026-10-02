@@ -39,6 +39,13 @@ mod deterministic_checks;
 mod observation_advice;
 mod work_integrity;
 mod events;
+mod values_timestamp;
+mod observation_materialize;
+mod app_observation_advice;
+mod observation_coordinator;
+mod ports_importer;
+mod ports_objects;
+mod observation_envelope;
 
 #[pymodule]
 fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -73,5 +80,12 @@ fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     observation_advice::register(module)?;
     work_integrity::register(module)?;
     events::register(module)?;
+    values_timestamp::register(module)?;
+    observation_materialize::register(module)?;
+    app_observation_advice::register(module)?;
+    observation_coordinator::register(module)?;
+    ports_importer::register(module)?;
+    ports_objects::register(module)?;
+    observation_envelope::register(module)?;
     Ok(())
 }

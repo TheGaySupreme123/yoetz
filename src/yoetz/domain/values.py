@@ -752,5 +752,54 @@ def _bind_native() -> None:
     bind_json_object(JsonObject)
     globals().update(_freeze_json=native_freeze_json_at, freeze_json=native_freeze_json)
 
+    timestamps = native_functions(
+        "values_bind_timestamp",
+        "values_parse_rfc3339_millis",
+        "values_is_wire_timestamp",
+        "values_timestamp_from_string",
+    )
+    if timestamps is None:
+        return
+    bind_timestamp, native_parse, native_is_wire, native_from_string = timestamps
+    bind_timestamp(Timestamp)
+    python_parse = parse_rfc3339_millis
+    python_post_init = Timestamp.__post_init__
+    python_from_string = timestamp_from_string
+
+    # Each twin only accepts. Whatever it does not accept is judged, and refused with the exact
+    # exception chain and a frame of this module, by the reference.
+    def native_parse_rfc3339_millis(value: object) -> datetime:
+        parsed = native_parse(value)
+        if parsed is None:
+            return python_parse(value)
+        return cast(datetime, parsed)
+
+    def native_post_init(self: Timestamp) -> None:
+        # A replaced ``parse_rfc3339_millis`` is an observation point of the reference.
+        wire = self._wire  # pyright: ignore[reportPrivateUsage]
+        if parse_rfc3339_millis is native_parse_rfc3339_millis and native_is_wire(wire):
+            return
+        python_post_init(self)
+
+    def native_timestamp_from_string(value: object) -> Timestamp:
+        if parse_rfc3339_millis is native_parse_rfc3339_millis and Timestamp is timestamp_class:
+            created = native_from_string(value)
+            if created is not None:
+                return cast(Timestamp, created)
+        return python_from_string(value)
+
+    timestamp_class = Timestamp
+    native_parse_rfc3339_millis.__name__ = python_parse.__name__
+    native_parse_rfc3339_millis.__qualname__ = python_parse.__qualname__
+    native_post_init.__name__ = python_post_init.__name__
+    native_post_init.__qualname__ = python_post_init.__qualname__
+    native_timestamp_from_string.__name__ = python_from_string.__name__
+    native_timestamp_from_string.__qualname__ = python_from_string.__qualname__
+    Timestamp.__post_init__ = native_post_init  # type: ignore[method-assign]
+    globals().update(
+        parse_rfc3339_millis=native_parse_rfc3339_millis,
+        timestamp_from_string=native_timestamp_from_string,
+    )
+
 
 _bind_native()

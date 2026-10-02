@@ -247,12 +247,16 @@ class ObjectRootSnapshot:
             format_rfc3339_millis(self.captured_at)
         except ValueError as exc:
             raise _invalid() from exc
-        values = _sorted_unique_ascii(self.live_object_ids)
-        try:
-            for value in values:
-                object_id(value)
-        except ValueError as exc:
-            raise _invalid() from exc
+        _validate_live_object_ids(self.live_object_ids)
+
+
+def _validate_live_object_ids(live_object_ids: object) -> None:
+    values = _sorted_unique_ascii(live_object_ids)
+    try:
+        for value in values:
+            object_id(value)
+    except ValueError as exc:
+        raise _invalid() from exc
 
 
 class ObjectStorePort(Protocol):
@@ -275,3 +279,30 @@ class ObjectStorePort(Protocol):
     def open_verified(self, ref: ObjectRef) -> AsyncIterator[bytes]: ...
 
     async def sweep_orphans(self, root_snapshot: ObjectRootSnapshot, now: datetime) -> int: ...
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions("objects_live_object_ids_valid")
+    if resolved is None:
+        return
+    (native_valid,) = resolved
+    from yoetz.protocol.ids import IdKind
+
+    python_validate = _validate_live_object_ids
+    bound_object_id = object_id
+    object_kind = IdKind.OBJECT
+
+    def native_validate_live_object_ids(live_object_ids: object) -> None:
+        # The twin only accepts; the reference refuses with its exact exception chain.
+        if object_id is bound_object_id and native_valid(live_object_ids, object_kind):
+            return
+        python_validate(live_object_ids)
+
+    native_validate_live_object_ids.__name__ = python_validate.__name__
+    native_validate_live_object_ids.__qualname__ = python_validate.__qualname__
+    globals().update(_validate_live_object_ids=native_validate_live_object_ids)
+
+
+_bind_native()

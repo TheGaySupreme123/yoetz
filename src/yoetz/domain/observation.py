@@ -2699,5 +2699,43 @@ def _bind_native() -> None:
         _content_object_refs=native_content_refs,
     )
 
+    envelopes = native_functions("envelope_bind", "envelope_from_json")
+    if envelopes is None:
+        return
+    bind_envelope, native_envelope_from_json = envelopes
+    python_envelope_from_json = observation_envelope_from_json
+    namespace = globals()
+    # The twin stands in for the reference's own steps only while every collaborator it reads
+    # through this namespace is still the one bound here; it calls the rest in the reference's
+    # order, so ``ObservationEnvelope`` is still built and validated by Python.
+    bind_envelope(
+        namespace,
+        {
+            name: namespace[name]
+            for name in (
+                "JsonObject",
+                "ObservationSource",
+                "ObservationCursor",
+                "ObservationEnvelope",
+                "observation_cursor_from_json",
+                "timestamp_from_string",
+                "_structural_payload",
+                "_content_object_refs",
+                "_sorted_unique_gap_codes",
+            )
+        },
+        python_envelope_from_json,
+    )
+
+    def native_observation_envelope_from_json(value: JsonValue) -> ObservationEnvelope:
+        envelope = native_envelope_from_json(value)
+        if envelope is None:
+            return python_envelope_from_json(value)
+        return cast(ObservationEnvelope, envelope)
+
+    native_observation_envelope_from_json.__name__ = python_envelope_from_json.__name__
+    native_observation_envelope_from_json.__qualname__ = python_envelope_from_json.__qualname__
+    globals().update(observation_envelope_from_json=native_observation_envelope_from_json)
+
 
 _bind_native()
