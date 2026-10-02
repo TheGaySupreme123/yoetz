@@ -646,3 +646,69 @@ __all__ = [
     "is_edit_tool_name",
     "is_routine_read_candidate",
 ]
+
+
+def _bind_native() -> None:
+    import os
+
+    from yoetz._native import NATIVE_ENV, native_functions
+    from yoetz.domain.values import JsonObject
+
+    resolved = native_functions(
+        "bind_observation_selection",
+        "observation_selection_tables",
+        "classify_observation",
+        "is_routine_read_candidate",
+        "envelope_outcome_state",
+        "is_edit_tool_name",
+    )
+    if resolved is None:
+        return
+    bind, tables, native_classify, native_candidate, native_outcome, native_edit = resolved
+    # The twins hard-code these tables and limits; a drifted copy keeps Python.
+    expected: dict[str, object] = {
+        "_MAX_RESULT_JSON_BYTES": _MAX_RESULT_JSON_BYTES,
+        "_MAX_COMMAND_CHARS": _MAX_COMMAND_CHARS,
+        "ROUTINE_READ_TOOLS": ROUTINE_READ_TOOLS,
+        "SHELL_TOOLS": SHELL_TOOLS,
+        "READ_ONLY_COMMANDS": READ_ONLY_COMMANDS,
+        "_PRE_EVENTS": _PRE_EVENTS,
+        "_POST_EVENTS": _POST_EVENTS,
+        "_SUCCESS_STATUSES": _SUCCESS_STATUSES,
+        "_PARTIAL_STATUSES": _PARTIAL_STATUSES,
+        "_RG_PRE_OPTIONS": _RG_PRE_OPTIONS,
+        "_GIT_SIDE_EFFECT_PREFIXES": frozenset(_GIT_SIDE_EFFECT_PREFIXES),
+        "_GIT_SIDE_EFFECT_OPTIONS": _GIT_SIDE_EFFECT_OPTIONS,
+        "_EDIT_TOOL_HINTS": _EDIT_TOOL_HINTS,
+        "_TEST_TOOL_HINTS": _TEST_TOOL_HINTS,
+        "_VERIFICATION_TOOL_HINTS": _VERIFICATION_TOOL_HINTS,
+        "_EDIT_COMMANDS": _EDIT_COMMANDS,
+        "_TEST_COMMANDS": _TEST_COMMANDS,
+        "_FAILURE_STATUSES": _FAILURE_STATUSES,
+    }
+    actual = {
+        name: frozenset(value) if type(value) is list else value for name, value in tables().items()
+    }
+    if actual != expected:
+        if os.environ.get(NATIVE_ENV, "") == "require":
+            raise ImportError("yoetz_native_table_mismatch")
+        return
+    bind(
+        globals(),
+        ObservationClassification,
+        ObservationContentRole,
+        JsonObject,
+        classify_observation,
+        is_routine_read_candidate,
+        envelope_outcome_state,
+        is_edit_tool_name,
+    )
+    globals().update(
+        classify_observation=native_classify,
+        is_routine_read_candidate=native_candidate,
+        envelope_outcome_state=native_outcome,
+        is_edit_tool_name=native_edit,
+    )
+
+
+_bind_native()

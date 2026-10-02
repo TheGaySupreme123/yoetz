@@ -12,6 +12,10 @@ use pyo3::prelude::*;
 mod registry;
 
 mod canonical;
+mod missing_for_assessment;
+mod observation;
+mod observation_selection;
+mod shlex;
 
 #[pymodule]
 fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -20,5 +24,9 @@ fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(registry::bind_protocol_value_error, module)?)?;
 
     canonical::register(module)?;
+    shlex::register(module)?;
+    observation::register(module)?;
+    observation_selection::register(module)?;
+    missing_for_assessment::register(module)?;
     Ok(())
 }
