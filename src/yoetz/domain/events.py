@@ -7,7 +7,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
-from typing import Annotated, Final, Literal, cast
+from typing import Annotated, Any, Final, Literal, cast
 
 from pydantic import Field, ValidationError
 
@@ -5122,6 +5122,7 @@ def _record_entry_digest(record: LedgerRecord) -> str:
 
 def _bind_native() -> None:
     from yoetz._native import native_functions
+    from yoetz._native_replay import ReplayReferences, adopt_identity, reference_functions
 
     resolved = native_functions(
         "bind_events",
@@ -5165,12 +5166,60 @@ def _bind_native() -> None:
                 return cast(str, digest)
         return python_record_entry_digest(record)
 
+    python: dict[str, Callable[..., Any]] = {
+        "_validate_ascii_sorted_unique": _validate_ascii_sorted_unique,
+        "_id_tuple": _id_tuple,
+        "_evidence_result_tuple": _evidence_result_tuple,
+    }
+    replay: ReplayReferences  # bound below, once the wrappers are
+
+    # The accepted path stays native. A shape refusal (or a constructor's) is replayed by the
+    # reference, called after the ``except`` block, so it raises from the reference's frame in
+    # this module (the diagnostic origin) with the reference's exception chain.
+    def native_id_tuple_wrapper[T](
+        value: object,
+        constructor: Callable[[object], T],
+        *,
+        minimum: int = 0,
+        maximum: int = MAX_REF_LIST,
+        field: str | None = None,
+    ) -> tuple[T, ...]:
+        try:
+            return native_id_tuple(
+                value, constructor, minimum=minimum, maximum=maximum, field=field
+            )
+        except Exception:
+            pass
+        return replay["_id_tuple"](
+            value, constructor, minimum=minimum, maximum=maximum, field=field
+        )
+
+    def native_evidence_result_tuple_wrapper(
+        value: object,
+        *,
+        minimum: int = 0,
+        maximum: int = MAX_REF_LIST,
+        field: str | None = None,
+    ) -> tuple[EvidenceId | ResultId, ...]:
+        try:
+            return native_evidence_result_tuple(
+                value, minimum=minimum, maximum=maximum, field=field
+            )
+        except Exception:
+            pass
+        return replay["_evidence_result_tuple"](
+            value, minimum=minimum, maximum=maximum, field=field
+        )
+
+    adopt_identity(native_id_tuple_wrapper, _id_tuple)
+    adopt_identity(native_evidence_result_tuple_wrapper, _evidence_result_tuple)
     globals().update(
         _record_entry_digest=native_record_entry_digest,
         _validate_ascii_sorted_unique=native_validate_ascii_sorted_unique,
-        _id_tuple=native_id_tuple,
-        _evidence_result_tuple=native_evidence_result_tuple,
+        _id_tuple=native_id_tuple_wrapper,
+        _evidence_result_tuple=native_evidence_result_tuple_wrapper,
     )
+    replay = reference_functions(globals(), python)
 
 
 _bind_native()

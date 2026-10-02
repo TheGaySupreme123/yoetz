@@ -5,10 +5,10 @@ from __future__ import annotations
 import os
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from enum import Enum
 from types import MappingProxyType
-from typing import Final, cast
+from typing import Any, Final, cast
 
 from yoetz.protocol.errors import ProtocolValueError
 
@@ -208,6 +208,7 @@ def safe_request_id_from(arguments: object) -> str | None:
 
 def _bind_native() -> None:
     from yoetz._native import native_functions
+    from yoetz._native_replay import ReplayReferences, adopt_identity, reference_functions
 
     resolved = native_functions(
         "ids_bind_kinds",
@@ -221,23 +222,47 @@ def _bind_native() -> None:
     # ``new_id`` stays here: it reads randomness through ``os.urandom``, an observation point.
     bind_kinds(IdKind, IdKind.ACTOR, PREFIX_BY_KIND)
 
-    # A refusal must pass through a frame of this module: diagnostics record the innermost
-    # ``yoetz`` frame of an exception as its origin, and a native frame has none.
-    def validate_id(kind: IdKind, value: object) -> str:
-        """Validate one ID against an expected kind and return the same string object."""
+    python: dict[str, Callable[..., Any]] = {
+        "validate_id": validate_id,
+        "is_valid_id": is_valid_id,
+        "validate_actor_id": validate_actor_id,
+    }
+    replay: ReplayReferences  # bound below, once the wrappers are
 
-        return native_validate_id(kind, value)
+    # The accepted path stays native. A refusal is replayed by the reference, called after the
+    # ``except`` block, so it raises with the reference's exception chain and a frame of this
+    # module (diagnostics record the innermost ``yoetz`` frame as the origin; a native frame
+    # has none).
+    def native_validate_id_wrapper(kind: IdKind, value: object) -> str:
+        try:
+            return native_validate_id(kind, value)
+        except Exception:
+            pass
+        return replay["validate_id"](kind, value)
 
-    def validate_actor_id(value: object) -> str:
-        """Validate a caller-asserted actor identifier without minting assurance."""
+    def native_is_valid_id_wrapper(kind: IdKind, value: object) -> bool:
+        try:
+            return native_is_valid_id(kind, value)
+        except Exception:
+            pass
+        return replay["is_valid_id"](kind, value)
 
-        return native_validate_actor_id(value)
+    def native_validate_actor_id_wrapper(value: object) -> str:
+        try:
+            return native_validate_actor_id(value)
+        except Exception:
+            pass
+        return replay["validate_actor_id"](value)
 
-    globals().update(
-        validate_id=validate_id,
-        is_valid_id=native_is_valid_id,
-        validate_actor_id=validate_actor_id,
-    )
+    wrappers: dict[str, Callable[..., Any]] = {
+        "validate_id": native_validate_id_wrapper,
+        "is_valid_id": native_is_valid_id_wrapper,
+        "validate_actor_id": native_validate_actor_id_wrapper,
+    }
+    for name, wrapper in wrappers.items():
+        adopt_identity(wrapper, python[name])
+    globals().update(wrappers)
+    replay = reference_functions(globals(), python)
 
 
 _bind_native()

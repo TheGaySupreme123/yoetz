@@ -589,16 +589,19 @@ def read_cursor_hook_ingress(raw: bytes | None = None) -> tuple[Mapping[str, Jso
 # means every importer reaches them; without the accelerator the definitions above stay.
 def _bind_native() -> None:
     from yoetz._native import native_functions
+    from yoetz._native_replay import ReplayReferences, adopt_identity, reference_functions
 
     resolved = native_functions("cursor_hook_document", "cursor_hook_identity")
     if resolved is None:
         return
     native_document, native_identity = resolved
     python_parse = _parse_cursor_hook_document
+    python_read_ingress = read_cursor_hook_ingress
     python_normalize = _normalize_cursor_value
     python_identity = _cursor_identity_payload
     python_ensure = ensure_canonical_value
     stdlib_loads = json.loads
+    replay: ReplayReferences  # bound below, once the wrappers are
 
     def native_scan_applies() -> bool:
         # The reference scans through ``json.loads`` with ``Decimal`` (whose refusal depends
@@ -611,40 +614,50 @@ def _bind_native() -> None:
             and bool(getcontext().traps[InvalidOperation])
         )
 
+    # The accepted path stays native. Any refusal (including a document nested deeper than the
+    # native scan decides) is replayed by the reference, called after the ``except`` block, so
+    # it raises with the reference's exception chain and a frame of this module as the origin.
     def native_parse_cursor_hook_document(data: bytes) -> Mapping[str, JsonValue]:
-        """Parse one complete Cursor hook body with the vendor-decimal rules."""
-
         if type(data) is bytes and native_scan_applies():
-            return cast(Mapping[str, JsonValue], native_document(data))
+            try:
+                return cast(Mapping[str, JsonValue], native_document(data))
+            except Exception:
+                pass
         return python_parse(data)
 
     def native_read_cursor_hook_ingress(
         raw: bytes | None = None,
     ) -> tuple[Mapping[str, JsonValue], bool]:
-        """Read one Cursor hook for observation, skimming a complete oversized body."""
-
         data = _read_cursor_bytes(raw, MAX_HOOK_SKIM_BYTES + 1)
-        if len(data) > MAX_HOOK_SKIM_BYTES:
-            raise ProtocolValueError("payload_too_large")
-        if len(data) > MAX_HOOK_STDIN_BYTES:
-            skim = (
-                _parse_cursor_hook_document is native_parse_cursor_hook_document
-                and _cursor_identity_payload is python_identity
-                and native_scan_applies()
-            )
+        if len(data) <= MAX_HOOK_STDIN_BYTES:
+            return _parse_cursor_hook_document(data), False
+        if len(data) <= MAX_HOOK_SKIM_BYTES and (
+            _parse_cursor_hook_document is native_parse_cursor_hook_document
+            and _cursor_identity_payload is python_identity
+            and native_scan_applies()
+        ):
             try:
-                if skim:
-                    # The identity view is built without materializing the dropped content.
-                    return cast(dict[str, JsonValue], native_identity(data)), True
-                parsed = _parse_cursor_hook_document(data)
-            except ProtocolValueError as exc:
-                raise CursorOversizedPayloadError(exc.reason_code) from exc
-            return _cursor_identity_payload(parsed), True
-        return _parse_cursor_hook_document(data), False
+                # The identity view is built without materializing the dropped content.
+                return cast(dict[str, JsonValue], native_identity(data)), True
+            except Exception:
+                pass
+        # An oversized body, an unskimmed one, and a skim refusal are the reference itself over
+        # the bytes already read (its read of ``raw`` bytes returns them unchanged), so each
+        # refusal is raised from the reference's own frame.
+        return replay["read_cursor_hook_ingress"](data)
 
+    adopt_identity(native_parse_cursor_hook_document, python_parse)
+    adopt_identity(native_read_cursor_hook_ingress, python_read_ingress)
     globals().update(
         _parse_cursor_hook_document=native_parse_cursor_hook_document,
         read_cursor_hook_ingress=native_read_cursor_hook_ingress,
+    )
+    replay = reference_functions(
+        globals(),
+        {
+            "_parse_cursor_hook_document": python_parse,
+            "read_cursor_hook_ingress": python_read_ingress,
+        },
     )
 
 

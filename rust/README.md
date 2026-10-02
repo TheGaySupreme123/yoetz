@@ -55,14 +55,13 @@ with `YZ_NATIVE=0`. The tests are never edited to fit the port.
    formatting must be byte-identical.
 2. **Same refusal.** The same exception class with the same reason code, raised for the *first*
    offending input in the reference's evaluation order (for example: mapping keys in insertion
-   order before member values in sorted-key order). A twin whose refusals cannot carry the
-   reference's exception chain and origin frame keeps the success path native and lets the Python
-   reference produce every refusal (error replay). Python exception classes are bound into the
+   order before member values in sorted-key order). Python exception classes are bound into the
    accelerator at import (`bind_protocol_value_error`, `bind_canonical_fragment`), never imported
    by Rust.
 3. **Same type rules.** `type(x) is int` is not `isinstance(x, int)`; `bool`, `IntEnum`,
    `StrEnum`, and `str`/`dict`/`list` subclasses take the reference's path. Mappings that are not
-   exact `dict`s go to the Python reference.
+   exact `dict`s (or an exact `JsonObject`) defer the whole call to the reference, which iterates
+   them itself.
 4. **Honor monkeypatch points.** Tests replace module attributes to observe or fault calls. A twin
    must not bypass a dependency or table the reference reads at call time: it defers to the Python
    reference whenever such a module global is not the original object (see `strict_json_parse` and
@@ -73,9 +72,19 @@ with `YZ_NATIVE=0`. The tests are never edited to fit the port.
    reference-only for that call, so CPython's recursion guard decides, never a native crash.
 6. **No panics across the boundary.** Dictionaries are never iterated with PyO3's iterator while
    Python code can run inside the loop; mutation raises what CPython raises.
-7. **No retained plaintext.** Caches never keep decrypted payloads, content or large strings alive
+7. **Refusals come from the reference.** A native exception has no frame in the owning module
+   (diagnostics record the innermost `yoetz` frame as the origin) and none of the reference's
+   `__cause__`/`__context__` chain. A twin bound over a Python function is therefore wrapped:
+   the accepted path stays native, and on any exception the wrapper calls the Python reference
+   *after* its `except` block (`yoetz._native_replay`), which returns or raises exactly what the
+   reference does. A twin may raise to defer whatever only the reference may touch (a value whose
+   Python code would run, a document nested past `DEFER_NESTING`, whose verdict depends on
+   CPython's stack-dependent recursion guard). Native code that still raises builds its errors
+   through `registry::protocol_error`/`protocol_error_from`, which chain `__context__` the way a
+   Python `raise` does.
+8. **No retained plaintext.** Caches never keep decrypted payloads, content or large strings alive
    beyond the reference's own lifetime semantics.
-8. **No user content in errors.** Reason codes only, as in Python.
+9. **No user content in errors.** Reason codes only, as in Python.
 
 ## What is ported
 

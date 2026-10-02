@@ -16,6 +16,15 @@ use super::canonical::{
 /// 3.14 bounds by native stack, which admits ~20k levels from a shallow caller).
 pub const MAX_PARSE_NESTING: usize = 20_000;
 
+/// Nesting past which a scan that a Python reference can replay stops instead of deciding.
+///
+/// The reference's own limit is CPython's stack-based recursion guard, which depends on the
+/// calling thread's stack (tens of thousands of levels on the main thread, a few thousand in
+/// a small-stack thread), so no constant can match it. Every document this deep is refused
+/// anyway (the profile bound is `MAX_JSON_DEPTH` = 64), so stopping here and letting the
+/// reference decide, with its real guard, costs nothing on any accepted input.
+pub const DEFER_NESTING: usize = 256;
+
 /// A decoded JSON string.
 pub enum JsonText<'a> {
     /// No escapes: a slice of the input.
@@ -297,6 +306,15 @@ impl<'a> Scanner<'a> {
 
 /// Scan `text` (already prechecked) into the sink's value.
 pub fn scan<S: JsonSink>(text: &str, sink: &mut S) -> Result<S::Value, S::Error> {
+    scan_limited(text, sink, MAX_PARSE_NESTING)
+}
+
+/// [`scan`], refusing with `nesting_too_deep` once `nesting` containers are open.
+pub fn scan_limited<S: JsonSink>(
+    text: &str,
+    sink: &mut S,
+    nesting: usize,
+) -> Result<S::Value, S::Error> {
     let mut scanner = Scanner {
         text,
         bytes: text.as_bytes(),
@@ -316,7 +334,7 @@ pub fn scan<S: JsonSink>(text: &str, sink: &mut S) -> Result<S::Value, S::Error>
                 sink.string(text)?
             }
             b'[' => {
-                if stack.len() >= MAX_PARSE_NESTING {
+                if stack.len() >= nesting {
                     return Err(sink.fail(NESTING_TOO_DEEP));
                 }
                 scanner.pos += 1;
@@ -331,7 +349,7 @@ pub fn scan<S: JsonSink>(text: &str, sink: &mut S) -> Result<S::Value, S::Error>
                 }
             }
             b'{' => {
-                if stack.len() >= MAX_PARSE_NESTING {
+                if stack.len() >= nesting {
                     return Err(sink.fail(NESTING_TOO_DEEP));
                 }
                 scanner.pos += 1;
@@ -572,6 +590,24 @@ mod tests {
             String::from_utf8(super::super::canonical::encode(&value).unwrap()).unwrap(),
             "{\"a\":{},\"b\":[1,true,null,\"x\u{e9}\u{1f600}\"]}"
         );
+    }
+
+    #[test]
+    fn limited_scan_stops_at_its_bound() {
+        let nested = |depth: usize| format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+        assert!(scan_limited(&nested(DEFER_NESTING), &mut ValueSink, DEFER_NESTING).is_ok());
+        let past = nested(DEFER_NESTING + 1);
+        assert_eq!(
+            scan_limited(&past, &mut ValueSink, DEFER_NESTING).err(),
+            Some(NESTING_TOO_DEEP)
+        );
+        // Unclosed: the bound fires before the scan reaches the missing closers.
+        let unclosed = "[".repeat(DEFER_NESTING + 1);
+        assert_eq!(
+            scan_limited(&unclosed, &mut ValueSink, DEFER_NESTING).err(),
+            Some(NESTING_TOO_DEEP)
+        );
+        assert!(scan(&past, &mut ValueSink).is_ok());
     }
 
     #[test]

@@ -409,9 +409,7 @@ fn json_object_items<'py>(
 
 /// `raise _invalid(reason) from cause`.
 fn invalid_from(py: Python<'_>, reason: &str, cause: PyErr) -> PyErr {
-    let error = protocol_error(py, reason);
-    error.set_cause(py, Some(cause));
-    error
+    crate::registry::protocol_error_from(py, reason, cause)
 }
 
 fn is_protocol_error(py: Python<'_>, error: &PyErr) -> bool {

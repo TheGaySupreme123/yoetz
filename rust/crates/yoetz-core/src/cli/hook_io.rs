@@ -476,7 +476,8 @@ pub fn parse_cursor_hook_document(
         deferred: None,
         faulty: false,
     };
-    let value = json::scan(text, &mut sink)?;
+    // Past `DEFER_NESTING` the reference decides with its own (stack-dependent) guard.
+    let value = json::scan_limited(text, &mut sink, json::DEFER_NESTING)?;
     if let Some(reason) = sink.deferred {
         return Err(reason);
     }
@@ -690,6 +691,11 @@ mod tests {
         assert_eq!(refusal(&source), NESTING_TOO_DEEP);
         let hostile = format!("{}{}", "[".repeat(30_000), "]".repeat(30_000));
         assert_eq!(refusal(&hostile), NESTING_TOO_DEEP);
+        // Past the native bound the scan stops even when the document is unclosed (the reference
+        // would report `malformed_json` or `nesting_too_deep` depending on its thread's stack, so
+        // the Python wrapper replays every refusal through it).
+        let unclosed = "[".repeat(json::DEFER_NESTING + 1);
+        assert_eq!(refusal(&unclosed), NESTING_TOO_DEEP);
     }
 
     #[test]
