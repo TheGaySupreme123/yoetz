@@ -2665,6 +2665,91 @@ def _bind_native() -> None:
         if os.environ.get(NATIVE_ENV, "") == "require":
             raise ImportError("yoetz_native_table_mismatch")
         return
+    # Every module global a reference reads at call time that its twin reproduces instead of
+    # reading: (globals that must stay the objects bound here, builtins that must stay
+    # unshadowed in this namespace, (owner, attribute) pairs that must stay put, dict globals
+    # whose contents must stay unchanged). A replaced one sends the call to the reference.
+    refusal = ("_invalid", "PROTOCOL_REASON_CODES", "ProtocolValueError")
+    sorted_set = (*refusal, "_exact_tuple", "cast")
+    commitment = (*refusal, "hmac", "hashlib")
+    commitment_builtins = ("type", "bytes", "len", "str")
+    guards: dict[str, tuple[tuple[object, ...], ...]] = {
+        "normalize_observed_command": (
+            (
+                "_MAX_OBSERVED_ARGV",
+                "_MAX_OBSERVED_COMMAND_CHARS",
+                "_shell_wrapped_command",
+                "_collapse_unquoted_blanks",
+                "_SHELL_WRAPPERS",
+                "_SHELL_COMMAND_FLAG_RE",
+                "shlex",
+                "cast",
+            ),
+            ("type", "str", "list", "tuple", "len", "any", "range", "ValueError"),
+            ((shlex, "split"), (shlex, "join")),
+            (),
+        ),
+        "_structural_payload": (
+            (
+                *refusal,
+                "_PROSE_KEYS",
+                "_STRUCTURAL_KEYS",
+                "_STRUCTURAL_TOKEN_KEYS",
+                "_token",
+                "_TOKEN_RE",
+                "_reject_path_like",
+                "_looks_like_path",
+                "_MAX_STRUCTURAL_BYTES",
+                "cast",
+            ),
+            ("type", "any", "len", "str", "tuple"),
+            (),
+            (),
+        ),
+        "_sorted_unique_tokens": (
+            (*sorted_set, "_token", "_TOKEN_RE"),
+            ("type", "len", "tuple"),
+            (),
+            (),
+        ),
+        "_sorted_unique_gap_codes": (
+            (*sorted_set, "_gap_code", "_GAP_RE"),
+            ("type", "len", "tuple"),
+            (),
+            (),
+        ),
+        "_evidence_refs": ((*sorted_set, "_token", "_TOKEN_RE"), ("type", "len", "tuple"), (), ()),
+        "_content_object_refs": (
+            (*sorted_set, "_looks_like_path"),
+            ("type", "len", "tuple", "str"),
+            (),
+            (),
+        ),
+        "workspace_commitment_from_path": (
+            (*commitment, "os", "OBSERVATION_WORKSPACE_DOMAIN"),
+            commitment_builtins,
+            (),
+            (),
+        ),
+        "stream_line_commitment": (
+            (*commitment, "OBSERVATION_STREAM_LINE_DOMAIN"),
+            ("type", "bytes", "len"),
+            (),
+            (),
+        ),
+        "hook_source_commitment": (
+            (*commitment, "OBSERVATION_HOOK_COMMITMENT_DOMAIN"),
+            commitment_builtins,
+            (),
+            (),
+        ),
+        "observed_command_commitment": (
+            (*commitment, "OBSERVATION_COMMAND_COMMITMENT_DOMAIN"),
+            commitment_builtins,
+            (),
+            (),
+        ),
+    }
     bind(
         globals(),
         {
@@ -2685,6 +2770,7 @@ def _bind_native() -> None:
             "fs_utf8_surrogateescape": sys.getfilesystemencoding() == "utf-8"
             and sys.getfilesystemencodeerrors() == "surrogateescape",
         },
+        guards,
     )
     globals().update(
         workspace_commitment_from_path=native_workspace_commitment,
