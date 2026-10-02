@@ -242,6 +242,7 @@ version = "0.3.0"
 dependencies = [
  "hex",
  "itoa",
+ "libc",
  "memchr",
  "pyo3",
  "sha2",

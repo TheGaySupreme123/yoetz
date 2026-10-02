@@ -13,6 +13,7 @@ mod registry;
 
 mod canonical;
 mod objects_envelope;
+mod secret_memory;
 
 #[pymodule]
 fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -22,5 +23,6 @@ fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
 
     canonical::register(module)?;
     objects_envelope::register(module)?;
+    secret_memory::register(module)?;
     Ok(())
 }
