@@ -685,12 +685,28 @@ def _outside_plan(
 ) -> list[ObservationAdviceCandidate]:
     if not plan_path_digests:
         return []
+    return _outside_plan_changes(
+        tuple(
+            (_envelope_ref(envelope), digest)
+            for envelope in envelopes
+            if (digest := _changed_paths_digest(envelope)) is not None
+        ),
+        inspect,
+        plan_path_digests,
+    )
+
+
+def _outside_plan_changes(
+    changes: Sequence[tuple[str, str]],
+    inspect: ObservationInspectFact | None,
+    plan_path_digests: Sequence[str],
+) -> list[ObservationAdviceCandidate]:
+    """``_outside_plan`` over each envelope's (ref, changed-paths digest), in envelope order."""
+
+    if not plan_path_digests:
+        return []
     plan_set = set(plan_path_digests)
-    change_refs: list[str] = []
-    for envelope in envelopes:
-        digest = _changed_paths_digest(envelope)
-        if digest is not None and digest not in plan_set:
-            change_refs.append(_envelope_ref(envelope))
+    change_refs: list[str] = [ref for ref, digest in changes if digest not in plan_set]
     if inspect is not None and inspect.changed_paths_digest is not None:
         if inspect.changed_paths_digest not in plan_set:
             change_refs.append(inspect.selection_digest)
@@ -877,6 +893,12 @@ def observation_advice_findings(
     collected.extend(_semantic_attention(context.composition))
     collected.extend(_semantic_without_attempt(envelopes))
 
+    return _rank_candidates(collected)
+
+
+def _rank_candidates(
+    collected: list[ObservationAdviceCandidate],
+) -> tuple[ObservationAdviceCandidate, ...]:
     # Deduplicate by rule_code + detail_token; keep first occurrence.
     seen: set[tuple[str, str]] = set()
     unique: list[ObservationAdviceCandidate] = []
@@ -946,3 +968,160 @@ def advice_candidate_digest(candidate: ObservationAdviceCandidate) -> str:
             "detail_token": candidate.detail_token,
         }
     )
+
+
+def _bind_native() -> None:
+    from yoetz._native import native_functions
+
+    resolved = native_functions("advice_bind", "advice_scan")
+    if resolved is None:
+        return
+    bind, native_scan = resolved
+    bind(
+        (
+            _FIELD_TOOL_NAME,
+            _FIELD_EXIT_STATUS,
+            _FIELD_SUCCESS,
+            _FIELD_CLAIM_KIND,
+            _FIELD_RESULT_STATUS,
+            _FIELD_CHANGED_PATHS_DIGEST,
+            _FIELD_MAPPING_HINT,
+            _FIELD_SUBAGENT_ID,
+            _FIELD_ACTION,
+            _FIELD_ATTEMPT,
+            _FIELD_DENIED,
+            _FIELD_COMMAND_COMMITMENT,
+            _FIELD_CORRELATION_ID,
+            _FIELD_TOOL_CALL_ID,
+        ),
+        _EDIT_TOOLS,
+        _VERIFICATION_TOOLS,
+        _COMMAND_TOOLS,
+        _ROUTINE_READ_ACTIONS,
+        _STATIC_CHECK_HINTS,
+        _LIVE_CLAIM_HINTS,
+        _POST_TOOL_EVENT_KINDS,
+        _ORIGINATING_TOOL_ACTIONS,
+    )
+    from yoetz.domain import values as values_module
+
+    python_findings = observation_advice_findings
+    # The twin reimplements the observed-run classification and leaves every digest to this
+    # module's ``canonical_digest``; a replaced dependency sends the call to the reference.
+    reference_classify = classify_observed_runs
+
+    def candidate(
+        kind: FindingKind,
+        rule_code: str,
+        next_action: AdviceNextAction,
+        refs: tuple[str, ...] | list[str],
+        detail_token: str,
+    ) -> ObservationAdviceCandidate:
+        # A tuple is already ``tuple(sorted(set(refs), key=_ascii))``; a list (some ref is not
+        # ASCII) takes the reference's own ordering, which may refuse it.
+        if not isinstance(refs, tuple):
+            return _candidate(kind, rule_code, next_action, refs, detail_token)
+        priority, _ = FINDING_KIND_TRAITS[kind]
+        return ObservationAdviceCandidate(
+            kind=kind,
+            rule_code=rule_code,
+            next_action=next_action,
+            evidence_refs=refs,
+            priority=priority,
+            detail_token=detail_token,
+        )
+
+    def native_observation_advice_findings(
+        context: ObservationAdviceContext,
+    ) -> tuple[ObservationAdviceCandidate, ...]:
+        """Emit ranked observation-advice candidates from envelopes and optional facts."""
+
+        if type(context) is not ObservationAdviceContext:
+            raise ValueError("observation_advice_invalid")
+        if classify_observed_runs is not reference_classify:
+            return python_findings(context)
+        envelopes = context.envelopes
+        scan = native_scan(envelopes, context.check_facts, values_module.JsonObject)
+        if scan is None:
+            return python_findings(context)
+        failed, edits, completion, static_for_live, subagents, changed, semantic = scan
+        # Candidates are built in the reference's rule order, so a refusal raised while building
+        # one (a digest, ``dict(lineage_refs)``) is the one the reference raises first.
+        collected: list[ObservationAdviceCandidate] = []
+        for key, identity in failed:
+            cause_digest = canonical_digest({"correlation_key": key, "source_identity": identity})
+            collected.append(
+                candidate(
+                    FindingKind.FAILED_WORK_OMITTED,
+                    "failed_command_unresolved",
+                    "resolve_failed_command",
+                    (identity,),
+                    f"failed:{cause_digest.removeprefix('sha256:')}",
+                )
+            )
+        for refs, key in edits:
+            cause_digest = canonical_digest({"correlation_key": key})
+            collected.append(
+                candidate(
+                    FindingKind.STALE_EVIDENCE_FOR_CHANGED_STATE,
+                    "edit_after_successful_check",
+                    "rerun_approved_check",
+                    refs,
+                    f"edit-after-check:{cause_digest.removeprefix('sha256:')}",
+                )
+            )
+        if completion is not None:
+            collected.append(
+                candidate(
+                    FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE,
+                    "completion_without_verification",
+                    "provide_verification",
+                    completion,
+                    "completion-unverified",
+                )
+            )
+        if static_for_live is not None:
+            collected.append(
+                candidate(
+                    FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM,
+                    "static_test_for_live_claim",
+                    "disclose_limitation",
+                    static_for_live,
+                    "static-for-live",
+                )
+            )
+        authorized_refs = dict(context.lineage_refs)
+        for sub, ref in subagents:
+            authorized_ref = authorized_refs.get(ref)
+            evidence_refs = (ref,) if authorized_ref is None else (authorized_ref, ref)
+            collected.append(
+                _candidate(
+                    FindingKind.FAILED_WORK_OMITTED,
+                    "subagent_finding_unaddressed",
+                    "address_subagent_finding",
+                    evidence_refs,
+                    f"subagent:{sub[:48]}",
+                )
+            )
+        collected.extend(
+            _outside_plan_changes(changed, context.inspect_fact, context.plan_path_digests)
+        )
+        collected.extend(_observation_gaps(context.lifecycle, context.gaps, envelopes))
+        collected.extend(_provider_not_ready(context.composition))
+        collected.extend(_semantic_attention(context.composition))
+        if semantic is not None:
+            collected.append(
+                candidate(
+                    FindingKind.REQUESTED_ITEM_NEVER_ATTEMPTED,
+                    "semantic_claim_without_attempt",
+                    "attempt_semantic_dispatch",
+                    semantic,
+                    "semantic-unattempted",
+                )
+            )
+        return _rank_candidates(collected)
+
+    globals().update(observation_advice_findings=native_observation_advice_findings)
+
+
+_bind_native()

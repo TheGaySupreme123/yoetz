@@ -35,6 +35,9 @@ mod observation_local;
 mod codex_session_stream;
 mod kernel_projections;
 mod kernel_reducers;
+mod deterministic_checks;
+mod observation_advice;
+mod work_integrity;
 
 #[pymodule]
 fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -65,5 +68,8 @@ fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     codex_session_stream::register(module)?;
     kernel_projections::register(module)?;
     kernel_reducers::register(module)?;
+    deterministic_checks::register(module)?;
+    observation_advice::register(module)?;
+    work_integrity::register(module)?;
     Ok(())
 }

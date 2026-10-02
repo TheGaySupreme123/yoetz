@@ -13,6 +13,7 @@ pub mod importers;
 pub mod integrations;
 pub mod objects;
 pub mod observability;
+pub mod observation_advice;
 pub mod protocol;
 pub mod shlex;
 
