@@ -5339,8 +5339,10 @@ def _bind_native() -> None:
         return python_catalog_ids_of(envelope)
 
     def native_bounded_json(value: Mapping[str, JsonValue]) -> tuple[str, _BoundedFit]:
+        # ``_head_tail`` is checked against its own rebound twin: the clip reproduces it natively.
         if not (
             intact(clip_names, clip_originals)
+            and module["_head_tail"] is native_head_tail_text
             and _MIN_CLIPPABLE_PROSE_BYTES == min_clippable
             and head_tail_constants()
         ):

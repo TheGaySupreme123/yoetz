@@ -4,11 +4,16 @@
 //!
 //! Collaborators the reference reaches through its module globals (`JsonObject`,
 //! `canonical_encode`, `validate_commitment`, `validate_observation_protection_reference`) are
-//! looked up in that module's namespace at call time, so a patched global still intercepts. Input
-//! the port does not model (a lone surrogate, a `JsonObject` without its item tuple) goes to the
-//! Python reference bound at import time.
+//! looked up in that module's namespace at call time, so a patched global still intercepts. Every
+//! other global a reference reads at call time and its twin reproduces instead (helpers, tables,
+//! limits, HMAC domains, and builtins a module global could shadow) is checked by that twin's
+//! [`Guard`] on each call: a replaced one sends the call to the Python reference. Input the port
+//! does not model (a lone surrogate, a `JsonObject` without its item tuple) goes to the Python
+//! reference bound at import time.
 
-use pyo3::exceptions::PyNameError;
+use std::sync::{Arc, Mutex};
+
+use pyo3::exceptions::{PyNameError, PyTypeError};
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyString, PyTuple};
@@ -24,11 +29,241 @@ static FALLBACKS: Slot = Slot::new();
 const INVALID: &str = "invalid_event_value_type";
 const UNKNOWN_FIELD: &str = "unknown_payload_field";
 
-/// Bind the reference module namespace and its Python implementations (name -> function).
+/// The module globals one twin reproduces instead of reading, captured when the twin is bound.
+///
+/// The twin may answer natively only while every captured global is still the very object bound
+/// at import, every builtin the reference resolves through the module is still unshadowed there,
+/// every captured attribute (`shlex.split`, `json.loads`, ...) is still the original, and every
+/// mutable table keeps its bound contents. Otherwise the Python reference, which reads all of
+/// them at call time, answers.
+pub(crate) struct Guard {
+    namespace: Py<PyDict>,
+    present: Vec<(Py<PyString>, Py<PyAny>)>,
+    absent: Vec<Py<PyString>>,
+    attributes: Vec<(Py<PyAny>, Py<PyString>, Py<PyAny>)>,
+    snapshots: Vec<(Py<PyString>, Py<PyDict>)>,
+}
+
+impl Guard {
+    /// Capture a guard from `(present, absent, attributes, snapshots)`: global names that must
+    /// stay bound to their current objects, builtin names that must stay absent from the
+    /// namespace, `(owner, attribute)` pairs whose current value must stay put, and names of
+    /// `dict` globals whose current contents must stay unchanged.
+    pub(crate) fn capture(
+        namespace: &Bound<'_, PyDict>,
+        spec: &Bound<'_, PyAny>,
+    ) -> PyResult<Self> {
+        let py = namespace.py();
+        let invalid = || PyTypeError::new_err("yoetz_native_guard_spec_invalid");
+        let spec = spec.cast::<PyTuple>().map_err(|_| invalid())?;
+        if spec.len() != 4 {
+            return Err(invalid());
+        }
+        let names = |index: usize| -> PyResult<Vec<Bound<'_, PyString>>> {
+            let item = spec.get_item(index)?;
+            let tuple = item.cast::<PyTuple>().map_err(|_| invalid())?;
+            tuple
+                .iter()
+                .map(|name| {
+                    let name = name.cast_into::<PyString>().map_err(|_| invalid())?;
+                    Ok(PyString::intern(py, name.to_str()?))
+                })
+                .collect()
+        };
+        let mut present = Vec::new();
+        for name in names(0)? {
+            let original = namespace
+                .get_item(&name)?
+                .ok_or_else(|| PyNameError::new_err("yoetz_native_guard_global_missing"))?;
+            present.push((name.unbind(), original.unbind()));
+        }
+        let mut absent = Vec::new();
+        for name in names(1)? {
+            if namespace.contains(&name)? {
+                return Err(PyNameError::new_err("yoetz_native_guard_builtin_shadowed"));
+            }
+            absent.push(name.unbind());
+        }
+        let mut attributes = Vec::new();
+        let pairs = spec.get_item(2)?;
+        for pair in pairs.cast::<PyTuple>().map_err(|_| invalid())?.iter() {
+            let pair = pair.cast_into::<PyTuple>().map_err(|_| invalid())?;
+            if pair.len() != 2 {
+                return Err(invalid());
+            }
+            let owner = pair.get_item(0)?;
+            let attribute = pair
+                .get_item(1)?
+                .cast_into::<PyString>()
+                .map_err(|_| invalid())?;
+            let attribute = PyString::intern(py, attribute.to_str()?);
+            let original = owner.getattr(&attribute)?;
+            attributes.push((owner.unbind(), attribute.unbind(), original.unbind()));
+        }
+        let mut snapshots = Vec::new();
+        for name in names(3)? {
+            let table = namespace
+                .get_item(&name)?
+                .ok_or_else(|| PyNameError::new_err("yoetz_native_guard_global_missing"))?;
+            let table = table.cast_into::<PyDict>().map_err(|_| invalid())?;
+            snapshots.push((name.unbind(), table.copy()?.unbind()));
+        }
+        Ok(Guard {
+            namespace: namespace.clone().unbind(),
+            present,
+            absent,
+            attributes,
+            snapshots,
+        })
+    }
+
+    /// Whether every guarded global is still what the twin reproduces. Any lookup error counts
+    /// as a change (the reference then decides and raises it itself).
+    pub(crate) fn intact(&self, py: Python<'_>) -> bool {
+        let namespace = self.namespace.as_ptr();
+        for (name, original) in &self.present {
+            if borrowed_item(py, namespace, name.as_ptr()) != Some(original.as_ptr()) {
+                return false;
+            }
+        }
+        for name in &self.absent {
+            if borrowed_item(py, namespace, name.as_ptr()) != Some(std::ptr::null_mut()) {
+                return false;
+            }
+        }
+        for (owner, attribute, original) in &self.attributes {
+            let owner = owner.bind(py);
+            // A module attribute is its namespace entry; anything else goes through `getattr`.
+            if let Ok(module) = owner.cast::<PyModule>() {
+                let entries = module.dict();
+                if borrowed_item(py, entries.as_ptr(), attribute.as_ptr())
+                    != Some(original.as_ptr())
+                {
+                    return false;
+                }
+                continue;
+            }
+            match owner.getattr(attribute.bind(py)) {
+                Ok(current) if current.is(original.bind(py)) => {}
+                _ => return false,
+            }
+        }
+        for (name, snapshot) in &self.snapshots {
+            let Some(table) = borrowed_item(py, namespace, name.as_ptr()) else {
+                return false;
+            };
+            if table.is_null() || unsafe { ffi::PyDict_CheckExact(table) } == 0 {
+                return false;
+            }
+            let snapshot = snapshot.bind(py);
+            if unsafe { ffi::PyDict_Size(table) } != snapshot.len() as ffi::Py_ssize_t {
+                return false;
+            }
+            for (key, value) in snapshot.iter() {
+                if borrowed_item(py, table, key.as_ptr()) != Some(value.as_ptr()) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+}
+
+/// `table[key]` as a borrowed pointer, null when absent; `None` (the error cleared) when the
+/// lookup raised, which every check reads as a change.
+fn borrowed_item(
+    py: Python<'_>,
+    table: *mut ffi::PyObject,
+    key: *mut ffi::PyObject,
+) -> Option<*mut ffi::PyObject> {
+    let item = unsafe { ffi::PyDict_GetItemWithError(table, key) };
+    if item.is_null() && PyErr::take(py).is_some() {
+        return None;
+    }
+    Some(item)
+}
+
+/// A slot holding one twin's [`Guard`]; the guard is cloned out before it is checked, so a
+/// lookup that runs Python code never holds the lock.
+pub(crate) struct GuardSlot(Mutex<Option<Arc<Guard>>>);
+
+impl GuardSlot {
+    pub(crate) const fn new() -> Self {
+        GuardSlot(Mutex::new(None))
+    }
+
+    pub(crate) fn set(&self, guard: Guard) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(guard));
+    }
+
+    /// Whether the twin may answer natively: its guard is bound and intact.
+    pub(crate) fn intact(&self, py: Python<'_>) -> bool {
+        let guard = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        guard.is_some_and(|guard| guard.intact(py))
+    }
+}
+
+/// The twins of this module, each checked by its own guard.
+#[derive(Clone, Copy)]
+enum Twin {
+    NormalizeObservedCommand,
+    StructuralPayload,
+    SortedUniqueTokens,
+    SortedUniqueGapCodes,
+    EvidenceRefs,
+    ContentObjectRefs,
+    WorkspaceCommitment,
+    StreamLineCommitment,
+    HookSourceCommitment,
+    ObservedCommandCommitment,
+}
+
+/// The reference name of each [`Twin`], in declaration order.
+const TWIN_NAMES: [&str; 10] = [
+    "normalize_observed_command",
+    "_structural_payload",
+    "_sorted_unique_tokens",
+    "_sorted_unique_gap_codes",
+    "_evidence_refs",
+    "_content_object_refs",
+    "workspace_commitment_from_path",
+    "stream_line_commitment",
+    "hook_source_commitment",
+    "observed_command_commitment",
+];
+
+static GUARDS: [GuardSlot; 10] = [const { GuardSlot::new() }; 10];
+
+/// Whether `twin` may answer natively.
+fn intact(py: Python<'_>, twin: Twin) -> bool {
+    GUARDS[twin as usize].intact(py)
+}
+
+/// Bind the reference module namespace, its Python implementations (name -> function), and each
+/// twin's guard spec (reference name -> `(present, absent, attributes, snapshots)`, see
+/// [`Guard::capture`]).
 #[pyfunction]
-pub fn bind_observation(globals: Bound<'_, PyDict>, fallbacks: Bound<'_, PyDict>) {
+pub fn bind_observation(
+    globals: Bound<'_, PyDict>,
+    fallbacks: Bound<'_, PyDict>,
+    guards: Bound<'_, PyDict>,
+) -> PyResult<()> {
+    for (slot, name) in GUARDS.iter().zip(TWIN_NAMES) {
+        let spec = guards
+            .get_item(name)?
+            .ok_or_else(|| PyNameError::new_err("yoetz_native_guard_missing"))?;
+        slot.set(Guard::capture(&globals, &spec)?);
+    }
     GLOBALS.set(globals.into_any().unbind());
     FALLBACKS.set(fallbacks.into_any().unbind());
+    Ok(())
 }
 
 /// The constants and tables the twins hard-code, for the import-time drift check.
@@ -110,6 +345,9 @@ pub fn normalize_observed_command<'py>(
     py: Python<'py>,
     value: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
+    if !intact(py, Twin::NormalizeObservedCommand) {
+        return fallback(py, "normalize_observed_command")?.call1((value,));
+    }
     let pointer = value.as_ptr();
     let normalized = if is_exact_str(value) {
         match exact_utf8(value) {
@@ -232,6 +470,9 @@ pub fn structural_payload<'py>(
     py: Python<'py>,
     value: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
+    if !intact(py, Twin::StructuralPayload) {
+        return fallback(py, "_structural_payload")?.call1((value,));
+    }
     let json_object = global(py, "JsonObject")?;
     let payload = if value.get_type().is(&json_object) {
         value.clone()
@@ -372,7 +613,9 @@ pub fn sorted_unique_tokens<'py>(
     value: &Bound<'py, PyAny>,
     maximum: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    if unsafe { ffi::PyLong_CheckExact(maximum.as_ptr()) } != 0 {
+    if intact(py, Twin::SortedUniqueTokens)
+        && unsafe { ffi::PyLong_CheckExact(maximum.as_ptr()) } != 0
+    {
         if let Ok(limit) = maximum.extract::<i64>() {
             if let Some(tuple) = sorted_unique(py, value, limit, |item| token_member(py, item))? {
                 return Ok(tuple.into_any());
@@ -390,6 +633,9 @@ pub fn evidence_refs<'py>(
     py: Python<'py>,
     value: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
+    if !intact(py, Twin::EvidenceRefs) {
+        return fallback(py, "_evidence_refs")?.call1((value,));
+    }
     if let Some(maximum) = limit(py, "_MAX_EVIDENCE_REFS")? {
         if let Some(tuple) = sorted_unique(py, value, maximum, |item| token_member(py, item))? {
             return Ok(tuple.into_any());
@@ -407,6 +653,7 @@ pub fn sorted_unique_gap_codes<'py>(
     maximum: Option<&Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let limit = match maximum {
+        _ if !intact(py, Twin::SortedUniqueGapCodes) => None,
         None => Some(core::MAX_GAP_CODES as i64),
         Some(maximum) if unsafe { ffi::PyLong_CheckExact(maximum.as_ptr()) } != 0 => {
             maximum.extract::<i64>().ok()
@@ -447,6 +694,9 @@ pub fn content_object_refs<'py>(
     py: Python<'py>,
     value: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
+    if !intact(py, Twin::ContentObjectRefs) {
+        return fallback(py, "_content_object_refs")?.call1((value,));
+    }
     if let Some(maximum) = limit(py, "_MAX_CONTENT_REFS")? {
         let native = sorted_unique(py, value, maximum, |item| {
             if !is_exact_str(item) {
@@ -542,13 +792,13 @@ fn commitment_text<'a>(py: Python<'_>, value: &'a Bound<'_, PyAny>) -> PyResult<
 
 fn text_commitment<'py>(
     py: Python<'py>,
-    name: &str,
+    twin: Twin,
     domain: &[u8],
     fsencode: bool,
     key_material: &Bound<'py, PyAny>,
     value: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    if stdlib_intact(py, fsencode)? {
+    if intact(py, twin) && stdlib_intact(py, fsencode)? {
         let key = commitment_key(py, key_material)?;
         if let Some(text) = commitment_text(py, value)? {
             return Ok(
@@ -556,7 +806,7 @@ fn text_commitment<'py>(
             );
         }
     }
-    fallback(py, name)?.call1((key_material, value))
+    fallback(py, TWIN_NAMES[twin as usize])?.call1((key_material, value))
 }
 
 /// `workspace_commitment_from_path(key_material, path)`.
@@ -568,7 +818,7 @@ pub fn workspace_commitment_from_path<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     text_commitment(
         py,
-        "workspace_commitment_from_path",
+        Twin::WorkspaceCommitment,
         core::WORKSPACE_DOMAIN,
         true,
         key_material,
@@ -585,7 +835,7 @@ pub fn hook_source_commitment<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     text_commitment(
         py,
-        "hook_source_commitment",
+        Twin::HookSourceCommitment,
         core::HOOK_COMMITMENT_DOMAIN,
         false,
         key_material,
@@ -602,7 +852,7 @@ pub fn observed_command_commitment<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     text_commitment(
         py,
-        "observed_command_commitment",
+        Twin::ObservedCommandCommitment,
         core::COMMAND_COMMITMENT_DOMAIN,
         false,
         key_material,
@@ -617,7 +867,7 @@ pub fn stream_line_commitment<'py>(
     key_material: &Bound<'py, PyAny>,
     content: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    if !stdlib_intact(py, false)? {
+    if !(intact(py, Twin::StreamLineCommitment) && stdlib_intact(py, false)?) {
         return fallback(py, "stream_line_commitment")?.call1((key_material, content));
     }
     let key = commitment_key(py, key_material)?;

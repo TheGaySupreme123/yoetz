@@ -1,13 +1,23 @@
 //! `yoetz.domain.observation_selection` twins: `classify_observation`,
 //! `is_routine_read_candidate`, `envelope_outcome_state`, and `is_edit_tool_name`.
 //!
+//! Every twin first checks its [`Guard`]: each module global the references read at call time
+//! (helpers, the classification class, tables, limits, `strict_json_parse`, builtins a module
+//! global could shadow) must still be the object bound at import, `shlex.split` and `json.loads`
+//! must be the originals, and `_FAILURE_STATUSES` must keep its contents. Otherwise the Python
+//! reference answers the whole call.
+//!
 //! Only exact `dict` payloads are walked natively. A value the reference tests with
 //! `isinstance(value, Mapping)` that is a mapping but not an exact `dict` (or a token whose
-//! folding needs Python's view of a lone surrogate) stops the native walk, and the whole call is
-//! answered by the Python reference instead; the walk has no side effects to repeat. Set
-//! membership on caller values, `==` against the event name, and `value not in (None, False, "")`
-//! go through Python's own protocols, so unhashable or custom-equality values behave exactly as
-//! in the reference. `strict_json_parse` is read from the module namespace at call time.
+//! folding needs Python's view of a lone surrogate) needs the Python reference. Every such place
+//! is checked before any caller code runs (`prepass`, then the routine facts, which call no
+//! caller code), so the reference never repeats a `strict_json_parse` call or a caller
+//! `__eq__`/`__hash__` the native walk already made. Parsed carriers need no check: with the
+//! guard intact, `strict_json_parse` builds exact `dict`s only. The one remaining late deferral is
+//! a payload that caller code (`__eq__`/`__hash__` on a payload value) mutates during the walk.
+//! Set membership on caller values, `==` against the event name, and
+//! `value not in (None, False, "")` go through Python's own protocols, so unhashable or
+//! custom-equality values behave exactly as in the reference.
 
 use pyo3::exceptions::{PyNameError, PyTypeError, PyValueError};
 use pyo3::ffi;
@@ -18,8 +28,14 @@ use pyo3::types::{PyBytes, PyDict, PyFrozenSet, PyString, PyTuple};
 use yoetz_core::domain::observation_selection as core;
 use yoetz_core::domain::observation_selection::{ContentRole, Phase, RoutineFacts, ToolDecision};
 
+use crate::observation::{Guard, GuardSlot};
 use crate::registry::{PROTOCOL_VALUE_ERROR, Slot};
 
+/// The module globals each twin reproduces instead of reading, by twin.
+static CLASSIFY_GUARD: GuardSlot = GuardSlot::new();
+static CANDIDATE_GUARD: GuardSlot = GuardSlot::new();
+static OUTCOME_GUARD: GuardSlot = GuardSlot::new();
+static EDIT_GUARD: GuardSlot = GuardSlot::new();
 static GLOBALS: Slot = Slot::new();
 static CLASSIFICATION: Slot = Slot::new();
 static JSON_OBJECT: Slot = Slot::new();
@@ -52,8 +68,9 @@ impl From<PyErr> for Stop {
 
 type Flow<T> = Result<T, Stop>;
 
-/// Bind the classification class, its role members, the module namespace, and the Python
-/// implementations each twin defers to.
+/// Bind the classification class, its role members, the module namespace, the Python
+/// implementations each twin defers to, and each twin's guard spec (twin name -> spec of the
+/// globals it reproduces, see `Guard::capture`).
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 pub fn bind_observation_selection(
@@ -65,7 +82,19 @@ pub fn bind_observation_selection(
     candidate: Bound<'_, PyAny>,
     outcome: Bound<'_, PyAny>,
     edit: Bound<'_, PyAny>,
+    guards: Bound<'_, PyDict>,
 ) -> PyResult<()> {
+    for (name, slot) in [
+        ("classify_observation", &CLASSIFY_GUARD),
+        ("is_routine_read_candidate", &CANDIDATE_GUARD),
+        ("envelope_outcome_state", &OUTCOME_GUARD),
+        ("is_edit_tool_name", &EDIT_GUARD),
+    ] {
+        let spec = guards
+            .get_item(name)?
+            .ok_or_else(|| PyNameError::new_err("yoetz_native_guard_missing"))?;
+        slot.set(Guard::capture(&globals, &spec)?);
+    }
     ROLE_NONE.set(role.getattr("NONE")?.unbind());
     ROLE_TOOL_INPUT.set(role.getattr("TOOL_INPUT")?.unbind());
     ROLE_TOOL_OUTPUT.set(role.getattr("TOOL_OUTPUT")?.unbind());
@@ -294,6 +323,34 @@ fn global<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
     globals
         .get_item(name)?
         .ok_or_else(|| PyNameError::new_err(name.to_owned()))
+}
+
+/// Find, before the walk runs any caller code, every value the outcome walk will test with
+/// `isinstance(value, Mapping)`: the payload's `tool_input`, its four result carriers, and the
+/// nested keys of a carrier that is already a mapping. A mapping that is not an exact `dict`
+/// defers the whole call now, while nothing has been called that the reference would repeat.
+/// String carriers are parsed later; with the guard intact the parser builds exact `dict`s only.
+fn prepass<'py>(py: Python<'py>, payload: &Bound<'py, PyDict>) -> Flow<()> {
+    as_dict(py, &get(py, payload, intern!(py, "tool_input"))?)?;
+    for key in [
+        intern!(py, "tool_response"),
+        intern!(py, "tool_output"),
+        intern!(py, "result"),
+        intern!(py, "result_json"),
+    ] {
+        let Some(carrier) = as_dict(py, &get(py, payload, key)?)? else {
+            continue;
+        };
+        for nested_key in [
+            intern!(py, "structuredContent"),
+            intern!(py, "structured_content"),
+            intern!(py, "data"),
+            intern!(py, "result"),
+        ] {
+            as_dict(py, &get(py, &carrier, nested_key)?)?;
+        }
+    }
+    Ok(())
 }
 
 /// `_classification_result_mappings(payload)`.
@@ -528,7 +585,9 @@ fn classify<'py>(
     event_name: &Bound<'py, PyString>,
     event: &str,
 ) -> Flow<Bound<'py, PyAny>> {
+    prepass(py, payload)?;
     let phase = core::phase(event);
+    // Calls no caller code, so a deferral it raises repeats nothing either.
     let routine = if phase == Phase::Other {
         RoutineFacts {
             candidate: false,
@@ -572,7 +631,9 @@ pub fn classify_observation<'py>(
     payload: &Bound<'py, PyAny>,
     event_name: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    if let Some((dict, name, event)) = native_args(payload, event_name) {
+    if let Some((dict, name, event)) =
+        native_args(payload, event_name).filter(|_| CLASSIFY_GUARD.intact(py))
+    {
         match classify(py, dict, name, event) {
             Ok(result) => return Ok(result),
             Err(Stop::Raise(error)) => return Err(error),
@@ -588,7 +649,8 @@ pub fn is_routine_read_candidate<'py>(
     py: Python<'py>,
     payload: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    if unsafe { ffi::PyDict_CheckExact(payload.as_ptr()) } != 0 {
+    if unsafe { ffi::PyDict_CheckExact(payload.as_ptr()) } != 0 && CANDIDATE_GUARD.intact(py) {
+        // The routine facts call no caller code, so a deferral repeats nothing.
         match routine_facts(py, unsafe { payload.cast_unchecked::<PyDict>() }) {
             Ok(facts) => {
                 return Ok(pyo3::types::PyBool::new(py, facts.candidate)
@@ -631,24 +693,21 @@ fn json_object_dict<'py>(
     Ok(Some(dict))
 }
 
-/// `dict(structural_payload)`: a copy of an exact `dict`, a `JsonObject`'s frozen pairs, or the
-/// `dict` constructor itself for anything else.
+/// `dict(structural_payload)` for a copy of an exact `dict` or a `JsonObject`'s frozen pairs;
+/// `None` for anything else, whose `dict()` runs caller code the reference must run itself.
 fn structural_dict<'py>(
     py: Python<'py>,
     value: &Bound<'py, PyAny>,
-) -> PyResult<Bound<'py, PyDict>> {
+) -> PyResult<Option<Bound<'py, PyDict>>> {
     if unsafe { ffi::PyDict_CheckExact(value.as_ptr()) } != 0 {
-        return unsafe { value.cast_unchecked::<PyDict>() }.copy();
+        return unsafe { value.cast_unchecked::<PyDict>() }.copy().map(Some);
     }
     if let Some(json_object) = JSON_OBJECT.get(py) {
         if value.get_type().is(&json_object) {
-            if let Some(dict) = json_object_dict(py, value)? {
-                return Ok(dict);
-            }
+            return json_object_dict(py, value);
         }
     }
-    let dict = py.get_type::<PyDict>().call1((value,))?;
-    Ok(dict.cast_into::<PyDict>()?)
+    Ok(None)
 }
 
 /// `envelope_outcome_state(structural_payload, event_kind)`.
@@ -664,16 +723,17 @@ pub fn envelope_outcome_state<'py>(
     } else {
         None
     };
-    if let Some((name, event)) = event {
-        {
-            let payload = structural_dict(py, structural_payload)?;
+    if let Some((name, event)) = event.filter(|_| OUTCOME_GUARD.intact(py)) {
+        if let Some(payload) = structural_dict(py, structural_payload)? {
             let hook_name = get(py, &payload, intern!(py, "hook_name"))?;
             if unsafe { ffi::PyUnicode_CheckExact(hook_name.as_ptr()) } != 0
                 && !payload.contains(intern!(py, "hook_event_name"))?
             {
                 payload.set_item(intern!(py, "hook_event_name"), hook_name)?;
             }
-            match classification_outcome(py, &payload, name, event) {
+            let outcome = prepass(py, &payload)
+                .and_then(|()| classification_outcome(py, &payload, name, event));
+            match outcome {
                 Ok(state) => {
                     return Ok(match state {
                         Some(state) => PyString::intern(py, state).into_any(),
@@ -694,6 +754,9 @@ pub fn is_edit_tool_name<'py>(
     py: Python<'py>,
     tool_name: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
+    if !EDIT_GUARD.intact(py) {
+        return slot(py, &FALLBACK_EDIT)?.call1((tool_name,));
+    }
     let Some(tool) = classification_token(tool_name) else {
         return Ok(pyo3::types::PyBool::new(py, false).to_owned().into_any());
     };
