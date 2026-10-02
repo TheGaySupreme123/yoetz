@@ -13,6 +13,10 @@ mod registry;
 
 mod canonical;
 mod observability_privacy;
+mod missing_for_assessment;
+mod observation;
+mod observation_selection;
+mod shlex;
 
 #[pymodule]
 fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -22,5 +26,9 @@ fn yoetz_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
 
     canonical::register(module)?;
     observability_privacy::register(module)?;
+    shlex::register(module)?;
+    observation::register(module)?;
+    observation_selection::register(module)?;
+    missing_for_assessment::register(module)?;
     Ok(())
 }

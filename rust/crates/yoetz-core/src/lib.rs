@@ -5,8 +5,11 @@
 //! contract); this crate exists so the same computation runs natively, both behind the
 //! `yoetz_native` accelerator and inside native command-line tools.
 
+pub mod application;
+pub mod domain;
 pub mod observability;
 pub mod protocol;
+pub mod shlex;
 
 /// Interface revision shared with `yoetz/_native.py`. A mismatch disables the accelerator.
 pub const INTERFACE_VERSION: u32 = 1;

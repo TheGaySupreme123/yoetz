@@ -903,3 +903,30 @@ def _answered(
         and all(per_target.get(ref) for ref in refs)
         and not supplied & set(refs)
     )
+
+
+def _bind_native() -> None:
+    from yoetz._native import NATIVE_ENV, native_functions
+
+    resolved = native_functions(
+        "bind_missing_for_assessment", "missing_for_assessment_tables", "diff_scope"
+    )
+    if resolved is None:
+        return
+    bind, tables, native_diff_scope = resolved
+    native = tables()
+    # The twin hard-codes these; a drifted copy keeps Python.
+    if not (
+        native["_WHOLE_TREE"] == _WHOLE_TREE
+        and frozenset(native["_SUMMARY_DIFF_OPTIONS"]) == _SUMMARY_DIFF_OPTIONS
+        and native["_REVISION"] == _REVISION.pattern
+        and _REVISION.flags == re.UNICODE
+    ):
+        if os.environ.get(NATIVE_ENV, "") == "require":
+            raise ImportError("yoetz_native_table_mismatch")
+        return
+    bind(_diff_scope)
+    globals().update(_diff_scope=native_diff_scope)
+
+
+_bind_native()

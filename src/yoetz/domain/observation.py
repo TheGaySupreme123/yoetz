@@ -2604,3 +2604,100 @@ def observation_revoke_command_from_json(value: JsonValue) -> ObservationRevokeC
         workspace_commitment=cast(str, source["workspace_commitment"]),
         retain_evidence=cast(Literal[True], source["retain_evidence"]),
     )
+
+
+def _bind_native() -> None:
+    import sys
+
+    from yoetz._native import NATIVE_ENV, native_functions
+
+    resolved = native_functions(
+        "bind_observation",
+        "observation_tables",
+        "normalize_observed_command",
+        "structural_payload",
+        "sorted_unique_tokens",
+        "sorted_unique_gap_codes",
+        "evidence_refs",
+        "content_object_refs",
+        "workspace_commitment_from_path",
+        "stream_line_commitment",
+        "hook_source_commitment",
+        "observed_command_commitment",
+    )
+    if resolved is None:
+        return
+    (
+        bind,
+        tables,
+        native_normalize,
+        native_structural,
+        native_tokens,
+        native_gap_codes,
+        native_evidence_refs,
+        native_content_refs,
+        native_workspace_commitment,
+        native_stream_line_commitment,
+        native_hook_commitment,
+        native_command_commitment,
+    ) = resolved
+    native = tables()
+    gap_default = (_sorted_unique_gap_codes.__kwdefaults__ or {}).get("maximum")
+    # The twins hard-code these limits, key tables, and patterns; a drifted copy keeps Python.
+    if not (
+        native["_MAX_OBSERVED_COMMAND_CHARS"] == _MAX_OBSERVED_COMMAND_CHARS
+        and native["_MAX_OBSERVED_ARGV"] == _MAX_OBSERVED_ARGV
+        and native["_MAX_STRUCTURAL_BYTES"] == _MAX_STRUCTURAL_BYTES
+        and frozenset(native["_STRUCTURAL_KEYS"]) == _STRUCTURAL_KEYS
+        and frozenset(native["_STRUCTURAL_TOKEN_KEYS"]) == _STRUCTURAL_TOKEN_KEYS
+        and frozenset(native["_PROSE_KEYS"]) == _PROSE_KEYS
+        and frozenset(native["_SHELL_WRAPPERS"]) == _SHELL_WRAPPERS
+        and native["_SHELL_COMMAND_FLAG_RE"] == _SHELL_COMMAND_FLAG_RE.pattern
+        and native["_TOKEN_RE"] == _TOKEN_RE.pattern
+        and native["_GAP_RE"] == _GAP_RE.pattern
+        and _SHELL_COMMAND_FLAG_RE.flags == _TOKEN_RE.flags == _GAP_RE.flags == re.ASCII
+        and native["_MAX_GAP_CODES"] == gap_default
+        and native["OBSERVATION_WORKSPACE_DOMAIN"] == OBSERVATION_WORKSPACE_DOMAIN
+        and native["OBSERVATION_STREAM_LINE_DOMAIN"] == OBSERVATION_STREAM_LINE_DOMAIN
+        and native["OBSERVATION_HOOK_COMMITMENT_DOMAIN"] == OBSERVATION_HOOK_COMMITMENT_DOMAIN
+        and native["OBSERVATION_COMMAND_COMMITMENT_DOMAIN"] == OBSERVATION_COMMAND_COMMITMENT_DOMAIN
+    ):
+        if os.environ.get(NATIVE_ENV, "") == "require":
+            raise ImportError("yoetz_native_table_mismatch")
+        return
+    bind(
+        globals(),
+        {
+            "normalize_observed_command": normalize_observed_command,
+            "_structural_payload": _structural_payload,
+            "_sorted_unique_tokens": _sorted_unique_tokens,
+            "_sorted_unique_gap_codes": _sorted_unique_gap_codes,
+            "_evidence_refs": _evidence_refs,
+            "_content_object_refs": _content_object_refs,
+            "workspace_commitment_from_path": workspace_commitment_from_path,
+            "stream_line_commitment": stream_line_commitment,
+            "hook_source_commitment": hook_source_commitment,
+            "observed_command_commitment": observed_command_commitment,
+            # The native HMAC stands in for these only while they are the originals.
+            "hmac.new": hmac.new,
+            "hashlib.sha256": hashlib.sha256,
+            "os.fsencode": os.fsencode,
+            "fs_utf8_surrogateescape": sys.getfilesystemencoding() == "utf-8"
+            and sys.getfilesystemencodeerrors() == "surrogateescape",
+        },
+    )
+    globals().update(
+        workspace_commitment_from_path=native_workspace_commitment,
+        stream_line_commitment=native_stream_line_commitment,
+        hook_source_commitment=native_hook_commitment,
+        observed_command_commitment=native_command_commitment,
+        normalize_observed_command=native_normalize,
+        _structural_payload=native_structural,
+        _sorted_unique_tokens=native_tokens,
+        _sorted_unique_gap_codes=native_gap_codes,
+        _evidence_refs=native_evidence_refs,
+        _content_object_refs=native_content_refs,
+    )
+
+
+_bind_native()
