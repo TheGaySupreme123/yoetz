@@ -12,6 +12,7 @@ from yoetz.domain.events import (
     CheckMode,
     CheckRecordedPayload,
     LedgerRecord,
+    MissingForAssessmentItem,
     NoObligationsReason,
     ObligationPublishedPayload,
     ObligationStatus,
@@ -59,6 +60,7 @@ from yoetz.domain.values import (
     EventId,
     FindingId,
     Frontier,
+    JsonObject,
     event_id,
     finding_id,
     freeze_json,
@@ -149,6 +151,9 @@ def _check(
     returned: tuple[FindingId, ...] = (),
     suppressed: int = 0,
     semantic_provenance: SemanticProvenance | None = None,
+    semantic_conclusion: str | None = None,
+    missing_for_assessment: tuple[MissingForAssessmentItem, ...] = (),
+    review_input_manifest: dict[str, object] | None = None,
 ) -> CheckRecordedPayload:
     return CheckRecordedPayload(
         mode=(
@@ -182,6 +187,13 @@ def _check(
             else semantic_provenance.reason
         ),
         semantic_provenance=semantic_provenance,
+        semantic_conclusion=semantic_conclusion,
+        missing_for_assessment=missing_for_assessment,
+        review_input_manifest=(
+            None
+            if review_input_manifest is None
+            else cast(JsonObject, freeze_json(review_input_manifest))
+        ),
         engine_version="0.1.0",
         projection_version="yoetz/0.1.0",
     )
@@ -1211,6 +1223,84 @@ def _provenance() -> SemanticProvenance:
         egress_authorization_id="aut_00000000-0000-4000-8000-000000000001",
         request_commitment="hmac-sha256:" + "b" * 64,
     )
+
+
+def _review_input_manifest(*, specification_status: str = "title_only") -> dict[str, object]:
+    digest = "sha256:" + "c" * 64
+
+    def section(status: str, content_digest: str | None = digest) -> dict[str, object]:
+        return {
+            "status": status,
+            "source_refs": ["evt_00000000-0000-4000-8000-000000000001"],
+            "item_ids": ["item-1"],
+            "omitted_refs": [],
+            "omission_reasons": [],
+            "revision": 6,
+            "content_digest": content_digest,
+            "content_bytes": 88,
+        }
+
+    return {
+        "schema": "yoetz.review-input-manifest/1",
+        "specification": section(specification_status),
+        "current_diff": section("complete"),
+        "caller_evidence": section("partial"),
+        "latest_verification": section("missing", None),
+        "prior_finding_context": section("not_selected", None),
+        "phase": "provider_bound",
+        "missing_inputs": [],
+        "selected_item_count": 2,
+        "selected_excerpt_bytes": 176,
+        "omitted_item_count": 1,
+    }
+
+
+def test_receipt_projects_provider_bound_input_metadata_in_all_formats() -> None:
+    code = "semantic_packet_insufficient"
+    coverage = _coverage(gaps=(code,))
+    missing = MissingForAssessmentItem(
+        kind="verification_output",
+        target_refs=("res_00000000-0000-4000-8000-000000000002",),
+        availability="agent_suppliable",
+    )
+    check = _check(
+        CheckVerdict.INSUFFICIENT_COVERAGE,
+        coverage,
+        semantic_provenance=_provenance(),
+        semantic_conclusion="insufficient_packet",
+        missing_for_assessment=(missing,),
+        review_input_manifest=_review_input_manifest(),
+    )
+
+    receipt = _build(
+        _context(
+            coverage=coverage,
+            gaps=(CaseGap(code, code, ()),),
+            check=check,
+        )
+    )
+    limitations = next(
+        section for section in receipt.sections if section.key is ReceiptSectionKey.LIMITATIONS_AND_COVERAGE
+    )
+    assert limitations.coverage_note is not None
+    assert "phase" not in limitations.coverage_note
+    assert "provider_bound" in limitations.coverage_note
+    assert "specification: title_only" in limitations.coverage_note
+    assert "verification_output (1 target refs): agent_suppliable" in limitations.coverage_note
+
+    wire = receipt_document_to_json(receipt)
+    wire_sections = cast(list[dict[str, object]], wire["sections"])
+    json_limitations = next(
+        section for section in wire_sections if section["key"] == "limitations_and_coverage"
+    )
+    assert json_limitations["coverage_note"] == limitations.coverage_note
+    markdown = render_receipt_human(receipt, markdown=True)
+    text = render_receipt_human(receipt, markdown=False)
+    for rendered in (markdown, text):
+        assert "Review input coverage (metadata only):" in rendered
+        assert "provider_bound" in rendered
+        assert "specification: title_only" in rendered
+        assert "agent_suppliable" in rendered
 
 
 def _subscription_provenance() -> SemanticProvenance:

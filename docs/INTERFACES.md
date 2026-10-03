@@ -1163,6 +1163,16 @@ public provenance.
 finding coverage using `coverage.weakest`; every explicit receipt-gap code must also occur in the
 top-level known-gap set, and the fold must equal that top-level coverage.
 
+The completed check's `review_input_manifest` is metadata-only and remains the authority for what
+the reviewer received: its `phase` (`composed` or `provider_bound`), each section's distinct
+status, digest, revision, byte count, and bounded omission tokens are preserved. The shared
+`domain.review_input_render` projection carries those facts through CLI, MCP, and TUI check views.
+Receipt JSON keeps the released receipt-document schemas closed: the same metadata is carried in
+the existing `limitations_and_coverage.coverage_note`, which the markdown and text renderers
+project, while a missing `coverage_note` keeps historical receipt bytes unchanged. `missing_for_assessment`
+remains a check limitation and renders its closed availability classification on the check and
+receipt surfaces; it never becomes a finding or a clean-review claim.
+
 Shared structural gap codes for optional AI-powered relevance review (distinct families):
 
 - `optional_semantic_review_blocked_by_policy` — blocked before dispatch by network-egress policy;

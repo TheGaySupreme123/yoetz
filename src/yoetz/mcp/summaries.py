@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from yoetz.domain.findings import FINDING_KIND_TRAITS, FindingKind
 from yoetz.domain.receipts import check_time_change_gap_sentence
+from yoetz.domain.review_input_render import render_review_input_manifest_compact
 from yoetz.mcp.errors import VALIDATION_REASON_TOKENS
 from yoetz.protocol.canonical import JsonValue, ensure_canonical_value
 from yoetz.protocol.errors import PublicErrorCode, normalize_safe_details
@@ -705,7 +706,13 @@ def summary_for_check(envelope: object) -> str:
                 checklist_source.get("next"),
             ),
         )
-    suffix = f"AI-powered review status/reason: {status}/{reason}; {_frontier_clause(source)}."
+    manifest_clause = render_review_input_manifest_compact(source.get("review_input_manifest"))
+    if manifest_clause:
+        prefix = _with_room(prefix, manifest_clause + " ")
+    suffix = (
+        f"AI-powered review status/reason: {status}/{reason}; "
+        f"{_frontier_clause(source)}."
+    )
     recovery = continuation_for_semantic_outcome(
         status=status,
         reason=reason,

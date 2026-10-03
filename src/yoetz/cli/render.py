@@ -7,6 +7,11 @@ from enum import Enum
 from typing import Final, cast
 
 from yoetz.domain.receipts import check_time_change_gap_sentence
+from yoetz.domain.review_input_render import (
+    render_missing_for_assessment_lines,
+    render_review_input_manifest_compat_line,
+    render_review_input_manifest_lines,
+)
 from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.errors import normalize_safe_details
 from yoetz.protocol.models import (
@@ -243,6 +248,17 @@ def render_human_check(result: CheckSuccessModel) -> str:
         f"AI-powered review: {_token(result.semantic_status)} ({_token(result.semantic_reason)})",
         render_human_findings(result.findings),
     ]
+    if result.review_input_manifest is not None:
+        compat_line = render_review_input_manifest_compat_line(
+            result.review_input_manifest.model_dump(mode="json", by_alias=True)
+        )
+        if compat_line:
+            lines.append(compat_line)
+        lines.extend(
+            render_review_input_manifest_lines(
+                result.review_input_manifest.model_dump(mode="json", by_alias=True)
+            )
+        )
     recovery = _semantic_outcome_recovery_lines(
         status=result.semantic_status,
         reason=result.semantic_reason,
@@ -284,10 +300,7 @@ def render_human_check(result: CheckSuccessModel) -> str:
     if result.missing_for_assessment:
         # Issue #907: a check limitation, never a finding. Recheck only after supplying an
         # agent-suppliable item; otherwise report the limitation.
-        lines.append("Missing for assessment (the reviewer could not assess the packet):")
-        for item in result.missing_for_assessment:
-            refs = ", ".join(item.target_refs) if item.target_refs else "no packet ref"
-            lines.append(f"- {_token(item.kind)} ({refs}): {_token(item.availability)}")
+        lines.extend(render_missing_for_assessment_lines(result.missing_for_assessment))
     if result.coverage.known_gaps:
         lines.append("Coverage gaps: " + ", ".join(result.coverage.known_gaps))
         lines.extend(_check_time_change_sentences(result.coverage.known_gaps))

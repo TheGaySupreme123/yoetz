@@ -58,6 +58,10 @@ from yoetz.domain.receipts import (
     check_time_change_gap_sentence,
     receipt_document_carries_terminal_sections,
 )
+from yoetz.domain.review_input_render import (
+    render_review_input_manifest_compat_line,
+    render_review_input_manifest_coverage_note,
+)
 from yoetz.domain.task_statement import (
     TASK_STATEMENT_NOT_AUTHORIZED_GAP,
     TASK_STATEMENT_NOT_SUPPLIED_GAP,
@@ -1328,6 +1332,10 @@ def _task_statement_source_sentence(
         or not records
     ):
         return ""
+    if _provider_manifest_spec_status(check) not in {None, "complete"}:
+        # The provider-bound manifest is authoritative after minimization. A recorded statement
+        # may have been clipped, withheld, or reduced to title-only scope for this packet.
+        return ""
     tested = tuple(
         record
         for record in records
@@ -1346,6 +1354,24 @@ def _task_statement_source_sentence(
         "most the task title in place of the user's request (source "
         f"{TaskStatementSource.TASK_TITLE_ONLY.value})."
     )
+
+
+_REVIEW_INPUT_SECTION_STATUSES: Final = frozenset(
+    {"complete", "partial", "title_only", "missing", "withheld", "not_selected"}
+)
+
+
+def _provider_manifest_spec_status(check: CheckRecordedPayload | None) -> str | None:
+    if check is None or not isinstance(check.review_input_manifest, Mapping):
+        return None
+    manifest = check.review_input_manifest
+    if manifest.get("phase") != "provider_bound":
+        return None
+    specification = manifest.get("specification")
+    if not isinstance(specification, Mapping):
+        return None
+    status = specification.get("status")
+    return status if type(status) is str and status in _REVIEW_INPUT_SECTION_STATUSES else None
 
 
 def _semantic_usage_sentence(provenance: SemanticProvenance | None) -> str:
@@ -1419,6 +1445,8 @@ def _sections(
     caller_digest_counts: _CallerDigestCounts = _NO_CALLER_DIGESTS,
     limitation_response_suffix: bool = False,
     check_change_gap_texts: Mapping[str, str] | None = None,
+    review_input_manifest: object | None = None,
+    missing_for_assessment: object = (),
 ) -> tuple[ReceiptSection, ...]:
     gap_codes = coverage.known_gaps
     gap_texts = check_change_gap_texts or {}
@@ -1654,6 +1682,13 @@ def _sections(
     if observed_failure_sentence:
         bodies[ReceiptSectionKey.LIMITATIONS_AND_COVERAGE] += " " + observed_failure_sentence
     bodies[ReceiptSectionKey.LIMITATIONS_AND_COVERAGE] += task_statement_source_sentence
+    review_input_coverage_note = render_review_input_manifest_coverage_note(
+        review_input_manifest,
+        missing_for_assessment,
+    )
+    compat_manifest_line = render_review_input_manifest_compat_line(review_input_manifest)
+    if compat_manifest_line:
+        bodies[ReceiptSectionKey.LIMITATIONS_AND_COVERAGE] += " " + compat_manifest_line
 
     policy_rows = "; ".join(
         f"{entry.policy_id} {entry.policy_version}" for entry in versions.policy_versions
@@ -1671,6 +1706,11 @@ def _sections(
             title=_SECTION_TITLES[key],
             body=bodies[key],
             items=items[key],
+            coverage_note=(
+                review_input_coverage_note
+                if key is ReceiptSectionKey.LIMITATIONS_AND_COVERAGE
+                else None
+            ),
         )
         for key in _SECTION_KEYS[include]
     )
@@ -1813,6 +1853,16 @@ def build_receipt(
         observed_failure_sentence=_observed_failure_history_sentence(context),
         caller_digest_counts=_caller_digest_counts(context),
         limitation_response_suffix=limitation_response_suffix,
+        review_input_manifest=(
+            None
+            if context.applicable_check is None
+            else context.applicable_check.review_input_manifest
+        ),
+        missing_for_assessment=(
+            ()
+            if context.applicable_check is None
+            else context.applicable_check.missing_for_assessment
+        ),
     )
     suppressed_count = (
         0 if context.applicable_check is None else context.applicable_check.suppressed_count
