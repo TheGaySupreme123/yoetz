@@ -124,6 +124,7 @@ def _app() -> tuple[Application, _WorkflowRuntime]:
         findings: object,
         runtime: object | None = None,
         lineage_evaluation: object | None = None,
+        require_complete_specification: bool = False,
     ) -> object:
         del frozen, findings, runtime, lineage_evaluation
         raise AssertionError("semantic_evaluator_called")

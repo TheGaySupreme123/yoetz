@@ -97,6 +97,7 @@ async def _semantic_forbidden(
     findings: object,
     runtime: object | None = None,
     lineage_evaluation: object | None = None,
+    require_complete_specification: bool = False,
 ) -> object:
     del frozen, findings, runtime, lineage_evaluation
     raise AssertionError("strict-local must never invoke the AI-powered evaluator")

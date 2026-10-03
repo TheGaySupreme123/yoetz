@@ -225,6 +225,7 @@ async def _semantic_disabled(
     findings: object,
     runtime: object | None = None,
     lineage_evaluation: object | None = None,
+    require_complete_specification: bool = False,
 ) -> object:
     del frozen, findings, runtime, lineage_evaluation
     raise AssertionError("semantic_evaluator_called_in_deterministic_mode")

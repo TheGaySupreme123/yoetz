@@ -200,6 +200,7 @@ async def _semantic_disabled(
     findings: object,
     runtime: object | None = None,
     lineage_evaluation: object | None = None,
+    require_complete_specification: bool = False,
 ) -> object:
     """Fail if the local projection unexpectedly invokes AI-powered evaluation."""
 

@@ -218,6 +218,7 @@ async def _semantic_never(
     findings: object,
     runtime: object | None = None,
     lineage_evaluation: object | None = None,
+    require_complete_specification: bool = False,
 ) -> object:
     """Fail if a local-only composition reaches AI-powered evaluation."""
 
@@ -230,6 +231,7 @@ async def _semantic_succeeds(
     findings: object,
     runtime: object | None = None,
     lineage_evaluation: object | None = None,
+    require_complete_specification: bool = False,
 ) -> object:
     """Return a succeeded AI-powered review outcome that raises no challenge of its own.
 

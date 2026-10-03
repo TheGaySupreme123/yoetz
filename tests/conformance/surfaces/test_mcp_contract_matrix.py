@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from copy import deepcopy
 from typing import Any, cast
 
@@ -861,13 +862,14 @@ def test_mcp_can_amend_review_input_without_replacing_the_session(
     draft["schema"]["version"] = "1.1.0"
     draft["payload"]["task_statement"] = "Preserve the complete user request in this session."
     validator = Draft202012Validator(cast(Any, descriptor.input_schema))
-    assert validator.is_valid(request)
+    is_valid = cast(Callable[[Any], bool], getattr(validator, "is_valid"))
+    assert is_valid(request)
     PublishWorkRequest.model_validate(request)
     validate_schema_instance(family.replace("_", "-"), "1.1.0", draft["payload"])
 
     # The new field must not accidentally become authorable under the frozen old wire version.
     draft["schema"]["version"] = "1.0.0"
-    assert not validator.is_valid(request)
+    assert not is_valid(request)
 
 
 def test_advertised_input_schemas_honor_presentation_keyword_budgets() -> None:

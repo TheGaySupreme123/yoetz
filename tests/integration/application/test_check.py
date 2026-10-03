@@ -410,6 +410,7 @@ class _App:
         deterministic_findings: tuple[Finding, ...],
         runtime: object | None = None,
         lineage_evaluation: object | None = None,
+        require_complete_specification: bool = False,
     ) -> FinalSemanticEvaluation:
         _ = (frozen, deterministic_findings, runtime, lineage_evaluation)
         self.semantic_calls += 1
