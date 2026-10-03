@@ -12,6 +12,7 @@ import hashlib
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import apsw
@@ -33,15 +34,26 @@ from builders.privacy_policies import minimal_external_policy
 from builders.start_application import MemoryStartRuntime, StartTestClock, start_composition
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.adapters.memory.ledger import MemoryLedgerAdapter
+from yoetz.adapters.providers.openai_responses_factory import OpenAIResponsesExternalFactory
 from yoetz.adapters.repository_identity import resolve_repository_privacy_context
 from yoetz.application.check import FinalSemanticEvaluation
 from yoetz.application.egress import SemanticEgressSuccess
+from yoetz.application.privacy_policy import (
+    DecidePrivacyPolicyRequest,
+    PolicyDecisionRequired,
+    ProposePrivacyPolicyRequest,
+    decide_privacy_policy,
+    privacy_propose_policy,
+)
 from yoetz.application.publish_work import PublishWorkInternalResult
 from yoetz.application.service import VerificationPolicy
 from yoetz.application.start import execute_start
-from yoetz.config.models import ProviderProfileConfig, YoetzConfig
+from yoetz.config.models import YoetzConfig
+from yoetz.config.write import fireworks_provider
 from yoetz.domain.findings import Finding, SamplingParams, SemanticDispatchKind
 from yoetz.domain.privacy import (
+    AuthorizationScope,
+    AuthorizationScopeKind,
     CandidateContext,
     DataCategory,
     EgressChannel,
@@ -50,7 +62,7 @@ from yoetz.domain.privacy import (
     ReviewSelectionPolicy,
 )
 from yoetz.domain.task_statement import RecordedTaskStatement, specification_preflight
-from yoetz.domain.values import event_id
+from yoetz.domain.values import JsonObject, event_id
 from yoetz.kernel.deterministic_checks import DeterministicAssessment, DeterministicCase
 from yoetz.kernel.lineage import LineageEvaluation
 from yoetz.ports.control import WorkspaceLocator
@@ -58,8 +70,13 @@ from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.importer import ImporterPort
 from yoetz.ports.keys import MacKeyPurpose
 from yoetz.ports.ledger import CheckPolicyExecution, FrozenCase
-from yoetz.ports.privacy import EffectivePrivacyPolicy
+from yoetz.ports.privacy import (
+    EffectivePrivacyPolicy,
+    HumanAuthorityCapability,
+    HumanPolicyDecision,
+)
 from yoetz.ports.runtime import BundleRuntimePort, RouteCommand, TaskRuntime
+from yoetz.ports.secret_memory import HumanAuthorizationProof, SecretPurpose
 from yoetz.ports.semantic import (
     ProviderAttemptProvenance,
     SemanticJudgment,
@@ -74,6 +91,7 @@ from yoetz.protocol.models import (
     SemanticStatus,
     StartRequest,
 )
+from yoetz.service.vault import provider_credential_profile_binding
 
 pytestmark = pytest.mark.anyio
 
@@ -565,18 +583,14 @@ async def test_ready_same_request_recovery_after_statement_plan_amendment(
 
     workspace = (tmp_path / "review-input-workspace").resolve()
     workspace.mkdir()
+    provider = fireworks_provider(model="accounts/fireworks/models/minimax-m3")
     config = YoetzConfig(
         profile="local-openai",
-        provider=ProviderProfileConfig(
-            provider_id="openai",
-            endpoint_profile_id="openai-responses",
-            endpoint_profile_version="1.0.0",
-            model="gpt-4o-mini",
-            capability_profile="test",
-        ),
+        provider=provider,
     )
     async with multi_agent_service(tmp_path / "state", config=config) as service:
         deterministic_calls = 0
+        provider_calls = 0
         original_deterministic = check_module.run_deterministic_policies
 
         def tracked_deterministic(
@@ -599,11 +613,52 @@ async def test_ready_same_request_recovery_after_statement_plan_amendment(
         monkeypatch.setattr(check_module, "run_deterministic_policies", tracked_deterministic)
         policy_store = service.app.privacy.policy_application.policy_store  # type: ignore[union-attr]
         widened = minimal_external_policy()
+        installation_id: str | None = None
+        original_effective_policy = policy_store.effective_policy
 
-        async def effective_policy(_store: object, _scope: object) -> EffectivePrivacyPolicy:
-            return EffectivePrivacyPolicy(widened, 2, widened.policy_digest)
+        async def effective_policy(
+            _store: object, scope: AuthorizationScope
+        ) -> EffectivePrivacyPolicy:
+            nonlocal installation_id
+            installation_id = scope.installation_id
+            if scope.kind is AuthorizationScopeKind.TASK:
+                return EffectivePrivacyPolicy(widened, 2, widened.policy_digest)
+            return await original_effective_policy(scope)
 
         monkeypatch.setattr(type(policy_store), "effective_policy", effective_policy)
+
+        def fake_build_evaluator(
+            _factory: OpenAIResponsesExternalFactory,
+            binding: ProviderBinding,
+            _credential: object,
+            _request_commitment: object,
+        ) -> object:
+            async def evaluate(_case: object, _deadline: object) -> SemanticResultSuccess:
+                nonlocal provider_calls
+                provider_calls += 1
+                provenance = ProviderAttemptProvenance(
+                    provider=binding.provider_id,
+                    endpoint_profile_id=binding.endpoint_profile_id,
+                    endpoint_profile_version=binding.endpoint_profile_version,
+                    model=binding.model_id,
+                    sdk_version="test-gateway-1.0.0",
+                    prompt_digest="sha256:" + "1" * 64,
+                    schema_digest="sha256:" + "2" * 64,
+                    policy_digest=widened.policy_digest,
+                    privacy_policy_digest=widened.policy_digest,
+                    sampling_params=SamplingParams(128),
+                    latency_ms=1,
+                    status=SemanticStatus.SUCCEEDED,
+                    provider_request_id="review-input-test-provider-request",
+                    request_commitment="hmac-sha256:" + "7" * 64,
+                )
+                return SemanticResultSuccess(
+                    SemanticJudgment("no_material_discrepancy", ()), provenance
+                )
+
+            return SimpleNamespace(evaluate=evaluate)
+
+        monkeypatch.setattr(OpenAIResponsesExternalFactory, "build_evaluator", fake_build_evaluator)
         lookup = service.vault.installation_mac_handle(MacKeyPurpose.CATALOG_LOOKUP)
         repository = await resolve_repository_privacy_context(
             WorkspaceLocator(str(workspace)), lookup
@@ -682,18 +737,95 @@ async def test_ready_same_request_recovery_after_statement_plan_amendment(
         )
         assert isinstance(published, PublishWorkInternalResult)
 
+        assert installation_id is not None
+        policy_app = service.app.privacy.policy_application
+        assert policy_app is not None
+        repository_scope = AuthorizationScope(
+            AuthorizationScopeKind.WORKSPACE,
+            installation_id,
+            repository.commitment,
+        )
+        authority = await policy_app.policy_store.repository_authority(repository_scope)
+        candidate_policy = replace(
+            widened,
+            effective_scope=repository_scope,
+            created_at=service.clock.now_utc(),
+        )
+        proposed = await privacy_propose_policy(
+            policy_app,
+            ProposePrivacyPolicyRequest(
+                authority.effective.effective_digest,
+                candidate_policy,
+                authority.authority_digest,
+                repository_scope,
+            ),
+        )
+        assert isinstance(proposed, PolicyDecisionRequired)
+        committed = await decide_privacy_policy(
+            policy_app,
+            DecidePrivacyPolicyRequest(
+                proposed.prepared,
+                HumanPolicyDecision(
+                    proposed.prepared.prepared_digest,
+                    True,
+                    service.clock.now_utc(),
+                    "hmac-sha256:" + "8" * 64,
+                ),
+                HumanAuthorityCapability(
+                    "established_passphrase",
+                    "sha256:" + "9" * 64,
+                    1,
+                    str(getattr(service.vault.mode, "value", service.vault.mode)),
+                    service.vault.generation,
+                    True,
+                ),
+            ),
+        )
+        assert committed.policy.effective_scope == repository_scope
+        assert committed.policy.profile is widened.profile
+        assert committed.policy.review_selection == widened.review_selection
+        credential_binding = provider_credential_profile_binding(
+            provider.provider_id,
+            provider.model,
+            provider.endpoint_profile_id,
+            provider.endpoint_profile_version,
+        )
+        credential = service.memory.capture(
+            SecretPurpose.PROVIDER_CREDENTIAL,
+            bytearray(b"review-input-test-provider-token"),
+        )
+        await service.vault.store_provider_credential(
+            "set",
+            credential_binding,
+            credential,
+            HumanAuthorizationProof(
+                "review-input-provider-credential",
+                "provider_credential_set",
+                credential_binding.target_digest("set"),
+                1,
+                service.vault.generation,
+                None,
+                1.0,
+                60.0,
+            ),
+            2.0,
+        )
+
         second = await service.app.check(request, repository_privacy_context=repository)
-        assert type(second).__name__ == "CheckAwaitingHuman"
-        assert getattr(second, "state") == "awaiting_human"
-        preflight = getattr(second, "specification_preflight")
-        assert preflight.status == "complete"
-        assert preflight.source.value == "agent_transcribed"
+        assert type(second).__name__ == "CheckCommitResult"
+        assert second.semantic_status is SemanticStatus.SUCCEEDED
+        assert second.semantic_reason is SemanticReason.SEMANTIC_COMPLETED
+        assert second.review_input_manifest is not None
+        assert second.review_input_manifest["phase"] == "provider_bound"
+        specification = second.review_input_manifest["specification"]
+        assert isinstance(specification, JsonObject)
+        assert specification["status"] == "complete"
         assert (
-            preflight.content_digest
+            specification["content_digest"]
             == "sha256:" + hashlib.sha256(statement.encode("utf-8")).hexdigest()
         )
-        assert preflight.content_bytes == len(statement.encode("utf-8"))
-        assert preflight.revision == 2
-        assert getattr(second, "continuation").kind == "repository_privacy_setup"
+        assert specification["content_bytes"] == len(statement.encode("utf-8"))
+        assert specification["revision"] == 2
+        assert provider_calls == 1
         assert getattr(second, "request_id") == request.request_id
         assert deterministic_calls >= 2
