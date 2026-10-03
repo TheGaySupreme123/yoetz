@@ -542,6 +542,18 @@ def _strict_mapping(value: object, *, reason: str) -> Mapping[str, object]:
     return cast(Mapping[str, object], value)
 
 
+def _plain_mapping_for_model(value: JsonValue, *, reason: str) -> Mapping[str, object]:
+    """Thaw a frozen JSON object before handing it to a Pydantic model.
+
+    Ledger payloads use ``JsonObject`` recursively so event values cannot be mutated after
+    acceptance.  Pydantic's mapping validation accepts the outer frozen object, but rejects its
+    nested ``JsonObject`` values as model inputs.  A canonical round trip preserves the recorded
+    bytes while restoring ordinary dict/list containers at this model boundary.
+    """
+
+    return _strict_mapping(strict_json_parse(canonical_encode(value)), reason=reason)
+
+
 async def _semantic_execution_lease_bound(
     objects: ObjectStorePort,
     job: SemanticJobRecord,
@@ -1433,7 +1445,11 @@ def _projection_items(
             manifest_model = (
                 None
                 if manifest is None
-                else ReviewInputManifestModel.model_validate(dict(manifest.items()))
+                else ReviewInputManifestModel.model_validate(
+                    _plain_mapping_for_model(
+                        cast(JsonValue, manifest), reason="review_input_manifest_shape_invalid"
+                    )
+                )
             )
             history_type = (
                 StatusHistoryItemV14Model if manifest_model is not None else StatusHistoryItemModel

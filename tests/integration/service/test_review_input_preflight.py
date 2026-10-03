@@ -46,7 +46,12 @@ from yoetz.application.privacy_policy import (
     privacy_propose_policy,
 )
 from yoetz.application.publish_work import PublishWorkInternalResult
-from yoetz.application.service import VerificationPolicy
+from yoetz.application.service import (
+    ClientProjectionContext,
+    ControlProjectionBinding,
+    ProjectionRenderMode,
+    VerificationPolicy,
+)
 from yoetz.application.start import execute_start
 from yoetz.config.models import YoetzConfig
 from yoetz.config.write import fireworks_provider
@@ -65,7 +70,7 @@ from yoetz.domain.task_statement import RecordedTaskStatement, specification_pre
 from yoetz.domain.values import JsonObject, event_id
 from yoetz.kernel.deterministic_checks import DeterministicAssessment, DeterministicCase
 from yoetz.kernel.lineage import LineageEvaluation
-from yoetz.ports.control import WorkspaceLocator
+from yoetz.ports.control import ControlClientKind, ControlMethod, WorkspaceLocator
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.importer import ImporterPort
 from yoetz.ports.keys import MacKeyPurpose
@@ -83,6 +88,7 @@ from yoetz.ports.semantic import (
     SemanticResultSuccess,
 )
 from yoetz.ports.start_catalog import StartCatalogPort, TaskRoute
+from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import (
     CheckRequest,
@@ -90,6 +96,10 @@ from yoetz.protocol.models import (
     SemanticReason,
     SemanticStatus,
     StartRequest,
+    StatusHistoryItemV14Model,
+    StatusHistoryPageModel,
+    StatusRequest,
+    StatusResultModel,
 )
 from yoetz.service.vault import provider_credential_profile_binding
 
@@ -829,3 +839,77 @@ async def test_ready_same_request_recovery_after_statement_plan_amendment(
         assert provider_calls == 1
         assert getattr(second, "request_id") == request.request_id
         assert deterministic_calls >= 2
+
+        # A completed provider-bound check must survive the durable history projection and the
+        # ordinary-client privacy projection.  This is the native-host failure boundary: the
+        # event stores the manifest as recursively frozen JSON, while the v1.4 history model
+        # needs ordinary nested mappings for Pydantic validation.
+        history_wire: dict[str, JsonValue] = {
+            **common,
+            "request_id": new_id(IdKind.REQUEST),
+            "session_id": started.session_id,
+            "writer_id": started.writer_id,
+            "view": "history",
+            "limit": "10",
+            "at_frontier": str(second.result_frontier.sequence),
+        }
+        history_request = StatusRequest.model_validate(history_wire)
+        history = await service.app.status(
+            history_request, repository_privacy_context=repository
+        )
+        history_page = history.page
+        assert isinstance(history_page, StatusHistoryPageModel)
+        check_items = [
+            item
+            for item in history_page.items
+            if item.schema_name == "check_recorded"
+        ]
+        assert len(check_items) == 1
+        check_item = check_items[0]
+        assert isinstance(check_item, StatusHistoryItemV14Model)
+        assert check_item.review_input_manifest is not None
+        assert check_item.review_input_manifest.phase == "provider_bound"
+        assert check_item.review_input_manifest.specification.status == "complete"
+
+        facts = await service.app.projection_binding_facts(
+            ControlMethod.STATUS, history_wire, history
+        )
+        rpc_id = new_id(IdKind.CONTROL_RPC)
+        service_instance_id = new_id(IdKind.SERVICE_INSTANCE)
+        binding = ControlProjectionBinding(
+            rpc_id,
+            ControlMethod.STATUS,
+            service_instance_id,
+            1,
+            facts.original_request_id,
+            facts.route_identity_digest,
+            canonical_encode(
+                {
+                    "rpc_id": rpc_id,
+                    "method": "status",
+                    "service_instance_id": service_instance_id,
+                    "service_generation": "1",
+                }
+            ),
+        )
+        projected = await service.app.project_result_for_client(
+            ClientProjectionContext(
+                ControlClientKind.MCP_BRIDGE,
+                ProjectionRenderMode.MACHINE_READABLE,
+                False,
+            ),
+            binding,
+            history,
+        )
+        assert isinstance(projected, StatusResultModel)
+        assert isinstance(projected.root.page, StatusHistoryPageModel)
+        projected_check_items = [
+            item
+            for item in projected.root.page.items
+            if item.schema_name == "check_recorded"
+        ]
+        assert len(projected_check_items) == 1
+        projected_check = projected_check_items[0]
+        assert isinstance(projected_check, StatusHistoryItemV14Model)
+        assert projected_check.review_input_manifest is not None
+        assert projected_check.review_input_manifest.phase == "provider_bound"
