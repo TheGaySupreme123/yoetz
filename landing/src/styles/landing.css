@@ -318,18 +318,21 @@ img, svg { max-width: 100%; }
 }
 .stanza .silver { background-image: linear-gradient(180deg, #b4bfba 0%, #6f7d78 100%); }
 .stanza .gold { background-image: linear-gradient(180deg, #e2b84a 0%, #9c6f12 100%); }
-.bench-logos { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
-.bench-logo {
+/* Inline tags inside a serif line: a logo chip the height of the x-height */
+.stanza .tag {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  height: 36px;
-  padding: 0 12px;
+  gap: 0.18em;
+  height: 1em;
+  padding: 0 0.3em;
+  margin: 0 0.04em;
   border-radius: var(--radius-full);
   background: var(--surface-card);
   border: 1px solid var(--border);
-  font: 500 14px/1 var(--font-sans);
+  font: 500 0.4em/1 var(--font-sans);
+  letter-spacing: 0;
   color: var(--ink);
+  vertical-align: 0.12em;
 }
-.bench-logo img { width: 22px; height: 22px; }
-.bench-logo.wordmark { font-weight: 600; letter-spacing: -0.01em; }
+.stanza .tag img { width: 1.4em; height: 1.4em; }
+.stanza .tag.wordmark { font-weight: 600; letter-spacing: -0.01em; }
