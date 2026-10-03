@@ -1,4 +1,4 @@
-"""MCP stdio bridge: six workflow tools plus read-only guidance, over the ordinary local service."""
+"""MCP stdio bridge: workflow tools plus read-only guidance and closure preparation."""
 
 from __future__ import annotations
 
@@ -30,11 +30,12 @@ from yoetz.adapters.integrations.cursor_project_mcp import (
     CursorProjectMcpRegistrationSnapshot,
     inspect_project_mcp_registration,
 )
-from yoetz.adapters.mcp_stdio import bounded_stdio_server
+from yoetz.adapters.mcp_stdio import MAX_JSON_FRAME_BYTES, bounded_stdio_server
 from yoetz.adapters.workspace_binding import (
     MAX_WORKSPACE_LOCATOR_BYTES,
     canonical_workspace_locator,
 )
+from yoetz.cli.closure import PREPARATION_REMEDIATIONS, prepare_closure
 from yoetz.config.load import load_config
 from yoetz.config.models import LoggingConfig
 from yoetz.mcp.descriptors import (
@@ -67,7 +68,11 @@ from yoetz.mcp.semantic_destination import (
     SemanticDestinationDisclosure,
     read_semantic_destination_disclosure,
 )
-from yoetz.mcp.summaries import render_safe_compact_summary, summary_for_read_guidance
+from yoetz.mcp.summaries import (
+    render_safe_compact_summary,
+    summary_for_closure_prepare,
+    summary_for_read_guidance,
+)
 from yoetz.observability.logging import (
     LogMode,
     configure_logging,
@@ -81,6 +86,7 @@ from yoetz.ports.control import (
     ServiceState,
     WorkspaceLocator,
 )
+from yoetz.ports.integrations import YOETZ_MCP_TOOL_NAMES
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.consent import CONSENT_PENDING_TTL_SECONDS
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
@@ -88,6 +94,8 @@ from yoetz.protocol.ids import IdKind, new_id, safe_request_id_from
 from yoetz.protocol.models import (
     CheckRequest,
     CheckResult,
+    ClosurePrepareRequest,
+    ClosurePrepareResult,
     PublishWorkRequest,
     PublishWorkResult,
     ReadGuidanceResult,
@@ -122,6 +130,7 @@ __all__ = [
     "call_tool",
     "close_bridge_runtime",
     "dispatch_check",
+    "dispatch_closure_prepare",
     "dispatch_publish_work",
     "dispatch_read_guidance",
     "dispatch_receipt",
@@ -167,10 +176,18 @@ _TIMEOUT_PROBE_DEADLINE_MS: Final = 5_000
 _CURSOR_ROOTS_REQUEST_TIMEOUT_SECONDS: Final = 5.0
 _MAX_CURSOR_ROOTS: Final = 32
 _MAX_CURSOR_ROOT_URI_BYTES: Final = MAX_WORKSPACE_LOCATOR_BYTES * 2
-_INVALID_URI_ESCAPE: Final = re.compile(r"%(?![0-9A-Fa-f]{2})", re.ASCII)
-_REGISTERED_TOOL_NAMES: Final = frozenset(
-    {"start", "publish_work", "check", "respond", "status", "receipt", "read_guidance"}
+# Leave room for the JSON-RPC method, id, and MCP result wrapper. A complete closure inventory is
+# useful only when the bridge can deliver it as one bounded frame; refusing before projection
+# prevents the transport from clipping a superficially successful preparation (#953/#950).
+_MAX_CLOSURE_RESULT_BYTES: Final = MAX_JSON_FRAME_BYTES - 65_536
+_CLOSURE_PUBLIC_REASON_CODES: Final = MappingProxyType(
+    {
+        "closure_snapshot_unavailable": "frontier_changed",
+        "closure_result_too_large": "payload_too_large",
+    }
 )
+_INVALID_URI_ESCAPE: Final = re.compile(r"%(?![0-9A-Fa-f]{2})", re.ASCII)
+_REGISTERED_TOOL_NAMES: Final = frozenset(YOETZ_MCP_TOOL_NAMES)
 _GUIDANCE_BY_URI: Final = MappingProxyType(
     {resource.uri: resource for resource in GUIDANCE_RESOURCES}
 )
@@ -251,6 +268,7 @@ _GUIDANCE_BY_OPERATION: Final = MappingProxyType(
         "respond": _REQUEST_TEMPLATES_GUIDANCE_URI,
         "status": _REQUEST_TEMPLATES_GUIDANCE_URI,
         "receipt": _REQUEST_TEMPLATES_GUIDANCE_URI,
+        "closure_prepare": "yoetz://guidance/workflow.md",
     }
 )
 
@@ -820,6 +838,8 @@ def _result_text(
         return canonical_encode(cast(JsonValue, dict(wire))).decode("utf-8")
     if host_profile not in {"generic", "codex", "claude"}:
         raise ValueError("mcp_host_profile_invalid")
+    if wire.get("preparatory_only") is True:
+        return summary_for_closure_prepare(wire)
     return render_safe_compact_summary(wire)
 
 
@@ -2594,6 +2614,186 @@ async def dispatch_status(
     )
 
 
+async def dispatch_closure_prepare(
+    arguments: Mapping[str, object], runtime: BridgeRuntime = BRIDGE_RUNTIME
+) -> types.CallToolResult:
+    """Prepare one explicit closure request from a pinned, paginated status inventory."""
+
+    request_id = safe_request_id_from(arguments)
+    try:
+        request = ClosurePrepareRequest.model_validate(arguments)
+    except ValidationError as exc:
+        locations = safe_validation_locations(exc)
+        return structured_error_result(
+            PublicErrorCode.INVALID_REQUEST,
+            invalid_request_message("closure_prepare", locations),
+            request_id=request_id,
+            safe_details=locations if locations else None,
+            operation="closure_prepare",
+            host_profile=runtime.host_profile,
+        )
+    except Exception as exc:
+        correlation_id = record_unexpected_exception_without_raising(
+            exc,
+            component="mcp.bridge",
+            operation="closure_prepare_request_internal_error",
+            request_id=request_id,
+        )
+        return structured_error_result(
+            PublicErrorCode.INTERNAL_ERROR,
+            "The bridge could not complete the operation.",
+            request_id=request_id,
+            correlation_id=correlation_id,
+            host_profile=runtime.host_profile,
+        )
+
+    inherited = await _prepare_availability(runtime, request_id)
+    if inherited is not None:
+        return inherited
+
+    async def status(status_request: StatusRequest) -> StatusResult:
+        return await _invoke_with_reconnect(
+            runtime,
+            status_request,
+            lambda client, current: client.status(
+                current,
+                deadline_ms=_rpc_deadline_ms("status"),
+                route_profile=runtime.route_profile,
+            ),
+            request_id,
+            retain_availability_failure_for_latch=True,
+        )
+
+    try:
+        prepared = await prepare_closure(
+            status,
+            request.session_id,
+            request.writer_id,
+            request.selection,
+            client_kind="cooperative_agent",
+            integration="cooperative_mcp",
+        )
+        if len(canonical_encode(cast(JsonValue, prepared))) > _MAX_CLOSURE_RESULT_BYTES:
+            raise ValueError("closure_result_too_large")
+        result = ClosurePrepareResult.model_validate({"ok": True, **prepared})
+    except _CursorWorkspaceBindingError:
+        return _cursor_workspace_error(runtime, request_id, "closure_prepare")
+    except PublicOperationError as exc:
+        try:
+            bound = (
+                exc
+                if exc.correlation_id is not None
+                else exc.bind_correlation_id(
+                    record_public_error_without_raising(
+                        component="mcp.bridge",
+                        operation=_public_error_operation("closure_prepare"),
+                        reason=exc.code.value.lower(),
+                        request_id=request_id,
+                    )
+                )
+            )
+            return _result_from_wire(
+                tool_error_envelope(bound, request_id=request_id),
+                host_profile=runtime.host_profile,
+            )
+        except Exception as mapping_exc:
+            correlation_id = record_unexpected_exception_without_raising(
+                mapping_exc,
+                component="mcp.bridge",
+                operation="closure_prepare_public_error_internal_error",
+                request_id=request_id,
+            )
+            return structured_error_result(
+                PublicErrorCode.INTERNAL_ERROR,
+                "The bridge could not complete the operation.",
+                request_id=request_id,
+                correlation_id=correlation_id,
+                host_profile=runtime.host_profile,
+            )
+    except ControlError as exc:
+        if exc.reason in _AVAILABILITY_LATCH_REASONS:
+            inherited_failure = await _inherit_terminal_availability(runtime, request_id)
+            if inherited_failure is not None:
+                return inherited_failure
+            failure = _control_error_result(
+                exc,
+                request_id,
+                "closure_prepare",
+                host_profile=runtime.host_profile,
+            )
+            return await _latch_availability(runtime, request_id, exc, failure)
+        return _control_error_result(
+            exc,
+            request_id,
+            "closure_prepare",
+            host_profile=runtime.host_profile,
+        )
+    except ValueError as exc:
+        reason = str(exc)
+        remediation = PREPARATION_REMEDIATIONS.get(reason)
+        if remediation is None:
+            correlation_id = record_unexpected_exception_without_raising(
+                exc,
+                component="mcp.bridge",
+                operation="closure_prepare_internal_error",
+                request_id=request_id,
+            )
+            return structured_error_result(
+                PublicErrorCode.INTERNAL_ERROR,
+                "The bridge could not complete the operation.",
+                request_id=request_id,
+                correlation_id=correlation_id,
+                host_profile=runtime.host_profile,
+            )
+        error_code = (
+            PublicErrorCode.LIMIT_EXCEEDED
+            if reason == "closure_result_too_large"
+            else PublicErrorCode.INVALID_REQUEST
+        )
+        return structured_error_result(
+            error_code,
+            f"{reason}: {remediation}",
+            request_id=request_id,
+            safe_details={"reason_code": _CLOSURE_PUBLIC_REASON_CODES.get(reason, reason)},
+            operation="closure_prepare",
+            host_profile=runtime.host_profile,
+        )
+    except Exception as exc:
+        correlation_id = record_unexpected_exception_without_raising(
+            exc,
+            component="mcp.bridge",
+            operation="closure_prepare_internal_error",
+            request_id=request_id,
+        )
+        return structured_error_result(
+            PublicErrorCode.INTERNAL_ERROR,
+            "The bridge could not complete the operation.",
+            request_id=request_id,
+            correlation_id=correlation_id,
+            host_profile=runtime.host_profile,
+        )
+
+    await _clear_availability(runtime)
+    try:
+        return result_from_public_model(result, host_profile=runtime.host_profile)
+    except Exception as exc:
+        correlation_id = record_unexpected_exception_without_raising(
+            exc,
+            component="mcp.bridge",
+            operation="closure_prepare_response_projection_failed",
+            request_id=request_id,
+        )
+        return structured_error_result(
+            PublicErrorCode.INTERNAL_ERROR,
+            _RESPONSE_PROJECTION_FAILED_MESSAGE,
+            retryable=True,
+            request_id=request_id,
+            correlation_id=correlation_id,
+            safe_details=dict(_RESPONSE_PROJECTION_FAILED_DETAILS),
+            host_profile=runtime.host_profile,
+        )
+
+
 async def dispatch_receipt(
     arguments: Mapping[str, object], runtime: BridgeRuntime = BRIDGE_RUNTIME
 ) -> types.CallToolResult:
@@ -2724,6 +2924,7 @@ async def call_tool(
         "check": dispatch_check,
         "respond": dispatch_respond,
         "status": dispatch_status,
+        "closure_prepare": dispatch_closure_prepare,
         "receipt": dispatch_receipt,
         "read_guidance": dispatch_read_guidance,
     }.get(name)

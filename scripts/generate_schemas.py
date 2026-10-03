@@ -7152,6 +7152,30 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         lambda: __import__("yoetz.protocol.models", fromlist=["CheckResultModel"]).CheckResultModel,
     ),
     _RegistryEntry(
+        "operations/closure-prepare-request-1.0.0.schema.json",
+        "closure-prepare-request",
+        "1.0.0",
+        "request_result",
+        "MCP input",
+        lambda: (
+            __import__(
+                "yoetz.protocol.models", fromlist=["ClosurePrepareRequestModel"]
+            ).ClosurePrepareRequestModel
+        ),
+    ),
+    _RegistryEntry(
+        "operations/closure-prepare-result-1.0.0.schema.json",
+        "closure-prepare-result",
+        "1.0.0",
+        "request_result",
+        "MCP output",
+        lambda: (
+            __import__(
+                "yoetz.protocol.models", fromlist=["ClosurePrepareResultModel"]
+            ).ClosurePrepareResultModel
+        ),
+    ),
+    _RegistryEntry(
         "operations/publish-work-request-1.0.0.schema.json",
         "publish-work-request",
         "1.0.0",

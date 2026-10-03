@@ -132,6 +132,17 @@ async def test_composer_paginates_and_requires_explicit_attempt_and_resolution()
     inventory = await prepare_closure(status, started.session_id, started.writer_id, Selection())
     assert inventory["request"] is None
     assert len(inventory["inventory"]["evidence"]) == 101  # type: ignore[index, arg-type]
+    mcp_inventory = await prepare_closure(
+        status,
+        started.session_id,
+        started.writer_id,
+        Selection(),
+        client_kind="cooperative_agent",
+        integration="cooperative_mcp",
+    )
+    # MCP delegates to the same pinned inventory composer as the CLI; transport identity does not
+    # alter the inventory, readiness, or the preparatory-only boundary.
+    assert mcp_inventory == inventory
     continued = [call for call in calls if call.cursor is not None]
     assert continued and all(
         call.limit == "100" and call.at_frontier == str(frontier.sequence) for call in continued

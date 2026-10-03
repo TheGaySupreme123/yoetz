@@ -71,6 +71,30 @@ def test_genesis_head_digest_is_admitted() -> None:
     assert summary == "Operation outcome: created; frontier: 0; head_digest: genesis."
 
 
+def test_closure_prepare_summary_names_frontier_inventory_and_boundary() -> None:
+    summary = render_safe_compact_summary(
+        {
+            "ok": True,
+            "preparatory_only": True,
+            "frontier": {"sequence": "12", "head_digest": _HEAD},
+            "inventory": {
+                "obligations": [{"obligation_id": "obl_1"}],
+                "results": [],
+                "evidence": [{"evidence_id": "evd_1"}, {"evidence_id": "evd_2"}],
+                "findings": [],
+                "history": [{"event_id": "evt_1"}],
+            },
+            "operation": "publish_work",
+        }
+    )
+    assert summary == (
+        f"Closure preparation only; frontier: 12; head_digest: {_HEAD}; inventory rows: "
+        "obligations 1, results 0, evidence 2, findings 0, history 1; next operation: "
+        "publish_work; review structuredContent before submitting any request."
+    )
+    assert len(summary.encode("ascii")) <= 512
+
+
 def test_check_summary_carries_finding_ids_required_for_respond() -> None:
     summary = render_safe_compact_summary(
         {

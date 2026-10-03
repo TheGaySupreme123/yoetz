@@ -626,6 +626,145 @@ async def test_read_guidance_returns_full_text_without_the_service_client(
 
 
 @pytest.mark.anyio
+async def test_closure_prepare_reuses_cli_helper_and_projects_structured_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def prepare(
+        _status: object,
+        session_id: str,
+        writer_id: str,
+        selection: object,
+        **kwargs: object,
+    ) -> dict[str, JsonValue]:
+        captured.update(
+            session_id=session_id,
+            writer_id=writer_id,
+            selection=selection,
+            **kwargs,
+        )
+        return {
+            "preparatory_only": True,
+            "frontier": {"sequence": "0", "head_digest": "genesis"},
+            "closure_readiness": {},
+            "inventory": {},
+            "request": None,
+            "notes": ["Nothing was published or judged."],
+        }
+
+    monkeypatch.setattr(bridge, "prepare_closure", prepare)
+    runtime = bridge.build_bridge_runtime()
+
+    result = await bridge.dispatch_closure_prepare(
+        {
+            "session_id": _id("session", 1),
+            "writer_id": _id("writer", 1),
+            "selection": {"phase": "inventory"},
+        },
+        runtime,
+    )
+
+    assert result.isError is False
+    assert result.structuredContent is not None
+    assert result.structuredContent["ok"] is True
+    assert result.structuredContent["preparatory_only"] is True
+    assert captured["session_id"] == _id("session", 1)
+    assert captured["writer_id"] == _id("writer", 1)
+    assert getattr(captured["selection"], "phase") == "inventory"
+    assert captured["client_kind"] == "cooperative_agent"
+    assert captured["integration"] == "cooperative_mcp"
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+async def test_closure_prepare_refuses_stale_inventory_without_writing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def prepare(*_args: object, **_kwargs: object) -> dict[str, JsonValue]:
+        raise ValueError("closure_snapshot_unavailable")
+
+    monkeypatch.setattr(bridge, "prepare_closure", prepare)
+    runtime = bridge.build_bridge_runtime()
+
+    result = await bridge.dispatch_closure_prepare(
+        {
+            "session_id": _id("session", 1),
+            "writer_id": _id("writer", 1),
+            "selection": {"phase": "claim"},
+        },
+        runtime,
+    )
+
+    assert result.isError is True
+    assert result.structuredContent is not None
+    assert result.structuredContent["error"]["code"] == "INVALID_REQUEST"
+    assert result.structuredContent["error"]["safe_details"] == {
+        "reason_code": "frontier_changed",
+        "continuation": "frontier_refresh_required",
+    }
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+async def test_closure_prepare_refuses_an_unbounded_mcp_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def prepare(*_args: object, **_kwargs: object) -> dict[str, JsonValue]:
+        return {
+            "preparatory_only": True,
+            "frontier": {"sequence": "0", "head_digest": "genesis"},
+            "closure_readiness": {},
+            "inventory": {"history": [{"event_id": "evt_" + "a" * 40_000}] * 30},
+            "request": None,
+            "notes": ["Nothing was published or judged."],
+        }
+
+    monkeypatch.setattr(bridge, "prepare_closure", prepare)
+    runtime = bridge.build_bridge_runtime()
+
+    result = await bridge.dispatch_closure_prepare(
+        {
+            "session_id": _id("session", 1),
+            "writer_id": _id("writer", 1),
+            "selection": {"phase": "inventory"},
+        },
+        runtime,
+    )
+
+    assert result.isError is True
+    assert result.structuredContent is not None
+    assert result.structuredContent["error"]["code"] == "LIMIT_EXCEEDED"
+    assert result.structuredContent["error"]["safe_details"] == {
+        "reason_code": "payload_too_large",
+    }
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+async def test_closure_prepare_replay_rejects_malformed_selection_in_one_turn() -> None:
+    runtime = bridge.build_bridge_runtime()
+    base = {
+        "session_id": _id("session", 1),
+        "writer_id": _id("writer", 1),
+    }
+    malformed = (
+        {**base},
+        {**base, "selection": {"phase": "inventory", "unexpected": True}},
+        {**base, "selection": {"phase": "attempt", "requested_item_indexes": [64]}},
+    )
+
+    for arguments in malformed:
+        result = await bridge.dispatch_closure_prepare(arguments, runtime)
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error"]["code"] == "INVALID_REQUEST"
+        assert result.structuredContent["error"]["safe_details"] is not None
+    assert runtime._slot.client is None  # pyright: ignore[reportPrivateUsage]
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
 async def test_read_guidance_rejects_unknown_uri_without_echoing_it() -> None:
     runtime = bridge.build_bridge_runtime()
     unknown = "yoetz://guidance/not-a-real-document.md"

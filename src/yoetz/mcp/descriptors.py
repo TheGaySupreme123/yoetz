@@ -17,7 +17,7 @@ from yoetz.mcp.semantic_destination import (
     SemanticDestinationDisclosure,
 )
 from yoetz.ports.control import McpHostProfile
-from yoetz.ports.integrations import YOETZ_WORKFLOW_TOOL_NAMES
+from yoetz.ports.integrations import YOETZ_MCP_TOOL_NAMES
 from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.schemas import (
     SCHEMA_NAMESPACE,
@@ -63,10 +63,18 @@ _TOOL_INPUT_SCHEMA_VERSIONS: Final = MappingProxyType(
         "check": "1.1.0",
         "respond": "1.1.0",
         "status": "1.2.0",
+        "closure_prepare": "1.0.0",
     }
 )
 _TOOL_OUTPUT_SCHEMA_VERSIONS: Final = MappingProxyType(
-    {"start": "1.1.0", "check": "1.3.0", "respond": "1.1.0", "status": "1.4.0", "receipt": "1.3.0"}
+    {
+        "start": "1.1.0",
+        "check": "1.3.0",
+        "respond": "1.1.0",
+        "status": "1.4.0",
+        "receipt": "1.3.0",
+        "closure_prepare": "1.0.0",
+    }
 )
 
 
@@ -220,6 +228,17 @@ PRESENTATION_INPUT_SCHEMA_BUDGETS: Final[Mapping[str, Mapping[str, int]]] = Mapp
                 "max_encoded_bytes": 2_000,
             }
         ),
+        "closure-prepare-request": MappingProxyType(
+            {
+                "max_oneof_nodes": 0,
+                "max_oneof_branches": 0,
+                "max_ref_nodes": 0,
+                "max_conditional_nodes": 0,
+                "max_defs_count": 4,
+                "max_defs_nest_depth": 1,
+                "max_encoded_bytes": 6_000,
+            }
+        ),
     }
 )
 
@@ -294,7 +313,7 @@ CLAUDE_CODE_INITIALIZE_INSTRUCTIONS: Final = (
 COMPACT_INSTRUCTIONS_HOST_PROFILES: Final[frozenset[str]] = frozenset({"codex", "cursor"})
 # Reviewed byte cap for the compact body (issue #918). Codex code mode builds every advertised
 # tool's description from these instructions, the tool description and a generated declaration,
-# so the body is charged once per tool (seven copies) on every turn. The full
+# so the body is charged once per tool (eight copies) on every turn. The full
 # `agent-instructions.md` document cost 19,835 bytes per copy there. `packaged_max_encoded_bytes`
 # bounds the packaged body alone. `max_encoded_bytes` is derived: that bound plus
 # len("\n\nRoute profile: policy. ") + len(policy tail) + 1 joiner + the disclosure ceiling (#479)
@@ -356,10 +375,10 @@ COMPACT_INITIALIZE_INSTRUCTIONS: Final = (
 # input schema. Per-item budgets cannot catch this — each item can sit inside its own bound while
 # the total still doubles. `instructions_copies_per_tool` is descriptive, not a knob: it records the
 # worst observed host behavior, one full copy of the instructions block charged to each of the
-# seven advertised tools, which is what the total is computed against.
+# eight advertised tools, which is what the total is computed against.
 # The 0.3 surface retains the 18 ordinary lifecycle/coordination event families and the expanded
 # current-main initialize guidance, including the #789 late-start rule carried from the 0.2 line.
-# That makes the measured generic-host packaged surface about 221 KB; the reviewed 224 KB ceiling
+# That makes the measured generic-host packaged surface about 245 KB; the reviewed 248 KB ceiling
 # leaves bounded headroom without dropping an admitted family, example, or startup rule. Claude
 # Code, Codex and Cursor receive compact initialize bodies instead, bounded separately above.
 # The aggregate likewise carries the packaged bound plus one disclosure allowance per advertised
@@ -367,9 +386,9 @@ COMPACT_INITIALIZE_INSTRUCTIONS: Final = (
 ADVERTISED_SURFACE_BUDGET: Final[Mapping[str, int]] = MappingProxyType(
     {
         "instructions_copies_per_tool": 1,
-        "packaged_max_encoded_bytes": 224_000,
-        "max_encoded_bytes": 224_000
-        + len(YOETZ_WORKFLOW_TOOL_NAMES) * MAX_DISCLOSURE_ENCODED_BYTES,
+        "packaged_max_encoded_bytes": 248_000,
+        "max_encoded_bytes": 248_000
+        + len(YOETZ_MCP_TOOL_NAMES) * MAX_DISCLOSURE_ENCODED_BYTES,
     }
 )
 
@@ -1951,6 +1970,22 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         read_only=True,
         idempotent=True,
     ),
+    _descriptor(
+        "closure_prepare",
+        "Prepare a closure request",
+        "Reads a complete status inventory at one pinned frontier and returns it with the "
+        "current closure readiness. A caller may select one explicit phase and existing IDs to "
+        "draft at most one publish_work, respond, or receipt request. Publication drafts carry "
+        "dry_run=true; this helper never writes the ledger, judges work, or claims completion. "
+        "Use the emitted recovery request and keep its request identity when a later write "
+        "times out. Select only IDs and requested-item indexes returned by the same inventory; "
+        "a moving frontier or unavailable item is refused. The MCP response has a bounded frame; "
+        "an oversized inventory returns LIMIT_EXCEEDED without a partial success, so use the CLI "
+        "closure-prepare --output path for a larger local inventory. Guidance: "
+        "yoetz://guidance/workflow.md.",
+        read_only=True,
+        idempotent=True,
+    ),
 )
 
 _STRICT_CHECK_DESCRIPTION_SUFFIX: Final = (
@@ -2006,6 +2041,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "status": "sha256:7e77f753244eee59b711cb7ee77c8f09970ef1b61c91b548b6f4a821b3541969",
                 "receipt": "sha256:c7676e1ca9afd96d9d7e74503edd5b31a758a05d7e7e1cf0d62c763611ffcecb",
                 "read_guidance": "sha256:4198e5fd133f7b37cc25c0c1a63161657c5d4396a1718f1f4f1f3db7c302a13d",
+                "closure_prepare": "sha256:9cbf97d6a668de25cd80bdf79a75c50dcbeef256ba4abf4b6abc86405a6627d5",
             }
         ),
         "strict": MappingProxyType(
@@ -2017,14 +2053,15 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "status": "sha256:7e77f753244eee59b711cb7ee77c8f09970ef1b61c91b548b6f4a821b3541969",
                 "receipt": "sha256:c7676e1ca9afd96d9d7e74503edd5b31a758a05d7e7e1cf0d62c763611ffcecb",
                 "read_guidance": "sha256:4198e5fd133f7b37cc25c0c1a63161657c5d4396a1718f1f4f1f3db7c302a13d",
+                "closure_prepare": "sha256:9cbf97d6a668de25cd80bdf79a75c50dcbeef256ba4abf4b6abc86405a6627d5",
             }
         ),
     }
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:8b4e83ef0514c7beba506b4c53443eac681dca8dac4a2cd76b8ee2e22225b026",
-        "strict": "sha256:3075d77a13af76ad8c8e0ff3f62de849f99a22f8bba415f98ebd609618289dbd",
+        "policy": "sha256:eb8d757c29fb0a4d0a0acc8af24f0aa9318629cca5830fc5d9de7461235595ed",
+        "strict": "sha256:2cb62b5e33d08dc8c413e82ed056454aa8e58d433a982b47531a742a0f77708b",
     }
 )
 
@@ -2051,7 +2088,7 @@ def _presentation_description_strings(schema: Mapping[str, JsonValue]) -> tuple[
 def _lint_descriptor_sets() -> None:
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         names = tuple(descriptor.name for descriptor in descriptors)
-        if names != YOETZ_WORKFLOW_TOOL_NAMES:
+        if names != YOETZ_MCP_TOOL_NAMES:
             raise RuntimeError("descriptor_registry_invalid")
         if len(set(names)) != len(names):
             raise RuntimeError("descriptor_registry_invalid")

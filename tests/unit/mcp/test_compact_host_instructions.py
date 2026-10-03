@@ -213,9 +213,9 @@ def test_the_compact_surface_costs_a_fraction_of_the_generic_one() -> None:
         assert compact["instructions_encoded_bytes"] == len(
             server_instructions("policy", host_profile=host).encode("utf-8")
         )
-        # Seven copies of the 19.8 KB document become seven copies of the compact body.
+        # One copy per advertised tool of the 19.8 KB document becomes one compact copy per tool.
         saved = generic["replicated_encoded_bytes"] - compact["replicated_encoded_bytes"]
-        assert saved == 7 * (
+        assert saved == generic["tool_count"] * (
             generic["instructions_encoded_bytes"] - compact["instructions_encoded_bytes"]
         )
         assert compact["instructions_encoded_bytes"] * 9 < generic["instructions_encoded_bytes"]

@@ -59,7 +59,7 @@ __all__ = [
 SCHEMA_NAMESPACE: Final = "https://schemas.yoetz.dev/0.1/"
 SCHEMA_MANIFEST_SCHEMA: Final = "yoetz.schema-manifest/1.0.0"
 SCHEMA_MANIFEST_VERSION: Final = "1.0.0"
-SCHEMA_MEMBER_COUNT: Final = 216
+SCHEMA_MEMBER_COUNT: Final = 218
 
 _DRAFT_2020_12: Final = "https://json-schema.org/draft/2020-12/schema"
 _SCHEMA_MEDIA_TYPE: Final = "application/schema+json"
@@ -787,7 +787,7 @@ def _load_catalog_state() -> _CatalogState:
             key=lambda item: item.schema_name.replace("-", "_").encode("ascii"),
         )
     }
-    if len(request_versions_dict) != 51 or len(event_versions_dict) != 29:
+    if len(request_versions_dict) != 53 or len(event_versions_dict) != 29:
         _protocol_error("schema_catalog_incomplete")
 
     catalog = SchemaCatalog(

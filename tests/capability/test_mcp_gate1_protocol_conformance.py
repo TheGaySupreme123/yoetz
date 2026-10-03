@@ -131,6 +131,11 @@ def _schema_valid_tool_arguments() -> dict[str, dict[str, JsonValue]]:
             "disposition": "acknowledged",
         },
         "status": {**_base(5), **identity, "view": "compact", "limit": "10"},
+        "closure_prepare": {
+            "session_id": identity["session_id"],
+            "writer_id": identity["writer_id"],
+            "selection": {"phase": "inventory"},
+        },
         "receipt": {
             **_base(6),
             **identity,
@@ -386,7 +391,7 @@ async def test_mcp_tools_list_exact(tmp_path: Path) -> None:
     async with _sdk_session(tmp_path) as (session, _initialize):
         listed = await session.list_tools()
         assert [tool.name for tool in listed.tools] == list(_TOOL_NAMES)
-        assert len(listed.tools) == 7
+        assert len(listed.tools) == 8
         for tool, descriptor in zip(listed.tools, TOOL_DESCRIPTORS["policy"], strict=True):
             assert tool.description == descriptor.description
             assert tool.inputSchema == _plain_json(descriptor.input_schema)
@@ -403,7 +408,7 @@ async def test_mcp_tools_list_exact(tmp_path: Path) -> None:
         requirement_id="mcp_tools_list_exact",
         observation="tools_list_exact",
         fixture=b"gate1-tools-list-exact",
-        value=7,
+        value=8,
     )
 
 
@@ -453,6 +458,14 @@ async def test_mcp_tools_call_all_six_dispatch(tmp_path: Path) -> None:
             )
             shapes.append("invalid_request")
         assert len(shapes) == 6
+        closure_result = await session.call_tool(
+            "closure_prepare", _schema_valid_tool_arguments()["closure_prepare"]
+        )
+        assert closure_result.isError is True
+        assert closure_result.structuredContent is not None
+        closure_structured = cast(dict[str, object], closure_result.structuredContent)
+        assert closure_structured["error"]["code"] in _DEGRADED_CODES
+        assert closure_structured["ok"] is False
     _record_pass(
         tmp_path,
         case_id="MCP-G1-TOOLS-CALL",

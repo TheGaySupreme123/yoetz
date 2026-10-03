@@ -14,6 +14,8 @@ from yoetz.protocol.canonical import canonical_encode
 from yoetz.protocol.errors import PROTOCOL_REASON_CODES, ProtocolValueError
 
 __all__ = [
+    "YOETZ_MCP_TOOL_NAMES",
+    "YOETZ_SUPPORT_TOOL_NAMES",
     "YOETZ_WORKFLOW_TOOL_NAMES",
     "HookCorrelationKind",
     "HookPairingMode",
@@ -107,6 +109,11 @@ YOETZ_WORKFLOW_TOOL_NAMES: Final = (
     "receipt",
     "read_guidance",
 )
+
+# Read-only support tools are advertised through MCP but do not enter the workflow hook
+# allowlist: they prepare or inspect an existing workflow request and never append ledger state.
+YOETZ_SUPPORT_TOOL_NAMES: Final = ("closure_prepare",)
+YOETZ_MCP_TOOL_NAMES: Final = (*YOETZ_WORKFLOW_TOOL_NAMES, *YOETZ_SUPPORT_TOOL_NAMES)
 
 _MAX_LOCATION_CHARS = 4_096
 _MAX_FILES = 64

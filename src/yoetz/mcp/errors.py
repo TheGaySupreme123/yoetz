@@ -59,6 +59,11 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "parent_tool_call_id",
         "project_id",
         "reason_code",
+        "selection",
+        "phase",
+        "observed_event_ids",
+        "requested_item_indexes",
+        "result_ids",
         "subagent_id",
         "actor",
         "actor_id",
@@ -1692,7 +1697,15 @@ def _check_locatable_required_names() -> None:
 
     from yoetz.mcp.descriptors import descriptor_for
 
-    for tool in ("start", "publish_work", "check", "respond", "status", "receipt"):
+    for tool in (
+        "start",
+        "publish_work",
+        "check",
+        "respond",
+        "status",
+        "receipt",
+        "closure_prepare",
+    ):
         required: set[str] = set()
         declared: set[str] = set()
         _schema_names(cast(JsonValue, descriptor_for(tool).input_schema), required, declared)

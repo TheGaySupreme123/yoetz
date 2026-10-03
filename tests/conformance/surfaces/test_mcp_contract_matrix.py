@@ -68,6 +68,7 @@ _EXPECTED_TOOL_NAMES = (
     "status",
     "receipt",
     "read_guidance",
+    "closure_prepare",
 )
 _WORKFLOW_TOOL_NAMES = (
     "start",
@@ -96,6 +97,7 @@ def test_fallback_error_object_is_admitted() -> None:
     for operation in _WORKFLOW_TOOL_NAMES:
         validate_schema_instance(f"{operation.replace('_', '-')}-result", "1.0.0", fallback)
     validate_schema_instance("read-guidance-result", "1.0.0", fallback)
+    validate_schema_instance("closure-prepare-result", "1.0.0", fallback)
 
 
 def test_public_error_and_validation_summaries_are_sanitized() -> None:
@@ -298,8 +300,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:8b4e83ef0514c7beba506b4c53443eac681dca8dac4a2cd76b8ee2e22225b026",
-        "strict": "sha256:3075d77a13af76ad8c8e0ff3f62de849f99a22f8bba415f98ebd609618289dbd",
+        "policy": "sha256:eb8d757c29fb0a4d0a0acc8af24f0aa9318629cca5830fc5d9de7461235595ed",
+        "strict": "sha256:2cb62b5e33d08dc8c413e82ed056454aa8e58d433a982b47531a742a0f77708b",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -355,10 +357,21 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert status_descriptor.output_schema_ref.endswith("status-result-1.4.0.schema.json")
     receipt_descriptor = descriptor_for("receipt")
     assert receipt_descriptor.output_schema_ref.endswith("receipt-result-1.3.0.schema.json")
+    closure_descriptor = descriptor_for("closure_prepare")
+    assert closure_descriptor.input_schema_ref.endswith(
+        "closure-prepare-request-1.0.0.schema.json"
+    )
+    assert closure_descriptor.output_schema_ref.endswith(
+        "closure-prepare-result-1.0.0.schema.json"
+    )
+    assert "never writes the ledger, judges work, or claims completion" in (
+        closure_descriptor.description
+    )
     for descriptors in TOOL_DESCRIPTORS.values():
         assert {item.name for item in descriptors if item.annotations.read_only} == {
             "status",
             "read_guidance",
+            "closure_prepare",
         }
         assert all(not item.annotations.destructive for item in descriptors)
         assert all(item.annotations.idempotent for item in descriptors)

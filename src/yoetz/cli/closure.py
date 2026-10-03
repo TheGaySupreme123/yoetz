@@ -9,14 +9,13 @@ import tempfile
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Literal, cast
-
-from pydantic import BaseModel, ConfigDict, Field
+from typing import cast
 
 from yoetz import __version__
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import (
+    ClosureSelectionModel,
     PublishWorkRequest,
     ReceiptRequest,
     RespondRequest,
@@ -31,6 +30,7 @@ PREPARATION_REMEDIATIONS = {
     "closure_snapshot_unavailable": "A complete pinned snapshot was unavailable. Read status and restart inventory.",
     "closure_pagination_invalid": "The cursor repeated. Keep the original query identity and inspect status.",
     "closure_inventory_limit": "The bounded inventory is incomplete; use paginated status without assuming closure.",
+    "closure_result_too_large": "The complete preparation exceeds the MCP response bound; use the CLI closure-prepare --output path or read status pages directly, and do not claim closure from an incomplete response.",
     "closure_obligation_unknown": "Select an obligation ID from the returned inventory.",
     "closure_evidence_unavailable": "Select available, relevant evidence or retain the missing-evidence limitation.",
     "closure_result_unavailable": "The selected result payload is unavailable; inspect results and retain its limitation.",
@@ -48,6 +48,10 @@ PREPARATION_REMEDIATIONS = {
     "closure_output_unwritable": "Nothing was saved. Choose a writable file path in an existing directory and prepare again.",
     "closure_output_not_durable": "The file was replaced, but its directory could not be flushed to disk, so a crash may lose it. Prepare again, saving to a local disk.",
 }
+
+# The CLI and MCP surfaces intentionally share the exact selection contract. The CLI keeps this
+# public alias so existing callers and the ``closure-schema`` command remain source-compatible.
+Selection = ClosureSelectionModel
 
 # Filesystems and platforms that cannot open or flush a directory report these; the rename is then
 # as durable as that filesystem makes it, which is all the command can promise there.
@@ -76,31 +80,6 @@ def _fsync_directory(directory: Path) -> None:
             raise
     finally:
         os.close(descriptor)
-
-
-class Selection(BaseModel):
-    """Explicit decisions only. No default action, response, resolution, or completion assertion."""
-
-    model_config = ConfigDict(extra="forbid")
-    phase: Literal["inventory", "attempt", "respond", "resolve", "claim", "receipt"] = "inventory"
-    obligation_ids: tuple[str, ...] = ()
-    requested_item_indexes: tuple[Annotated[int, Field(ge=0, le=63)], ...] = ()
-    description: str | None = None
-    command: str | None = None
-    action_kind: Literal["command", "edit", "research", "review", "other"] = "other"
-    observed_event_ids: tuple[str, ...] = ()
-    evidence_refs: tuple[str, ...] = ()
-    result_ids: tuple[str, ...] = ()
-    finding_id: str | None = None
-    disposition: (
-        Literal[
-            "acknowledged", "acknowledged_not_done", "provenance_disputed", "rejected", "waived"
-        ]
-        | None
-    ) = None
-    reason: str | None = None
-    supersedes_claim_refs: tuple[str, ...] = ()
-    format: Literal["markdown", "text", "json"] = "markdown"
 
 
 def write_prepared_output(result: Mapping[str, JsonValue], path: Path) -> dict[str, JsonValue]:
@@ -159,7 +138,13 @@ def write_prepared_output(result: Mapping[str, JsonValue], path: Path) -> dict[s
     }
 
 
-def _base(session_id: str, writer_id: str) -> dict[str, object]:
+def _base(
+    session_id: str,
+    writer_id: str,
+    *,
+    client_kind: str = "yoetz_cli",
+    integration: str = "local_cli",
+) -> dict[str, object]:
     return {
         "protocol_version": "0.1",
         "schema_version": "1.0.0",
@@ -167,7 +152,7 @@ def _base(session_id: str, writer_id: str) -> dict[str, object]:
         "session_id": session_id,
         "writer_id": writer_id,
         "actor": {"actor_id": "harness:closure-composer", "actor_type": "harness"},
-        "client": {"kind": "yoetz_cli", "version": __version__, "integration": "local_cli"},
+        "client": {"kind": client_kind, "version": __version__, "integration": integration},
     }
 
 
@@ -176,10 +161,18 @@ async def prepare_closure(
     session_id: str,
     writer_id: str,
     selection: Selection,
+    *,
+    client_kind: str = "yoetz_cli",
+    integration: str = "local_cli",
 ) -> dict[str, JsonValue]:
     """Pin and exhaust every input view, then produce at most one non-evidential request."""
 
-    base = _base(session_id, writer_id)
+    base = _base(
+        session_id,
+        writer_id,
+        client_kind=client_kind,
+        integration=integration,
+    )
     compact_request = StatusRequest.model_validate(
         {
             **base,
@@ -420,7 +413,12 @@ async def prepare_closure(
     output["request"] = validated
     recovery = StatusRequest.model_validate(
         {
-            **_base(session_id, writer_id),
+            **_base(
+                session_id,
+                writer_id,
+                client_kind=client_kind,
+                integration=integration,
+            ),
             "view": "operation",
             "limit": "10",
             "at_frontier": None,

@@ -26,6 +26,7 @@ from yoetz.protocol.recovery import (
 __all__ = [
     "render_safe_compact_summary",
     "summary_for_check",
+    "summary_for_closure_prepare",
     "summary_for_public_error",
     "summary_for_read_guidance",
     "summary_for_receipt",
@@ -1109,6 +1110,24 @@ def summary_for_read_guidance(envelope: object) -> str:
     )
 
 
+def summary_for_closure_prepare(envelope: object) -> str:
+    """Project the bounded, preparatory-only closure result onto the text channel."""
+
+    source = _mapping(envelope)
+    inventory = source.get("inventory")
+    counts: list[str] = []
+    if isinstance(inventory, Mapping):
+        typed_inventory = cast(Mapping[str, JsonValue], inventory)
+        for view in ("obligations", "results", "evidence", "findings", "history"):
+            counts.append(f"{view} {_item_count(typed_inventory.get(view))}")
+    rows = ", ".join(counts) if counts else "unavailable"
+    operation = _safe_token(source.get("operation"), fallback="inventory")
+    return _bounded(
+        f"Closure preparation only; {_frontier_clause(source)}; inventory rows: {rows}; "
+        f"next operation: {operation}; review structuredContent before submitting any request."
+    )
+
+
 def _summary_for_other_success(source: Mapping[str, JsonValue]) -> str:
     outcome = _safe_token(source.get("outcome"), fallback="recorded")
     identity = _identity_clause(source)
@@ -1127,6 +1146,8 @@ def render_safe_compact_summary(envelope: object) -> str:
     source = _mapping(envelope)
     if source.get("ok") is False or "error" in source:
         return summary_for_public_error(source)
+    if source.get("preparatory_only") is True:
+        return summary_for_closure_prepare(source)
     if "verdict" in source:
         return summary_for_check(source)
     if "view" in source:

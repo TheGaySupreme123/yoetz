@@ -91,6 +91,11 @@ __all__ = [
     "CheckResult",
     "CheckResultModel",
     "CheckScopeModel",
+    "ClosurePrepareRequest",
+    "ClosurePrepareRequestModel",
+    "ClosurePrepareResult",
+    "ClosurePrepareResultModel",
+    "ClosureSelectionModel",
     "ClientInfoModel",
     "ClientKind",
     "CoverageModel",
@@ -1874,6 +1879,95 @@ type ReadGuidanceResultBranch = Annotated[
 
 
 class ReadGuidanceResultModel(PublicResultModel[ReadGuidanceResultBranch]):
+    pass
+
+
+class ClosureSelectionModel(_ClosedModel):
+    """Explicit caller choices for the read-only closure preparation helper."""
+
+    phase: Literal["inventory", "attempt", "respond", "resolve", "claim", "receipt"] = (
+        "inventory"
+    )
+    obligation_ids: Annotated[tuple[ObligationIdWire, ...], Field(max_length=64)] = ()
+    requested_item_indexes: Annotated[
+        tuple[Annotated[int, Field(ge=0, le=63)], ...], Field(max_length=64)
+    ] = ()
+    description: String1To8192 | None = None
+    command: String1To8192 | None = None
+    action_kind: Literal["command", "edit", "research", "review", "other"] = "other"
+    observed_event_ids: Annotated[tuple[EventIdWire, ...], Field(max_length=64)] = ()
+    evidence_refs: Annotated[tuple[EvidenceOrResultIdWire, ...], Field(max_length=64)] = ()
+    result_ids: Annotated[tuple[ResultIdWire, ...], Field(max_length=64)] = ()
+    finding_id: FindingIdWire | None = None
+    disposition: (
+        Literal[
+            "acknowledged",
+            "acknowledged_not_done",
+            "provenance_disputed",
+            "rejected",
+            "waived",
+        ]
+        | None
+    ) = None
+    reason: String1To4096 | None = None
+    supersedes_claim_refs: Annotated[tuple[ClaimIdWire, ...], Field(max_length=64)] = ()
+    format: Literal["markdown", "text", "json"] = "markdown"
+
+    @model_validator(mode="after")
+    def _validate_closure_selection(self) -> ClosureSelectionModel:
+        for values in (
+            self.obligation_ids,
+            self.observed_event_ids,
+            self.evidence_refs,
+            self.result_ids,
+            self.supersedes_claim_refs,
+        ):
+            _require_unique(values, limit=64)
+        if len(self.requested_item_indexes) > 64 or len(
+            set(self.requested_item_indexes)
+        ) != len(self.requested_item_indexes):
+            raise ValueError("closure_selection_indexes_not_unique")
+        return self
+
+
+class ClosurePrepareRequestModel(_ClosedModel):
+    """MCP input for the read-only closure preparation helper."""
+
+    session_id: SessionIdWire
+    writer_id: WriterIdWire
+    selection: ClosureSelectionModel
+
+    @model_validator(mode="after")
+    def _validate_closure_prepare_request(self) -> ClosurePrepareRequestModel:
+        _validate_model_against_schema(self, "closure-prepare-request")
+        return self
+
+
+class ClosurePrepareSuccessModel(_ClosedModel):
+    """MCP result carrying a CLI-equivalent closure inventory or one explicit draft."""
+
+    ok: Literal[True]
+    preparatory_only: Literal[True]
+    frontier: FrontierModel
+    closure_readiness: dict[str, JsonValue]
+    inventory: dict[str, JsonValue]
+    request: dict[str, JsonValue] | None = None
+    notes: tuple[String1To8192, ...]
+    operation: Literal["publish_work", "respond", "receipt"] | None = None
+    recovery_request: dict[str, JsonValue] | None = None
+    recovery: String1To4096 | None = None
+
+    @model_validator(mode="after")
+    def _validate_closure_prepare_success(self) -> ClosurePrepareSuccessModel:
+        return self
+
+
+type ClosurePrepareResultBranch = Annotated[
+    ClosurePrepareSuccessModel | OperationFailureModel, Field(discriminator="ok")
+]
+
+
+class ClosurePrepareResultModel(PublicResultModel[ClosurePrepareResultBranch]):
     pass
 
 
@@ -4464,6 +4558,8 @@ ReceiptRequest = ReceiptRequestModel
 ReceiptResult = ReceiptResultModel
 ReadGuidanceRequest = ReadGuidanceRequestModel
 ReadGuidanceResult = ReadGuidanceResultModel
+ClosurePrepareRequest = ClosurePrepareRequestModel
+ClosurePrepareResult = ClosurePrepareResultModel
 
 _PUBLIC_MODEL_SCHEMA: Final[Mapping[type[object], str]] = MappingProxyType(
     {
@@ -4481,6 +4577,8 @@ _PUBLIC_MODEL_SCHEMA: Final[Mapping[type[object], str]] = MappingProxyType(
         ReceiptResultModel: "receipt-result",
         ReadGuidanceRequestModel: "read-guidance-request",
         ReadGuidanceResultModel: "read-guidance-result",
+        ClosurePrepareRequestModel: "closure-prepare-request",
+        ClosurePrepareResultModel: "closure-prepare-result",
     }
 )
 
