@@ -309,15 +309,6 @@ img, svg { max-width: 100%; }
 }
 
 /* ---------- Benchmark: tier colours and the logo row ---------- */
-.stanza .silver,
-.stanza .gold {
-  background-clip: text;
-  -webkit-background-clip: text;
-  color: transparent;
-  -webkit-text-fill-color: transparent;
-}
-.stanza .silver { background-image: linear-gradient(180deg, #b4bfba 0%, #6f7d78 100%); }
-.stanza .gold { background-image: linear-gradient(180deg, #e2b84a 0%, #9c6f12 100%); }
 /* Inline tags inside a serif line: a logo chip the height of the x-height */
 .stanza .tag {
   display: inline-flex;
@@ -336,3 +327,7 @@ img, svg { max-width: 100%; }
 }
 .stanza .tag img { width: 1.4em; height: 1.4em; }
 .stanza .tag.wordmark { font-weight: 600; letter-spacing: -0.01em; }
+/* The tier word is drawn in dots by the artwork; this is the room the sentence leaves for it */
+.stanza .nowrap { white-space: nowrap; }
+.copy-right.wide { max-width: 720px; }
+.dot-word { display: block; width: 100%; height: 2em; margin-top: 0.1em; }

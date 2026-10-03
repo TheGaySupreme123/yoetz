@@ -146,23 +146,23 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
           </section>
 
           <section id="benchmark" class="scene" data-scene="sun">
-            <div class="copy-right">
+            <div class="copy-right wide">
               <p class="eyebrow">Score on {BENCH.suite}</p>
-              <p class="stanza">{BENCH.model} on <span class="tag"><img src="/assets/openai.svg" alt="" width="22" height="22" />Codex</span>, scored on <span class="tag wordmark">{BENCH.suite}</span>.</p>
+              <p class="stanza">{BENCH.model} on <span class="nowrap"><span class="tag"><img src="/assets/openai.svg" alt="" width="22" height="22" />Codex</span>,</span> scored on <span class="nowrap"><span class="tag wordmark">{BENCH.suite}</span>.</span></p>
             </div>
           </section>
 
           <section id="local" class="scene" data-scene="sun">
-            <div class="copy-right">
+            <div class="copy-right wide">
               <p class="eyebrow">Score on {BENCH.suite}</p>
-              <p class="stanza">{BENCH.model} on <span class="tag"><img src="/assets/openai.svg" alt="" width="22" height="22" />Codex</span>, scored on <span class="tag wordmark">{BENCH.suite}</span> with FinishUP <span class="silver">Local</span></p>
+              <p class="stanza">{BENCH.model} on <span class="nowrap"><span class="tag"><img src="/assets/openai.svg" alt="" width="22" height="22" />Codex</span>,</span> scored on <span class="nowrap"><span class="tag wordmark">{BENCH.suite}</span></span> with FinishUP <span class="dot-word short" aria-label="Local" role="img"></span></p>
             </div>
           </section>
 
           <section id="ai" class="scene" data-scene="sun">
-            <div class="copy-right">
+            <div class="copy-right wide">
               <p class="eyebrow">Score on {BENCH.suite}</p>
-              <p class="stanza">{BENCH.model} on <span class="tag"><img src="/assets/openai.svg" alt="" width="22" height="22" />Codex</span>, scored on <span class="tag wordmark">{BENCH.suite}</span> with FinishUP <span class="gold">AI-powered</span></p>
+              <p class="stanza">{BENCH.model} on <span class="nowrap"><span class="tag"><img src="/assets/openai.svg" alt="" width="22" height="22" />Codex</span>,</span> scored on <span class="nowrap"><span class="tag wordmark">{BENCH.suite}</span></span> with FinishUP <span class="dot-word long" aria-label="AI-powered" role="img"></span></p>
             </div>
           </section>
 
@@ -265,6 +265,7 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
         let raf = 0;
         let last = "";
         const slot = document.getElementById("pc-slot");
+        const tiers = Array.from(document.querySelectorAll<HTMLElement>(".dot-word"));
         const update = () => {
           raf = 0;
           const vh = window.innerHeight || 900;
@@ -272,6 +273,16 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
             const r = slot.getBoundingClientRect();
             const c = canvas.getBoundingClientRect();
             art.setAnchor(r.left + r.width / 2 - c.left, r.top + r.height / 2 - c.top);
+          }
+          if (tiers.length) {
+            // the tier slot nearest the middle of the viewport is the one being read
+            const c = canvas.getBoundingClientRect();
+            let best: DOMRect | null = null;
+            for (const el of tiers) {
+              const r = el.getBoundingClientRect();
+              if (!best || Math.abs(r.top + r.height / 2 - vh / 2) < Math.abs(best.top + best.height / 2 - vh / 2)) best = r;
+            }
+            if (best) art.setTier(best.left + best.width / 2 - c.left, best.top + best.height / 2 - c.top, best.width, best.height);
           }
           const top = -story.getBoundingClientRect().top;
           const screens = (top + vh * 0.5) / vh;

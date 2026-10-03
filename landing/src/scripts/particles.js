@@ -8,6 +8,8 @@ const PALETTE = {
   particle: "#064E3B",
   signal: "#10B981",
   faint: "#8FA39B",
+  silver: "#8E9B96",
+  gold: "#B08A2E",
 };
 
 const HERO_WORDS = ["work", "code", "research", "writing", "reviews"];
@@ -50,6 +52,8 @@ export function mountParticles(canvas, options = {}) {
   let scene = { form: "hero", phase: 0 };
   let anchor = null; // canvas-pixel position of the word "computer" in the closing copy
   let anchorN = { x: 0.32, y: 0.52 };
+  let tierPx = null; // the slot in the copy where the tier word is drawn in dots
+  let tierN = { x: 0.9, y: 0.55, w: 0.7, h: 0.3 };
   let tilt = 0;
   let ox = 0;
   let mx = 0;
@@ -127,6 +131,9 @@ export function mountParticles(canvas, options = {}) {
         if (d[k + 3] > 120) pts.push((x - W / 2) / (W / 2), (y - H / 2) / (W / 2), d[k + 1] > 128 ? 1 : 0);
       }
     }
+    let lo = 9, hi = -9;
+    for (let j = 0; j < pts.length; j += 3) { if (pts[j] < lo) lo = pts[j]; if (pts[j] > hi) hi = pts[j]; }
+    pts.width = Math.max(0.2, hi - lo);
     cache[key] = pts;
     return pts;
   }
@@ -293,19 +300,28 @@ export function mountParticles(canvas, options = {}) {
         spec.ox = -0.1;
         const y0 = 0.38;
         const sy = 0.42 - phase * 1.0;
-        const digits = wordSet((scores[Math.min(scores.length - 1, Math.floor(phase * scores.length))] || "") + "%");
+        const stop = Math.min(2, Math.floor(phase * 3));
+        const digits = wordSet((scores[Math.min(scores.length - 1, stop)] || "") + "%");
+        // the tier word, drawn in dots where the copy leaves room for it
+        const tier = stop === 1 ? wordSet("Local") : stop === 2 ? wordSet("AI-powered") : null;
+        const tsc = tier ? Math.min(tierN.w / tier.width, tierN.h / 0.42) : 0;
         for (i = 0; i < N; i++) {
           f = i / N;
-          if (f < 0.28) {
+          if (f < 0.26) {
             set(i, (R[i * 6] - 0.5) * 2.3, y0 + (R[i * 6 + 1] - 0.5) * 0.03, (R[i * 6 + 2] - 0.5) * 0.5, 0);
             continue;
           }
-          if (f >= 0.78) {
+          if (f >= 0.82) {
+            if (tier) fromSet(i, tier, tsc, tierN.x + tierN.w / 2 - (tier.width * tsc) / 2, tierN.y, 0.06, stop === 1 ? 5 : 6);
+            else sphere(i, 0, sy, 0, 0.17, 2);
+            continue;
+          }
+          if (f >= 0.72) {
             // the benchmark score, rising with the sun: one figure per stop
             fromSet(i, digits, 0.6, -0.72, Math.min(sy, 0.2), 0.1, 0);
             continue;
           }
-          if (f < 0.52) sphere(i, 0, sy, 0, 0.17, 2);
+          if (f < 0.46) sphere(i, 0, sy, 0, 0.17, 2);
           else {
             a = R[i * 6] * 6.2832;
             const rr = 0.2 + R[i * 6 + 1] * 0.32 * (0.55 + 0.45 * Math.sin(a * 9 + t * 1.5));
@@ -342,6 +358,7 @@ export function mountParticles(canvas, options = {}) {
     const t = (performance.now() - t0) / 1000;
     const S = cw < 720 ? cw * 0.42 : Math.min(cw, ch) * 0.46;
     if (anchor) anchorN = { x: (anchor.x - cw / 2 - ox * cw) / S, y: (anchor.y - ch / 2) / S };
+    if (tierPx) tierN = { x: (tierPx.x - cw / 2 - ox * cw) / S, y: (tierPx.y - ch / 2) / S, w: tierPx.w / S, h: tierPx.h / S };
     const spec = build(scene.form, t, Math.max(0, Math.min(1, scene.phase || 0)));
     for (let i = 0; i < N; i++) {
       const k = 0.04 + R[i * 6 + 4] * 0.07;
@@ -377,11 +394,11 @@ export function mountParticles(canvas, options = {}) {
       const dep = 1 - (Math.max(-1.2, Math.min(1.2, z2)) + 1.2) / 2.4;
       pa[i] = 0.22 + dep * 0.78;
     }
-    const PAL = [PALETTE.particle, PALETTE.signal, sun, sun, PALETTE.faint];
-    const AM = [1, 1, 1, 0.5, 0.8];
+    const PAL = [PALETTE.particle, PALETTE.signal, sun, sun, PALETTE.faint, PALETTE.silver, PALETTE.gold];
+    const AM = [1, 1, 1, 0.5, 0.8, 1, 1];
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cw, ch);
-    for (let c = 0; c < 5; c++) {
+    for (let c = 0; c < PAL.length; c++) {
       ctx.fillStyle = PAL[c];
       const am = AM[c];
       for (let i = 0; i < N; i++) {
@@ -425,6 +442,10 @@ export function mountParticles(canvas, options = {}) {
     // x, y in canvas pixels; null to fall back to the default spot.
     setAnchor(x, y) {
       anchor = x == null ? null : { x, y };
+    },
+    // the slot (canvas pixels: centre and size) where "Local" / "AI-powered" is drawn in dots
+    setTier(x, y, w, h) {
+      tierPx = x == null ? null : { x, y, w, h };
     },
     destroy() {
       cancelAnimationFrame(raf);
