@@ -1319,7 +1319,10 @@ class SemanticAttemptRecord:
             if self.terminal_code is None or self.result_object_ref is None:
                 raise _invalid()
         elif self.state == "expired":
-            if self.terminal_code is None or self.result_object_ref is not None:
+            # A retryable non-success may carry a durable response object solely for bounded
+            # privacy omission metadata. It remains unselected and claimable, but terminal replay
+            # can recover the same metadata if the frozen deadline closes the job before retry.
+            if self.terminal_code is None:
                 raise _invalid()
         elif self.state == "late":
             if self.terminal_code is None or self.result_object_ref is None:

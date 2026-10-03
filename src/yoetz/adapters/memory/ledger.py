@@ -3385,9 +3385,7 @@ class MemoryLedgerAdapter:
                     token_usage=token_usage,
                 )
                 return
-            if terminal_code is None or (
-                outcome is AttemptOutcome.EXPIRED and result_object_ref is not None
-            ):
+            if terminal_code is None:
                 raise _error(PublicErrorCode.INVALID_REQUEST)
             self._state.attempts[handle.attempt_id] = replace(
                 attempt,

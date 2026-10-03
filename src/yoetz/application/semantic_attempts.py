@@ -1074,14 +1074,14 @@ async def run_durable_semantic_attempts(
     async def _publish_terminal_response(
         handle: SemanticAttemptHandle, evaluation: _AttemptEvaluation
     ) -> tuple[ObjectRef | None, bool]:
-        """Persist privacy omission identities for a terminal non-success attempt.
+        """Persist privacy omission identities for a non-success attempt.
 
         Successful attempts already publish their response object before selection. A blocked,
-        exhausted, or otherwise non-success attempt is never selected, but its withheld item
-        identities are still part of the public result. Store that bounded metadata in the same
-        authenticated response object so terminal replay can recover it without re-dispatching.
-        Publishing is best effort here: the terminal status remains authoritative if object
-        storage itself fails, and no unverified identity is written into the ledger.
+        exhausted, retryable, or otherwise non-success attempt is never selected, but its
+        withheld item identities are still part of the public result. Store that bounded metadata
+        in the same authenticated response object so retry and terminal replay can recover it
+        without re-dispatching. Publishing is best effort here; callers decide whether a failed
+        write is retryable or an explicit persistence-unknown terminal outcome.
         """
 
         if not getattr(evaluation, "semantic_withheld_item_ids", ()):
@@ -1527,11 +1527,35 @@ async def run_durable_semantic_attempts(
                     )
                 budget = _total_budget(walk_after, fallback)
             if can_retry:
+                retry_response_ref, retry_response_failed = await _publish_terminal_response(
+                    handle, evaluation
+                )
+                if retry_response_failed:
+                    # Retrying after losing the only durable carrier would let an immediate
+                    # result expose omission identities that terminal replay cannot reconstruct.
+                    # Stop with the same bounded persistence-unknown outcome used by terminal
+                    # attempts instead of clearing the facts and pretending the retry is safe.
+                    await ledger.record_attempt_outcome(
+                        handle,
+                        AttemptOutcome.FAILED,
+                        terminal_code=SemanticReason.RECEIPT_PERSISTENCE_UNKNOWN,
+                        token_usage=_attempt_token_usage(evaluation),
+                    )
+                    await _resolve_disclosure_wait_after_terminal(
+                        ledger, current_lease, job.job_id, handle.attempt_id
+                    )
+                    return build_final(
+                        SemanticStatus.UNAVAILABLE,
+                        SemanticReason.RECEIPT_PERSISTENCE_UNKNOWN,
+                        None,
+                        await _accounting(),
+                    )
                 # ``expired`` keeps the job claimable and leaves this attempt's terminal code in the
                 # row, so the repaired attempt stays visible in accounting next to its successor.
                 await ledger.record_attempt_outcome(
                     handle,
                     AttemptOutcome.EXPIRED,
+                    result_object_ref=retry_response_ref,
                     terminal_code=evaluation.reason,
                     token_usage=_attempt_token_usage(evaluation),
                 )
