@@ -144,7 +144,7 @@ def _native_done(host: str, output: str) -> bool:
         # a later refusal or turn failure must not inherit an earlier DONE.
         completed = False
         for line in output.split("\n"):
-            if not line.strip():
+            if not line.strip(" \t\r"):
                 continue
             try:
                 event = json.loads(line)
@@ -203,7 +203,7 @@ def _codex_workflow_completed(output: str) -> bool:
     receipted = False
     completed = False
     for line in output.split("\n"):
-        if not line.strip():
+        if not line.strip(" \t\r"):
             continue
         try:
             raw = json.loads(line)

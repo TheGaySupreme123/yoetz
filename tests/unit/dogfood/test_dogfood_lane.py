@@ -419,6 +419,9 @@ def test_codex_completion_keeps_unicode_separators_inside_json_records(separator
     assert _LANE._native_done("codex", output) is True
     workflow = _codex_probe_output(final).replace(json.dumps(separator)[1:-1], separator) + "\n"
     assert _LANE._codex_workflow_completed(workflow) is True
+    # The same scalar outside a JSON string is malformed input, not an empty line.
+    assert _LANE._native_done("codex", output + separator + "\n") is False
+    assert _LANE._codex_workflow_completed(workflow + separator + "\n") is False
 
 
 @pytest.mark.parametrize("host", ["codex", "claude", "cursor"])
