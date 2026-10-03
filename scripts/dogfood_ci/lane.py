@@ -617,6 +617,19 @@ def _find_key(value: object, key: str) -> object | None:
     return None
 
 
+def _semantic_provenance_provider(value: object) -> str | None:
+    """Read the provider identity across the semantic-provenance wire versions."""
+
+    provider_id = _find_key(value, "provider_id")
+    if isinstance(provider_id, str) and provider_id:
+        return provider_id
+    if isinstance(value, dict):
+        provider = cast(dict[str, object], value).get("provider")
+        if isinstance(provider, str) and provider:
+            return provider
+    return None
+
+
 def _find_frontier(value: object) -> dict[str, str] | None:
     """Return the first ``{sequence, head_digest}`` object found in a result."""
 
@@ -1913,9 +1926,7 @@ class Lane:
                     "status": checked.get("semantic_status"),
                     "reason": checked.get("semantic_reason"),
                     "provenance_present": provenance is not None,
-                    "provenance_provider": _find_key(provenance, "provider_id")
-                    if provenance is not None
-                    else None,
+                    "provenance_provider": _semantic_provenance_provider(provenance),
                     "verdict": checked.get("verdict"),
                     "findings": len(cast(list[Any], checked.get("findings") or [])),
                 }

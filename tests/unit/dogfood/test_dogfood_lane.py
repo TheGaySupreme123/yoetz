@@ -80,6 +80,18 @@ def test_find_frontier_prefers_result_frontier_and_parse_json_tolerates_prefix()
     assert _LANE._find_key({"a": {"b": {"c": 3}}}, "c") == 3
 
 
+def test_semantic_provenance_provider_supports_current_and_legacy_field_names() -> None:
+    assert _LANE._semantic_provenance_provider({"provider": "fireworks"}) == "fireworks"
+    assert _LANE._semantic_provenance_provider({"provider_id": "fireworks"}) == "fireworks"
+    assert (
+        _LANE._semantic_provenance_provider(
+            {"provider": "fireworks", "runtime": {"provider_id": "legacy"}}
+        )
+        == "legacy"
+    )
+    assert _LANE._semantic_provenance_provider({"provider": ""}) is None
+
+
 def test_redaction_masks_secrets_and_runner_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
