@@ -474,6 +474,12 @@ class MinimizedDisclosure:
     scanner_registry_version: str
     scanner_profile_digest: str
     forbidden_findings: tuple[ForbiddenDataKind, ...]
+    # Item ids omitted because only a low-confidence assignment heuristic matched. Item ids are
+    # already bounded opaque case identifiers; no matched bytes or user prose are retained.
+    withheld_item_ids: tuple[str, ...] = ()
+    # Heuristic findings that survive into the prepared bytes are a fail-closed backstop failure,
+    # not safe omissions. They are kept apart from concrete ``forbidden_findings`` for this check.
+    heuristic_findings: tuple[ForbiddenDataKind, ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -484,17 +490,29 @@ class MinimizedDisclosure:
         for values in (self.included_item_ids, self.source_item_digests):
             if type(values) is not tuple or values != tuple(sorted(set(values), key=str.encode)):
                 raise _invalid()
+        if type(self.withheld_item_ids) is not tuple or self.withheld_item_ids != tuple(
+            sorted(set(self.withheld_item_ids), key=str.encode)
+        ):
+            raise _invalid()
+        if any(
+            type(item_id) is not str or not item_id or len(item_id.encode("utf-8")) > 128
+            for item_id in self.withheld_item_ids
+        ):
+            raise _invalid()
         for digest in self.source_item_digests:
             validate_sha256_digest(digest)
         for values, enum_type in (
             (self.approved_categories, DataCategory),
             (self.blocked_categories, DataCategory),
             (self.forbidden_findings, ForbiddenDataKind),
+            (self.heuristic_findings, ForbiddenDataKind),
         ):
             if type(values) is not tuple or any(type(value) is not enum_type for value in values):
                 raise _invalid()
             if values != tuple(sorted(set(values), key=lambda value: value.value.encode())):
                 raise _invalid()
+        if set(self.forbidden_findings) & set(self.heuristic_findings):
+            raise _invalid()
         if type(self.transformation_summary) is not tuple:
             raise _invalid()
         if self.transformation_summary != tuple(
@@ -511,6 +529,12 @@ class MinimizedDisclosure:
         if type(self.scanner_registry_version) is not str or not self.scanner_registry_version:
             raise _invalid()
         validate_sha256_digest(self.scanner_profile_digest)
+
+    @property
+    def heuristic_item_ids(self) -> tuple[str, ...]:
+        """Backward-compatible name for the bounded heuristic omission identities."""
+
+        return self.withheld_item_ids
 
 
 @dataclass(frozen=True, slots=True)

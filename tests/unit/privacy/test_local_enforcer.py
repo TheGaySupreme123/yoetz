@@ -7,7 +7,11 @@ from datetime import UTC, datetime
 
 import pytest
 
-from yoetz.adapters.privacy.local_enforcer import LocalPrivacyEnforcer, scan_exact_bytes
+from yoetz.adapters.privacy.local_enforcer import (
+    LocalPrivacyEnforcer,
+    scan_exact_bytes,
+    scan_exact_bytes_with_confidence,
+)
 from yoetz.application.egress import PrivacyCoordinator
 from yoetz.domain.privacy import (
     AuthorizationScope,
@@ -25,12 +29,14 @@ from yoetz.domain.privacy import (
     PrivacyOutcome,
     PrivacyPolicy,
     PrivacyProfile,
+    PrivacyReason,
     ProjectionProvenanceContext,
     ReviewContextProfile,
     ReviewSelectionPolicy,
 )
 from yoetz.domain.values import Frontier
 from yoetz.ports.privacy import EffectivePrivacyPolicy
+from yoetz.protocol.canonical import canonical_encode
 from yoetz.protocol.models import DataCategory
 
 _INSTALLATION = "ins_10000000-0000-4000-8000-000000000001"
@@ -103,6 +109,23 @@ def _effective() -> EffectivePrivacyPolicy:
 def test_exact_scanner_reuses_shared_sensitive_content_detectors() -> None:
     kinds = scan_exact_bytes(b"api_key=sk-proj-abcdefghijklmnopqrstuvwxyz012345")
     assert kinds == (ForbiddenDataKind.API_CREDENTIAL,)
+
+
+def test_exact_scanner_keeps_heuristics_separate_and_saturated_scans_fail_closed() -> None:
+    heuristic = scan_exact_bytes_with_confidence(b"auth_token: 'bounded-but-suspicious-value'")
+    assert heuristic.high_confidence == ()
+    assert heuristic.heuristic == (ForbiddenDataKind.API_CREDENTIAL,)
+    assert not heuristic.saturated
+
+    concrete = scan_exact_bytes_with_confidence(
+        b"GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456"
+    )
+    assert concrete.high_confidence == (ForbiddenDataKind.API_CREDENTIAL,)
+    assert concrete.heuristic == ()
+
+    saturated = scan_exact_bytes_with_confidence(b"\n".join([b"TOKEN=suspiciousvalue"] * 128))
+    assert saturated.saturated
+    assert saturated.high_confidence == (ForbiddenDataKind.API_CREDENTIAL,)
 
 
 def test_source_denial_cannot_be_overridden_by_recipient_self_authorship() -> None:
@@ -213,6 +236,212 @@ def test_minimization_is_deterministic_and_cannot_include_forbidden_item() -> No
     assert first.included_item_ids == ("allowed",)
     assert b"not itself a token" not in first.prepared_bytes
     assert first.forbidden_findings == ()
+
+
+def test_heuristic_only_item_is_withheld_without_blocking_clean_item() -> None:
+    candidate = CandidateContext(
+        request_id=_REQUEST,
+        channel=None,
+        local_sink=LocalDisclosureSink.LOCAL_HUMAN_VIEW,
+        purpose="privacy-test",
+        scope=_scope(),
+        subject_digest=_DIGEST,
+        provider_binding=None,
+        items=(
+            CandidateContextItem(
+                "clean",
+                DataCategory.FINDING_SUMMARY,
+                _scope(),
+                "finding:clean",
+                b"bounded finding",
+            ),
+            CandidateContextItem(
+                "heuristic",
+                DataCategory.EVIDENCE_EXCERPT,
+                _scope(),
+                "finding:heuristic",
+                b"auth_token: 'bounded-but-suspicious-value'",
+            ),
+        ),
+    )
+    enforcer = LocalPrivacyEnforcer()
+    classified = enforcer.classify(candidate, _effective())
+    assert classified.items[0].heuristic_findings == ()
+    assert classified.items[1].forbidden_findings == ()
+    assert classified.items[1].heuristic_findings == (ForbiddenDataKind.API_CREDENTIAL,)
+
+    decision = _decision(classified)
+    minimized = enforcer.minimize_and_scan(classified, decision)
+    assert minimized.included_item_ids == ("clean",)
+    assert minimized.heuristic_item_ids == ("heuristic",)
+    assert minimized.forbidden_findings == ()
+    assert minimized.heuristic_findings == ()
+    assert b"bounded-but-suspicious-value" not in minimized.prepared_bytes
+
+
+def test_mixed_case_keeps_concrete_credentials_as_whole_case_findings() -> None:
+    candidate = CandidateContext(
+        request_id=_REQUEST,
+        channel=None,
+        local_sink=LocalDisclosureSink.LOCAL_HUMAN_VIEW,
+        purpose="semantic-review",
+        scope=_scope(),
+        subject_digest=_DIGEST,
+        provider_binding=None,
+        items=(
+            CandidateContextItem(
+                "clean",
+                DataCategory.FINDING_SUMMARY,
+                _scope(),
+                "finding:clean",
+                b"bounded finding",
+            ),
+            CandidateContextItem(
+                "heuristic",
+                DataCategory.FINDING_SUMMARY,
+                _scope(),
+                "finding:heuristic",
+                b"TOKEN=opaque.value",
+            ),
+            CandidateContextItem(
+                "credential",
+                DataCategory.FINDING_SUMMARY,
+                _scope(),
+                "finding:credential",
+                b"GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456",
+            ),
+        ),
+    )
+    enforcer = LocalPrivacyEnforcer()
+    classified = enforcer.classify(candidate, _effective())
+    decision = _decision(classified)
+
+    assert classified.items[1].heuristic_findings == (ForbiddenDataKind.API_CREDENTIAL,)
+    assert classified.items[2].forbidden_findings == (ForbiddenDataKind.API_CREDENTIAL,)
+    assert decision.outcome is PrivacyOutcome.BLOCKED_FORBIDDEN_DATA
+    assert decision.reason is PrivacyReason.NEVER_SEND_DETECTED
+
+
+def test_semantic_heuristic_omission_keeps_review_packet_reference_closure() -> None:
+    from yoetz.protocol.canonical import strict_json_parse
+
+    clean_ref = "evd_10000000-0000-4000-8000-000000000010"
+    withheld_ref = "evd_10000000-0000-4000-8000-000000000011"
+    envelope = canonical_encode(
+        {
+            "case_digest": _DIGEST,
+            "case_id": "cas_10000000-0000-4000-8000-000000000012",
+            "dependency_digest": _DIGEST,
+            "frontier_refs": [clean_ref, withheld_ref],
+            "local_check_refs": [],
+            "item_catalog": [
+                {
+                    "category": "bounded_structural_metadata",
+                    "item_id": "review-packet",
+                    "section": "timeline",
+                    "source_kind": "task",
+                    "source_ref": "evt_10000000-0000-4000-8000-000000000013",
+                    "linked_subject_refs": [],
+                    "occurred_order": 0,
+                },
+                {
+                    "category": "evidence_excerpt",
+                    "item_id": "clean",
+                    "section": "excerpt",
+                    "source_kind": "evidence",
+                    "source_ref": clean_ref,
+                    "linked_subject_refs": [],
+                    "occurred_order": 1,
+                },
+                {
+                    "category": "evidence_excerpt",
+                    "item_id": "heuristic",
+                    "section": "excerpt",
+                    "source_kind": "evidence",
+                    "source_ref": withheld_ref,
+                    "linked_subject_refs": [],
+                    "occurred_order": 2,
+                },
+            ],
+            "review_packet": {
+                "targeted_excerpts": [
+                    {"excerpt_item_id": "clean", "source_kind": "evidence"},
+                    {"excerpt_item_id": "heuristic", "source_kind": "evidence"},
+                ],
+                "omissions": [],
+            },
+            "schema": "yoetz.review-packet-case/2",
+        }
+    )
+    candidate = CandidateContext(
+        request_id=_REQUEST,
+        channel=EgressChannel.LLM_INFERENCE,
+        local_sink=None,
+        purpose="semantic-review",
+        scope=_scope(),
+        subject_digest=_DIGEST,
+        provider_binding=None,
+        items=(
+            CandidateContextItem(
+                "review-packet",
+                DataCategory.BOUNDED_STRUCTURAL_METADATA,
+                _scope(),
+                "/case/review-packet",
+                envelope,
+            ),
+            CandidateContextItem(
+                "clean",
+                DataCategory.EVIDENCE_EXCERPT,
+                _scope(),
+                "/case/excerpt/clean",
+                b"clean evidence",
+            ),
+            CandidateContextItem(
+                "heuristic",
+                DataCategory.EVIDENCE_EXCERPT,
+                _scope(),
+                "/case/excerpt/heuristic",
+                b"auth_token: 'bounded-but-suspicious-value'",
+            ),
+        ),
+    )
+    enforcer = LocalPrivacyEnforcer()
+    classified = enforcer.classify(candidate, _effective())
+    minimized = enforcer.minimize_and_scan(
+        classified,
+        PrivacyDecision(
+            ("clean", "heuristic", "review-packet"),
+            (),
+            PrivacyOutcome.COMPLETED,
+            None,
+        ),
+    )
+    packet = strict_json_parse(minimized.prepared_bytes)
+    assert isinstance(packet, dict)
+    rows = packet["items"]
+    assert isinstance(rows, list)
+    source_refs: list[str] = []
+    for row in rows:
+        if isinstance(row, dict):
+            source_ref = row.get("source_ref")
+            if type(source_ref) is str:
+                source_refs.append(source_ref)
+    assert set(source_refs) == {clean_ref}
+    review_packet = packet["review_packet"]
+    assert isinstance(review_packet, dict)
+    omissions = review_packet["omissions"]
+    assert isinstance(omissions, list)
+    assert any(
+        isinstance(row, dict)
+        and row.get("subject_ref") == withheld_ref
+        and row.get("reason") == "withheld_by_policy"
+        for row in omissions
+    )
+    targeted = review_packet["targeted_excerpts"]
+    assert isinstance(targeted, list)
+    assert all(
+        isinstance(row, dict) and row.get("excerpt_item_id") == "clean" for row in targeted
+    )
 
 
 class _Provenance:

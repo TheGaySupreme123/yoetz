@@ -671,6 +671,7 @@ class MemoryPrivacyAudit:
             "transformation_summary": [
                 list(item) for item in request.minimized.transformation_summary
             ],
+            "withheld_item_ids": list(request.minimized.withheld_item_ids),
         }
         body = canonical_encode(value)
         commitment = _mac(self._key, _PROPOSAL_DOMAIN, body)
@@ -704,6 +705,7 @@ class MemoryPrivacyAudit:
             request.max_tokens,
             request.expires_at,
             commitment,
+            request.minimized.withheld_item_ids,
         )
         lookup = _mac(self._key, _LOOKUP_DOMAIN, canonical_encode(_json(proposal)))
         reservation = PrivacyAuditReservation(

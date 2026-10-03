@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, cast
 
+from yoetz.adapters.privacy.local_enforcer import SecretScanRuleset
 from yoetz.domain.findings import SemanticDispatchKind
 from yoetz.domain.privacy import (
     ApprovedLocalDisclosureCase,
@@ -121,6 +122,7 @@ _SEMANTIC_PURPOSE = "semantic-review"
 _CREDENTIAL_PROBE_PURPOSE = "credential-probe"
 _MEDIA_TYPE = "application/json"
 _SCHEMA_ID = "yoetz-semantic-case-1.0.0"
+_SCAN = SecretScanRuleset()
 # Breadth order, matching ``_scope_rank`` in ``yoetz.application.privacy_policy``: a lower rank
 # is a *broader* scope. ``machine`` is therefore the widest authorization ceiling a channel can
 # carry and ``request`` the narrowest, which is why moving a ceiling from ``task`` to ``machine``
@@ -188,6 +190,10 @@ class SemanticEgressSuccess:
     # What the exact prepared (bounded, minimized) review packet carried; None when that document
     # is not a readable review packet (issue #904).
     disclosure: ReviewPacketDisclosure | None = None
+    # Opaque case item ids withheld by the low-confidence secret-assignment heuristic. The caller
+    # can map these ids to authorized source references from its frozen case; no matched bytes or
+    # user prose cross this boundary.
+    withheld_item_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -654,7 +660,7 @@ class PrivacyCoordinator:
         if decision.outcome is not PrivacyOutcome.COMPLETED:
             return await self._complete_local_block(classified, effective, decision)
         minimized = self._classifier.minimize_and_scan(classified, decision)
-        if minimized.forbidden_findings:
+        if minimized.forbidden_findings or minimized.heuristic_findings:
             forbidden = PrivacyDecision(
                 (),
                 minimized.blocked_categories,
@@ -1034,6 +1040,7 @@ class PrivacyCoordinator:
             scanner_registry_version="resume",
             scanner_profile_digest=proposal.policy_digest,
             forbidden_findings=(),
+            withheld_item_ids=proposal.withheld_item_ids,
         )
         authority_digest: str | None = None
         if binding.transport == "external":
@@ -1167,7 +1174,42 @@ class PrivacyCoordinator:
             effective = refreshed[0]
         else:
             effective = await self._policies.effective_policy(candidate.scope)
-        if minimized.forbidden_findings:
+        # The first classification is only a preflight. Policy, repository authority, and the
+        # scanner profile may have changed while that case was being prepared, so re-run the
+        # complete classifier/minimizer against the effective state immediately before reserving
+        # disclosure. A scanner-profile drift is a bounded fail-closed policy result; it never
+        # silently reuses a stale prepared manifest.
+        preflight_scanner = (
+            minimized.scanner_registry_version,
+            minimized.scanner_profile_digest,
+        )
+        refreshed_classified = self._classifier.classify(candidate, effective)
+        refreshed_decision = self._semantic_decision(refreshed_classified, effective, binding)
+        if refreshed_decision.outcome is not PrivacyOutcome.COMPLETED:
+            return await self._complete_semantic_predispatch(
+                candidate,
+                effective,
+                refreshed_decision.outcome,
+                refreshed_decision.reason or PrivacyReason.POLICY_DENIED,
+            )
+        refreshed_minimized = self._classifier.minimize_and_scan(
+            refreshed_classified, refreshed_decision
+        )
+        if (
+            refreshed_minimized.scanner_registry_version,
+            refreshed_minimized.scanner_profile_digest,
+        ) != preflight_scanner:
+            return await self._complete_semantic_predispatch(
+                candidate,
+                effective,
+                PrivacyOutcome.BLOCKED_BY_POLICY,
+                PrivacyReason.POLICY_DENIED,
+            )
+        minimized = refreshed_minimized
+        # Concrete credentials and scanner saturation still block the whole case. A heuristic
+        # that survives into the prepared bytes means the omission construction was violated, so
+        # the final prepared case also fails closed.
+        if minimized.forbidden_findings or minimized.heuristic_findings:
             return await self._complete_semantic_predispatch(
                 candidate,
                 effective,
@@ -1482,6 +1524,7 @@ class PrivacyCoordinator:
                 subject_digest,
                 result,
                 prepared_bytes=proposal.prepared_bytes,
+                withheld_item_ids=minimized.withheld_item_ids,
             )
 
         if authority_digest is None or not await self._repository_authority_is_current(
@@ -1569,6 +1612,7 @@ class PrivacyCoordinator:
             subject_digest,
             result,
             prepared_bytes=proposal.prepared_bytes,
+            withheld_item_ids=minimized.withheld_item_ids,
         )
 
     async def _map_provider_result(
@@ -1582,6 +1626,7 @@ class PrivacyCoordinator:
         result: SemanticResult,
         *,
         prepared_bytes: bytes | None = None,
+        withheld_item_ids: tuple[str, ...] = (),
     ) -> SemanticEgressResult:
         receipt_id: str | None = None
         try:
@@ -1608,6 +1653,7 @@ class PrivacyCoordinator:
                 disclosure=(
                     None if prepared_bytes is None else review_packet_disclosure(prepared_bytes)
                 ),
+                withheld_item_ids=tuple(sorted(set(withheld_item_ids), key=str.encode)),
             )
         if type(result) in {
             SemanticResultRefused,
@@ -1692,6 +1738,7 @@ class PrivacyCoordinator:
             and item.data_class is not DataClass.SECRET_OR_CRYPTOGRAPHIC
             and item.scope_valid
             and not item.forbidden_findings
+            and not item.heuristic_findings
         )
         blocked = tuple(
             {
@@ -1807,7 +1854,7 @@ class PrivacyCoordinator:
                 None,
             ),
             ReceiptTransformations(0, 0, len(candidate.items)),
-            ReceiptSecretScan("observability-sensitive-content-v1", f"sha256:{'0' * 64}", 0, True),
+            ReceiptSecretScan(_SCAN.version, _SCAN.profile_digest, 0, True),
             reason,
             1,
         )
@@ -1905,6 +1952,7 @@ class PrivacyCoordinator:
             and item.data_class is not DataClass.SECRET_OR_CRYPTOGRAPHIC
             and item.scope_valid
             and not item.forbidden_findings
+            and not item.heuristic_findings
         )
         blocked = tuple(
             {
@@ -2113,8 +2161,8 @@ class PrivacyCoordinator:
             proposal_id,
             (),
             decision.blocked_categories,
-            "observability-sensitive-content-v1",
-            f"sha256:{'0' * 64}",
+            _SCAN.version,
+            _SCAN.profile_digest,
             sum(forbidden_counts.values()),
             decision.outcome,
             decision.reason,

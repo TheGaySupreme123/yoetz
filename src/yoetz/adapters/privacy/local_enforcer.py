@@ -23,7 +23,7 @@ from yoetz.domain.privacy import (
     PrivacyDecision,
     ProjectionProvenanceContext,
 )
-from yoetz.observability.privacy import scan_for_sensitive_content
+from yoetz.observability.privacy import scan_finding_is_heuristic, scan_for_sensitive_content
 from yoetz.ports.privacy import EffectivePrivacyPolicy, MinimizedDisclosure
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 from yoetz.protocol.models import DataCategory
@@ -36,10 +36,12 @@ __all__ = [
     "ProvenanceRuleset",
     "ReviewSelectionRuleset",
     "SecretScanRuleset",
+    "SensitiveScan",
     "TrustedProvenanceResolver",
     "clean_item_data_class",
     "estimated_token_count",
     "scan_exact_bytes",
+    "scan_exact_bytes_with_confidence",
 ]
 
 # The whole-case token ceiling in ChannelPolicy is compared against this estimate, so anything
@@ -56,8 +58,8 @@ def estimated_token_count(byte_count: int) -> int:
     return (byte_count + EGRESS_BYTES_PER_TOKEN_ESTIMATE - 1) // EGRESS_BYTES_PER_TOKEN_ESTIMATE
 
 
-_SCANNER_REGISTRY_VERSION = "observability-sensitive-content-v1"
-_SCANNER_PROFILE_DIGEST = "sha256:75d5e5545aec001901b1370f502120114b583662fd473229e545553154f4d605"
+_SCANNER_REGISTRY_VERSION = "observability-sensitive-content-v2"
+_SCANNER_PROFILE_DIGEST = "sha256:38c2f95c318fcc23df7f3e472d9d0ae46fe4376ff89d289e2aee63599c754c1f"
 _STRUCTURAL_CATEGORIES = frozenset(
     {DataCategory.BOUNDED_STRUCTURAL_METADATA, DataCategory.DECLARED_FILE_TYPE}
 )
@@ -127,17 +129,78 @@ class TrustedProvenanceResolver(Protocol):
     ) -> DisclosureProvenance | None: ...
 
 
-def scan_exact_bytes(data: bytes) -> tuple[ForbiddenDataKind, ...]:
-    """Map the shared observability scanner to the closed never-send vocabulary."""
+@dataclass(frozen=True, slots=True)
+class SensitiveScan:
+    """Closed scanner classes used by egress without retaining matched bytes."""
+
+    high_confidence: tuple[ForbiddenDataKind, ...]
+    heuristic: tuple[ForbiddenDataKind, ...]
+    saturated: bool = False
+
+    def __post_init__(self) -> None:
+        for values in (self.high_confidence, self.heuristic):
+            if type(values) is not tuple or any(
+                type(value) is not ForbiddenDataKind for value in values
+            ):
+                raise ValueError("sensitive_scan_kinds_invalid")
+            if values != tuple(sorted(set(values), key=lambda value: value.value.encode())):
+                raise ValueError("sensitive_scan_kinds_not_canonical")
+        if set(self.high_confidence) & set(self.heuristic):
+            raise ValueError("sensitive_scan_kind_class_overlap")
+        if type(self.saturated) is not bool:
+            raise ValueError("sensitive_scan_saturation_invalid")
+
+    @property
+    def all_findings(self) -> tuple[ForbiddenDataKind, ...]:
+        return tuple(
+            sorted(
+                set(self.high_confidence) | set(self.heuristic),
+                key=lambda value: value.value.encode(),
+            )
+        )
+
+
+def scan_exact_bytes_with_confidence(data: bytes) -> SensitiveScan:
+    """Map scanner findings while preserving high-confidence versus heuristic classes."""
 
     findings = scan_for_sensitive_content(data)
-    mapped = {
-        ForbiddenDataKind.PRIVATE_CERTIFICATE
-        if finding.kind == "private_key_marker"
-        else ForbiddenDataKind.API_CREDENTIAL
-        for finding in findings
-    }
-    return tuple(sorted(mapped, key=lambda value: value.value.encode()))
+    high: set[ForbiddenDataKind] = set()
+    heuristic: set[ForbiddenDataKind] = set()
+    for finding in findings:
+        kind = (
+            ForbiddenDataKind.PRIVATE_CERTIFICATE
+            if finding.kind == "private_key_marker"
+            else ForbiddenDataKind.API_CREDENTIAL
+        )
+        if scan_finding_is_heuristic(finding):
+            heuristic.add(kind)
+        else:
+            high.add(kind)
+    # The shared scanner deliberately caps findings. A saturated result cannot prove that no
+    # later high-confidence credential exists, so egress must fail closed rather than treating a
+    # crowded heuristic-only result as safe.
+    saturated = len(findings) >= 128
+    if saturated:
+        high.add(ForbiddenDataKind.API_CREDENTIAL)
+    # If two detector classes overlap, the high-confidence class wins. This keeps a concrete
+    # credential from ever being downgraded merely because a heuristic also matched its span.
+    heuristic.difference_update(high)
+    return SensitiveScan(
+        tuple(sorted(high, key=lambda value: value.value.encode())),
+        tuple(sorted(heuristic, key=lambda value: value.value.encode())),
+        saturated,
+    )
+
+
+def scan_exact_bytes(data: bytes) -> tuple[ForbiddenDataKind, ...]:
+    """Map the shared scanner to the closed never-send vocabulary.
+
+    This public backstop deliberately includes heuristic findings. The semantic minimizer uses
+    ``scan_exact_bytes_with_confidence`` to omit a heuristic-only item; a heuristic that survives
+    into a final rendered body still fails closed here.
+    """
+
+    return scan_exact_bytes_with_confidence(data).all_findings
 
 
 _SEMANTIC_PACKET_SCHEMA = "yoetz.review-packet-case/2"
@@ -240,7 +303,9 @@ class LocalPrivacyEnforcer:
                 for prefix, kind in _FORBIDDEN_SOURCE_PREFIXES
                 if item.origin_ref.startswith(prefix)
             }
-            source_findings.update(scan_exact_bytes(item.plaintext))
+            scan = scan_exact_bytes_with_confidence(item.plaintext)
+            source_findings.update(scan.high_confidence)
+            heuristic_findings = set(scan.heuristic)
             scope_valid = item.source_disclosure_permitted and candidate.scope.contains(
                 item.source_scope
             )
@@ -269,6 +334,9 @@ class LocalPrivacyEnforcer:
                     scope_valid=scope_valid,
                     classifier_ruleset_version=self._classification.version,
                     provenance=resolved_provenance,
+                    heuristic_findings=tuple(
+                        sorted(heuristic_findings, key=lambda value: value.value.encode())
+                    ),
                 )
             )
         return ClassifiedContext(candidate, tuple(classified))
@@ -285,6 +353,7 @@ class LocalPrivacyEnforcer:
             if item.candidate.item_id in approved
             and item.scope_valid
             and not item.forbidden_findings
+            and not item.heuristic_findings
             and item.data_class is not DataClass.SECRET_OR_CRYPTOGRAPHIC
         )
         if classified.candidate.purpose == "semantic-review":
@@ -301,7 +370,7 @@ class LocalPrivacyEnforcer:
             prepared = canonical_encode(
                 cast(JsonValue, {"items": rows, "schema": "yoetz.minimized-disclosure/1"})
             )
-        findings = scan_exact_bytes(prepared)
+        prepared_scan = scan_exact_bytes_with_confidence(prepared)
         source_digests = tuple(
             sorted(
                 {
@@ -312,6 +381,16 @@ class LocalPrivacyEnforcer:
             )
         )
         included_ids = tuple(sorted((item.candidate.item_id for item in included), key=str.encode))
+        heuristic_item_ids = tuple(
+            sorted(
+                (
+                    item.candidate.item_id
+                    for item in classified.items
+                    if item.heuristic_findings and item.candidate.item_id not in included_ids
+                ),
+                key=str.encode,
+            )
+        )
         approved_categories = tuple(
             sorted({item.candidate.category for item in included}, key=lambda value: value.value)
         )
@@ -328,7 +407,9 @@ class LocalPrivacyEnforcer:
             case_digest=f"sha256:{hashlib.sha256(prepared).hexdigest()}",
             scanner_registry_version=self._scanner.version,
             scanner_profile_digest=self._scanner.profile_digest,
-            forbidden_findings=findings,
+            forbidden_findings=prepared_scan.high_confidence,
+            withheld_item_ids=heuristic_item_ids,
+            heuristic_findings=prepared_scan.heuristic,
         )
 
     def scan_exact_bytes(self, data: bytes) -> tuple[ForbiddenDataKind, ...]:

@@ -3504,6 +3504,22 @@ independently authenticate; tightening is immediate after an ordinary explicit c
 revokes affected authorizations/transports. The never-send set is non-overridable under either
 path.
 
+The scanner keeps concrete credential findings separate from low-confidence assignment heuristics.
+An item with only a heuristic match is omitted from the prepared review packet and may be followed
+by a safe review of the remaining items; its bounded opaque item identity is reported with the
+closed reason `never_send_heuristic` and coverage carries the content loss. A concrete credential,
+mixed finding, scanner saturation or failure, stale policy/scanner manifest, and any final rendered
+body match remain whole-case no-dispatch refusals. The final-body backstop scans heuristics too, so
+an omission construction failure cannot turn into disclosure. Recovery persists the omission
+identities with the exact proposal; a corrected check supplies a new prepared case. No matched
+bytes, caller prose, raw exception, or detector output enters a structural notice or receipt.
+Only unquoted parser/member/call/enum expressions with source syntax evidence are excluded: a
+`const`/`let`/`var` declaration for a token call or member call, an explicit member assignment
+such as `parser.token = Token.EOF`, or a lower-case object property such as `token:
+Token.ConstKeyword`. Bare dotted assignments such as `TOKEN=opaque.value`, call-shaped values such
+as `password=functionName()`, and quoted lookalikes remain withheld. This precision rule does not
+add an opt-out and does not change capture-time redaction.
+
 `PreDispatchAuditDecision` is structural-only and terminal; it permits no prepared bytes,
 authorization, or dispatch. A v0.1 content-bearing `DisclosureProposal` has one owning `task_id` and
 is encrypted as `ObjectKind.privacy_audit` in that task bundle; the privacy catalog stores its

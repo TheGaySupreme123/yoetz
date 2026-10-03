@@ -12,6 +12,7 @@ from yoetz.observability.privacy import (
     DiagnosticRedactionProfile,
     PersistenceScanResult,
     PrivacyFenceError,
+    ScanConfidence,
     Sensitivity,
     assert_plaintext_safe,
     build_diagnostic_manifest,
@@ -157,6 +158,44 @@ def test_sensitive_scanner_positive_patterns(data: bytes, kind: str) -> None:
 )
 def test_sensitive_scanner_negative_patterns(data: bytes) -> None:
     assert scan_for_sensitive_content(data) == ()
+
+
+def test_assignment_heuristic_preserves_source_expressions_but_withholds_quoted_lookalikes() -> None:
+    for source in (
+        b"const token = parser.getToken();",
+        b"const token = nextToken(parser)",
+        b"let token = lexer.next();",
+        b"parser.token = Token.EOF",
+        b"token: Token.ConstKeyword",
+    ):
+        assert scan_for_sensitive_content(source) == ()
+
+    quoted = scan_for_sensitive_content(b"TOKEN='nextToken(parser)'")
+    assert len(quoted) == 1
+    assert quoted[0].confidence is ScanConfidence.HEURISTIC
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"TOKEN=opaque.value",
+        b"password=functionName()",
+        b"token=parser.getToken()",
+        b"TOKEN=Token.EOF",
+        b"TOKEN: Token.EOF",
+    ],
+)
+def test_ambiguous_unquoted_assignments_remain_heuristic(data: bytes) -> None:
+    findings = scan_for_sensitive_content(data)
+    assert len(findings) == 1
+    assert findings[0].confidence is ScanConfidence.HEURISTIC
+
+
+def test_heuristic_scan_saturation_is_bounded_without_exposing_matches() -> None:
+    data = b"\n".join([b"TOKEN=suspiciousvalue"] * 128)
+    findings = scan_for_sensitive_content(data)
+    assert len(findings) == 128
+    assert all(finding.confidence is ScanConfidence.HEURISTIC for finding in findings)
 
 
 def test_prepare_persisted_plaintext_redacts_without_retaining_match() -> None:

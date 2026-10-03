@@ -1905,6 +1905,7 @@ class CatalogPrivacyAudit:
             "transformation_summary": [
                 list(item) for item in request.minimized.transformation_summary
             ],
+            "withheld_item_ids": list(request.minimized.withheld_item_ids),
         }
         proposal_bytes = canonical_encode(cast(JsonValue, proposal_value))
         proposal_commitment = _mac(self._key, _PROPOSAL_DOMAIN, proposal_bytes)
@@ -1943,6 +1944,7 @@ class CatalogPrivacyAudit:
             request.max_tokens,
             request.expires_at,
             proposal_commitment,
+            request.minimized.withheld_item_ids,
         )
         structural = canonical_encode(
             {
@@ -2351,6 +2353,7 @@ class CatalogPrivacyAudit:
                 max_tokens,
                 parse_rfc3339_millis(parsed["expires_at"]),
                 commitment,
+                tuple(sorted(_strings(parsed.get("withheld_item_ids") or []), key=str.encode)),
             )
         except Exception:
             return None

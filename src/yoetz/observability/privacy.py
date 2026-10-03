@@ -19,6 +19,7 @@ __all__ = [
     "DiagnosticRedactionProfile",
     "PersistenceScanResult",
     "PrivacyFenceError",
+    "ScanConfidence",
     "ScanFinding",
     "Sensitivity",
     "assert_plaintext_safe",
@@ -29,6 +30,7 @@ __all__ = [
     "redact_diagnostic_value",
     "redact_sensitive_content",
     "scan_for_sensitive_content",
+    "scan_finding_is_heuristic",
     "session_id_hash",
 ]
 
@@ -91,6 +93,24 @@ _TOKEN_ASSIGNMENT = re.compile(
     rb"(?i)(?:^|[^A-Za-z0-9_])['\"]?"
     rb"(?:[A-Za-z][A-Za-z0-9]{0,63}[_-])*token"
     rb"['\"]?\s*[:=]\s*['\"]?(?=[^\s,'\";}{]{0,511}[A-Za-z_/=+-])[^\s,'\";}{]{8,512}"
+)
+# Assignment heuristics remain conservative: ordinary parser/member/call expressions should not
+# turn a whole review into a credential refusal, but a bare dotted value is ambiguous without
+# source syntax. These filters run on bounded matches and never retain or log the value inspected.
+_SOURCE_DECLARATION = re.compile(
+    rb"(?ix)(?:^|[\s{;(])(?:export\s+)?(?:const|let|var)\s+"
+    rb"[A-Za-z_][A-Za-z0-9_]*\s*$"
+)
+_CODE_LIKE_CALL_VALUE = re.compile(
+    rb"(?ix)^(?:(?:[A-Za-z_][A-Za-z0-9_]*\.)?"
+    rb"(?:getToken|nextToken|next)|[A-Za-z_][A-Za-z0-9_]*token)"
+    rb"\([^()]{0,256}\)$"
+)
+_CODE_LIKE_ENUM_VALUE = re.compile(
+    rb"^(?:[A-Z][A-Za-z0-9_]*\.)+[A-Z][A-Za-z0-9_]*$"
+)
+_TOKEN_LIKE_ASSIGNMENT_NAME = re.compile(
+    rb"(?i)^(?:[A-Za-z][A-Za-z0-9]{0,63}[_-])?token$"
 )
 
 _LOG_FIELDS: Final = frozenset(
@@ -256,6 +276,18 @@ class Sensitivity(str, Enum):  # noqa: UP042 - frozen diagnostic vocabulary
     KEY_MATERIAL = "key_material"
 
 
+class ScanConfidence(str, Enum):  # noqa: UP042 - local scanner classification
+    """Confidence class for a sensitive-content match.
+
+    ``ScanFinding.kind`` stays backward-compatible for persisted diagnostic manifests. Egress uses
+    this separate field to withhold heuristic-only items while continuing to block concrete
+    credentials.
+    """
+
+    HIGH = "high"
+    HEURISTIC = "heuristic"
+
+
 @dataclass(frozen=True, slots=True)
 class ScanFinding:
     """One bounded sensitive-content match, without retaining matched bytes."""
@@ -264,6 +296,7 @@ class ScanFinding:
     start_offset: int
     end_offset: int
     severity: Sensitivity
+    confidence: ScanConfidence = ScanConfidence.HIGH
 
     def __post_init__(self) -> None:
         if self.kind not in {"canary", "credential_pattern", "private_key_marker"}:
@@ -276,6 +309,16 @@ class ScanFinding:
             raise ValueError("scan_finding_offset_invalid")
         if type(self.severity) is not Sensitivity:
             raise TypeError("scan_finding_severity_invalid")
+        if type(self.confidence) is not ScanConfidence:
+            raise TypeError("scan_finding_confidence_invalid")
+
+
+def scan_finding_is_heuristic(finding: ScanFinding) -> bool:
+    """Return whether a finding came from a low-confidence assignment heuristic."""
+
+    if type(finding) is not ScanFinding:
+        raise TypeError("scan_finding_invalid")
+    return finding.confidence is ScanConfidence.HEURISTIC
 
 
 class DiagnosticRedactionProfile(str, Enum):  # noqa: UP042 - frozen profile vocabulary
@@ -310,11 +353,46 @@ def _append_finding(
     start: int,
     end: int,
     severity: Sensitivity,
+    confidence: ScanConfidence = ScanConfidence.HIGH,
 ) -> None:
     identity = (kind, start, end)
     if identity not in seen and len(findings) < _MAX_SCAN_FINDINGS:
         seen.add(identity)
-        findings.append(ScanFinding(kind, start, end, severity))
+        findings.append(ScanFinding(kind, start, end, severity, confidence))
+
+
+def _assignment_value_is_code(match: re.Match[bytes], *, preceding: bytes = b"") -> bool:
+    """Recognize source expressions only when the assignment syntax proves source context."""
+
+    raw = match.group(0)
+    separator = re.search(rb"[:=]\s*", raw)
+    if separator is None:
+        return False
+    value = raw[separator.end() :]
+    # Quoted values are literals even when their text resembles source code. Keep them in the
+    # heuristic class so a value such as ``TOKEN='nextToken(parser)'`` is still withheld.
+    if value.startswith((b"'", b'"')):
+        return False
+    lhs = raw[: separator.start()].strip(b" \t\r\n'\"")
+    lhs_name = lhs.rsplit(b".", 1)[-1].strip()
+    if _TOKEN_LIKE_ASSIGNMENT_NAME.fullmatch(lhs_name) is None:
+        return False
+    source_context = (preceding[-512:] + raw[: separator.start()])[-1024:]
+    declared = _SOURCE_DECLARATION.search(source_context) is not None
+    if _CODE_LIKE_CALL_VALUE.fullmatch(value) is not None:
+        # A declaration is the evidence that ``token = nextToken(parser)`` is source code. A
+        # bare ``TOKEN=opaque.value`` or ``token=getToken()`` remains a heuristic match.
+        return declared
+    if _CODE_LIKE_ENUM_VALUE.fullmatch(value) is not None:
+        # Member assignment (``parser.token = Token.EOF``) and an object property (``token:
+        # Token.ConstKeyword``) carry their own source evidence. A bare equals assignment does
+        # not, even if the RHS happens to look like an enum.
+        return (
+            lhs.startswith(b".")
+            or declared
+            or (separator.group(0).startswith(b":") and lhs_name == b"token")
+        )
+    return False
 
 
 def _scan_chunks(data: bytes) -> Iterator[tuple[int, bytes]]:
@@ -386,7 +464,7 @@ def scan_for_sensitive_content(
                 )
                 offset = found + len(marker)
 
-    for pattern in (*_CREDENTIAL_PATTERNS, _URI_PASSWORD, _SECRET_ASSIGNMENT, _TOKEN_ASSIGNMENT):
+    for pattern in (*_CREDENTIAL_PATTERNS, _URI_PASSWORD):
         for chunk_start, chunk in _scan_chunks(data):
             for match in pattern.finditer(chunk):
                 _append_finding(
@@ -396,6 +474,31 @@ def scan_for_sensitive_content(
                     chunk_start + match.start(),
                     chunk_start + match.end(),
                     Sensitivity.SECRET,
+                    ScanConfidence.HIGH,
+                )
+                if len(findings) >= _MAX_SCAN_FINDINGS:
+                    break
+
+    for pattern in (_SECRET_ASSIGNMENT, _TOKEN_ASSIGNMENT):
+        for chunk_start, chunk in _scan_chunks(data):
+            for match in pattern.finditer(chunk):
+                # ``parser.getToken()``, ``nextToken(parser)`` and ``Token.EOF`` are ordinary
+                # source expressions. The assignment heuristic must not classify them as secret
+                # material merely because the left side is named ``token`` or ``secret``.
+                absolute_start = chunk_start + match.start()
+                if _assignment_value_is_code(
+                    match,
+                    preceding=data[max(0, absolute_start - 1024) : absolute_start],
+                ):
+                    continue
+                _append_finding(
+                    findings,
+                    seen,
+                    "credential_pattern",
+                    chunk_start + match.start(),
+                    chunk_start + match.end(),
+                    Sensitivity.SECRET,
+                    ScanConfidence.HEURISTIC,
                 )
                 if len(findings) >= _MAX_SCAN_FINDINGS:
                     break

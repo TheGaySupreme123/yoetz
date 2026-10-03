@@ -1769,6 +1769,10 @@ class ClassifiedContextItem:
     scope_valid: bool
     classifier_ruleset_version: str
     provenance: DisclosureProvenance | None = None
+    # Low-confidence secret-like assignments are withheld item-by-item by semantic egress. They
+    # remain separate from ``forbidden_findings`` so a concrete credential still blocks the whole
+    # case and so local receipts can explain the omission without retaining matched bytes.
+    heuristic_findings: tuple[ForbiddenDataKind, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.candidate) is not CandidateContextItem:
@@ -1777,6 +1781,11 @@ class ClassifiedContextItem:
         object.__setattr__(
             self, "forbidden_findings", _sorted_enums(self.forbidden_findings, ForbiddenDataKind)
         )
+        object.__setattr__(
+            self, "heuristic_findings", _sorted_enums(self.heuristic_findings, ForbiddenDataKind)
+        )
+        if set(self.forbidden_findings) & set(self.heuristic_findings):
+            raise _invalid()
         if type(self.scope_valid) is not bool:
             raise _invalid()
         _text(self.classifier_ruleset_version, _VERSION)
@@ -1974,6 +1983,10 @@ class DisclosureProposal:
     max_tokens: int
     expires_at: datetime
     proposal_commitment: str
+    # Opaque case item ids omitted by the heuristic scanner. This is persisted with the exact
+    # prepared proposal so a restart/replay can report the same coverage loss without reopening
+    # or re-scanning the original plaintext.
+    withheld_item_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         validate_id(IdKind.PRIVACY_PROPOSAL, self.privacy_proposal_id)
@@ -2004,6 +2017,15 @@ class DisclosureProposal:
         _nonnegative(self.max_tokens)
         _time(self.expires_at)
         validate_commitment(self.proposal_commitment)
+        if type(self.withheld_item_ids) is not tuple or self.withheld_item_ids != tuple(
+            sorted(set(self.withheld_item_ids), key=str.encode)
+        ):
+            raise _invalid()
+        if any(
+            type(item_id) is not str or not item_id or len(item_id.encode("utf-8")) > 128
+            for item_id in self.withheld_item_ids
+        ):
+            raise _invalid()
 
 
 type PrivacyAuditSubject = (

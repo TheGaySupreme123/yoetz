@@ -715,3 +715,30 @@ into the unreleased privacy-policy wire 1.2.0 (the #908 version), so one re-appr
   in `yoetz --privacy`) is a narrowing that needs no widening approval. An Expanded policy returned
   to the 1.1.0 preset encodes as the exact 1.1.0 bytes it had before.
 - Token budgets and raised channel ceilings are not part of this amendment (issue #924).
+
+## Heuristic secret matches amendment (2026-10-03, issues #920/#961)
+
+The never-send floor remains absolute for concrete credentials, private-key markers, canaries, and
+scanner uncertainty. The assignment detectors for names such as `token` and `secret` are a lower
+confidence class because ordinary parser and authentication source uses those names. A heuristic
+only match therefore withholds the affected case item and records its bounded opaque item identity
+and the closed reason `never_send_heuristic`; the remaining prepared case may continue through the
+same policy, authorization, final-body scan, and receipt path. No matched bytes, source prose, or
+raw detector output is exposed in the notice or receipt.
+
+This is an omission rule, not an opt-out. A concrete credential in the same item or any mixed case
+still blocks the whole case before provider construction. A heuristic that survives minimization,
+a scanner finding-capacity/saturation condition, a scanner profile mismatch, a stale policy or
+route, or a final rendered-body match fails closed. The final-body scan continues to include the
+heuristic class as a backstop. A corrected check builds a new prepared case and may include safe
+replacement content; it never reuses the withheld bytes or silently carries the old omission as
+approved content. The exact omission identity is persisted with a resumable proposal so recovery
+reports the same coverage limitation without reconstructing plaintext.
+
+The detector precision rule ignores only unquoted source expressions with syntax evidence: a
+`const`/`let`/`var` declaration for a token call or member call, an explicit member assignment
+such as `parser.token = Token.EOF`, or a lower-case object property such as `token:
+Token.ConstKeyword`. Bare dotted assignments such as `TOKEN=opaque.value`, call-shaped values such
+as `password=functionName()`, and quoted lookalikes remain heuristic matches. Capture-time
+redaction and the owner-controlled privacy policy are unchanged. The deferred heuristic opt-out
+and in-place masking design remain out of scope.
