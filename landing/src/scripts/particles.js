@@ -75,6 +75,14 @@ export function mountParticles(canvas, options = {}) {
     const j = Math.floor(R[i * 6 + 3] * n) * 3;
     set(i, pts[j] * sc + dx, pts[j + 1] * sc + dy, (R[i * 6 + 4] - 0.5) * zj, c == null ? (pts[j + 2] ? 1 : 0) : c);
   };
+  // like fromSet, but points i0..i1 walk the sample in order, so coverage is even and
+  // the letters read crisply (no clumps, no gaps, no depth jitter)
+  const fromSetEven = (i, i0, i1, pts, sc, dx, dy, c) => {
+    const n = pts.length / 3;
+    if (!n) return scatter(i);
+    const j = Math.min(n - 1, Math.floor(((i - i0) / Math.max(1, i1 - i0)) * n)) * 3;
+    set(i, pts[j] * sc + dx, pts[j + 1] * sc + dy, 0, c);
+  };
   const sphere = (i, cx, cy, cz, r, c) => {
     const u = R[i * 6] * 2 - 1;
     const ph = R[i * 6 + 1] * 6.2832;
@@ -320,21 +328,21 @@ export function mountParticles(canvas, options = {}) {
         const tsc = tier ? Math.min(tierN.w / tier.width, tierN.h / 0.42) : 0;
         for (i = 0; i < N; i++) {
           f = i / N;
-          if (f < 0.22) {
+          if (f < 0.18) {
             set(i, (R[i * 6] - 0.5) * 2.3, y0 + (R[i * 6 + 1] - 0.5) * 0.03, (R[i * 6 + 2] - 0.5) * 0.5, 0);
             continue;
           }
-          if (f >= 0.7) {
-            if (tier) fromSet(i, tier, tsc, tierN.x + tierN.w / 2 - (tier.width * tsc) / 2, tierN.y, 0.06, stop === 1 ? 5 : 6);
+          if (f >= 0.62) {
+            if (tier) fromSetEven(i, Math.floor(N * 0.62), N, tier, tsc, tierN.x + tierN.w / 2 - (tier.width * tsc) / 2, tierN.y, stop === 1 ? 5 : 6);
             else sphere(i, 0, sy, 0, 0.17, 2);
             continue;
           }
-          if (f >= 0.6) {
+          if (f >= 0.52) {
             // the benchmark score, rising with the sun: one figure per stop
             fromSet(i, digits, 0.6, -0.72, Math.min(sy, 0.55), 0.1, 0);
             continue;
           }
-          if (f < 0.38) sphere(i, 0, sy, 0, 0.17, 2);
+          if (f < 0.3) sphere(i, 0, sy, 0, 0.17, 2);
           else {
             a = R[i * 6] * 6.2832;
             const rr = 0.2 + R[i * 6 + 1] * 0.32 * (0.55 + 0.45 * Math.sin(a * 9 + t * 1.5));
@@ -404,7 +412,7 @@ export function mountParticles(canvas, options = {}) {
       const jj = col[i] >= 5 ? 0 : jit;
       px[i] = cx + x1 * S * sc + Math.sin(t * 2.2 + i) * jj;
       py[i] = cy + y2 * S * sc + Math.cos(t * 1.9 + i * 0.7) * jj;
-      ps[i] = (1.2 + R[i * 6 + 1] * 1.9) * sc * (col[i] >= 5 ? 1.5 : 1);
+      ps[i] = (1.2 + R[i * 6 + 1] * 1.9) * sc * (col[i] >= 5 ? 1.25 : 1);
       const dep = 1 - (Math.max(-1.2, Math.min(1.2, z2)) + 1.2) / 2.4;
       pa[i] = col[i] >= 5 ? 1 : 0.22 + dep * 0.78;
     }

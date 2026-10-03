@@ -306,5 +306,5 @@ img, svg { max-width: 100%; }
 .stanza .nowrap { white-space: nowrap; }
 .copy-right.wide { max-width: 760px; }
 /* The tier word is drawn in dots by the artwork; this is the room the sentence leaves for it */
-.dot-word { display: block; width: 100%; height: 2.6em; margin-top: 0.1em; }
+.dot-word { display: block; width: 100%; height: 1.5em; margin-top: 0.15em; }
 .stanza .fup-mark { width: 0.78em; height: 0.78em; vertical-align: -0.04em; margin-right: 0.1em; }
