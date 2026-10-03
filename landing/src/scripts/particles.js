@@ -227,9 +227,8 @@ export function mountParticles(canvas, options = {}) {
         spec.mouse = false;
         for (i = 0; i < N; i++) {
           f = i / N;
-          if (f < 0.9) fromSet(i, pts, 0.78, 0, -0.52, 0.12, null);
-          else if (f < 0.94) sphere(i, 0, -0.52, 0, 1.1, 1);
-          else laptop(i, (f - 0.94) / 0.06, anchorN.x, anchorN.y, 0.075, 0);
+          if (f < 0.96) fromSet(i, pts, 0.78, 0, -0.52, 0.12, null);
+          else sphere(i, 0, -0.52, 0, 1.1, 1);
         }
         break;
       }
