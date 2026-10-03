@@ -360,7 +360,7 @@ def _parse_json(text: str) -> dict[str, Any] | None:
         parsed = json.loads(stripped)
     except ValueError:
         # Some commands print a human line before the JSON; try the last JSON-looking line.
-        for line in reversed(stripped.splitlines()):
+        for line in reversed(stripped.split("\n")):
             line = line.strip()
             if line.startswith("{"):
                 try:
