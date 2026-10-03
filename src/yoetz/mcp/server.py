@@ -36,9 +36,9 @@ from yoetz.adapters.workspace_binding import (
     MAX_WORKSPACE_LOCATOR_BYTES,
     canonical_workspace_locator,
 )
-from yoetz.cli.closure import PREPARATION_REMEDIATIONS, prepare_closure
 from yoetz.config.load import load_config
 from yoetz.config.models import LoggingConfig
+from yoetz.domain.closure import PREPARATION_REMEDIATIONS, prepare_closure
 from yoetz.mcp.descriptors import (
     TOOL_DESCRIPTORS,
     McpRouteProfile,

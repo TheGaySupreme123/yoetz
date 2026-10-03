@@ -173,7 +173,7 @@ def test_skill_routes_to_the_readable_cadence_owner() -> None:
         assert _cadence_row(workflow, operation)
     cadence = _cadence_row(workflow, "check")
     assert "A check with no new events since the last one adds nothing" in cadence
-    assert "not the finding's `subject_frontier`" in _cadence_row(workflow, "respond")
+    assert "never use the finding's `subject_frontier`" in _cadence_row(workflow, "respond")
 
 
 def test_the_skill_does_not_promise_that_responding_clears_a_finding() -> None:
