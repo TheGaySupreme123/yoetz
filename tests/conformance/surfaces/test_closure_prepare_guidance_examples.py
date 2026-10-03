@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from yoetz.mcp.resources import read_resource
 from yoetz.protocol.models import ClosurePrepareRequest
@@ -22,7 +22,7 @@ def _closure_examples(document: str) -> list[dict[str, Any]]:
     for match in _JSON_FENCE.finditer(document):
         value = json.loads(match.group("body"))
         if isinstance(value, dict) and _REQUEST_KEYS <= value.keys():
-            examples.append(value)
+            examples.append(cast(dict[str, Any], value))
     return examples
 
 
@@ -34,7 +34,7 @@ def test_canonical_and_packaged_closure_examples_validate() -> None:
 
     examples = _closure_examples(canonical)
     assert len(examples) >= 2
-    phases = set()
+    phases: set[str] = set()
     for example in examples:
         phases.add(ClosurePrepareRequest.model_validate(example).selection.phase)
     assert {"inventory", "attempt"} <= phases

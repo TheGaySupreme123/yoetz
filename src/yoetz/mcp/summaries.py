@@ -1111,7 +1111,7 @@ def summary_for_read_guidance(envelope: object) -> str:
         total_bytes = _safe_count(source.get("total_byte_count"))
         digest = source.get("digest")
         digest_text = (
-            cast(str, digest)
+            digest
             if type(digest) is str and re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
             else "unavailable"
         )

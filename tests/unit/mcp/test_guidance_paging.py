@@ -73,7 +73,10 @@ def test_utf8_page_boundaries_never_split_a_scalar() -> None:
 
 
 def test_empty_guidance_document_is_one_complete_page(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(resource_module, "read_verified_resource", lambda _name: b"")
+    def empty_resource(_name: str) -> bytes:
+        return b""
+
+    monkeypatch.setattr(resource_module, "read_verified_resource", empty_resource)
     page = read_resource_page(_URI, page_size=4)
     assert page.page_count == 1
     assert page.complete is True
@@ -180,6 +183,7 @@ def test_dispatch_paged_result_has_bounded_markers_and_stale_recovery() -> None:
             assert isinstance(block, types.TextContent)
             assert block.text.startswith("YOETZ_GUIDANCE_PAGE_BEGIN ")
             assert block.text.endswith(f"digest={wire['digest']}")
+            assert isinstance(wire["text"], str)
             assert wire["text"] in block.text
 
             stale = await bridge.dispatch_read_guidance(
