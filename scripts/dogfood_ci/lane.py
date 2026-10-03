@@ -882,6 +882,7 @@ class Lane:
         args: list[str],
         *,
         cwd: Path | None = None,
+        env: dict[str, str] | None = None,
         stdin: str | None = None,
         fatal: bool = False,
         expect_zero: bool = True,
@@ -895,6 +896,7 @@ class Lane:
         rc, out, err, ms = self._run(
             [str(self.launcher), *args],
             cwd=self.project if cwd is None else cwd,
+            env=env,
             stdin=stdin,
             timeout=timeout,
         )
@@ -1436,6 +1438,7 @@ class Lane:
                 project,
                 "--json",
             ],
+            env={"CODEX_HOME": str(self.host_config_root)},
             fatal=True,
         )
         preview_body = preview if isinstance(preview, dict) else {}
@@ -1481,6 +1484,7 @@ class Lane:
                 preview_digest,
                 "--json",
             ],
+            env={"CODEX_HOME": str(self.host_config_root)},
             fatal=True,
         )
         grant_body = grant if isinstance(grant, dict) else {}
@@ -1515,6 +1519,7 @@ class Lane:
                 project,
                 "--json",
             ],
+            env={"CODEX_HOME": str(self.host_config_root)},
             fatal=True,
         )
         status_body = status if isinstance(status, dict) else {}

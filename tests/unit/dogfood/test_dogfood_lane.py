@@ -560,7 +560,15 @@ def test_native_launch_resolves_pinned_runtime_before_ambient_install(
 def test_codex_setup_run_grants_only_project_check_admission(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    lane = _LANE.Lane(_namespace(tmp_path, host="codex", connection_mode="setup-run"))
+    codex_home = tmp_path / "codex-home"
+    lane = _LANE.Lane(
+        _namespace(
+            tmp_path,
+            host="codex",
+            connection_mode="setup-run",
+            host_config_root=str(codex_home),
+        )
+    )
     lane.launcher = tmp_path / "isolated-runtime" / "bin" / "yoetz"
     lane.project.mkdir(parents=True)
     lane.evidence.mkdir(parents=True)
@@ -568,6 +576,7 @@ def test_codex_setup_run_grants_only_project_check_admission(
     monkeypatch.setattr(lane, "_write_codex_provider_config", Mock())
     digest = "sha256:" + "a" * 64
     calls: list[tuple[str, list[str]]] = []
+    admission_envs: dict[str, dict[str, str] | None] = {}
 
     responses: dict[str, dict[str, Any]] = {
         "host_preview": {
@@ -596,9 +605,11 @@ def test_codex_setup_run_grants_only_project_check_admission(
     }
 
     def fake_yoetz(
-        name: str, _phase: str, args: list[str], **_kwargs: Any
+        name: str, _phase: str, args: list[str], **kwargs: Any
     ) -> tuple[Mock, dict[str, Any]]:
         calls.append((name, args))
+        if name.startswith("codex_admission_"):
+            admission_envs[name] = kwargs.get("env")
         return Mock(exit_code=0), responses[name]
 
     monkeypatch.setattr(lane, "_yoetz", fake_yoetz)
@@ -616,6 +627,11 @@ def test_codex_setup_run_grants_only_project_check_admission(
     grant_argv = calls[5][1]
     assert grant_argv[grant_argv.index("--preview-digest") + 1] == digest
     assert grant_argv[grant_argv.index("--project-root") + 1] == str(lane.project)
+    assert admission_envs == {
+        "codex_admission_preview": {"CODEX_HOME": str(codex_home)},
+        "codex_admission_grant": {"CODEX_HOME": str(codex_home)},
+        "codex_admission_status": {"CODEX_HOME": str(codex_home)},
+    }
     assert lane.identity["codex_admission"] == {
         "owner": "external",
         "route_profile": "policy",
