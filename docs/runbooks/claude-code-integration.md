@@ -761,6 +761,14 @@ not a recovery selector. For
 `vault_locked` on a never-initialized install, that explicit `start` returns the typed
 `vault_initialization_required` continuation (see the proof checklist) rather than a dead end.
 
+If a scoped attach returns `SESSION_CONFLICT`, inspect `safe_details.reason_code`:
+`repository_identity_required` means the trusted repository context was omitted, while
+`repository_identity_mismatch` means it resolved to a different repository than the selected
+route. Resolve the canonical repository root and retry the same attach with the held session/writer
+selector; the existing task may receive a rotated session/writer under the 0.3 recovery contract,
+but a sibling must not be created from this refusal. Never infer a selector or copy a commitment
+from a public workspace string.
+
 Busy host lifecycle changes are durable local work. State schema `/11` adds bounded pending
 session-lifecycle intents, and a READY or hook drain reconciles them under the workspace and
 session reservations before routing their rows; busy mapping writes use an atomic per-session

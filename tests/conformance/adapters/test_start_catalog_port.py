@@ -844,6 +844,17 @@ async def test_repository_binding_is_atomic_and_mismatch_precedes_operation_rese
         assert after_operations == before_operations
         assert before_operations == after_operations == 1
 
+        corrected = await catalog.reserve_or_resume(
+            await _command(
+                catalog,
+                operation_id=_id(IdKind.REQUEST, 708),
+                mode=StartMode.ATTACH,
+                session_id=created.session_id,
+                repository_privacy_commitment=commitment_a,
+            )
+        )
+        assert corrected.task_id == created.task_id
+
 
 @pytest.mark.anyio
 async def test_quarantine_and_reclaim_parity() -> None:
