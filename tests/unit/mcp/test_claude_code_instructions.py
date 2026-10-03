@@ -51,7 +51,7 @@ def test_the_first_two_sentences_are_the_trigger_and_the_late_start_rule() -> No
         "If this session edits files, runs state-changing commands, or delegates"
     )
     assert first.endswith("call `start` before work")
-    assert second.startswith("If material work began without a task, call `start` now")
+    assert second.startswith("If work began without a task, call `start` now")
     assert "disclose the uncovered prefix in the receipt" in second
 
 
@@ -59,7 +59,8 @@ def test_the_claude_text_names_the_deferred_schema_load_step_and_the_catalog() -
     text = CLAUDE_CODE_INITIALIZE_INSTRUCTIONS
     assert "ToolSearch `select:mcp__yoetz__start`" in text
     assert "plugin-prefixed name" in text
-    assert "Read-only questions and unassigned subagents skip it." in text
+    assert "Read-only questions skip it." in text
+    assert "Subagents whose assignment names no handle or parent session skip it." in text
     # Everything that no longer fits is one read_guidance call away; both URIs stay named so the
     # agent that only sees this block can still find the safety floor and the workflow.
     assert "`read_guidance`" in text
@@ -67,7 +68,7 @@ def test_the_claude_text_names_the_deferred_schema_load_step_and_the_catalog() -
     assert "yoetz://guidance/workflow.md" in text
     assert "Do not list resources." in text
     assert "if guidance is empty or clipped, use paged reads and verify before continuing" in text
-    assert "Never claim Yoetz is active before `start` returns" in text
+    assert "Never claim active before `start`" in text
     assert "a clean check does not mean the work is correct" in text
 
 
@@ -75,7 +76,10 @@ def test_a_subagent_without_a_child_selector_is_exempt_from_the_trigger() -> Non
     # Claude renders this block into native subagents with no cue that they are children
     # (issue #509). The exemption sits in the trigger paragraph, beside the read-only exemption.
     trigger_paragraph = CLAUDE_CODE_INITIALIZE_INSTRUCTIONS.split("\n\n")[1]
-    assert "Read-only questions and unassigned subagents skip it." in trigger_paragraph
+    assert "Read-only questions skip it." in trigger_paragraph
+    assert (
+        "Subagents whose assignment names no handle or parent session skip it." in trigger_paragraph
+    )
 
 
 def test_budget_arithmetic_derives_the_packaged_bound_from_the_observed_cap() -> None:

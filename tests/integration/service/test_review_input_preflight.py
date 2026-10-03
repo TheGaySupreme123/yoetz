@@ -854,16 +854,10 @@ async def test_ready_same_request_recovery_after_statement_plan_amendment(
             "at_frontier": str(second.result_frontier.sequence),
         }
         history_request = StatusRequest.model_validate(history_wire)
-        history = await service.app.status(
-            history_request, repository_privacy_context=repository
-        )
+        history = await service.app.status(history_request, repository_privacy_context=repository)
         history_page = history.page
         assert isinstance(history_page, StatusHistoryPageModel)
-        check_items = [
-            item
-            for item in history_page.items
-            if item.schema_name == "check_recorded"
-        ]
+        check_items = [item for item in history_page.items if item.schema_name == "check_recorded"]
         assert len(check_items) == 1
         check_item = check_items[0]
         assert isinstance(check_item, StatusHistoryItemV14Model)
@@ -904,9 +898,7 @@ async def test_ready_same_request_recovery_after_statement_plan_amendment(
         assert isinstance(projected, StatusResultModel)
         assert isinstance(projected.root.page, StatusHistoryPageModel)
         projected_check_items = [
-            item
-            for item in projected.root.page.items
-            if item.schema_name == "check_recorded"
+            item for item in projected.root.page.items if item.schema_name == "check_recorded"
         ]
         assert len(projected_check_items) == 1
         projected_check = projected_check_items[0]

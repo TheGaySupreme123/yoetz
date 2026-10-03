@@ -38,7 +38,7 @@ from yoetz.ports.control import McpHostProfile
 # and the policy-route destination disclosure (#479) ride on top and are never trimmed to fit.
 COMPACT_BODY_CAP_BYTES = 2_048
 # The Claude body hash locks the current compact startup contract, including guidance recovery.
-CLAUDE_BODY_SHA256 = "sha256:05225e869b1f68f73c76a39704ab3b9de6a7a4d393cd9d41588b0e6d16dac687"
+CLAUDE_BODY_SHA256 = "sha256:4204cb40e1db542f43fd82b7b25db32e40720f24cebf67cfae9a0df70dd90b5a"
 COMPACT_HOSTS: tuple[McpHostProfile, ...] = ("codex", "cursor")
 # The longer of the two route lines the bridge appends to every body.
 LONGEST_ROUTE_LINE = (
