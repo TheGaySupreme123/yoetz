@@ -1157,6 +1157,50 @@ def test_native_provider_history_rejects_first_manifest_mismatch(
     assert lane.native_provider_verification["reason"] == "native_provider_bound_manifest_mismatch"
 
 
+def test_native_provider_history_rejects_later_valid_check_after_early_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A later matching check cannot hide the first provider-bound check's mismatch."""
+
+    statement = "first provider-bound check wins"
+    lane = _LANE.Lane(_namespace(tmp_path, host="cursor"))
+    lane.evidence.mkdir()
+    marker = _native_binding()
+    current = {"sequence": "9", "head_digest": "sha256:" + "d" * 64}
+    items = [
+        _history_item("session_opened", "2", publication_channel="cooperative_mcp"),
+        _history_item("plan_published", "3", publication_channel="cooperative_mcp"),
+        _history_item(
+            "check_recorded",
+            "5",
+            publication_channel="engine_derived",
+            manifest=_provider_bound_history_manifest(statement, digest="sha256:" + "0" * 64),
+        ),
+        _history_item(
+            "check_recorded",
+            "6",
+            publication_channel="engine_derived",
+            manifest=_provider_bound_history_manifest(statement),
+        ),
+        _history_item("receipt_recorded", "7", publication_channel="engine_derived"),
+    ]
+    responses = iter(
+        [
+            _history_status_page(_NATIVE_IDS, marker["frontier"], [], None),
+            _history_status_page(_NATIVE_IDS, current, items, None),
+        ]
+    )
+    monkeypatch.setattr(
+        lane,
+        "_yoetz",
+        Mock(side_effect=[(Mock(exit_code=0), response) for response in responses]),
+    )
+
+    assert lane._verify_native_provider_statement("native", statement, marker) is False
+    assert lane.native_provider_verification["reason"] == "native_provider_bound_manifest_mismatch"
+    assert lane.native_provider_verification["first_provider_bound_sequence"] == "5"
+
+
 def test_native_provider_history_exhausts_paged_rows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
