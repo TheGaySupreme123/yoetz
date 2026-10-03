@@ -2547,8 +2547,13 @@ class YoetzTui(App[int]):
             if not check.done():
                 check.cancel()
         verdict, lines = check.result()
-        if verdict == "awaiting_human":
-            self.settle(Level.ACTIVE, "Check awaiting your decision", lines)
+        if verdict in {"awaiting_human", "awaiting_input"}:
+            heading = (
+                "Check awaiting review input"
+                if verdict == "awaiting_input"
+                else "Check awaiting your decision"
+            )
+            self.settle(Level.ACTIVE, heading, lines)
             return
         level = Level.VERIFIED if verdict == "pass" else Level.UNPROVEN
         self.settle(level, f"Check complete: {verdict}", lines)

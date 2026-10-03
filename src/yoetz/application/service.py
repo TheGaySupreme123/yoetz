@@ -786,7 +786,9 @@ def _public_model(method: ControlMethod, value: Mapping[str, JsonValue]) -> Proj
     # CHECK has two success shapes. The nonterminal one carries no verdict or coverage, so it
     # cannot validate against the terminal model; pick the branch the body actually declares.
     check_success: type[BaseModel] = (
-        CheckAwaitingHumanModel if value.get("state") == "awaiting_human" else CheckSuccessModel
+        CheckAwaitingHumanModel
+        if value.get("state") in {"awaiting_human", "awaiting_input"}
+        else CheckSuccessModel
     )
     model: tuple[type[BaseModel], type[BaseModel]] | None = {
         ControlMethod.START: (StartSuccessModel, StartResultModel),

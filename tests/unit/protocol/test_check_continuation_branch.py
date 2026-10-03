@@ -16,6 +16,7 @@ from typing import Any, Final, cast
 import pytest
 from pydantic import ValidationError
 
+from yoetz.cli.render import render_human_awaiting_human
 from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.models import (
@@ -112,6 +113,33 @@ def test_the_awaiting_branch_validates_and_discriminates_on_state() -> None:
     assert result.root.continuation.pending_id == _PENDING
 
 
+def test_the_awaiting_input_branch_validates_and_discriminates_on_state() -> None:
+    result = CheckResultModel.model_validate(
+        _awaiting(
+            state="awaiting_input",
+            semantic_status="awaiting_input",
+            semantic_reason="review_input_required",
+            continuation={
+                "kind": "review_input_required",
+                "command": ["yoetz", "publish-work", "--input", "PATH"],
+                "replay_request_id": _REQUEST,
+                "instruction": "Supply the statement, then replay this exact request.",
+            },
+        )
+    )
+
+    assert type(result.root) is CheckAwaitingHumanModel
+    assert result.root.state == "awaiting_input"
+    assert result.root.semantic_reason == "review_input_required"
+    assert result.root.continuation.kind == "review_input_required"
+
+    rendered = render_human_awaiting_human(result.root)
+    assert "awaiting_input (review_input_required)" in rendered
+    assert "complete review input" in rendered
+    assert "yoetz publish-work --input PATH" in rendered
+    assert "awaiting_human (human_approval_required)" not in rendered
+
+
 def test_the_branch_carries_the_exact_command_the_user_must_run() -> None:
     result = CheckResultModel.model_validate(_awaiting())
     assert type(result.root) is CheckAwaitingHumanModel
@@ -136,8 +164,10 @@ def test_completed_check_operation_page_carries_withheld_item_identity() -> None
             ],
         }
     )
-    assert page.semantic_withheld_items[0].item_id == "excerpt-heuristic"
-    assert page.semantic_withheld_items[0].reason == "never_send_heuristic"
+    items = page.semantic_withheld_items
+    assert items is not None
+    assert items[0].item_id == "excerpt-heuristic"
+    assert items[0].reason == "never_send_heuristic"
 
 
 def test_old_completed_check_operation_page_omits_withheld_items() -> None:
@@ -149,7 +179,7 @@ def test_old_completed_check_operation_page_omits_withheld_items() -> None:
             "operation_kind": "check",
         }
     )
-    assert page.semantic_withheld_items == ()
+    assert page.semantic_withheld_items is None
 
 
 def test_missing_repository_grant_carries_standing_setup_without_one_use_fields() -> None:

@@ -1863,9 +1863,10 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "mean the whole case, and sending only one of the two keys is rejected. Call it after "
         "publishing the completion claim and its evidence, and again after any material edit or "
         "new evidence; a check with no new events since the last one adds nothing. "
-        "awaiting_human is the one nonterminal result: its typed continuation identifies standing "
-        "repository setup or a one-use decision and carries the exact command to run. Show that "
-        "command, do not create a new "
+        "awaiting_human and awaiting_input are the nonterminal check results: each typed "
+        "continuation identifies the exact next command. awaiting_human carries standing "
+        "repository setup or a one-use decision; awaiting_input carries the same-task review-input "
+        "amendment. Show that command, do not create a new "
         "check request, do not inspect live Yoetz storage or reconstruct consumer calls from source, "
         "and replay this same request with "
         "the same request_id after the decision. If Yoetz explicitly reports that the current "
@@ -2040,7 +2041,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
             {
                 "start": "sha256:4c6c687e3dc3666c2a248f8a23f504b3f22bb7258df2c608ed557165ea3af78a",
                 "publish_work": "sha256:a8dd06954e2f2ff65d3fb269a143b13745342e973e270179dc8b952fde7df115",
-                "check": "sha256:9befe13b257acf10535009c1dd69d9a933f3d94f5cd2aaac1655d4867596f89e",
+                "check": "sha256:5d5afe66c2a4861c5d9c4e573e0e6d37b61ac651ea3f2536e979f41236acd425",
                 "respond": "sha256:191f69e1592bd6bb23f7173725645dc339441b12eaa91c08cc3da4e9feaf0b85",
                 "status": "sha256:7e77f753244eee59b711cb7ee77c8f09970ef1b61c91b548b6f4a821b3541969",
                 "receipt": "sha256:c7676e1ca9afd96d9d7e74503edd5b31a758a05d7e7e1cf0d62c763611ffcecb",
@@ -2052,7 +2053,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
             {
                 "start": "sha256:4c6c687e3dc3666c2a248f8a23f504b3f22bb7258df2c608ed557165ea3af78a",
                 "publish_work": "sha256:a8dd06954e2f2ff65d3fb269a143b13745342e973e270179dc8b952fde7df115",
-                "check": "sha256:2bd9947abc7b60564474840a73d99a80bfa528b98af1a725d11fdfde5dac9795",
+                "check": "sha256:876915e84b64e1e4b0ee3eead50cb046ff59f112249850e28e4ef7b730cbde9d",
                 "respond": "sha256:191f69e1592bd6bb23f7173725645dc339441b12eaa91c08cc3da4e9feaf0b85",
                 "status": "sha256:7e77f753244eee59b711cb7ee77c8f09970ef1b61c91b548b6f4a821b3541969",
                 "receipt": "sha256:c7676e1ca9afd96d9d7e74503edd5b31a758a05d7e7e1cf0d62c763611ffcecb",
@@ -2064,8 +2065,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:390e66df4f079650fe0a23f3a387854c193834dbc949ab55f45d5414f003eae5",
-        "strict": "sha256:8c1d413d9af1deeb72c4168bb005febf19dec1e043192b12f730a231712b774f",
+        "policy": "sha256:b7ec8bfa1b188d2d9f3147a561999f3dc27eb7a03b2fc68c63d304802d598397",
+        "strict": "sha256:01f38133bfae636c30261c5bc94641b2e03647b3e0fa8dd99503f95c31f826ef",
     }
 )
 

@@ -3014,7 +3014,7 @@ class CheckContinuationModel(_ClosedModel):
             or tuple(self.command) != ("yoetz", "publish-work", "--input", "PATH")
         ):
             raise ValueError("check_continuation_review_input_invalid")
-        elif (
+        elif self.kind == "repository_privacy_setup" and (
             self.pending_id is not None
             or self.expires_at is not None
             or tuple(self.command) != ("yoetz", "--privacy")
@@ -4520,7 +4520,7 @@ class StatusOperationPageModel(_ClosedModel):
     semantic_progress: StatusSemanticProgressModel | None = None
     # A completed check may disclose the bounded opaque identities omitted by the never-send
     # heuristic. Old operation rows omit this field entirely.
-    semantic_withheld_items: tuple[SemanticWithheldItemModel, ...] = ()
+    semantic_withheld_items: tuple[SemanticWithheldItemModel, ...] | None = None
     # Issue #838: pre-admission stage of a check request that has no operation record yet.
     # Omitted whenever the service knows of no reservation or refusal for the exact key.
     admission: StatusCheckAdmissionModel | None = None
@@ -4534,7 +4534,7 @@ class StatusOperationPageModel(_ClosedModel):
             self.operation_kind == "check" and self.state in {"pending", "complete"}
         ):
             raise ValueError("status_operation_page_invalid")
-        if self.semantic_withheld_items:
+        if self.semantic_withheld_items is not None:
             if not (self.operation_kind == "check" and self.state == "complete"):
                 raise ValueError("status_operation_page_invalid")
             _require_unique(

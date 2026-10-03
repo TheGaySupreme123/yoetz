@@ -2030,7 +2030,7 @@ class YoetzRuntime:
 
         if isinstance(success, CheckAwaitingHumanModel):
             self._pending_checks[title] = request
-            return "awaiting_human", tuple(render_human_awaiting_human(success).splitlines())
+            return success.state, tuple(render_human_awaiting_human(success).splitlines())
         self._pending_checks.pop(title, None)
         return str(success.verdict), tuple(render_human_check(success).splitlines())
 

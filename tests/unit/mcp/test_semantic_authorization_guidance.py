@@ -179,7 +179,7 @@ def test_closure_descriptors_require_the_recorded_resolution_and_receipt_counts(
 def test_check_descriptor_gives_the_continuation_procedure() -> None:
     description = descriptor_for("check").description
 
-    assert "awaiting_human is the one nonterminal result" in description
+    assert "awaiting_human and awaiting_input are the nonterminal check results" in description
     assert "do not create a new check request" in description
     assert "same request_id" in description
 

@@ -52,14 +52,16 @@ from yoetz.domain.privacy import (
     ReceiptSecretScan,
     ReceiptTransformations,
 )
+from yoetz.domain.values import Frontier, review_input_continuation
 from yoetz.ports.control import ControlClientKind, ControlMethod
-from yoetz.ports.ledger import CheckCommitResult
+from yoetz.ports.ledger import CheckAwaitingHuman, CheckCommitResult, CheckVersionSlice
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.coverage import PublicationChannel, coverage_for_channel, coverage_to_json
 from yoetz.protocol.models import (
     CheckAwaitingHumanModel,
     CheckContinuationModel,
     CheckRequest,
+    CheckResultModel,
     CheckSuccessModel,
     ChildDependencySnapshotModel,
     ChildFindingSnapshotModel,
@@ -509,6 +511,79 @@ async def _project_status(
         ProjectionCase(f"status/{view}", ControlMethod.STATUS, status_body, status),
         seed + 10,
     )
+
+
+async def test_project_result_for_client_routes_awaiting_input_as_nonterminal() -> None:
+    """The real post-privacy projection keeps review-input suspension out of the terminal branch."""
+
+    app, _policy = await build_projection_application(seed=2050)
+    try:
+        started = await app.start(start_request(2051, title="Awaiting input projection"))
+        request_id = protocol_id("req_", 2052)
+        frontier = Frontier(int(started.frontier.sequence), started.frontier.head_digest)
+        request_body: dict[str, JsonValue] = {
+            **request_base(request_id),
+            "session_id": started.session_id,
+            "writer_id": started.writer_id,
+            "expected_frontier": frontier_json(started.frontier),
+            "mode": "semantic_required",
+        }
+        internal = CheckAwaitingHuman(
+            started.task_id,
+            started.session_id,
+            started.writer_id,
+            request_id,
+            frontier,
+            frontier,
+            review_input_continuation(request_id=request_id),
+            CheckVersionSlice(
+                "0.1",
+                "0.1.0",
+                "0.1.0",
+                ("research-evidence/0.1.0", "work-integrity/0.1.0"),
+            ),
+            state="awaiting_input",
+        )
+        facts = await app.projection_binding_facts(ControlMethod.CHECK, request_body, internal)
+        rpc_id = protocol_id("rpc_", 2053)
+        service_instance_id = protocol_id("svc_", 2054)
+        binding = ControlProjectionBinding(
+            rpc_id,
+            ControlMethod.CHECK,
+            service_instance_id,
+            1,
+            facts.original_request_id,
+            facts.route_identity_digest,
+            canonical_encode(
+                {
+                    "rpc_id": rpc_id,
+                    "method": "check",
+                    "service_instance_id": service_instance_id,
+                    "service_generation": "1",
+                }
+            ),
+        )
+
+        projected = cast(
+            CheckResultModel,
+            await app.project_result_for_client(
+                ClientProjectionContext(
+                    ControlClientKind.MCP_BRIDGE, ProjectionRenderMode.MACHINE_READABLE, False
+                ),
+                binding,
+                internal,
+            ),
+        )
+        assert isinstance(projected.root, CheckAwaitingHumanModel)
+        assert projected.root.state == "awaiting_input"
+        assert projected.root.semantic_reason == "review_input_required"
+        wire = public_model_to_wire(projected)
+        assert wire["state"] == "awaiting_input"
+        assert wire["semantic_status"] == "awaiting_input"
+        continuation = cast(Mapping[str, JsonValue], wire["continuation"])
+        assert continuation["kind"] == "review_input_required"
+    finally:
+        await app.close()
 
 
 def _obligation_from_projected(
