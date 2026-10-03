@@ -91,8 +91,15 @@ trusted-console ceremonies from a pseudo-terminal. Phases, in order, each record
    `provider status` until a restart (a lock/unlock does not refresh it either); then
    `privacy setup` (recipe 3, Assisted review, when a credential exists; Private otherwise),
    `provider status`, `setup status`.
-2. **connect** — the host connection per the table, then `observe grant --workspace <project>`
-   and `observe status`.
+2. **connect** — the host connection per the table. In a Codex cell with the reviewed Fireworks
+   credential, the lane then uses the product-owned admission preview→grant flow for the
+   disposable project's trusted `.codex/config.toml`, accepting the exact preview digest and
+   re-reading admission status. The generated rule is only
+   `[mcp_servers.yoetz.tools.check] approval_mode = "approve"`; no server-wide default or
+   approval/sandbox bypass is used. A fresh `codex exec -C <project>` is still required by the
+   native phase, so project trust and the active per-tool policy are exercised by the host itself.
+   Credential-free lanes keep the private recipe and skip this external-review admission. The
+   lane then runs `observe grant --workspace <project>` and `observe status`.
 3. **ledger** — the host's session-start carrier first (`hooks observe`,
    `hooks claude-observe`, or `hooks cursor-observe`), whose auto-attach creates the
    workspace's task and names the session to attach to, exactly as a native host does; then

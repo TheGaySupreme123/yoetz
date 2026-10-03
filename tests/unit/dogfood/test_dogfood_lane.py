@@ -553,6 +553,112 @@ def test_native_launch_resolves_pinned_runtime_before_ambient_install(
     assert child["PATH"] == env["PATH"]
     assert "DOGFOOD_VAULT_PASSPHRASE" not in child
     assert "DOGFOOD_OS_PASSWORD" not in child
+    assert "--dangerously-bypass-approvals-and-sandbox" not in argv
+    assert "--approve-for-me" not in argv
+
+
+def test_codex_setup_run_grants_only_project_check_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lane = _LANE.Lane(_namespace(tmp_path, host="codex", connection_mode="setup-run"))
+    lane.launcher = tmp_path / "isolated-runtime" / "bin" / "yoetz"
+    lane.project.mkdir(parents=True)
+    lane.evidence.mkdir(parents=True)
+    lane.fireworks_key = "synthetic-provider-key"
+    monkeypatch.setattr(lane, "_write_codex_provider_config", Mock())
+    digest = "sha256:" + "a" * 64
+    calls: list[tuple[str, list[str]]] = []
+
+    responses: dict[str, dict[str, Any]] = {
+        "host_preview": {
+            "plan": {
+                "request_id": "req_setup",
+                "preview_digest": "sha256:" + "b" * 64,
+                "requires_os_presence": False,
+                "host_version": "0.157.1",
+            }
+        },
+        "host_accept": {"outcome": "completed"},
+        "host_status": {},
+        "codex_mcp_status": {},
+        "codex_admission_preview": {
+            "preview_digest": digest,
+            "route": {"observed": True, "owner": "external", "route_profile": "policy"},
+        },
+        "codex_admission_grant": {
+            "host": "codex",
+            "action": "grant",
+            "state_after": "present",
+        },
+        "codex_admission_status": {
+            "admission": {"state": "present", "entries": [{"detail": "external"}]}
+        },
+    }
+
+    def fake_yoetz(
+        name: str, _phase: str, args: list[str], **_kwargs: Any
+    ) -> tuple[Mock, dict[str, Any]]:
+        calls.append((name, args))
+        return Mock(exit_code=0), responses[name]
+
+    monkeypatch.setattr(lane, "_yoetz", fake_yoetz)
+    lane._connect_setup_run("connect")
+
+    assert [name for name, _ in calls] == [
+        "host_preview",
+        "host_accept",
+        "host_status",
+        "codex_mcp_status",
+        "codex_admission_preview",
+        "codex_admission_grant",
+        "codex_admission_status",
+    ]
+    grant_argv = calls[5][1]
+    assert grant_argv[grant_argv.index("--preview-digest") + 1] == digest
+    assert grant_argv[grant_argv.index("--project-root") + 1] == str(lane.project)
+    assert lane.identity["codex_admission"] == {
+        "owner": "external",
+        "route_profile": "policy",
+        "state": "present",
+        "tool": "check",
+    }
+
+
+def test_codex_setup_run_does_not_admit_unpermitted_private_recipe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lane = _LANE.Lane(_namespace(tmp_path, host="codex", connection_mode="setup-run"))
+    lane.launcher = tmp_path / "isolated-runtime" / "bin" / "yoetz"
+    lane.project.mkdir(parents=True)
+    lane.evidence.mkdir(parents=True)
+    calls: list[str] = []
+
+    responses: dict[str, dict[str, Any]] = {
+        "host_preview": {
+            "plan": {
+                "request_id": "req_setup",
+                "preview_digest": "sha256:" + "b" * 64,
+                "requires_os_presence": False,
+            }
+        },
+        "host_accept": {"outcome": "completed"},
+        "host_status": {},
+        "codex_mcp_status": {},
+    }
+
+    def fake_yoetz(
+        name: str, _phase: str, _args: list[str], **_kwargs: Any
+    ) -> tuple[Mock, dict[str, Any]]:
+        calls.append(name)
+        return Mock(exit_code=0), responses[name]
+
+    monkeypatch.setattr(lane, "_yoetz", fake_yoetz)
+    lane._connect_setup_run("connect")
+
+    assert "codex_admission_preview" not in calls
+    assert next(step for step in lane.steps if step.name == "codex_admission").reason == (
+        "FIREWORKS_API_KEY_unset"
+    )
 
 
 @pytest.mark.parametrize("terminal", ["retry_pending", "pass_limit"])

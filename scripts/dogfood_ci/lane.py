@@ -1367,6 +1367,15 @@ class Lane:
             if self.host_path:
                 mcp_status[4:4] = ["--codex-path", self.host_path]
             self._yoetz("codex_mcp_status", phase, mcp_status, expect_zero=False)
+            if self.fireworks_key:
+                self._grant_codex_check_admission(phase)
+            else:
+                self._record(
+                    "codex_admission",
+                    phase,
+                    status="skip",
+                    reason="FIREWORKS_API_KEY_unset",
+                )
         elif self.host == "claude":
             status_argv = [
                 "integrate",
@@ -1402,6 +1411,143 @@ class Lane:
                 ],
                 expect_zero=False,
             )
+
+    def _grant_codex_check_admission(self, phase: str) -> None:
+        """Admit only the policy-route ``check`` in this disposable project.
+
+        Codex's non-interactive process uses ``approval_policy = \"never\"`` in the evaluator
+        home.  That is compatible with a per-tool ``approval_mode = \"approve\"`` entry, but it
+        cannot answer a remaining MCP prompt.  Use Yoetz's previewed, digest-bound host-admission
+        command so the privacy grant, observed route owner, and exact project file stay under the
+        product's existing authority.  The subsequent native invocation is a fresh Codex process
+        and is the final project-trust check.
+        """
+
+        project = str(self.project)
+        _, preview = self._yoetz(
+            "codex_admission_preview",
+            phase,
+            [
+                "integrate",
+                "codex",
+                "admission",
+                "preview",
+                "--project-root",
+                project,
+                "--json",
+            ],
+            fatal=True,
+        )
+        preview_body = preview if isinstance(preview, dict) else {}
+        preview_digest = preview_body.get("preview_digest")
+        route = preview_body.get("route")
+        route_body = cast(dict[str, Any], route) if isinstance(route, dict) else {}
+        if (
+            not isinstance(preview_digest, str)
+            or _NATIVE_DIGEST_RE.fullmatch(preview_digest) is None
+            or route_body.get("observed") is not True
+            or route_body.get("owner") != "external"
+            or route_body.get("route_profile") != "policy"
+        ):
+            self._record(
+                "codex_admission_preview_validation",
+                phase,
+                status="fail",
+                reason="codex_admission_preview_unusable",
+                summary={
+                    "digest_valid": isinstance(preview_digest, str)
+                    and _NATIVE_DIGEST_RE.fullmatch(preview_digest) is not None,
+                    "route_observed": route_body.get("observed") is True,
+                    "route_owner": route_body.get("owner"),
+                    "route_profile": route_body.get("route_profile"),
+                },
+                fatal=True,
+            )
+            return
+
+        self.identity["codex_admission_preview_digest"] = preview_digest
+        _, grant = self._yoetz(
+            "codex_admission_grant",
+            phase,
+            [
+                "integrate",
+                "codex",
+                "admission",
+                "grant",
+                "--project-root",
+                project,
+                "--accept",
+                "--preview-digest",
+                preview_digest,
+                "--json",
+            ],
+            fatal=True,
+        )
+        grant_body = grant if isinstance(grant, dict) else {}
+        if (
+            grant_body.get("host") != "codex"
+            or grant_body.get("state_after") != "present"
+            or grant_body.get("action") not in {"grant", "noop"}
+        ):
+            self._record(
+                "codex_admission_grant_validation",
+                phase,
+                status="fail",
+                reason="codex_admission_grant_unconfirmed",
+                summary={
+                    "host": grant_body.get("host"),
+                    "action": grant_body.get("action"),
+                    "state_after": grant_body.get("state_after"),
+                },
+                fatal=True,
+            )
+            return
+
+        _, status = self._yoetz(
+            "codex_admission_status",
+            phase,
+            [
+                "integrate",
+                "codex",
+                "admission",
+                "status",
+                "--project-root",
+                project,
+                "--json",
+            ],
+            fatal=True,
+        )
+        status_body = status if isinstance(status, dict) else {}
+        admission = status_body.get("admission")
+        admission_body = cast(dict[str, Any], admission) if isinstance(admission, dict) else {}
+        entries = admission_body.get("entries")
+        details: set[str] = set()
+        if isinstance(entries, list):
+            for entry in cast(list[object], entries):
+                if not isinstance(entry, dict):
+                    continue
+                detail = cast(dict[str, Any], entry).get("detail")
+                if isinstance(detail, str):
+                    details.add(detail)
+        if admission_body.get("state") != "present" or "external" not in details:
+            self._record(
+                "codex_admission_status_validation",
+                phase,
+                status="fail",
+                reason="codex_admission_status_unconfirmed",
+                summary={
+                    "state": admission_body.get("state"),
+                    "external_entry_present": "external" in details,
+                },
+                fatal=True,
+            )
+            return
+        self.identity["codex_admission"] = {
+            "owner": "external",
+            "route_profile": "policy",
+            "state": "present",
+            "tool": "check",
+        }
 
     def _connect_plugin_dir(self, phase: str) -> None:
         if self.host != "claude":
