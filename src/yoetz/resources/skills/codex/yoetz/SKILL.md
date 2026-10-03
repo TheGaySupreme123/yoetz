@@ -30,11 +30,16 @@ fetched on demand from MCP server `yoetz`. The five URIs below are the
 complete catalog. Do not call `resources/list` or `list_mcp_resources` to discover them. A list
 failure is not a missing server and is not a reason to read product source.
 
-Use `resources/read` with the exact URI. If a `resources/read` result has no text, call `read_guidance`
-with the same URI. If that also has no text, open the matching installed `references/<name>.md`.
-Do not call `start` on an empty guidance body. Retain already-read guidance while it is in context.
+Use `resources/read` with the exact URI. If its body is empty, carries a truncation marker, or is
+nonempty but clipped, call the advertised `read_guidance` route and verify the returned page before
+using it. The current route is `read_guidance` input/output schema `1.1.0`: request bounded pages
+with canonical `page` and `page_size`, then carry the returned revision/digest continuation. If a
+declaration advertises the frozen `1.0.0` route, preserve that compatibility path by sending only
+`{"uri": ...}` and use the matching installed `references/<name>.md` fallback when that full
+result is empty or clipped. Do not call `start` on incomplete guidance. Retain already-read
+guidance while it is in context.
 
-- Before the first `start`: `yoetz://guidance/workflow.md` (the ten steps, cadence, resume behavior) and `yoetz://guidance/coverage-and-receipts.md` (coverage, findings, receipt wording). Neither is in initialize `instructions`; read both before the first `start`, and call `read_guidance` with the same URI if the `resources/read` body is empty.
+- Before the first `start`: `yoetz://guidance/workflow.md` (the ten steps, cadence, resume behavior) and `yoetz://guidance/coverage-and-receipts.md` (coverage, findings, receipt wording). Neither is in initialize `instructions`; read both before the first `start`, and use the bounded `read_guidance` route if a resource body is empty or clipped.
 - Before the first `publish_work`: `yoetz://guidance/publication-policy.md` (what is material and safe to publish).
 - When schema metadata is missing or a request is rejected:
   `yoetz://guidance/request-templates.md` (complete bodies for all six operations and
@@ -79,13 +84,39 @@ const decl = (name) => {
 text(decl("start"));
 ```
 
-Read guidance from `structuredContent.text`. On this host the text `content` of a `read_guidance`
-result names that field instead of repeating the document:
+For the current advertised `read_guidance` 1.1.0 route, read one bounded page from
+`structuredContent.text` and keep its marker metadata. On this host the text `content` names that
+field instead of repeating the document:
 
 ```js
-const g = await tools.mcp__yoetz__read_guidance({ uri: "yoetz://guidance/workflow.md" });
-text(g.structuredContent.text);
+const g = await tools.mcp__yoetz__read_guidance({
+  uri: "yoetz://guidance/workflow.md",
+  page: "0",
+  page_size: "1024",
+});
+// `structuredContent.text` is the bounded page body; `content` is only a pointer here.
+const page = g.structuredContent;
+if (!page || page.ok !== true || typeof page.text !== "string") throw new Error("guidance page missing");
+if (new TextEncoder().encode(page.text).byteLength !== page.page_byte_count) throw new Error("guidance page clipped");
+if (page.revision !== page.digest || page.complete !== (Number(page.page) + 1 === Number(page.page_count))) {
+  throw new Error("guidance page metadata mismatch");
+}
+text(JSON.stringify({
+  schema: "read-guidance-result/1.1.0",
+  page: page.page,
+  page_count: page.page_count,
+  page_offset: page.page_offset,
+  page_byte_count: page.page_byte_count,
+  complete: page.complete,
+  continuation: page.continuation ?? null,
+  text: page.text,
+}));
 ```
+
+If the declaration still advertises `1.0.0`, use the compatibility request
+`{ uri: "yoetz://guidance/workflow.md" }` and its full `structuredContent.text`; that route has no
+page metadata. Do not treat a nonempty full result or a final page's `complete: true` as proof of
+host delivery when the displayed channel may have clipped it.
 
 The sandbox may have no `crypto`, so a bare `crypto.randomUUID()` can throw. Every `request_id`,
 and every id you author in an event draft (`evt_`, `act_`, `res_`, `evd_`, `clm_`, `obl_`), is
