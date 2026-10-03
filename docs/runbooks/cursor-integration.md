@@ -43,6 +43,13 @@ and receipts before `check`. Setup/consent, vault/credential operations, transcr
 recommendation decisions route to the corresponding sections of request templates only when
 needed. Already-read guidance need not be fetched again while present in context.
 
+When Cursor may clip a large guidance document, use the `read_guidance/1.1.0` page route with a
+bounded UTF-8 `page_size`. Cursor's `structuredContent` delivery is not relied on for this host:
+validate each marked `content` page with `GuidancePageAssembler`, carry the revision/digest
+continuation, and require the complete page set and final digest before treating guidance as
+loaded. The URI-only request remains unchanged; native fresh/resumed/compacted Cursor
+acceptance for the page route remains a pending dogfood lane.
+
 Use `semantic_if_configured` only when AI-powered review is known to be optional; omit `mode` when
 relying on the configured default. Select `semantic_required` for an explicit user requirement,
 effective policy, or named acceptance criterion requiring independent AI-powered judgment. Preserve

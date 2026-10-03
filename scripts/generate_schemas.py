@@ -4360,7 +4360,7 @@ def _plan_payload_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
 
 
 def _read_guidance_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
-    """Build the closed read-guidance result: document text or the shared public error."""
+    """Build the closed read-guidance result, including bounded page metadata."""
 
     from yoetz.protocol.models import REGISTERED_GUIDANCE_URIS
 
@@ -4372,15 +4372,104 @@ def _read_guidance_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
             },
             "success": {
                 "additionalProperties": False,
+                "allOf": [
+                    {
+                        "if": {
+                            "anyOf": [
+                                {"required": [field]}
+                                for field in (
+                                    "document_id",
+                                    "revision",
+                                    "digest",
+                                    "total_byte_count",
+                                    "page",
+                                    "page_size",
+                                    "page_offset",
+                                    "page_byte_count",
+                                    "page_count",
+                                    "complete",
+                                    "continuation",
+                                )
+                            ]
+                        },
+                        "then": {
+                            "required": [
+                                "document_id",
+                                "revision",
+                                "digest",
+                                "total_byte_count",
+                                "page",
+                                "page_size",
+                                "page_offset",
+                                "page_byte_count",
+                                "page_count",
+                                "complete",
+                            ]
+                        },
+                    },
+                    {
+                        "if": {
+                            "properties": {"complete": {"const": True}},
+                            "required": ["complete"],
+                        },
+                        "then": {"not": {"required": ["continuation"]}},
+                    },
+                    {
+                        "if": {
+                            "properties": {"complete": {"const": False}},
+                            "required": ["complete"],
+                        },
+                        "then": {"required": ["continuation"]},
+                    },
+                ],
                 "properties": {
                     "byte_count": {"maximum": 65536, "minimum": 0, "type": "integer"},
+                    "complete": {"type": "boolean"},
+                    "continuation": {"$ref": "#/$defs/continuation"},
+                    "digest": {"$ref": "#/$defs/digest"},
+                    "document_id": {"$ref": "#/$defs/guidance_resource_uri"},
                     "media_type": {"const": "text/markdown", "type": "string"},
                     "ok": {"const": True, "type": "boolean"},
+                    "page": {"$ref": "#/$defs/canonical_uint"},
+                    "page_byte_count": {"maximum": 65536, "minimum": 0, "type": "integer"},
+                    "page_count": {"$ref": "#/$defs/canonical_positive_uint"},
+                    "page_offset": {"maximum": 65536, "minimum": 0, "type": "integer"},
+                    "page_size": {"$ref": "#/$defs/page_size"},
+                    "revision": {"$ref": "#/$defs/digest"},
                     "text": {"maxLength": 65536, "minLength": 0, "type": "string"},
+                    "total_byte_count": {"maximum": 65536, "minimum": 0, "type": "integer"},
                     "uri": {"$ref": "#/$defs/guidance_resource_uri"},
                 },
                 "required": ["byte_count", "media_type", "ok", "text", "uri"],
                 "type": "object",
+            },
+            "canonical_positive_uint": {
+                "pattern": r"^(?:[1-9][0-9]{0,18})$",
+                "type": "string",
+            },
+            "canonical_uint": {
+                "pattern": r"^(?:0|[1-9][0-9]{0,18})$",
+                "type": "string",
+            },
+            "continuation": {
+                "additionalProperties": False,
+                "properties": {
+                    "digest": {"$ref": "#/$defs/digest"},
+                    "page": {"$ref": "#/$defs/canonical_uint"},
+                    "page_size": {"$ref": "#/$defs/page_size"},
+                    "revision": {"$ref": "#/$defs/digest"},
+                    "uri": {"$ref": "#/$defs/guidance_resource_uri"},
+                },
+                "required": ["digest", "page", "page_size", "revision", "uri"],
+                "type": "object",
+            },
+            "digest": {"pattern": r"^sha256:[0-9a-f]{64}$", "type": "string"},
+            "page_size": {
+                "pattern": (
+                    r"^(?:[4-9]|[1-9][0-9]{1,3}|1[0-5][0-9]{3}|16[0-2][0-9]{2}|"
+                    r"163(?:[0-7][0-9]|8[0-3]|84))$"
+                ),
+                "type": "string",
             },
         },
         "oneOf": [
@@ -4392,6 +4481,51 @@ def _read_guidance_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
                 )
             },
         ],
+    }
+    return _normalize(raw, entry)
+
+
+def _read_guidance_request_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Build the closed request with optional, non-null bounded-page selectors."""
+
+    from yoetz.protocol.models import REGISTERED_GUIDANCE_URIS
+
+    raw: dict[str, object] = {
+        "$defs": {
+            "GuidanceResourceUri": {
+                "enum": list(REGISTERED_GUIDANCE_URIS),
+                "type": "string",
+            },
+            "canonical_uint": {
+                "pattern": r"^(?:0|[1-9][0-9]{0,18})$",
+                "type": "string",
+            },
+            "digest": {"pattern": r"^sha256:[0-9a-f]{64}$", "type": "string"},
+            "page_size": {
+                "pattern": (
+                    r"^(?:[4-9]|[1-9][0-9]{1,3}|1[0-5][0-9]{3}|16[0-2][0-9]{2}|"
+                    r"163(?:[0-7][0-9]|8[0-3]|84))$"
+                ),
+                "type": "string",
+            },
+        },
+        "additionalProperties": False,
+        "description": (
+            "Read one registered guidance document, or one bounded UTF-8-safe page. "
+            "Omit page fields for the legacy full-document route."
+        ),
+        "properties": {
+            "digest": {"$ref": "#/$defs/digest"},
+            "page": {"$ref": "#/$defs/canonical_uint"},
+            "page_size": {"$ref": "#/$defs/page_size"},
+            "revision": {"$ref": "#/$defs/digest"},
+            "uri": {
+                "$ref": "#/$defs/GuidanceResourceUri",
+                "description": "One registered URI such as yoetz://guidance/workflow.md.",
+            },
+        },
+        "required": ["uri"],
+        "type": "object",
     }
     return _normalize(raw, entry)
 
@@ -7248,6 +7382,30 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "operations/read-guidance-request-1.1.0.schema.json",
+        "read-guidance-request",
+        "1.1.0",
+        "request_result",
+        "MCP input",
+        lambda: (
+            __import__(
+                "yoetz.protocol.models", fromlist=["ReadGuidanceRequestModel"]
+            ).ReadGuidanceRequestModel
+        ),
+    ),
+    _RegistryEntry(
+        "operations/read-guidance-result-1.1.0.schema.json",
+        "read-guidance-result",
+        "1.1.0",
+        "request_result",
+        "MCP output",
+        lambda: (
+            __import__(
+                "yoetz.protocol.models", fromlist=["ReadGuidanceResultModel"]
+            ).ReadGuidanceResultModel
+        ),
+    ),
+    _RegistryEntry(
         "operations/receipt-request-1.0.0.schema.json",
         "receipt-request",
         "1.0.0",
@@ -8121,6 +8279,8 @@ _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
         "operations/start-result-1.1.0.schema.json",
         "operations/status-request-1.2.0.schema.json",
         "operations/status-result-1.4.0.schema.json",
+        "operations/read-guidance-request-1.1.0.schema.json",
+        "operations/read-guidance-result-1.1.0.schema.json",
         "observations/routine-read-summary-1.0.0.schema.json",
         "receipts/receipt-document-1.3.0.schema.json",
         "findings/finding-1.3.0.schema.json",
@@ -8493,8 +8653,10 @@ def build_schema_documents(
             normalized = _start_result_v1_1_schema(entry)
         elif entry.relative_path == "operations/start-request-1.1.0.schema.json":
             normalized = _start_request_v1_1_schema(entry)
-        elif entry.relative_path == "operations/read-guidance-result-1.0.0.schema.json":
+        elif entry.relative_path == "operations/read-guidance-result-1.1.0.schema.json":
             normalized = _read_guidance_result_schema(entry)
+        elif entry.relative_path == "operations/read-guidance-request-1.1.0.schema.json":
+            normalized = _read_guidance_request_schema(entry)
         elif entry.relative_path == "operations/publish-work-result-1.0.0.schema.json":
             normalized = _publish_work_result_schema(entry)
         elif entry.relative_path == "operations/respond-request-1.0.0.schema.json":

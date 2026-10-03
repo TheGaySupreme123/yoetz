@@ -382,6 +382,21 @@ registered URI and byte count alone. `structuredContent`, and so the `read-guida
 is identical for every host. This item is revertible: it stays only while Codex dogfood shows no
 additional guidance re-read turns.
 
+The current `read_guidance` input/output route is `1.1.0` and keeps the frozen `1.0.0` schema
+available for older clients. The URI-only request remains the full-document on-demand route. A
+request carrying canonical string `page` and bounded `page_size` selects the page route. Its
+success body adds stable `document_id`, source-byte `revision` and `digest`, total and page byte
+counts, page offsets/counts, `complete`, and (until the final page) an exact `continuation` that
+repeats the URI, next page, page size, revision, and digest. Pages never split a UTF-8 scalar.
+The Codex text channel remains a bounded pointer to `structuredContent.text`; generic, Claude, and
+Cursor paged text carries explicit begin/end markers. A final page's `complete: true` is a service
+emission fact, not proof that the host delivered the page. A consumer must reject clipped markers,
+missing or duplicate pages, changed revision/digest, byte-count or offset mismatches, and a final
+assembled digest mismatch before exposing the document or claiming guidance is loaded. The
+supported bounded consumer is `GuidancePageAssembler`; a rejected page has a bounded retry path,
+and a revision change restarts at page zero. The full URI-only route remains available when a
+caller explicitly needs the source document.
+
 Protocol reason
 `expected_frontier_required` marks a state-sensitive `publish_work` batch that omitted
 `expected_frontier`. It names that field and is retryable because validation wrote no durable

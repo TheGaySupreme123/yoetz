@@ -106,12 +106,8 @@ _CODE_LIKE_CALL_VALUE = re.compile(
     rb"(?:getToken|nextToken|next)|[A-Za-z_][A-Za-z0-9_]*token)"
     rb"\([^()]{0,256}\)$"
 )
-_CODE_LIKE_ENUM_VALUE = re.compile(
-    rb"^(?:[A-Z][A-Za-z0-9_]*\.)+[A-Z][A-Za-z0-9_]*$"
-)
-_TOKEN_LIKE_ASSIGNMENT_NAME = re.compile(
-    rb"(?i)^(?:[A-Za-z][A-Za-z0-9]{0,63}[_-])?token$"
-)
+_CODE_LIKE_ENUM_VALUE = re.compile(rb"^(?:[A-Z][A-Za-z0-9_]*\.)+[A-Z][A-Za-z0-9_]*$")
+_TOKEN_LIKE_ASSIGNMENT_NAME = re.compile(rb"(?i)^(?:[A-Za-z][A-Za-z0-9]{0,63}[_-])?token$")
 
 _LOG_FIELDS: Final = frozenset(
     {

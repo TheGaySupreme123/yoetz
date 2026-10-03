@@ -40,6 +40,13 @@ and receipts before `check`. Setup/consent, vault/credential operations, transcr
 recommendation decisions route to the corresponding sections of request templates only when
 needed. Already-read guidance need not be fetched again while present in context.
 
+When Claude's model-visible tool result could clip a large guidance document, use the
+`read_guidance/1.1.0` page route with a bounded UTF-8 `page_size`. Keep the begin/end markers from
+each page, carry its revision/digest continuation, and pass the exact marked text to
+`GuidancePageAssembler` before treating the document as loaded. The URI-only request remains
+unchanged for callers that explicitly request the full source; native fresh/resumed/compacted
+Claude acceptance for the page route remains a pending dogfood lane.
+
 Use `semantic_if_configured` only when AI-powered review is known to be optional; omit `mode` when
 relying on the configured default. Select `semantic_required` for an explicit user requirement,
 effective policy, or named acceptance criterion requiring independent AI-powered judgment. Preserve

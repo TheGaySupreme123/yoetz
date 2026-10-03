@@ -158,6 +158,7 @@ __all__ = [
     "ReadGuidanceRequestModel",
     "ReadGuidanceResult",
     "ReadGuidanceResultModel",
+    "ReadGuidanceContinuationModel",
     "RespondRequest",
     "RespondRequestModel",
     "RespondResult",
@@ -1840,17 +1841,64 @@ type GuidanceResourceUri = Literal[
     "yoetz://guidance/request-templates.md",
 ]
 _MAX_GUIDANCE_DOCUMENT_CHARS: Final = 65_536
+_MIN_GUIDANCE_PAGE_SIZE: Final = 4
+_MAX_GUIDANCE_PAGE_SIZE: Final = 16_384
+_MAX_GUIDANCE_PAGE_COUNT: Final = 16_384
+
+
+def _guidance_page_size(value: object) -> str:
+    """Validate a canonical page-size token without widening the generic integer aliases."""
+
+    validated = _canonical_uint_wire(value)
+    parsed = int(validated)
+    if not _MIN_GUIDANCE_PAGE_SIZE <= parsed <= _MAX_GUIDANCE_PAGE_SIZE:
+        raise ValueError("guidance_page_size_invalid")
+    return validated
+
+
+GuidancePageSizeWire = Annotated[str, BeforeValidator(_guidance_page_size)]
+
+
+class ReadGuidanceContinuationModel(_ClosedModel):
+    """Exact next-page request material returned for an incomplete guidance read."""
+
+    uri: GuidanceResourceUri
+    page: CanonicalUInt64Wire
+    page_size: GuidancePageSizeWire
+    revision: Sha256Digest
+    digest: Sha256Digest
+
+    @model_validator(mode="after")
+    def _validate_guidance_continuation(self) -> ReadGuidanceContinuationModel:
+        if int(self.page) > _MAX_GUIDANCE_PAGE_COUNT:
+            raise ValueError("guidance_page_invalid")
+        if self.revision != self.digest:
+            raise ValueError("guidance_revision_digest_mismatch")
+        return self
 
 
 class ReadGuidanceRequestModel(_ClosedModel):
     """Request to read one registered Yoetz guidance document as tool text."""
 
+    optional_non_null_fields = frozenset({"page", "page_size", "revision", "digest"})
+
     uri: GuidanceResourceUri = Field(
         description="One registered URI such as yoetz://guidance/workflow.md."
     )
+    # Omitting all four optional fields preserves the legacy full-document route. Supplying any
+    # page field opts into the bounded route; ``page`` defaults to zero and ``page_size`` to the
+    # service's bounded default at the MCP edge.
+    page: CanonicalUInt64Wire | None = None
+    page_size: GuidancePageSizeWire | None = None
+    revision: Sha256Digest | None = None
+    digest: Sha256Digest | None = None
 
     @model_validator(mode="after")
     def _validate_read_guidance_request(self) -> ReadGuidanceRequestModel:
+        if self.page is not None and int(self.page) > _MAX_GUIDANCE_PAGE_COUNT:
+            raise ValueError("guidance_page_invalid")
+        if self.revision is not None and self.digest is not None and self.revision != self.digest:
+            raise ValueError("guidance_revision_digest_mismatch")
         _validate_model_against_schema(self, "read-guidance-request")
         return self
 
@@ -1858,17 +1906,98 @@ class ReadGuidanceRequestModel(_ClosedModel):
 class ReadGuidanceSuccessModel(_ClosedModel):
     """Registered guidance document returned as tool text."""
 
+    optional_non_null_fields = frozenset(
+        {
+            "document_id",
+            "revision",
+            "digest",
+            "total_byte_count",
+            "page",
+            "page_size",
+            "page_offset",
+            "page_byte_count",
+            "page_count",
+            "complete",
+            "continuation",
+        }
+    )
+
     ok: Literal[True]
     uri: GuidanceResourceUri
     media_type: Literal["text/markdown"]
     byte_count: Annotated[int, Field(ge=0, le=_MAX_GUIDANCE_DOCUMENT_CHARS)]
     text: Annotated[str, Field(min_length=0, max_length=_MAX_GUIDANCE_DOCUMENT_CHARS)]
+    document_id: GuidanceResourceUri | None = None
+    revision: Sha256Digest | None = None
+    digest: Sha256Digest | None = None
+    total_byte_count: Annotated[int, Field(ge=0, le=_MAX_GUIDANCE_DOCUMENT_CHARS)] | None = None
+    page: CanonicalUInt64Wire | None = None
+    page_size: GuidancePageSizeWire | None = None
+    page_offset: Annotated[int, Field(ge=0, le=_MAX_GUIDANCE_DOCUMENT_CHARS)] | None = None
+    page_byte_count: Annotated[int, Field(ge=0, le=_MAX_GUIDANCE_DOCUMENT_CHARS)] | None = None
+    page_count: CanonicalPositiveUInt64Wire | None = None
+    complete: bool | None = None
+    continuation: ReadGuidanceContinuationModel | None = None
 
     @model_validator(mode="after")
     def _validate_read_guidance_success(self) -> ReadGuidanceSuccessModel:
         encoded = self.text.encode("utf-8")
         if len(encoded) != self.byte_count:
             raise ValueError("guidance_byte_count_mismatch")
+        page_fields = (
+            self.document_id,
+            self.revision,
+            self.digest,
+            self.total_byte_count,
+            self.page,
+            self.page_size,
+            self.page_offset,
+            self.page_byte_count,
+            self.page_count,
+            self.complete,
+        )
+        if not any(value is not None for value in page_fields):
+            if self.continuation is not None:
+                raise ValueError("guidance_page_metadata_incomplete")
+        else:
+            if any(value is None for value in page_fields):
+                raise ValueError("guidance_page_metadata_incomplete")
+            assert self.document_id is not None
+            assert self.revision is not None
+            assert self.digest is not None
+            assert self.total_byte_count is not None
+            assert self.page is not None
+            assert self.page_size is not None
+            assert self.page_offset is not None
+            assert self.page_byte_count is not None
+            assert self.page_count is not None
+            assert self.complete is not None
+            if self.revision != self.digest:
+                raise ValueError("guidance_revision_digest_mismatch")
+            page = int(self.page)
+            page_count = int(self.page_count)
+            if page_count < 1 or page_count > _MAX_GUIDANCE_PAGE_COUNT or page >= page_count:
+                raise ValueError("guidance_page_invalid")
+            if self.page_byte_count != self.byte_count:
+                raise ValueError("guidance_page_byte_count_mismatch")
+            if self.page_offset + self.page_byte_count > self.total_byte_count:
+                raise ValueError("guidance_page_offset_invalid")
+            expected_complete = page + 1 == page_count
+            if self.complete != expected_complete:
+                raise ValueError("guidance_completion_mismatch")
+            if self.complete and self.continuation is not None:
+                raise ValueError("guidance_completion_continuation_invalid")
+            if not self.complete and self.continuation is None:
+                raise ValueError("guidance_continuation_missing")
+            if self.continuation is not None:
+                if self.continuation.uri != self.uri:
+                    raise ValueError("guidance_continuation_uri_mismatch")
+                if int(self.continuation.page) != page + 1:
+                    raise ValueError("guidance_continuation_page_mismatch")
+                if self.continuation.page_size != self.page_size:
+                    raise ValueError("guidance_continuation_page_size_mismatch")
+                if self.continuation.revision != self.revision:
+                    raise ValueError("guidance_continuation_revision_mismatch")
         _validate_model_against_schema(self, "read-guidance-result")
         return self
 
@@ -1885,9 +2014,7 @@ class ReadGuidanceResultModel(PublicResultModel[ReadGuidanceResultBranch]):
 class ClosureSelectionModel(_ClosedModel):
     """Explicit caller choices for the read-only closure preparation helper."""
 
-    phase: Literal["inventory", "attempt", "respond", "resolve", "claim", "receipt"] = (
-        "inventory"
-    )
+    phase: Literal["inventory", "attempt", "respond", "resolve", "claim", "receipt"] = "inventory"
     obligation_ids: Annotated[tuple[ObligationIdWire, ...], Field(max_length=64)] = ()
     requested_item_indexes: Annotated[
         tuple[Annotated[int, Field(ge=0, le=63)], ...], Field(max_length=64)
@@ -1923,9 +2050,9 @@ class ClosureSelectionModel(_ClosedModel):
             self.supersedes_claim_refs,
         ):
             _require_unique(values, limit=64)
-        if len(self.requested_item_indexes) > 64 or len(
-            set(self.requested_item_indexes)
-        ) != len(self.requested_item_indexes):
+        if len(self.requested_item_indexes) > 64 or len(set(self.requested_item_indexes)) != len(
+            self.requested_item_indexes
+        ):
             raise ValueError("closure_selection_indexes_not_unique")
         return self
 

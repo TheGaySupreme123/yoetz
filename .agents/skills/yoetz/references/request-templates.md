@@ -32,6 +32,56 @@ canonical set fields — must already have unique members in ascending ASCII ord
 A one-element `dry_run` subset cannot demonstrate this rule. The two-member `obligation_ids`
 example under assignment is already sorted.
 
+## Initial shape matrix and bounded guidance reads
+
+Resolve the advertised declaration before using any worked example. The operation's current tool
+schema wins over this fallback. A legacy route that advertises `1.0.0` must not receive a body
+written for `1.1.0`; surface that compatibility mismatch and load the matching schema or template.
+
+The initial fields that prevent the most common mechanical rejections are:
+
+| operation | current advertised input | initial shape |
+| --- | --- | --- |
+| `start` | `1.1.0` | `mode`, `task_title`, `requested_view`, exact `client`, and either the held `session_id` or both `workspace_ref` and `external_ref`; include the user's whole `task_statement` when first starting |
+| `read_guidance` | `1.1.0` | URI-only reads remain available on demand; for bounded delivery send canonical string `page` and `page_size`, then echo `revision` and `digest` from the response's continuation |
+| `publish_work` | `1.2.0` | state-sensitive bodies require `expected_frontier` with both sequence and `head_digest`; all mirrored references must match in both locations |
+| `status` | `1.2.0` | `at_frontier` is a sequence string, while `limit` is a canonical page-limit string; neither is a frontier object |
+| `check` / `respond` | `1.1.0` | carry returned task/session/writer ids; respond at a `finding_frontier` at or after the finding record |
+| `receipt` | `1.0.0` | carry the current returned identities and frontier after the final check |
+
+For a completion claim, put admissible evidence and successful results in `supporting_refs`, every
+partial, failed, or unknown result in `limitation_refs`, and every in-scope obligation in
+`obligation_refs`. `result_recorded` and `response_recorded` require envelope `evidence_refs` to
+mirror the payload list exactly. `evidence_recorded` requires envelope `artifact_refs` to mirror
+the captured object reference exactly. The validator never supplies a missing mirror or invents a
+limitation claim.
+
+### Reconstruct a bounded guidance document
+
+`read_guidance` with only `uri` returns the full current document on demand. When a host may clip a
+large response, use the paged shape below. `page_size` is a bounded UTF-8 byte budget, not a
+character count; the service never splits a Unicode scalar value.
+
+```json
+{
+  "uri": "yoetz://guidance/workflow.md",
+  "page": "0",
+  "page_size": "2048"
+}
+```
+
+Each page carries `document_id`, `revision`, `digest`, `total_byte_count`, `page`, `page_count`,
+`page_offset`, `page_byte_count`, and `complete`. A non-final page carries an exact `continuation`
+with the next page and the same revision/digest. The final page's `complete: true` means only that
+the service emitted the end page; it does not prove that the host received it. Require complete
+begin/end markers in the host-visible channel, keep pages in order, verify contiguous offsets and
+per-page byte counts, then compare the assembled UTF-8 bytes with the final digest and total length.
+Keep each host print bounded to one page; never print all pages or the assembled document in one
+tool result, because a host text channel can clip after receiving a valid structured response.
+Missing or clipped markers, a missing page, stale revision, mismatched digest, or a changed length
+is an explicit incomplete-guidance result. Retry the exact page, or restart at page zero after a
+revision mismatch; do not start work or claim guidance is loaded until the assembler succeeds.
+
 ## `start`
 
 Use `create_or_attach` with a stable workspace/work-item pair when first opening or resuming the

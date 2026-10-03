@@ -1249,6 +1249,7 @@ def test_protocol_models_public_exports_are_closed() -> None:
         ReceiptFormat ReceiptInclude ReceiptRedactionProfile
         ReceiptRequest ReceiptRequestModel ReceiptResult ReceiptResultModel
         REGISTERED_GUIDANCE_URIS ReadGuidanceRequest ReadGuidanceRequestModel
+        ReadGuidanceContinuationModel
         ReadGuidanceResult ReadGuidanceResultModel ClosurePrepareRequest
         ClosurePrepareRequestModel ClosurePrepareResult ClosurePrepareResultModel
         ClosureSelectionModel RespondRequest
@@ -3033,7 +3034,7 @@ def test_schema_catalog_reports_complete_registry() -> None:
     assert SCHEMA_NAMESPACE == "https://schemas.yoetz.dev/0.1/"
     assert SCHEMA_MANIFEST_SCHEMA == "yoetz.schema-manifest/1.0.0"
     assert SCHEMA_MANIFEST_VERSION == "1.0.0"
-    assert SCHEMA_MEMBER_COUNT == 218
+    assert SCHEMA_MEMBER_COUNT == 220
     assert len(catalog.documents) == SCHEMA_MEMBER_COUNT
 
     paths = tuple(document.relative_path for document in catalog.documents)
@@ -3117,7 +3118,7 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     root = resources.files("yoetz").joinpath("resources", "schemas")
     manifest_bytes = root.joinpath("manifest.json").read_bytes()
     assert catalog.manifest_digest == f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
-    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 7_171
+    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 7_191
 
 
 def test_schema_name_derivation_and_version_maps_are_exact() -> None:

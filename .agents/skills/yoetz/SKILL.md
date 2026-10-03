@@ -131,6 +131,78 @@ const r = await tools.mcp__yoetz__check({ ...checkRequest, request_id });
 text(JSON.stringify({ request_id, result: r.structuredContent }));
 ```
 
+## Bootstrap request shapes
+
+Resolve the live declaration before copying an example: the tool's advertised input/output schema
+version is authoritative. A host advertising a legacy `1.0.0` route must not receive a `1.1.0`
+request body; print the declaration again or use the complete request template for that route and
+surface the compatibility mismatch. The current route matrix is:
+
+| operation | input schema | shape that matters first |
+| --- | --- | --- |
+| `start` | `1.1.0` | `mode`, `task_title`, `requested_view`, `actor`, `client`, plus either the held `session_id` or the complete `workspace_ref` + `external_ref` pair; carry the user's whole request in `task_statement` when it is first provided |
+| `read_guidance` | `1.1.0` | `uri` alone reads the full document on demand; add canonical string `page` and bounded `page_size` to reconstruct it page by page, carrying the returned `revision` and `digest` on the next request |
+| `publish_work` | `1.2.0` | every state-sensitive write carries `expected_frontier: {"sequence": "...", "head_digest": "..."}`; set-valued envelope and payload references are sorted, unique, and mirrored exactly where the family requires |
+| `status` | `1.2.0` | `at_frontier` is the canonical sequence string only; it is not a frontier object and does not accept a head digest |
+| `check` / `respond` | `1.1.0` | use the returned task/session/writer identities and the current frontier; `respond` uses a `finding_id` and a `finding_frontier` at or after the finding record |
+| `receipt` | `1.0.0` | use the returned task/session/writer identities and the current frontier after the final check |
+
+For completion claims, keep admissible evidence and successful results in `supporting_refs`, put
+partial, failed, or unknown results in `limitation_refs`, and name the in-scope obligations in
+`obligation_refs`. `result_recorded` and `response_recorded` mirror payload `evidence_refs` into
+the envelope; `evidence_recorded` mirrors `captured_object_id` into envelope `artifact_refs`.
+Never invent either side of a mirror to make a request pass.
+
+When a request is rejected, keep the field-local correction and follow its typed continuation:
+`input_correction_new_identity` means correct the named field and mint a fresh request id;
+replaying an unchanged body uses the same request id only for an unknown or pending write outcome.
+The helper in the Code mode section produces valid UUIDv4 ids without assuming `crypto` exists.
+
+### Bounded guidance reconstruction
+
+Large guidance documents can be clipped by a host even when the server response is valid. For a
+host-visible read, request `page_size` below the host cap and require the `YOETZ_GUIDANCE_PAGE_BEGIN`
+and `YOETZ_GUIDANCE_PAGE_END` markers in the text channel. Read the structured page text, append
+pages in `page` order, and verify each page's `page_offset` and `page_byte_count`. Continue only
+with the returned `continuation`, carrying its `revision` and `digest`; if a marker, page, length,
+revision, or digest is missing or mismatched, report incomplete guidance and retry that page (or
+restart at page zero after a revision mismatch). A service page with `complete: true` means only
+that the service emitted its final page. It is not proof that the host delivered every page.
+Expose the reconstructed document only after the final byte count and SHA-256 digest match.
+
+The supported consumer helper is `GuidancePageAssembler` in `yoetz.mcp.resources`. For a raw
+structured-content check, use `GuidancePageAssembler(host_proof_required=False)`, feed each raw
+`r.structuredContent` page to `add(page_wire)`, and call `assemble()` only after all pages have
+arrived. For a model-visible check, use the default assembler and pass the exact printed page as
+`add(page_wire, host_text=the_model_visible_page)`. Codex code mode reads
+`structuredContent.text` directly; the bounded pointer in `content` is not the document body, so
+use the structured result as the bounded page and keep the page metadata checks. Generic, Claude
+Code, and Cursor use the marked text channel.
+
+Keep each page request and response in its own code-mode cell. Validate the raw structured page
+before calling `text(...)`, including `TextEncoder().encode(page.text).byteLength`, offsets,
+page count, the revision/digest pair, and the final-page continuation rule. Print at most one
+bounded page plus its small metadata record per cell, and choose `page_size` below the actual host
+cap. Never print all pages, a reconstructed document, or a full raw response in one cell: the
+`text(...)` channel may clip after the script receives a valid raw result. A service digest and
+`complete: true` therefore describe the emitted page only; they do not establish what the host
+displayed. Do not label a full-document URI-only response complete merely because its source digest
+is present.
+
+The minimal raw-page check in a code-mode cell is:
+
+```js
+const page = r.structuredContent;
+if (!page || page.ok !== true || typeof page.text !== "string") throw new Error("guidance page missing");
+if (new TextEncoder().encode(page.text).byteLength !== page.page_byte_count) throw new Error("guidance page clipped");
+if (page.revision !== page.digest) throw new Error("guidance revision mismatch");
+if (page.complete !== (Number(page.page) + 1 === Number(page.page_count))) throw new Error("guidance completion mismatch");
+text(JSON.stringify({page: page.page, page_count: page.page_count, complete: page.complete, digest: page.digest, text: page.text}));
+```
+
+The final digest and contiguous offsets still require the assembler; the snippet only checks the
+single raw page before its bounded print.
+
 ## Delegation and project work
 
 Before delegating, read the multi-agent section of `yoetz://guidance/workflow.md`. The parent

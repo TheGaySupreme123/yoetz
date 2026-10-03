@@ -54,9 +54,12 @@ from yoetz.mcp.errors import (
     tool_error_envelope,
 )
 from yoetz.mcp.resources import (
+    DEFAULT_GUIDANCE_PAGE_SIZE,
     GUIDANCE_RESOURCES,
+    MAX_GUIDANCE_PAGE_SIZE,
     GuidanceResource,
     GuidanceResourceError,
+    GuidanceResourcePage,
 )
 from yoetz.mcp.resources import (
     list_resources as list_guidance_resources,
@@ -98,6 +101,7 @@ from yoetz.protocol.models import (
     ClosurePrepareResult,
     PublishWorkRequest,
     PublishWorkResult,
+    ReadGuidanceRequest,
     ReadGuidanceResult,
     ReceiptRequest,
     ReceiptResult,
@@ -2810,27 +2814,25 @@ async def dispatch_receipt(
 async def dispatch_read_guidance(
     arguments: Mapping[str, object], runtime: BridgeRuntime = BRIDGE_RUNTIME
 ) -> types.CallToolResult:
-    """Return one registered guidance document as tool text. Does not touch the service."""
+    """Return one registered guidance document or one digest-bound bounded page.
 
-    extra_keys = sorted(str(key) for key in arguments if key != "uri")
-    if extra_keys:
+    The legacy ``{"uri": ...}`` body remains a full-document on-demand read. Supplying any
+    page field selects the bounded route, whose structured metadata lets a host reconstruct and
+    verify the document even when its model-visible channel clips ordinary tool output.
+    """
+
+    try:
+        request = ReadGuidanceRequest.model_validate(arguments)
+    except ValidationError as exc:
+        locations = safe_validation_locations(exc)
         return structured_error_result(
             PublicErrorCode.INVALID_REQUEST,
-            "read_guidance rejects extra argument keys.",
-            safe_details={"argument_count": len(arguments)},
+            "The read_guidance request is invalid.",
+            safe_details=locations if locations else {"argument_count": len(arguments)},
             operation="read_guidance",
             host_profile=runtime.host_profile,
         )
-    raw_uri = arguments.get("uri")
-    if type(raw_uri) is not str or not raw_uri:
-        return structured_error_result(
-            PublicErrorCode.INVALID_REQUEST,
-            "read_guidance requires a registered guidance URI.",
-            safe_details={"argument_count": len(arguments)},
-            operation="read_guidance",
-            host_profile=runtime.host_profile,
-        )
-    resource = _GUIDANCE_BY_URI.get(raw_uri)
+    resource = _GUIDANCE_BY_URI.get(request.uri)
     if resource is None:
         return structured_error_result(
             PublicErrorCode.INVALID_REQUEST,
@@ -2839,25 +2841,145 @@ async def dispatch_read_guidance(
             operation="read_guidance",
             host_profile=runtime.host_profile,
         )
-    text = resource.text
-    result = ReadGuidanceResult.model_validate(
-        {
+    paged = any(
+        value is not None
+        for value in (request.page, request.page_size, request.revision, request.digest)
+    )
+    if paged:
+        page_number = int(request.page or "0")
+        page_size = int(request.page_size or str(DEFAULT_GUIDANCE_PAGE_SIZE))
+        try:
+            page = read_guidance_page(
+                resource,
+                page=page_number,
+                page_size=page_size,
+                expected_revision=request.revision,
+                expected_digest=request.digest,
+            )
+        except GuidanceResourceError as exc:
+            return _guidance_page_error(exc, runtime=runtime)
+        text = page.text
+        result_body: dict[str, object] = {
             "ok": True,
             "uri": resource.uri,
             "media_type": resource.media_type,
-            "byte_count": len(text.encode("utf-8")),
+            "byte_count": page.byte_count,
             "text": text,
+            "document_id": resource.uri,
+            "revision": page.revision,
+            "digest": page.digest,
+            "total_byte_count": page.total_byte_count,
+            "page": str(page.page),
+            "page_size": str(page.page_size),
+            "page_offset": page.offset,
+            "page_byte_count": page.byte_count,
+            "page_count": str(page.page_count),
+            "complete": page.complete,
         }
-    )
-    wire = public_model_to_wire(result)
+        if page.continuation is not None:
+            result_body["continuation"] = page.continuation
+        result = ReadGuidanceResult.model_validate(result_body)
+        wire = public_model_to_wire(result)
+        content_text = _guidance_page_content_text(
+            page, host_profile=runtime.host_profile, wire=wire
+        )
+    else:
+        text = resource.text
+        result = ReadGuidanceResult.model_validate(
+            {
+                "ok": True,
+                "uri": resource.uri,
+                "media_type": resource.media_type,
+                "byte_count": len(text.encode("utf-8")),
+                "text": text,
+            }
+        )
+        wire = public_model_to_wire(result)
+        content_text = _guidance_text(wire, text, host_profile=runtime.host_profile)
     return types.CallToolResult(
-        content=[
-            types.TextContent(
-                type="text", text=_guidance_text(wire, text, host_profile=runtime.host_profile)
-            )
-        ],
+        content=[types.TextContent(type="text", text=content_text)],
         structuredContent=cast(dict[str, object], wire),
         isError=False,
+    )
+
+
+def read_guidance_page(
+    resource: GuidanceResource,
+    *,
+    page: int,
+    page_size: int,
+    expected_revision: str | None,
+    expected_digest: str | None,
+) -> GuidanceResourcePage:
+    """Read a page for an already selected registry resource without interpreting caller paths."""
+
+    # Keep URI selection and byte loading in the resource registry. This wrapper makes the bridge
+    # call site explicit and gives tests a stable seam without exposing a second path resolver.
+    from yoetz.mcp.resources import read_resource_page
+
+    return read_resource_page(
+        resource.uri,
+        page=page,
+        page_size=page_size,
+        expected_revision=expected_revision,
+        expected_digest=expected_digest,
+    )
+
+
+def _guidance_page_error(
+    error: GuidanceResourceError,
+    *,
+    runtime: BridgeRuntime,
+) -> types.CallToolResult:
+    """Map page failures to bounded field-local corrections without echoing caller values."""
+
+    reason = str(error)
+    if reason in {"guidance_revision_mismatch", "guidance_digest_mismatch"}:
+        message = (
+            "The guidance revision changed while the document was being reconstructed. "
+            "Retry page 0 without the stale token, then carry the new revision and digest."
+        )
+        field = "/revision" if reason == "guidance_revision_mismatch" else "/digest"
+    elif reason == "guidance_page_out_of_range":
+        message = "The guidance page is outside the current document; restart at page 0."
+        field = "/page"
+    elif reason == "guidance_page_size_invalid":
+        message = f"Guidance page_size must be between 4 and {MAX_GUIDANCE_PAGE_SIZE} bytes."
+        field = "/page_size"
+    elif reason == "guidance_page_size_too_small":
+        message = "Guidance page_size must leave room for one complete UTF-8 character."
+        field = "/page_size"
+    else:
+        message = "The guidance page could not be read. Restart at page 0."
+        field = "/page"
+    return structured_error_result(
+        PublicErrorCode.INVALID_REQUEST,
+        message,
+        safe_details={"field": field},
+        operation="read_guidance",
+        host_profile=runtime.host_profile,
+    )
+
+
+def _guidance_page_content_text(
+    page: GuidanceResourcePage,
+    *,
+    host_profile: McpHostProfile,
+    wire: Mapping[str, object],
+) -> str:
+    """Render a page with explicit boundaries on hosts that consume the text channel."""
+
+    if host_profile == "codex":
+        return summary_for_read_guidance(wire)
+    next_page = "none" if page.next_page is None else str(page.next_page)
+    complete = "yes" if page.complete else "no"
+    return (
+        f"YOETZ_GUIDANCE_PAGE_BEGIN document={page.resource.uri} page={page.page} "
+        f"page_count={page.page_count} offset={page.offset} bytes={page.byte_count} "
+        f"total_bytes={page.total_byte_count} revision={page.revision} digest={page.digest}\n"
+        f"{page.text}\n"
+        f"YOETZ_GUIDANCE_PAGE_END complete={complete} next_page={next_page} "
+        f"revision={page.revision} digest={page.digest}"
     )
 
 

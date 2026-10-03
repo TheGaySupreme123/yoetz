@@ -160,7 +160,9 @@ def test_sensitive_scanner_negative_patterns(data: bytes) -> None:
     assert scan_for_sensitive_content(data) == ()
 
 
-def test_assignment_heuristic_preserves_source_expressions_but_withholds_quoted_lookalikes() -> None:
+def test_assignment_heuristic_preserves_source_expressions_but_withholds_quoted_lookalikes() -> (
+    None
+):
     for source in (
         b"const token = parser.getToken();",
         b"const token = nextToken(parser)",

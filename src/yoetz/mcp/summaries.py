@@ -1104,6 +1104,24 @@ def summary_for_read_guidance(envelope: object) -> str:
     uri = source.get("uri")
     if type(uri) is not str or _GUIDANCE_URI.fullmatch(uri) is None:
         uri = "unavailable"
+    if source.get("complete") is not None:
+        page = _safe_count(source.get("page"))
+        page_count = _safe_count(source.get("page_count"))
+        page_bytes = _safe_count(source.get("page_byte_count"))
+        total_bytes = _safe_count(source.get("total_byte_count"))
+        digest = source.get("digest")
+        digest_text = (
+            cast(str, digest)
+            if type(digest) is str and re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
+            else "unavailable"
+        )
+        complete = "yes" if source.get("complete") is True else "no"
+        continuation = "yes" if isinstance(source.get("continuation"), Mapping) else "no"
+        return _bounded(
+            f"Guidance page {page}/{page_count} for {uri}: {page_bytes} bytes of {total_bytes}; "
+            f"complete: {complete}; continuation: {continuation}; revision: {digest_text}; "
+            "full page in structuredContent.text."
+        )
     return _bounded(
         f"Guidance {uri}: {_safe_count(source.get('byte_count'))} bytes; "
         "full text in structuredContent.text."

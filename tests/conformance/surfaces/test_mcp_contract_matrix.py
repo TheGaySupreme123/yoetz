@@ -300,8 +300,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:eb8d757c29fb0a4d0a0acc8af24f0aa9318629cca5830fc5d9de7461235595ed",
-        "strict": "sha256:2cb62b5e33d08dc8c413e82ed056454aa8e58d433a982b47531a742a0f77708b",
+        "policy": "sha256:390e66df4f079650fe0a23f3a387854c193834dbc949ab55f45d5414f003eae5",
+        "strict": "sha256:8c1d413d9af1deeb72c4168bb005febf19dec1e043192b12f730a231712b774f",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -358,12 +358,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     receipt_descriptor = descriptor_for("receipt")
     assert receipt_descriptor.output_schema_ref.endswith("receipt-result-1.3.0.schema.json")
     closure_descriptor = descriptor_for("closure_prepare")
-    assert closure_descriptor.input_schema_ref.endswith(
-        "closure-prepare-request-1.0.0.schema.json"
-    )
-    assert closure_descriptor.output_schema_ref.endswith(
-        "closure-prepare-result-1.0.0.schema.json"
-    )
+    assert closure_descriptor.input_schema_ref.endswith("closure-prepare-request-1.0.0.schema.json")
+    assert closure_descriptor.output_schema_ref.endswith("closure-prepare-result-1.0.0.schema.json")
     assert "never writes the ledger, judges work, or claims completion" in (
         closure_descriptor.description
     )

@@ -439,9 +439,7 @@ def test_semantic_heuristic_omission_keeps_review_packet_reference_closure() -> 
     )
     targeted = review_packet["targeted_excerpts"]
     assert isinstance(targeted, list)
-    assert all(
-        isinstance(row, dict) and row.get("excerpt_item_id") == "clean" for row in targeted
-    )
+    assert all(isinstance(row, dict) and row.get("excerpt_item_id") == "clean" for row in targeted)
 
 
 class _Provenance:

@@ -27,7 +27,10 @@ Read the named document before the operation it governs; use the operation schem
 - `check` — after publishing the completion claim and evidence, and after a material edit or new evidence. Read `yoetz://guidance/coverage-and-receipts.md` first.
 - `respond` — once per finding; `finding_frontier` may be the current status frontier.
 - `receipt` — once at the end, and again only after material state changes.
-- `read_guidance` — reads one registered URI when resource text or schema metadata is missing.
+- `read_guidance` — reads one registered URI when resource text or schema metadata is missing. If
+  the host may clip it, request bounded UTF-8-safe pages with begin/end markers, carry revision and
+  digest, and verify offsets, lengths, and the final digest before loading guidance. `complete: true`
+  means only that the service emitted its final page; host delivery remains unconfirmed.
 
 # Multi-agent work
 

@@ -64,6 +64,7 @@ _TOOL_INPUT_SCHEMA_VERSIONS: Final = MappingProxyType(
         "respond": "1.1.0",
         "status": "1.2.0",
         "closure_prepare": "1.0.0",
+        "read_guidance": "1.1.0",
     }
 )
 _TOOL_OUTPUT_SCHEMA_VERSIONS: Final = MappingProxyType(
@@ -74,6 +75,7 @@ _TOOL_OUTPUT_SCHEMA_VERSIONS: Final = MappingProxyType(
         "status": "1.4.0",
         "receipt": "1.3.0",
         "closure_prepare": "1.0.0",
+        "read_guidance": "1.1.0",
     }
 )
 
@@ -378,7 +380,7 @@ COMPACT_INITIALIZE_INSTRUCTIONS: Final = (
 # eight advertised tools, which is what the total is computed against.
 # The 0.3 surface retains the 18 ordinary lifecycle/coordination event families and the expanded
 # current-main initialize guidance, including the #789 late-start rule carried from the 0.2 line.
-# That makes the measured generic-host packaged surface about 245 KB; the reviewed 248 KB ceiling
+# That makes the measured generic-host packaged surface about 249 KB; the reviewed 250 KB ceiling
 # leaves bounded headroom without dropping an admitted family, example, or startup rule. Claude
 # Code, Codex and Cursor receive compact initialize bodies instead, bounded separately above.
 # The aggregate likewise carries the packaged bound plus one disclosure allowance per advertised
@@ -386,9 +388,8 @@ COMPACT_INITIALIZE_INSTRUCTIONS: Final = (
 ADVERTISED_SURFACE_BUDGET: Final[Mapping[str, int]] = MappingProxyType(
     {
         "instructions_copies_per_tool": 1,
-        "packaged_max_encoded_bytes": 248_000,
-        "max_encoded_bytes": 248_000
-        + len(YOETZ_MCP_TOOL_NAMES) * MAX_DISCLOSURE_ENCODED_BYTES,
+        "packaged_max_encoded_bytes": 250_000,
+        "max_encoded_bytes": 250_000 + len(YOETZ_MCP_TOOL_NAMES) * MAX_DISCLOSURE_ENCODED_BYTES,
     }
 )
 
@@ -1963,10 +1964,17 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
     _descriptor(
         "read_guidance",
         "Read guidance",
-        "Reads one registered Yoetz guidance URI and returns its full markdown as tool text. The "
-        "result is document text, not a 512-byte summary; this is not a ledger operation and does "
-        "not write the ledger. Extra keys and unknown URIs are rejected without echoing the value. "
-        "Guidance: yoetz://guidance/agent-instructions.md.",
+        "Reads one registered Yoetz guidance URI and returns its full markdown as tool text, or a "
+        "bounded UTF-8-safe page when `page` or `page_size` is supplied. Paged results carry stable "
+        "document identity, source revision, total byte count, digest, page offsets and an exact "
+        "continuation; consumers must reconstruct every page and verify the final digest before "
+        "claiming guidance is loaded. A page marked complete means only that the service emitted "
+        "the end page; delivery remains unconfirmed until the consumer reconstructs it. The text "
+        "channel uses a 512-byte summary, while paged reads carry one marked page. The legacy "
+        "URI-only route remains "
+        "available on demand. This is not a ledger operation and does not write the ledger. Extra "
+        "keys and unknown URIs are rejected without echoing the value. Guidance: "
+        "yoetz://guidance/agent-instructions.md.",
         read_only=True,
         idempotent=True,
     ),
@@ -2040,7 +2048,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "respond": "sha256:191f69e1592bd6bb23f7173725645dc339441b12eaa91c08cc3da4e9feaf0b85",
                 "status": "sha256:7e77f753244eee59b711cb7ee77c8f09970ef1b61c91b548b6f4a821b3541969",
                 "receipt": "sha256:c7676e1ca9afd96d9d7e74503edd5b31a758a05d7e7e1cf0d62c763611ffcecb",
-                "read_guidance": "sha256:4198e5fd133f7b37cc25c0c1a63161657c5d4396a1718f1f4f1f3db7c302a13d",
+                "read_guidance": "sha256:c6e38b0d4ffc48a5e5acd9fa18e059e864393abf7a8f8690b2d9786626f387de",
                 "closure_prepare": "sha256:9cbf97d6a668de25cd80bdf79a75c50dcbeef256ba4abf4b6abc86405a6627d5",
             }
         ),
@@ -2052,7 +2060,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "respond": "sha256:191f69e1592bd6bb23f7173725645dc339441b12eaa91c08cc3da4e9feaf0b85",
                 "status": "sha256:7e77f753244eee59b711cb7ee77c8f09970ef1b61c91b548b6f4a821b3541969",
                 "receipt": "sha256:c7676e1ca9afd96d9d7e74503edd5b31a758a05d7e7e1cf0d62c763611ffcecb",
-                "read_guidance": "sha256:4198e5fd133f7b37cc25c0c1a63161657c5d4396a1718f1f4f1f3db7c302a13d",
+                "read_guidance": "sha256:c6e38b0d4ffc48a5e5acd9fa18e059e864393abf7a8f8690b2d9786626f387de",
                 "closure_prepare": "sha256:9cbf97d6a668de25cd80bdf79a75c50dcbeef256ba4abf4b6abc86405a6627d5",
             }
         ),
@@ -2060,8 +2068,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:eb8d757c29fb0a4d0a0acc8af24f0aa9318629cca5830fc5d9de7461235595ed",
-        "strict": "sha256:2cb62b5e33d08dc8c413e82ed056454aa8e58d433a982b47531a742a0f77708b",
+        "policy": "sha256:390e66df4f079650fe0a23f3a387854c193834dbc949ab55f45d5414f003eae5",
+        "strict": "sha256:8c1d413d9af1deeb72c4168bb005febf19dec1e043192b12f730a231712b774f",
     }
 )
 

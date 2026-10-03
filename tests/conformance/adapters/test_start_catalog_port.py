@@ -828,15 +828,11 @@ async def test_repository_binding_is_atomic_and_mismatch_precedes_operation_rese
         with pytest.raises(PublicOperationError) as missing_failure:
             await catalog.reserve_or_resume(missing)
         assert missing_failure.value.code is PublicErrorCode.SESSION_CONFLICT
-        assert missing_failure.value.safe_details == {
-            "reason_code": "repository_identity_required"
-        }
+        assert missing_failure.value.safe_details == {"reason_code": "repository_identity_required"}
         with pytest.raises(PublicOperationError) as failure:
             await catalog.reserve_or_resume(mismatch)
         assert failure.value.code is PublicErrorCode.SESSION_CONFLICT
-        assert failure.value.safe_details == {
-            "reason_code": "repository_identity_mismatch"
-        }
+        assert failure.value.safe_details == {"reason_code": "repository_identity_mismatch"}
         if isinstance(catalog, MemoryStartCatalogAdapter):
             after_operations = len(memory_state.operations)
         else:

@@ -305,6 +305,14 @@ ceremony step and makes each one cheaper:
   revertible: if a Codex dogfood run shows additional guidance re-read turns, restore the full
   text in `content`. The other items stand alone.
 
+Large guidance reads use the `read_guidance/1.1.0` page route when the host response cap could
+clip a full document. Request a canonical `page` and bounded `page_size`; carry the returned
+revision/digest continuation; and verify the structured page bytes, offsets, page set, and final
+digest with `GuidancePageAssembler` before treating the document as loaded. Generic, Claude, and
+Cursor page text carries explicit begin/end markers. On Codex, `content` remains only the bounded
+pointer and `structuredContent.text` is the page body. A final `complete` page proves service
+emission only, so a missing or clipped host result is retried or restarted at page zero.
+
 Lifecycles: a running Codex session keeps the instructions it received at `initialize`; a fresh
 session, which starts a new bridge, picks up the compact body after an upgrade. Skill changes take
 effect when the plugin or skill is reinstalled or updated through the normal upgrade path.

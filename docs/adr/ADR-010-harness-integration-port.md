@@ -325,6 +325,17 @@ route tail and destination disclosure are composed identically for every body. S
 `codex` only, a `read_guidance` result's text `content` points at `structuredContent.text`
 instead of repeating the document; tier 1 and tier 2 bytes and the output schema are unchanged.
 
+**Amendment (2026-10-03, issue #950; residual #918): bounded guidance delivery.** The additive
+`read_guidance` 1.1.0 request/result schemas retain the URI-only full-document request and add a
+UTF-8-safe page route bound to a document URI, source-byte revision/digest, offsets, byte counts,
+page count, completion, and an exact continuation. Codex keeps its bounded pointer and reads the
+page body from `structuredContent`; generic, Claude Code, and Cursor page text carries explicit
+begin/end markers. A final `complete` flag records service emission only. The supported consumer
+assembler rejects clipped markers, missing or duplicate pages, stale identity, offset/length
+mismatches, and a final digest mismatch before exposing guidance. The frozen 1.0.0 schemas remain
+available for compatibility, and generated resource/skill mirrors continue to come from the
+resource ripple.
+
 **Amendment (ADR-023, 2026-08-21, issue #149): tier 2 gains a portable carrier; artifact and
 activation are sibling ports.** Tier 2 on-disk delivery may now be carried either by a host-native
 projection (the existing Codex layout) or by a portable Agent Plugins 1.0.0 artifact, both
