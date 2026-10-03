@@ -18,7 +18,7 @@ const HERO_SECONDS = 2.2;
 // The scroll story, in screens. Around each boundary the two neighbouring shapes are
 // blended by scroll position (BLEND screens either side), so the dots move with the
 // reader's hand rather than racing to a new shape when a line is crossed.
-const PLAN = [["hero", 1], ["alone", 1], ["swarm", 1], ["robot", 3], ["sun", 3], ["end", 1]];
+const PLAN = [["hero", 0.45], ["alone", 1], ["swarm", 1], ["robot", 3], ["sun", 3], ["end", 1]];
 const BLEND = 0.3;
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 const smooth = (v) => { const u = clamp01(v); return u * u * (3 - 2 * u); };

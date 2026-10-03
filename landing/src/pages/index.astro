@@ -35,7 +35,7 @@ const structuredData = {
 // The scroll story: one scene per screen, in order. `screens` is how many viewport
 // heights the scene spans; the sun rises across three so each stop gets its own line.
 const plan = [
-  ["hero", 1],
+  ["hero", 0.45],
   ["alone", 1],
   ["swarm", 1],
   ["robot", 3],
@@ -187,7 +187,7 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
         const tiers = Array.from(document.querySelectorAll<HTMLElement>(".dot-word"));
         const benchWith = document.getElementById("bench-with");
         const copies = Array.from(document.querySelectorAll<HTMLElement>(".copy"));
-        const COPY_AT: [string, number][] = [["hero", 0], ["alone", 1], ["swarm", 2], ["robot1", 3], ["robot2", 4], ["robot3", 5], ["bench", 6], ["end", 9]];
+        const COPY_AT: [string, number][] = [["hero", 0], ["alone", 0.45], ["swarm", 1.45], ["robot1", 2.45], ["robot2", 3.45], ["robot3", 4.45], ["bench", 5.45], ["end", 8.45]];
         const benchDot = document.getElementById("bench-dot");
         const update = () => {
           raf = 0;
