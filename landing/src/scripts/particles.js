@@ -268,19 +268,19 @@ export function mountParticles(canvas, options = {}) {
         const gone = fade * (1 - heal);
         for (i = 0; i < N; i++) {
           f = i / N;
-          if (f < 0.84) {
+          if (f < 0.88) {
             fromSet(i, pts, 2.1, 0, 0.02, 0.14, 0);
             const r5 = R[i * 6 + 5];
             if (heal > 0 && tgt[i * 3 + 1] > 0.75 - heal * 1.6) tcol[i] = 1;
-            else if (r5 < gone * 0.7) {
-              const drift = (r5 / Math.max(0.001, gone * 0.7)) * 0.5 + 0.15;
+            else if (r5 < gone * 0.42) {
+              const drift = (r5 / Math.max(0.001, gone * 0.42)) * 0.3 + 0.1;
               tgt[i * 3] += (R[i * 6 + 2] - 0.5) * drift * gone;
               tgt[i * 3 + 1] -= (0.3 + R[i * 6 + 4] * 0.6) * drift * gone;
               tgt[i * 3 + 2] += (R[i * 6 + 3] - 0.5) * 0.4 * gone;
               tcol[i] = 4;
             }
           } else if (check > 0) {
-            const q = (f - 0.84) / 0.16;
+            const q = (f - 0.88) / 0.12;
             if (q < 0.4) seg(i, 0.5, 0.06, 0.66, 0.24, 0.07, 1, -0.3);
             else if (check > 0.45) seg(i, 0.66, 0.24, 1.0, -0.2, 0.07, 1, -0.3);
             else sphere(i, 0.66, 0.24, -0.3, 0.05, 1);
@@ -367,12 +367,12 @@ export function mountParticles(canvas, options = {}) {
       const sc = F / (F + z2);
       px[i] = cx + x1 * S * sc + Math.sin(t * 2.2 + i) * jit;
       py[i] = cy + y2 * S * sc + Math.cos(t * 1.9 + i * 0.7) * jit;
-      ps[i] = (0.9 + R[i * 6 + 1] * 1.7) * sc;
+      ps[i] = (1.2 + R[i * 6 + 1] * 1.9) * sc;
       const dep = 1 - (Math.max(-1.2, Math.min(1.2, z2)) + 1.2) / 2.4;
       pa[i] = 0.22 + dep * 0.78;
     }
     const PAL = [PALETTE.particle, PALETTE.signal, sun, sun, PALETTE.faint];
-    const AM = [1, 1, 1, 0.5, 0.7];
+    const AM = [1, 1, 1, 0.5, 0.8];
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cw, ch);
     for (let c = 0; c < 5; c++) {
