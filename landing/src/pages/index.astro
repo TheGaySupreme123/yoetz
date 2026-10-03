@@ -57,8 +57,8 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
     <meta name="description" content={DESCRIPTION} />
     <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />
     <link rel="canonical" href={`${SITE}/`} />
-    <link rel="icon" href="/assets/finishup-mark.svg" type="image/svg+xml" />
-    <link rel="apple-touch-icon" href="/assets/finishup-mark.svg" />
+    <link rel="icon" href="/assets/finishup-mark.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/assets/finishup-mark.png" />
     <meta name="theme-color" content="#fafdf9" />
     <meta property="og:title" content={TITLE} />
     <meta property="og:description" content={DESCRIPTION} />
@@ -78,10 +78,7 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
   <body>
     <header class="nav">
       <div class="nav-inner">
-        <a class="lockup" href="#top" aria-label="FinishUP home">
-          <img src="/assets/finishup-mark.svg" alt="" width="30" height="30" />
-          <span>FinishUP</span>
-        </a>
+        <a class="lockup" href="#top" aria-label="FinishUP home"><img src="/assets/finishup-lockup.png" alt="FinishUP" height="32" /></a>
         <nav class="nav-links" aria-label="Site">
           <a class="lnk" href={DOCS} target="_blank" rel="noopener">Docs</a>
           <a class="lnk" href={GITHUB} target="_blank" rel="noopener">GitHub</a>
@@ -100,7 +97,7 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
           <section id="top" class="scene hero" data-scene="hero">
             <p class="stanza center hero-top">We use agents to</p>
             <div class="hero-bottom">
-              <p class="stanza center"><span class="nowrap"><svg class="fup-mark" viewBox="0 0 240 240" fill="none" aria-hidden="true"><path d="M190 150V190a20 20 0 0 1-20 20H50a20 20 0 0 1-20-20V70a20 20 0 0 1 20-20h70" stroke="#064E3B" stroke-width="36" stroke-linecap="round" stroke-linejoin="round" /><path d="M112 72l38 38 78-80" stroke="#10B981" stroke-width="34" stroke-linecap="round" stroke-linejoin="round" /></svg>FinishUP</span> <span class="accent">makes sure they do it.</span></p>
+              <p class="stanza center"><span class="nowrap"><img class="fup-mark" src="/assets/finishup-mark.png" alt="" />FinishUP</span> <span class="accent">makes sure they do it.</span></p>
               <div class="actions">
                 <button class="btn add-agent" type="button" data-prompt={AGENT_PROMPT}>Add to your agent</button>
                 <a class="btn quiet" href={GITHUB} target="_blank" rel="noopener"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.1.79-.25.79-.56v-2c-3.2.7-3.87-1.37-3.87-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.78 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.41-2.69 5.38-5.25 5.67.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z" /></svg> Visit our GitHub</a>
@@ -133,21 +130,11 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
             </div>
           </section>
 
-          <section id="benchmark" class="scene" data-scene="sun">
-            <div class="copy-right wide">
-              <p class="stanza">{BENCH.model} on <span class="nowrap"><span class="tag"><img src="/assets/openai.svg" alt="" width="22" height="22" />Codex</span>,</span> scored on <span class="nowrap"><span class="tag wordmark">{BENCH.suite}</span>.</span></p>
-            </div>
-          </section>
-
-          <section id="local" class="scene" data-scene="sun">
-            <div class="copy-right wide">
-              <p class="stanza">{BENCH.model} on <span class="nowrap"><span class="tag"><img src="/assets/openai.svg" alt="" width="22" height="22" />Codex</span>,</span> scored on <span class="nowrap"><span class="tag wordmark">{BENCH.suite}</span></span> <span class="nowrap">with <svg class="fup-mark" viewBox="0 0 240 240" fill="none" aria-hidden="true"><path d="M190 150V190a20 20 0 0 1-20 20H50a20 20 0 0 1-20-20V70a20 20 0 0 1 20-20h70" stroke="#064E3B" stroke-width="36" stroke-linecap="round" stroke-linejoin="round" /><path d="M112 72l38 38 78-80" stroke="#10B981" stroke-width="34" stroke-linecap="round" stroke-linejoin="round" /></svg>FinishUP</span> <span class="dot-word short" aria-label="Local" role="img"></span></p>
-            </div>
-          </section>
-
-          <section id="ai" class="scene" data-scene="sun">
-            <div class="copy-right wide">
-              <p class="stanza">{BENCH.model} on <span class="nowrap"><span class="tag"><img src="/assets/openai.svg" alt="" width="22" height="22" />Codex</span>,</span> scored on <span class="nowrap"><span class="tag wordmark">{BENCH.suite}</span></span> <span class="nowrap">with <svg class="fup-mark" viewBox="0 0 240 240" fill="none" aria-hidden="true"><path d="M190 150V190a20 20 0 0 1-20 20H50a20 20 0 0 1-20-20V70a20 20 0 0 1 20-20h70" stroke="#064E3B" stroke-width="36" stroke-linecap="round" stroke-linejoin="round" /><path d="M112 72l38 38 78-80" stroke="#10B981" stroke-width="34" stroke-linecap="round" stroke-linejoin="round" /></svg>FinishUP</span> <span class="dot-word long" aria-label="AI-powered" role="img"></span></p>
+          <section id="benchmark" class="scene bench" data-scene="sun">
+            <div class="bench-sticky">
+              <div class="copy-right wide">
+                <p class="stanza">{BENCH.model} on <span class="nowrap"><span class="tag"><img src="/assets/openai.svg" alt="" width="22" height="22" />Codex</span>,</span> scored on <span class="nowrap"><span class="tag wordmark">{BENCH.suite}</span><span class="bench-dot" id="bench-dot">.</span></span> <span class="nowrap reveal" id="bench-with">with <img class="fup-mark" src="/assets/finishup-mark.png" alt="" />FinishUP</span><span class="dot-word" aria-label="Local, then AI-powered" role="img"></span></p>
+              </div>
             </div>
           </section>
 
@@ -168,10 +155,7 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
 
     <footer class="footer">
       <div class="footer-inner">
-        <a class="lockup" href="#top" aria-label="FinishUP home">
-          <img src="/assets/finishup-mark.svg" alt="" width="26" height="26" />
-          <span>FinishUP</span>
-        </a>
+        <a class="lockup" href="#top" aria-label="FinishUP home"><img src="/assets/finishup-lockup.png" alt="FinishUP" height="28" /></a>
         <nav class="footer-links" aria-label="Footer">
           <a href={DOCS} target="_blank" rel="noopener">Docs</a>
           <a href={`mailto:${CONTACT_EMAIL}`}>Contact us</a>
@@ -209,6 +193,8 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
         let last = "";
         const slot = document.getElementById("pc-slot");
         const tiers = Array.from(document.querySelectorAll<HTMLElement>(".dot-word"));
+        const benchWith = document.getElementById("bench-with");
+        const benchDot = document.getElementById("bench-dot");
         const update = () => {
           raf = 0;
           const vh = window.innerHeight || 900;
@@ -243,6 +229,14 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
           }
           void form;
           void phase;
+          // the benchmark copy stays put; "with FinishUP" appears at the second stop
+          if (benchWith) {
+            let sunStart = 0;
+            for (const [name, len] of plan) { if (name === "sun") break; sunStart += len; }
+            const bp = (screens - sunStart) / 3;
+            benchWith.classList.toggle("on", bp >= 0.33);
+            benchDot?.classList.toggle("off", bp >= 0.33);
+          }
           const key = String(Math.round(screens * 400) / 400);
           if (key !== last) {
             last = key;

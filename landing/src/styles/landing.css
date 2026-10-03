@@ -97,8 +97,7 @@ img, svg { max-width: 100%; }
   text-decoration: none;
   color: var(--ink);
 }
-.lockup img { width: 30px; height: 30px; }
-.lockup span { font: 600 20px/1 var(--font-sans); letter-spacing: -0.01em; }
+.lockup img { height: 32px; width: auto; display: block; }
 .nav-links {
   margin-left: auto;
   display: flex;
@@ -203,8 +202,7 @@ img, svg { max-width: 100%; }
   gap: var(--space-6);
   align-items: center;
 }
-.footer .lockup img { width: 26px; height: 26px; }
-.footer .lockup span { font-size: 18px; }
+.footer .lockup img { height: 28px; }
 .footer-links { margin-left: auto; display: flex; gap: var(--space-6); flex-wrap: wrap; align-items: center; }
 .footer-links a { color: var(--ink-muted); text-decoration: none; font: 500 15px/1.5 var(--font-sans); padding: 8px 0; }
 .footer-links a:hover { color: var(--ink); }
@@ -256,4 +254,21 @@ img, svg { max-width: 100%; }
 .copy-right.wide { max-width: 760px; }
 /* The tier word is drawn in dots by the artwork; this is the room the sentence leaves for it */
 .dot-word { display: block; width: 100%; height: 1.5em; margin-top: 0.15em; }
-.stanza .fup-mark { width: 0.78em; height: 0.78em; vertical-align: -0.04em; margin-right: 0.1em; }
+.stanza .fup-mark { width: auto; height: 0.78em; vertical-align: -0.04em; margin-right: 0.1em; }
+
+/* ---------- Benchmark: one block that stays while its parts change ---------- */
+.scene.bench { display: block; min-height: 300vh; min-height: 300svh; padding: 0; }
+.bench-sticky {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  height: 100svh;
+  display: flex;
+  align-items: center;
+  padding: var(--space-24) clamp(16px, 6vw, 96px);
+  box-sizing: border-box;
+}
+.stanza .reveal { opacity: 0; transition: opacity 0.6s ease; }
+.stanza .reveal.on { opacity: 1; }
+.stanza .bench-dot { transition: opacity 0.3s ease; }
+.stanza .bench-dot.off { opacity: 0; }
