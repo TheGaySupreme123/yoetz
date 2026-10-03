@@ -37,8 +37,8 @@ from yoetz.ports.control import McpHostProfile
 # The stated cap recorded on issue #918: the packaged compact body is at most 2 KB. The route tail
 # and the policy-route destination disclosure (#479) ride on top and are never trimmed to fit.
 COMPACT_BODY_CAP_BYTES = 2_048
-# The Claude body as shipped by #789, byte for byte; this change must not move it.
-CLAUDE_BODY_SHA256 = "sha256:5b6ee4d2e269f021299a6533cb3c3739e9738af100831b82dd1071b186f9bf02"
+# The Claude body hash locks the current compact startup contract, including guidance recovery.
+CLAUDE_BODY_SHA256 = "sha256:05225e869b1f68f73c76a39704ab3b9de6a7a4d393cd9d41588b0e6d16dac687"
 COMPACT_HOSTS: tuple[McpHostProfile, ...] = ("codex", "cursor")
 # The longer of the two route lines the bridge appends to every body.
 LONGEST_ROUTE_LINE = (
@@ -162,8 +162,8 @@ def test_the_compact_body_names_every_guidance_document_and_how_to_read_it() -> 
         assert read_resource(resource.uri), resource.uri
     assert "`yoetz://guidance/publication-policy.md` before the first `publish_work`" in text
     assert "`yoetz://guidance/coverage-and-receipts.md` before the first `check`" in text
-    assert "Do not list resources to find them" in text
-    assert "call `start` on an empty guidance body" in text
+    assert "Use paged `read_guidance` for empty or clipped guidance; verify before `start`." in text
+    assert "Do not list resources." in text
 
 
 def test_the_compact_body_keeps_cadence_consent_and_honesty_rules() -> None:
@@ -194,7 +194,7 @@ def test_the_compact_body_keeps_cadence_consent_and_honesty_rules() -> None:
     assert "Keep the final answer no stronger than the receipt's weakest coverage." in text
 
 
-def test_the_claude_body_is_unchanged_and_the_generic_host_keeps_the_full_document() -> None:
+def test_the_claude_body_is_locked_and_the_generic_host_keeps_the_full_document() -> None:
     digest = "sha256:" + hashlib.sha256(CLAUDE_CODE_INITIALIZE_INSTRUCTIONS.encode()).hexdigest()
     assert digest == CLAUDE_BODY_SHA256
     assert server_instructions("policy", host_profile="claude").startswith(

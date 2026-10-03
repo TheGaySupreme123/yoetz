@@ -149,6 +149,12 @@ def test_host_assembler_rejects_missing_or_clipped_model_output() -> None:
         final_only.assemble()
 
 
+def test_empty_host_result_is_incomplete_even_when_the_page_is_nonempty() -> None:
+    page = read_resource_page(_URI, page_size=64)
+    with pytest.raises(GuidanceAssemblyError, match="guidance_host_delivery_incomplete"):
+        GuidancePageAssembler().add(_wire(page), host_text="")
+
+
 def test_host_assembler_rejects_missing_pages_duplicate_pages_and_offset_gaps() -> None:
     first = read_resource_page(_URI, page=0, page_size=64)
 
@@ -289,6 +295,45 @@ def test_paged_route_accepts_supported_host_profiles(host: McpHostProfile) -> No
             )
             assert result.isError is False
             assert result.structuredContent is not None
+        finally:
+            await bridge.close_bridge_runtime(runtime)
+
+    import anyio
+
+    anyio.run(_run)
+
+
+@pytest.mark.parametrize("host", ("codex", "claude", "cursor"))
+def test_paged_route_reconstructs_every_document_on_each_host_projection(
+    host: McpHostProfile,
+) -> None:
+    async def _run() -> None:
+        runtime = bridge.build_bridge_runtime("policy", host_profile=host)
+        try:
+            for resource in resource_module.GUIDANCE_RESOURCES:
+                assembler = GuidancePageAssembler(host_proof_required=host != "codex")
+                arguments: dict[str, object] = {
+                    "uri": resource.uri,
+                    "page": "0",
+                    "page_size": "4096",
+                }
+                while True:
+                    result = await bridge.dispatch_read_guidance(arguments, runtime)
+                    assert result.isError is False
+                    assert result.structuredContent is not None
+                    wire = cast(dict[str, object], result.structuredContent)
+                    block = result.content[0]
+                    assert isinstance(block, types.TextContent)
+                    assembler.add(
+                        wire,
+                        host_text=None if host == "codex" else block.text,
+                    )
+                    if wire["complete"] is True:
+                        break
+                    continuation = wire.get("continuation")
+                    assert isinstance(continuation, dict)
+                    arguments = dict(continuation)
+                assert assembler.assemble() == resource.text
         finally:
             await bridge.close_bridge_runtime(runtime)
 

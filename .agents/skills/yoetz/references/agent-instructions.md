@@ -10,7 +10,7 @@ Yoetz is not an enforcement system, observer, authorship proof, transcript recor
 
 # Guidance catalog
 
-Do not call `resources/list` or `list_mcp_resources` to find Yoetz guidance. The five `yoetz://guidance/` URIs under Read more are the complete catalog. A list failure is not a missing server and is not a reason to read product source. Read the named URI. If a `resources/read` result has no text, call `read_guidance` with the same URI. Only if that result is also empty, open the matching installed `references/<name>.md` copy. Do not call `start` on an empty guidance body.
+Do not call `resources/list` or `list_mcp_resources` to find Yoetz guidance. The five `yoetz://guidance/` URIs under Read more are the complete catalog. A list failure is not a missing server and is not a reason to read product source. Read the named URI. If its `resources/read` body is empty, clipped, or marked truncated, call `read_guidance` with the same URI and verify its bounded pages before use. Only if that route is also empty, open the matching installed `references/<name>.md` copy. Do not call `start` on incomplete guidance.
 
 For Yoetz operations, current served guidance and typed results take precedence over remembered
 product behavior. Preserve higher-priority instructions, current user intent, and authorization

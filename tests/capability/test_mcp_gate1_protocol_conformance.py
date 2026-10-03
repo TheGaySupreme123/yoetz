@@ -37,7 +37,7 @@ from tests.capability.evidence import (
 )
 
 from yoetz.mcp.descriptors import TOOL_DESCRIPTORS, server_instructions
-from yoetz.mcp.resources import GUIDANCE_RESOURCES, read_resource
+from yoetz.mcp.resources import GUIDANCE_RESOURCES, GuidancePageAssembler, read_resource
 from yoetz.mcp.semantic_destination import disclose_semantic_destination
 from yoetz.protocol.canonical import JsonValue, canonical_digest
 from yoetz.protocol.errors import PublicErrorCode
@@ -478,23 +478,39 @@ async def test_mcp_tools_call_all_six_dispatch(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
-async def test_mcp_read_guidance_returns_full_document_text(tmp_path: Path) -> None:
-    """read_guidance returns the registered document as tool text, not a 512-byte summary."""
+async def test_mcp_read_guidance_returns_full_document_or_reconstructable_pages(
+    tmp_path: Path,
+) -> None:
+    """read_guidance returns the registered document or a reconstructable bounded page stream."""
 
     async with _sdk_session(tmp_path) as (session, _initialize):
         for resource in GUIDANCE_RESOURCES:
-            result = await session.call_tool("read_guidance", {"uri": resource.uri})
-            assert result.isError is False
-            assert result.structuredContent is not None
-            structured = cast(dict[str, object], result.structuredContent)
-            assert structured["ok"] is True
-            assert structured["uri"] == resource.uri
-            assert structured["media_type"] == resource.media_type
-            assert structured["text"] == resource.text
-            assert result.content
-            assert result.content[0].type == "text"
-            assert result.content[0].text == resource.text
-            assert len(result.content[0].text) == len(resource.text)
+            arguments: dict[str, object] = {"uri": resource.uri}
+            assembler: GuidancePageAssembler | None = None
+            while True:
+                result = await session.call_tool("read_guidance", arguments)
+                assert result.isError is False
+                assert result.structuredContent is not None
+                structured = cast(dict[str, object], result.structuredContent)
+                assert structured["ok"] is True
+                assert structured["uri"] == resource.uri
+                assert structured["media_type"] == resource.media_type
+                assert result.content
+                assert result.content[0].type == "text"
+                if "page" not in structured:
+                    assert structured["text"] == resource.text
+                    assert result.content[0].text == resource.text
+                    assert len(result.content[0].text) == len(resource.text)
+                    break
+                if assembler is None:
+                    assembler = GuidancePageAssembler()
+                assembler.add(structured, host_text=result.content[0].text)
+                if structured["complete"] is True:
+                    assert assembler.assemble() == resource.text
+                    break
+                continuation = structured.get("continuation")
+                assert isinstance(continuation, dict)
+                arguments = dict(continuation)
     _record_pass(
         tmp_path,
         case_id="MCP-G1-READ-GUIDANCE",
