@@ -502,10 +502,7 @@ class MinimizedDisclosure:
             sorted(set(self.withheld_item_ids), key=str.encode)
         ):
             raise _invalid()
-        if any(
-            not _valid_opaque_item_id(item_id)
-            for item_id in self.withheld_item_ids
-        ):
+        if any(not _valid_opaque_item_id(item_id) for item_id in self.withheld_item_ids):
             raise _invalid()
         for digest in self.source_item_digests:
             validate_sha256_digest(digest)

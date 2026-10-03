@@ -57,6 +57,7 @@ from yoetz.ports.ledger import CheckCommitResult
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.coverage import PublicationChannel, coverage_for_channel, coverage_to_json
 from yoetz.protocol.models import (
+    CheckAwaitingHumanModel,
     CheckContinuationModel,
     CheckRequest,
     CheckSuccessModel,
@@ -77,6 +78,7 @@ from yoetz.protocol.models import (
     StatusEvidenceItemModel,
     StatusFindingItemModel,
     StatusFindingsPageModel,
+    StatusHistoryItemV14Model,
     StatusObligationItemModel,
     StatusObservedRunModel,
     StatusOperationPageModel,
@@ -115,6 +117,68 @@ def _version_slice_payload() -> dict[str, object]:
     }
 
 
+def _privacy_projection_payload() -> dict[str, object]:
+    return {
+        "sink": "agent_context",
+        "local_disclosure_receipt_id": protocol_id("egr_", 2905),
+        "policy_id": protocol_id("pvy_", 2906),
+        "policy_version": "1",
+        "policy_digest": _DIGEST,
+        "included_categories": [],
+        "blocked_categories": [],
+        "omitted_pointers": [],
+        "projection_commitment": _WORKSPACE,
+    }
+
+
+def _check_awaiting_human_payload() -> dict[str, object]:
+    request_id = protocol_id("req_", 2907)
+    frontier = {"sequence": "1", "head_digest": _DIGEST}
+    return {
+        "protocol_version": "0.1",
+        "schema_version": "1.0.0",
+        "request_id": request_id,
+        "ok": True,
+        "state": "awaiting_input",
+        "task_id": protocol_id("tsk_", 2908),
+        "session_id": protocol_id("ses_", 2909),
+        "writer_id": protocol_id("wri_", 2910),
+        "subject_frontier": frontier,
+        "result_frontier": frontier,
+        "semantic_status": "awaiting_input",
+        "semantic_reason": "review_input_required",
+        "continuation": {
+            "kind": "review_input_required",
+            "command": ["yoetz", "publish-work", "--input", "PATH"],
+            "replay_request_id": request_id,
+            "instruction": "Supply the requested review input, then replay this exact request.",
+        },
+        "versions": {
+            "protocol_version": "0.1",
+            "engine_version": "0.1.0",
+            "projection_version": "yoetz/0.1.0",
+            "policy_packs": ["work-integrity/0.1.0"],
+        },
+        "privacy_projection": _privacy_projection_payload(),
+    }
+
+
+def _status_history_v14_payload() -> dict[str, object]:
+    return {
+        "event_id": protocol_id("evt_", 2911),
+        "schema_name": "check_recorded",
+        "schema_version": "1.3.0",
+        "actor_id": "harness:test",
+        "publication_channel": "cooperative_mcp",
+        "ingestion_sequence": "1",
+        "occurred_at": "2026-07-28T12:00:00.000Z",
+        "accepted_at": "2026-07-28T12:00:00.000Z",
+        "occurred_at_consistency": "within_forward_skew_allowance",
+        "projection_status": "projected",
+        "summary_code": "check_recorded",
+    }
+
+
 # Every public *result* model that declares ``optional_non_null_fields``. Request and filter models
 # are caller-supplied and already reject null at parse time; they are intentionally absent here.
 # A new result model that joins the set without a row in this table fails the inventory test.
@@ -122,8 +186,18 @@ _RESULT_OPTIONAL_NON_NULL: tuple[tuple[type[BaseModel], frozenset[str]], ...] = 
     (CheckContinuationModel, frozenset({"pending_id", "expires_at"})),
     (
         CheckSuccessModel,
-        frozenset({"children", "advisory_notes", "missing_for_assessment", "finding_checklist"}),
+        frozenset(
+            {
+                "children",
+                "advisory_notes",
+                "missing_for_assessment",
+                "finding_checklist",
+                "semantic_withheld_items",
+                "review_input_manifest",
+            }
+        ),
     ),
+    (CheckAwaitingHumanModel, frozenset({"specification_preflight"})),
     (
         ChildDependencySnapshotModel,
         frozenset(
@@ -179,6 +253,7 @@ _RESULT_OPTIONAL_NON_NULL: tuple[tuple[type[BaseModel], frozenset[str]], ...] = 
     (StatusCompactObligationModel, frozenset({"acceptance_criteria"})),
     (StatusFindingItemModel, frozenset({"todo_state", "review_rounds", "finding_frontier"})),
     (StatusFindingsPageModel, frozenset({"attempt_budget"})),
+    (StatusHistoryItemV14Model, frozenset({"review_input_manifest"})),
     (StatusObligationItemModel, frozenset({"acceptance_criteria"})),
     (StatusObservedRunModel, frozenset({"tool_name", "command_commitment", "exit_status"})),
     (StatusResultItemModel, frozenset({"observed_run"})),
@@ -195,7 +270,10 @@ _RESULT_OPTIONAL_NON_NULL: tuple[tuple[type[BaseModel], frozenset[str]], ...] = 
         ),
     ),
     (StatusProjectDetectionModel, frozenset({"resource_paths"})),
-    (StatusOperationPageModel, frozenset({"semantic_progress", "admission"})),
+    (
+        StatusOperationPageModel,
+        frozenset({"semantic_progress", "admission", "semantic_withheld_items"}),
+    ),
     (
         StatusSemanticProgressModel,
         frozenset({"remaining_ms", "terminal_outcome", "terminal_reason"}),
@@ -904,14 +982,17 @@ async def test_root_start_and_check_omit_unset_multi_agent_fields() -> None:
         assert "advisory_notes" not in projected_check
         # Issue #907: only an insufficient_packet review that named items emits the list.
         assert "missing_for_assessment" not in projected_check
+        assert "semantic_withheld_items" not in projected_check
+        assert "review_input_manifest" not in projected_check
         # Issue #905: the checklist is current context a ledger may not offer; unset, it is
         # absent rather than null, and an explicit null is refused.
         assert "finding_checklist" in projected_check
-        unset = {key: value for key, value in projected_check.items() if key != "finding_checklist"}
-        model = CheckSuccessModel.model_validate(unset)
-        assert "finding_checklist" not in model.model_dump(mode="json", exclude_unset=True)
-        with pytest.raises(ValidationError, match="optional_field_must_not_be_null"):
-            CheckSuccessModel.model_validate({**unset, "finding_checklist": None})
+        for field in ("finding_checklist", "semantic_withheld_items", "review_input_manifest"):
+            unset = {key: value for key, value in projected_check.items() if key != field}
+            model = CheckSuccessModel.model_validate(unset)
+            assert field not in model.model_dump(mode="json", exclude_unset=True)
+            with pytest.raises(ValidationError, match="optional_field_must_not_be_null"):
+                CheckSuccessModel.model_validate({**unset, field: None})
     finally:
         await app.close()
 
@@ -919,6 +1000,11 @@ async def test_root_start_and_check_omit_unset_multi_agent_fields() -> None:
 @pytest.mark.parametrize(
     ("model_type", "payload", "absent"),
     (
+        (
+            CheckAwaitingHumanModel,
+            _check_awaiting_human_payload(),
+            ("specification_preflight",),
+        ),
         (
             ChildFindingSnapshotModel,
             {
@@ -1029,6 +1115,21 @@ async def test_root_start_and_check_omit_unset_multi_agent_fields() -> None:
             ("todo_state", "review_rounds"),
         ),
         (StatusFindingsPageModel, {"items": [], "next_cursor": None}, ("attempt_budget",)),
+        (
+            StatusOperationPageModel,
+            {
+                "operation_request_id": protocol_id("req_", 2912),
+                "found": True,
+                "state": "complete",
+                "operation_kind": "check",
+            },
+            ("semantic_withheld_items",),
+        ),
+        (
+            StatusHistoryItemV14Model,
+            _status_history_v14_payload(),
+            ("review_input_manifest",),
+        ),
         (
             StatusProjectDetectionModel,
             {
@@ -1167,11 +1268,27 @@ def test_every_result_optional_non_null_field_has_an_unset_projection_case() -> 
         ("StartSuccessModel", ("attach_handle", "parent_task_id", "depth", "origin", "acceptance")),
         (
             "CheckSuccessModel",
-            ("children", "advisory_notes", "missing_for_assessment", "finding_checklist"),
+            (
+                "children",
+                "advisory_notes",
+                "missing_for_assessment",
+                "finding_checklist",
+                "semantic_withheld_items",
+                "review_input_manifest",
+            ),
         ),
     ):
         for field in fields:
             covered[model, field] = "test_root_start_and_check_omit_unset_multi_agent_fields"
+    covered["CheckAwaitingHumanModel", "specification_preflight"] = (
+        "test_nested_multi_agent_results_omit_unset_fields"
+    )
+    covered["StatusHistoryItemV14Model", "review_input_manifest"] = (
+        "test_nested_multi_agent_results_omit_unset_fields"
+    )
+    covered["StatusOperationPageModel", "semantic_withheld_items"] = (
+        "test_nested_multi_agent_results_omit_unset_fields"
+    )
     for model, fields in (
         ("ChildFindingSnapshotModel", ("resolution_event_id",)),
         (

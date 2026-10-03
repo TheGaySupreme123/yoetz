@@ -54,13 +54,15 @@ from yoetz.domain.receipts import (
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
     semantic_coverage_gap_code,
 )
-from yoetz.domain.task_statement import TASK_STATEMENT_GAPS
+from yoetz.domain.task_statement import TASK_STATEMENT_GAPS, SpecificationPreflight
 from yoetz.domain.values import (
     REPOSITORY_GRANT_CONTINUATION_KIND,
+    REVIEW_INPUT_CONTINUATION_KIND,
     ClaimId,
     EventId,
     FindingId,
     Frontier,
+    JsonObject,
     ObligationId,
     SemanticContinuation,
     claim_id,
@@ -133,7 +135,7 @@ from yoetz.ports.ledger import (
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource
 from yoetz.ports.observation import ObservationStoreLockTimeout
 from yoetz.ports.runtime import BundleRuntimePort, RouteAccess, RouteCommand, TaskRuntime
-from yoetz.ports.semantic import ReviewerChallenge, SemanticJudgment
+from yoetz.ports.semantic import ReviewerChallenge, ReviewInputManifest, SemanticJudgment
 from yoetz.protocol.canonical import (
     JsonValue,
     canonical_digest,
@@ -362,19 +364,30 @@ def check_awaiting_human_json(result: CheckAwaitingHuman) -> dict[str, JsonValue
         continuation["pending_id"] = result.continuation.pending_id
     if result.continuation.expires_at is not None:
         continuation["expires_at"] = result.continuation.expires_at.wire
-    return {
+    body: dict[str, JsonValue] = {
         "protocol_version": "0.1",
         "schema_version": "1.0.0",
         "request_id": result.request_id,
         "ok": True,
-        "state": "awaiting_human",
+        "state": result.state,
         "task_id": result.task_id,
         "session_id": result.session_id,
         "writer_id": result.writer_id,
         "subject_frontier": dict(result.subject_frontier.as_wire().items()),
         "result_frontier": dict(result.result_frontier.as_wire().items()),
-        "semantic_status": SemanticStatus.AWAITING_HUMAN.value,
-        "semantic_reason": SemanticReason.HUMAN_APPROVAL_REQUIRED.value,
+        # The historical semantic enum remains frozen for terminal/projection contracts.  The
+        # explicit state/reason pair below distinguishes a missing review input from a human
+        # approval pause without widening that enum for a nonterminal response.
+        "semantic_status": (
+            "awaiting_input"
+            if result.state == "awaiting_input"
+            else SemanticStatus.AWAITING_HUMAN.value
+        ),
+        "semantic_reason": (
+            "review_input_required"
+            if result.state == "awaiting_input"
+            else SemanticReason.HUMAN_APPROVAL_REQUIRED.value
+        ),
         "continuation": continuation,
         "versions": {
             "protocol_version": result.versions.protocol_version,
@@ -383,6 +396,19 @@ def check_awaiting_human_json(result: CheckAwaitingHuman) -> dict[str, JsonValue
             "policy_packs": result.versions.policy_packs,
         },
     }
+    if result.specification_preflight is not None:
+        preflight = result.specification_preflight
+        body["specification_preflight"] = {
+            "actionable": preflight.actionable,
+            "content_bytes": preflight.content_bytes,
+            "content_digest": preflight.content_digest,
+            "gap": preflight.gap,
+            "required": preflight.required,
+            "revision": preflight.revision,
+            "source": None if preflight.source is None else preflight.source.value,
+            "status": preflight.status,
+        }
+    return body
 
 
 def check_internal_json(result: CheckCommitResult) -> dict[str, JsonValue]:
@@ -501,6 +527,11 @@ def check_internal_json(result: CheckCommitResult) -> dict[str, JsonValue]:
             {}
             if result.finding_checklist is None
             else {"finding_checklist": _checklist_json(result.finding_checklist)}
+        ),
+        **(
+            {}
+            if result.review_input_manifest is None
+            else {"review_input_manifest": dict(result.review_input_manifest.items())}
         ),
     }
 
@@ -1199,6 +1230,14 @@ class FinalSemanticEvaluation:
     # exact request. Every terminal outcome leaves it None. A one-use disclosure wait keeps its
     # job and attempt open; a missing standing repository grant stops before either exists.
     continuation: SemanticContinuation | None = None
+    # Structural admission result for the task specification. It is surfaced on the actionable
+    # preflight branch and retained with terminal evaluation metadata; statement prose never
+    # enters this value.
+    specification_preflight: SpecificationPreflight | None = None
+    review_input_manifest: ReviewInputManifest | None = None
+    # Provider-bound manifest reconstructed from the exact minimized packet.  It is intentionally
+    # separate from the composed manifest so the final check receipt can report what was sent.
+    provider_input_manifest: JsonObject | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -1218,8 +1257,7 @@ class FinalSemanticEvaluation:
             != tuple(sorted(set(self.semantic_withheld_item_ids), key=str.encode))
             or len(self.semantic_withheld_item_ids) > 64
             or any(
-                not _valid_opaque_item_id(item_id)
-                for item_id in self.semantic_withheld_item_ids
+                not _valid_opaque_item_id(item_id) for item_id in self.semantic_withheld_item_ids
             )
         ):
             raise _invalid("semantic_judgment_invalid")
@@ -1253,6 +1291,21 @@ class FinalSemanticEvaluation:
             # ledger has already closed. Bind it to the one status that keeps the job open.
             if self.status is not SemanticStatus.AWAITING_HUMAN:
                 raise _invalid("semantic_continuation_invalid")
+        if (
+            self.specification_preflight is not None
+            and type(self.specification_preflight) is not SpecificationPreflight
+        ):
+            raise _invalid("specification_preflight_invalid")
+        if (
+            self.review_input_manifest is not None
+            and type(self.review_input_manifest) is not ReviewInputManifest
+        ):
+            raise _invalid("review_input_manifest_invalid")
+        if (
+            self.provider_input_manifest is not None
+            and type(self.provider_input_manifest) is not JsonObject
+        ):
+            raise _invalid("provider_input_manifest_invalid")
 
 
 # Gaps that record an AI-powered review the task actually attempted and did not get. They are the
@@ -1361,6 +1414,7 @@ class Application(Protocol):
         deterministic_findings: tuple[Finding, ...],
         runtime: TaskRuntime | None = None,
         lineage_evaluation: LineageEvaluation | None = None,
+        require_complete_specification: bool = False,
     ) -> FinalSemanticEvaluation: ...
 
 
@@ -2608,6 +2662,7 @@ async def _semantic_evaluation(
     *,
     route_profile: Literal["policy", "strict"],
     lineage_evaluation: LineageEvaluation | None = None,
+    require_complete_specification: bool = False,
 ) -> FinalSemanticEvaluation:
     if request.mode == "deterministic_only":
         return FinalSemanticEvaluation(
@@ -2625,7 +2680,27 @@ async def _semantic_evaluation(
             SemanticReason.PROVIDER_NOT_CONFIGURED,
         )
     try:
-        if lineage_evaluation is None or not _semantic_evaluator_accepts_lineage(app):
+        accepts_lineage = _semantic_evaluator_accepts_lineage(app)
+        accepts_full_spec = _semantic_evaluator_accepts_complete_specification(app)
+        if accepts_lineage:
+            kwargs: dict[str, bool] = {}
+            if accepts_full_spec:
+                kwargs["require_complete_specification"] = require_complete_specification
+            return await app.evaluate_semantic_check(
+                frozen,
+                deterministic,
+                runtime,
+                lineage_evaluation,
+                **kwargs,
+            )
+        if accepts_full_spec and lineage_evaluation is None:
+            return await app.evaluate_semantic_check(
+                frozen,
+                deterministic,
+                runtime,
+                require_complete_specification=require_complete_specification,
+            )
+        if lineage_evaluation is None:
             # Keep the original three-argument application seam for integrations that predate
             # the optional lineage semantic channel.  The production facade accepts the fourth
             # argument below; omitting it when there is no lineage also avoids turning an old
@@ -2675,6 +2750,20 @@ def _semantic_evaluator_accepts_lineage(app: Application) -> bool:
             in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
         )
     ) >= 4 or any(parameter.kind is inspect.Parameter.VAR_POSITIONAL for parameter in parameters)
+
+
+def _semantic_evaluator_accepts_complete_specification(app: Application) -> bool:
+    """Detect the optional full-specification admission keyword on legacy evaluator doubles."""
+
+    try:
+        parameters = tuple(inspect.signature(app.evaluate_semantic_check).parameters.values())
+    except TypeError, ValueError:
+        return True
+    return any(
+        parameter.name == "require_complete_specification"
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
 
 
 def _semantic_conclusion_token(result: FinalSemanticEvaluation) -> str:
@@ -2980,6 +3069,7 @@ async def execute_check_commit(
             deterministic,
             route_profile=route_profile,
             lineage_evaluation=lineage_evaluation,
+            require_complete_specification=request.mode == "semantic_required",
         )
         # Durable AI-powered review attempts may renew the check lease (TTL 60s vs timeout up to 300s).
         if semantic_result.operation_lease is not None:
@@ -3017,6 +3107,11 @@ async def execute_check_commit(
                 # immediately after the trusted ceremony (or reproduce the same handoff before
                 # approval) without opening a fresh check.
                 await runtime.ledger.suspend_check_for_repository_grant(frozen.lease)
+            elif semantic_result.continuation.kind == REVIEW_INPUT_CONTINUATION_KIND:
+                # A statement-bearing plan amends input within the existing session. Park the
+                # operation and release its observation barrier so the amendment can converge
+                # on the same request identity without replacing its session or writer.
+                await runtime.ledger.suspend_check_for_review_input(frozen.lease)
             return CheckAwaitingHuman(
                 runtime.task_id,
                 request.session_id,
@@ -3026,6 +3121,12 @@ async def execute_check_commit(
                 frozen.case.frontier,
                 semantic_result.continuation,
                 CheckVersionSlice("0.1", ENGINE_VERSION, PROJECTION_VERSION, packs),
+                semantic_result.specification_preflight,
+                state=(
+                    "awaiting_input"
+                    if semantic_result.continuation.kind == REVIEW_INPUT_CONTINUATION_KIND
+                    else "awaiting_human"
+                ),
             )
         review = _EMPTY_SEMANTIC_REVIEW
         if semantic_result.status is SemanticStatus.SUCCEEDED:
@@ -3191,6 +3292,14 @@ async def execute_check_commit(
             and semantic_result.judgment is not None
             else None
         )
+        from yoetz.application.semantic_case import review_input_manifest_to_json
+
+        recorded_manifest: JsonObject | None = semantic_result.provider_input_manifest
+        if recorded_manifest is None and semantic_result.review_input_manifest is not None:
+            recorded_manifest = cast(
+                JsonObject,
+                freeze_json(review_input_manifest_to_json(semantic_result.review_input_manifest)),
+            )
         committed = await runtime.ledger.commit_check_if_current(
             frozen,
             ranked,
@@ -3211,6 +3320,7 @@ async def execute_check_commit(
             missing_for_assessment=missing.items,
             semantic_included_refs=semantic_included_refs(semantic_result),
             semantic_withheld_item_ids=semantic_result.semantic_withheld_item_ids,
+            review_input_manifest=recorded_manifest,
         )
         preview = _lineage_preview(lineage_evaluation, frozen.case.frontier)
         projected = committed if preview is None else replace(committed, children=preview)

@@ -34,6 +34,7 @@ from yoetz.domain.values import (
     disclosure_continuation,
     format_rfc3339_millis,
     repository_grant_continuation,
+    review_input_continuation,
 )
 from yoetz.kernel.closure_readiness import (
     GAP_CLASSIFICATION_VERSION,
@@ -145,7 +146,9 @@ def _dump_closed_omitting_optional_nulls(model: BaseModel) -> dict[str, JsonValu
     entirely — never reintroduced as null — so the closed wire models accept the body.
     """
 
-    dumped = cast(dict[str, JsonValue], model.model_dump(mode="json", exclude_none=False))
+    dumped = cast(
+        dict[str, JsonValue], model.model_dump(mode="json", by_alias=True, exclude_none=False)
+    )
     return _strip_optional_non_null_nulls(model, dumped)
 
 
@@ -162,7 +165,13 @@ def _strip_optional_non_null_nulls(
     for key, value in dumped.items():
         if key in optional_fields and value is None:
             continue
-        attr: object = getattr(model, key)
+        attr_name = key
+        if key not in type(model).model_fields:
+            for name, field in type(model).model_fields.items():
+                if field.alias == key:
+                    attr_name = name
+                    break
+        attr: object = getattr(model, attr_name)
         if isinstance(attr, BaseModel) and isinstance(value, Mapping):
             result[key] = cast(
                 JsonValue,
@@ -628,6 +637,8 @@ async def _operation_continuation(
     continuation: SemanticContinuation | None = None
     if operation.suspension_kind is CheckSuspensionKind.REPOSITORY_GRANT:
         continuation = repository_grant_continuation(request_id=operation_request_id)
+    elif operation.suspension_kind is CheckSuspensionKind.REVIEW_INPUT:
+        continuation = review_input_continuation(request_id=operation_request_id)
     elif load is not None:
         try:
             wait = await load(operation.writer_id, operation_request_id)
@@ -773,8 +784,7 @@ async def _operation_semantic_withheld_items(
                 return None
             item_ids = cast(tuple[str, ...], raw_items)
             return tuple(
-                {"item_id": item_id, "reason": "never_send_heuristic"}
-                for item_id in item_ids
+                {"item_id": item_id, "reason": "never_send_heuristic"} for item_id in item_ids
             )
     except Exception as exc:  # noqa: BLE001 - status enrichment must never block recovery
         record_unexpected_exception_without_raising(

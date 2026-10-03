@@ -1553,6 +1553,24 @@ def test_narrow_custom_excerpt_bound_is_selection_not_a_size_gap() -> None:
     excerpt = next(item for item in semantic.items if item.item_id == f"excerpt-{evd(1)}")
     assert excerpt.content_bytes == 512
     assert SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP not in semantic.packet.coverage.known_gaps
+    manifest = semantic.packet.input_manifest
+    assert manifest is not None
+    assert manifest.latest_verification.status == "partial"
+    assert "truncated_payload" in manifest.latest_verification.omission_reasons
+
+    prepared = cast(
+        dict[str, JsonValue],
+        strict_json_parse(
+            semantic_case_to_prepared_payload(semantic, {item.item_id for item in semantic.items})
+        ),
+    )
+    provider = cast(
+        dict[str, JsonValue],
+        cast(dict[str, JsonValue], prepared["review_packet"])["provider_input_manifest"],
+    )
+    verification = cast(dict[str, JsonValue], provider["latest_verification"])
+    assert verification["status"] == "partial"
+    assert "truncated_payload" in cast(list[JsonValue], verification["omission_reasons"])
 
 
 def test_prose_within_the_case_item_bound_raises_no_over_limit_gap() -> None:
@@ -1777,6 +1795,10 @@ def test_code_chunk_selection_keeps_utf8_and_reports_unselected_suffix(
     assert len(excerpts) <= max_excerpts
     delivered.decode("utf-8")
     assert {"truncated_payload", "content_unselected"}.issubset(semantic.packet.coverage.known_gaps)
+    manifest = semantic.packet.input_manifest
+    assert manifest is not None
+    assert manifest.current_diff.status == "partial"
+    assert "truncated_payload" in manifest.current_diff.omission_reasons
 
 
 def _routine_case() -> DeterministicCase:

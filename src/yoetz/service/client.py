@@ -548,9 +548,7 @@ def _transformations_from_wire(value: object) -> ReceiptTransformations:
     )
 
 
-def _secret_scan_from_wire(
-    value: object, *, legacy_unknown: bool = False
-) -> ReceiptSecretScan:
+def _secret_scan_from_wire(value: object, *, legacy_unknown: bool = False) -> ReceiptSecretScan:
     source = _object(value)
     match_count = _decimal(source["match_count"])
     passed = cast(bool, source["passed"])
@@ -651,9 +649,7 @@ def _receipt_view_from_wire(value: object) -> PrivacyReceiptView:
         "secret_scan": _secret_scan_from_wire(
             receipt["secret_scan"], legacy_unknown=legacy_scan_unknown
         ),
-        "withheld_item_ids": _withheld_item_ids_from_wire(
-            receipt.get("withheld_item_ids", ())
-        ),
+        "withheld_item_ids": _withheld_item_ids_from_wire(receipt.get("withheld_item_ids", ())),
         "withheld_item_reason": (
             None
             if receipt.get("withheld_item_reason") is None

@@ -7828,7 +7828,9 @@ plan. Names and contracts:
   transcribed it, 1..`MAX_TASK_STATEMENT_BYTES` (65,536) UTF-8 bytes. It is part of start request
   identity: a retry with the same `request_id` and statement replays; different words under the
   same `request_id` conflict. `yoetz start --task-statement-file PATH|-` reads it verbatim. A
-  request without it keeps its exact historical digest.
+  request without it keeps its exact historical digest. A paused semantic-required check can
+  receive the missing statement through a same-session `publish_work` plan amendment instead;
+  that continuation preserves the original check identity and replays it after recomputation.
 - Ledger: the unreleased `session_opened` 1.2.0 carries an optional `task_statement` beside the
   lineage metadata (on create; a statement alone selects 1.2.0, and a create with neither stays on
   1.1.0). The released families gain new versions that require it: `session_resumed` 1.2.0 (on
@@ -7836,8 +7838,8 @@ plan. Names and contracts:
   publish-work-request 1.2.0 admit in place. Each released version stays frozen and never admits
   the field, and a version minted for the statement is never chosen without one. The advertised
   MCP `publish_work` presentation leaves the plan 1.1.0 branches out to hold the reviewed surface
-  budget, so an MCP agent revises the statement with a reattaching `start`; the catalog schema,
-  the CLI and the service still accept the plan branches. `domain/task_statement.current_task_statement`
+  budget, while the CLI and service still accept plan branches for a same-session statement
+  amendment. `domain/task_statement.current_task_statement`
   returns the newest readable statement in ledger order; earlier ones stay in history, and a
   redacted event contributes nothing.
 - `DeterministicCase.task_statement` (`RecordedTaskStatement`) and `task_title` are frozen from
@@ -7860,6 +7862,13 @@ plan. Names and contracts:
   `review_selection_for_delivery(policy)`, which drops the section when the LLM channel withholds
   `task_description`, so a statement egress would filter is never offered and the packet names
   its absence.
+- A `semantic_required` check whose metadata preflight is actionable returns `state:
+  "awaiting_input"` with `semantic_reason: "review_input_required"` before repository or provider
+  admission. Its continuation is a same-session `publish_work` plan publish or revision carrying
+  `task_statement`; it retains the check's request identity and releases the observation barrier
+  only for that correction path. Replay of the same check request recomputes deterministic
+  assessments from the amended ledger frontier before semantic admission. This continuation is
+  separate from `awaiting_human` privacy approval and never authorizes egress.
 - Gaps (packet, check, finding baseline and receipt coverage): `task_statement_unavailable`
   (nothing carried) always travels with exactly one reason: `task_statement_not_authorized` (the
   selection lacks the section, or the LLM channel's `allowed_categories` lack `task_description`,

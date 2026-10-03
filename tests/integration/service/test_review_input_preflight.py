@@ -688,9 +688,10 @@ async def test_ready_same_request_recovery_after_statement_plan_amendment(
         preflight = getattr(second, "specification_preflight")
         assert preflight.status == "complete"
         assert preflight.source.value == "agent_transcribed"
-        assert preflight.content_digest == "sha256:" + hashlib.sha256(
-            statement.encode("utf-8")
-        ).hexdigest()
+        assert (
+            preflight.content_digest
+            == "sha256:" + hashlib.sha256(statement.encode("utf-8")).hexdigest()
+        )
         assert preflight.content_bytes == len(statement.encode("utf-8"))
         assert preflight.revision == 2
         assert getattr(second, "continuation").kind == "repository_privacy_setup"

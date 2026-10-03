@@ -29,6 +29,8 @@ from yoetz.application.semantic_case import (
     assemble_filtered_review_packet,
     bounded_case_envelope,
     build_semantic_case,
+    review_input_manifest,
+    review_packet_disclosure,
     semantic_case_to_candidate_context,
     semantic_case_to_prepared_payload,
 )
@@ -67,7 +69,7 @@ from yoetz.domain.task_statement import (
     RecordedTaskStatement,
 )
 from yoetz.kernel.deterministic_checks import DeterministicCase
-from yoetz.ports.semantic import ReviewerChallenge, SemanticCase, SemanticJudgment
+from yoetz.ports.semantic import ReviewerChallenge, ReviewOmission, SemanticCase, SemanticJudgment
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 from yoetz.protocol.models import DataCategory, SemanticReason, SemanticStatus
 
@@ -384,17 +386,63 @@ def test_per_check_manifest_binds_specification_source_revision_and_digest() -> 
     packet = _packet(semantic)
     wire = cast(dict[str, JsonValue], packet["review_packet"])["review_input_manifest"]
     assert isinstance(wire, dict)
-    specification = cast(dict[str, JsonValue], wire)["specification"]
+    specification = wire["specification"]
     assert isinstance(specification, dict)
     assert specification["status"] == "complete"
     assert specification["revision"] == _STATEMENT_EVENT
     assert specification["content_digest"] == manifest.specification.content_digest
-    provider = cast(dict[str, JsonValue], cast(dict[str, JsonValue], packet["review_packet"]))[
-        "provider_input_manifest"
-    ]
+    review_packet = cast(dict[str, JsonValue], packet["review_packet"])
+    provider = review_packet["provider_input_manifest"]
     assert isinstance(provider, dict)
     assert provider["phase"] == "provider_bound"
-    assert provider["selected_item_count"] <= manifest.selected_item_count
+    provider_count = provider["selected_item_count"]
+    assert type(provider_count) is int
+    assert provider_count == len(_items(packet)) == manifest.selected_item_count
+
+
+def test_input_manifest_counts_each_omission_once_across_section_projections() -> None:
+    omission = ReviewOmission(
+        subject_ref=str(evt(_STATEMENT_EVENT)),
+        category=DataCategory.REPOSITORY_EXCERPT,
+        source_kind="diff",
+        reason="not_selected",
+    )
+    manifest = review_input_manifest(
+        frozen_case=_case(statement=_statement()),
+        review_selection=ReviewSelectionPolicy.for_profile(ReviewContextProfile.ASSISTED),
+        sections=frozenset({"task_statement", "targeted_excerpts"}),
+        items=(),
+        omissions=(omission,),
+        task_statement_ids=(),
+        task_statement_gaps=frozenset(),
+        recorded_statement=None,
+        pending_missing=None,
+    )
+
+    # The same diff omission is visible through the current-diff section and the top-level row;
+    # it is one omitted row for accounting purposes.
+    assert manifest.omitted_item_count == 1
+
+
+def test_disclosure_rejects_malformed_or_count_inconsistent_provider_manifest() -> None:
+    semantic = _build(_case(statement=_statement()))
+
+    valid = _packet(semantic)
+    assert review_packet_disclosure(canonical_encode(valid)) is not None
+
+    malformed = _packet(semantic)
+    malformed_packet = cast(dict[str, JsonValue], malformed["review_packet"])
+    malformed_packet["provider_input_manifest"] = {
+        "schema": "yoetz.review-input-manifest/1",
+        "phase": "provider_bound",
+    }
+    assert review_packet_disclosure(canonical_encode(malformed)) is None
+
+    inconsistent = _packet(semantic)
+    inconsistent_packet = cast(dict[str, JsonValue], inconsistent["review_packet"])
+    provider = cast(dict[str, JsonValue], inconsistent_packet["provider_input_manifest"])
+    provider["selected_item_count"] = 0
+    assert review_packet_disclosure(canonical_encode(inconsistent)) is None
 
 
 def test_per_check_manifest_keeps_title_only_and_policy_withheld_distinct() -> None:

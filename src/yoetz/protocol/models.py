@@ -2984,7 +2984,11 @@ class CheckContinuationModel(_ClosedModel):
 
     optional_non_null_fields = frozenset({"pending_id", "expires_at"})
 
-    kind: Literal["privacy_disclosure_decision", "repository_privacy_setup"]
+    kind: Literal[
+        "privacy_disclosure_decision",
+        "repository_privacy_setup",
+        "review_input_required",
+    ]
     pending_id: PrivacyProposalIdWire | None = None
     expires_at: TimestampWire | None = None
     command: tuple[String1To256, ...]
@@ -2999,6 +3003,12 @@ class CheckContinuationModel(_ClosedModel):
             head = ("yoetz", "privacy", "decide-disclosure")
             if tuple(self.command[:3]) != head or self.command[3] != self.pending_id:
                 raise ValueError("check_continuation_command_invalid")
+        elif self.kind == "review_input_required" and (
+            self.pending_id is not None
+            or self.expires_at is not None
+            or tuple(self.command) != ("yoetz", "publish-work", "--input", "PATH")
+        ):
+            raise ValueError("check_continuation_review_input_invalid")
         elif (
             self.pending_id is not None
             or self.expires_at is not None
@@ -3008,6 +3018,82 @@ class CheckContinuationModel(_ClosedModel):
         return self
 
 
+class SpecificationPreflightModel(_ClosedModel):
+    """Metadata-only specification admission result before semantic dispatch."""
+
+    status: Literal["complete", "title_only", "missing", "withheld"]
+    source: Literal["agent_transcribed", "host_captured_user_prompt", "task_title_only"] | None
+    content_digest: Sha256Digest | None
+    content_bytes: CanonicalUInt64Wire
+    revision: CanonicalUInt64Wire | None
+    required: bool
+    actionable: bool
+    gap: Literal["task_statement_not_authorized", "task_statement_not_supplied"] | None = None
+
+
+class ReviewInputSectionModel(_ClosedModel):
+    """Metadata-only coverage for one bounded review-input family."""
+
+    status: Literal[
+        "complete",
+        "partial",
+        "title_only",
+        "missing",
+        "withheld",
+        "not_selected",
+    ]
+    source_refs: tuple[String1To256, ...] = Field(max_length=16)
+    item_ids: tuple[String1To256, ...] = Field(max_length=64)
+    omitted_refs: tuple[String1To256, ...] = Field(max_length=16)
+    omission_reasons: tuple[
+        Literal[
+            "capture_unavailable",
+            "content_unselected",
+            "not_recorded",
+            "not_selected",
+            "redacted_never_send",
+            "task_statement_not_authorized",
+            "task_statement_not_supplied",
+            "task_statement_unavailable",
+            "truncated_payload",
+            "withheld_by_policy",
+        ],
+        ...,
+    ] = Field(max_length=8)
+    revision: int | None = Field(default=None, ge=0, le=2**53 - 1)
+    content_digest: Sha256Digest | None = None
+    content_bytes: int = Field(ge=0, le=MAX_SEMANTIC_CASE_BYTES)
+
+
+class ReviewInputMissingModel(_ClosedModel):
+    kind: Literal[
+        "command_identity",
+        "current_diff_for_path",
+        "other",
+        "plan_or_claim_text",
+        "prior_finding_context",
+        "task_statement",
+        "verification_output",
+    ]
+    target_refs: tuple[String1To256, ...] = Field(max_length=4)
+    supplied_refs: tuple[String1To256, ...] = Field(max_length=4)
+    status: Literal["pending", "supplied", "unavailable", "repeated"]
+
+
+class ReviewInputManifestModel(_ClosedModel):
+    schema_: Literal["yoetz.review-input-manifest/1"] = Field(alias="schema")
+    specification: ReviewInputSectionModel
+    current_diff: ReviewInputSectionModel
+    caller_evidence: ReviewInputSectionModel
+    latest_verification: ReviewInputSectionModel
+    prior_finding_context: ReviewInputSectionModel
+    phase: Literal["composed", "provider_bound"]
+    missing_inputs: tuple[ReviewInputMissingModel, ...] = Field(max_length=8)
+    selected_item_count: int = Field(ge=0, le=304)
+    selected_excerpt_bytes: int = Field(ge=0, le=MAX_SEMANTIC_CASE_BYTES)
+    omitted_item_count: int = Field(ge=0, le=MAX_REVIEW_OMISSIONS)
+
+
 class CheckAwaitingHumanModel(_ClosedModel):
     """The nonterminal CHECK branch: suspended on a local disclosure decision.
 
@@ -3015,20 +3101,23 @@ class CheckAwaitingHumanModel(_ClosedModel):
     would let a caller conclude from a check that never ran.
     """
 
+    optional_non_null_fields = frozenset({"specification_preflight"})
+
     protocol_version: Literal["0.1"]
     schema_version: Literal["1.0.0"]
     request_id: RequestIdWire
     ok: Literal[True]
-    state: Literal["awaiting_human"]
+    state: Literal["awaiting_human", "awaiting_input"]
     task_id: TaskIdWire
     session_id: SessionIdWire
     writer_id: WriterIdWire
     subject_frontier: FrontierModel
     result_frontier: FrontierModel
-    semantic_status: Literal["awaiting_human"]
-    semantic_reason: Literal["human_approval_required"]
+    semantic_status: Literal["awaiting_human", "awaiting_input"]
+    semantic_reason: Literal["human_approval_required", "review_input_required"]
     continuation: CheckContinuationModel
     versions: CheckVersionSliceModel
+    specification_preflight: SpecificationPreflightModel | None = None
     # Every projected success body carries its disclosure projection; the nonterminal branch is
     # projected through the same path and must not be an exception to that invariant.
     privacy_projection: PrivacyProjectionModel
@@ -3037,6 +3126,19 @@ class CheckAwaitingHumanModel(_ClosedModel):
     def _validate_awaiting_human(self) -> CheckAwaitingHumanModel:
         if self.continuation.replay_request_id != self.request_id:
             raise ValueError("check_continuation_request_mismatch")
+        if self.state == "awaiting_input":
+            if (
+                self.continuation.kind != "review_input_required"
+                or self.semantic_status != "awaiting_input"
+                or self.semantic_reason != "review_input_required"
+            ):
+                raise ValueError("check_awaiting_input_shape_invalid")
+        elif (
+            self.continuation.kind == "review_input_required"
+            or self.semantic_status != "awaiting_human"
+            or self.semantic_reason != "human_approval_required"
+        ):
+            raise ValueError("check_awaiting_human_shape_invalid")
         _validate_model_against_schema(self, "check-result")
         return self
 
@@ -3079,6 +3181,7 @@ class CheckSuccessModel(_ClosedModel):
             "missing_for_assessment",
             "finding_checklist",
             "semantic_withheld_items",
+            "review_input_manifest",
         }
     )
 
@@ -3106,6 +3209,7 @@ class CheckSuccessModel(_ClosedModel):
     missing_for_assessment: tuple[CheckMissingItemModel, ...] = ()
     finding_checklist: CheckFindingChecklistModel | None = None
     semantic_withheld_items: tuple[SemanticWithheldItemModel, ...] = ()
+    review_input_manifest: ReviewInputManifestModel | None = None
     coverage: CoverageModel
     versions: CheckVersionSliceModel
     privacy_projection: PrivacyProjectionModel
@@ -3693,8 +3797,15 @@ class StatusHistoryItemModel(_ClosedModel):
     ]
 
 
+class StatusHistoryItemV14Model(StatusHistoryItemModel):
+    """v1.4 history row carrying a completed check's provider-bound input coverage."""
+
+    optional_non_null_fields = frozenset({"review_input_manifest"})
+    review_input_manifest: ReviewInputManifestModel | None = None
+
+
 class StatusHistoryPageModel(_ClosedModel):
-    items: tuple[StatusHistoryItemModel, ...]
+    items: tuple[StatusHistoryItemModel | StatusHistoryItemV14Model, ...]
     next_cursor: CursorWire | None
 
     @model_validator(mode="after")
@@ -4834,6 +4945,57 @@ _PRIVACY_PROJECTION_LEAVES: Final = (
     "sink",
 )
 _OMITTED_CONTENT_LEAVES: Final = ("category", "omitted", "reason")
+_REVIEW_INPUT_MANIFEST_LEAVES: Final = (
+    "caller_evidence/content_bytes",
+    "caller_evidence/content_digest",
+    "caller_evidence/item_ids/*",
+    "caller_evidence/omission_reasons/*",
+    "caller_evidence/omitted_refs/*",
+    "caller_evidence/revision",
+    "caller_evidence/source_refs/*",
+    "caller_evidence/status",
+    "current_diff/content_bytes",
+    "current_diff/content_digest",
+    "current_diff/item_ids/*",
+    "current_diff/omission_reasons/*",
+    "current_diff/omitted_refs/*",
+    "current_diff/revision",
+    "current_diff/source_refs/*",
+    "current_diff/status",
+    "latest_verification/content_bytes",
+    "latest_verification/content_digest",
+    "latest_verification/item_ids/*",
+    "latest_verification/omission_reasons/*",
+    "latest_verification/omitted_refs/*",
+    "latest_verification/revision",
+    "latest_verification/source_refs/*",
+    "latest_verification/status",
+    "missing_inputs/*/kind",
+    "missing_inputs/*/status",
+    "missing_inputs/*/supplied_refs/*",
+    "missing_inputs/*/target_refs/*",
+    "omitted_item_count",
+    "phase",
+    "prior_finding_context/content_bytes",
+    "prior_finding_context/content_digest",
+    "prior_finding_context/item_ids/*",
+    "prior_finding_context/omission_reasons/*",
+    "prior_finding_context/omitted_refs/*",
+    "prior_finding_context/revision",
+    "prior_finding_context/source_refs/*",
+    "prior_finding_context/status",
+    "schema",
+    "selected_excerpt_bytes",
+    "selected_item_count",
+    "specification/content_bytes",
+    "specification/content_digest",
+    "specification/item_ids/*",
+    "specification/omission_reasons/*",
+    "specification/omitted_refs/*",
+    "specification/revision",
+    "specification/source_refs/*",
+    "specification/status",
+)
 _BASIC_VERSION_LEAVES: Final = (
     "engine_version",
     "policy_packs/*",
@@ -5075,6 +5237,20 @@ _CHECK_STRUCTURAL_POINTERS: Final = (
     + _prefix_leaf_patterns(
         "/semantic_withheld_items/*",
         ("item_id", "reason"),
+    )
+    + _prefix_leaf_patterns("/review_input_manifest", _REVIEW_INPUT_MANIFEST_LEAVES)
+    + _prefix_leaf_patterns(
+        "/specification_preflight",
+        (
+            "actionable",
+            "content_bytes",
+            "content_digest",
+            "gap",
+            "required",
+            "revision",
+            "source",
+            "status",
+        ),
     )
     + (
         "/finding_checklist/attempt_budget",
@@ -5371,21 +5547,25 @@ _STATUS_FINDINGS_STRUCTURAL_POINTERS: Final = (
     + _prefix_leaf_patterns("/page/items/*/summary", _OMITTED_CONTENT_LEAVES)
 )
 
-_STATUS_HISTORY_STRUCTURAL_POINTERS: Final = ("/page/next_cursor",) + _prefix_leaf_patterns(
-    "/page/items/*",
-    (
-        "accepted_at",
-        "actor_id",
-        "event_id",
-        "ingestion_sequence",
-        "occurred_at",
-        "occurred_at_consistency",
-        "projection_status",
-        "publication_channel",
-        "schema_name",
-        "schema_version",
-        "summary_code",
-    ),
+_STATUS_HISTORY_STRUCTURAL_POINTERS: Final = (
+    ("/page/next_cursor",)
+    + _prefix_leaf_patterns(
+        "/page/items/*",
+        (
+            "accepted_at",
+            "actor_id",
+            "event_id",
+            "ingestion_sequence",
+            "occurred_at",
+            "occurred_at_consistency",
+            "projection_status",
+            "publication_channel",
+            "schema_name",
+            "schema_version",
+            "summary_code",
+        ),
+    )
+    + _prefix_leaf_patterns("/page/items/*/review_input_manifest", _REVIEW_INPUT_MANIFEST_LEAVES)
 )
 
 _STATUS_OBLIGATIONS_STRUCTURAL_POINTERS: Final = (
@@ -5901,7 +6081,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 1207:
+    if len(result) != 1313:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

@@ -223,7 +223,9 @@ def test_diff_property_with_ambiguous_value_remains_heuristic(data: bytes) -> No
         },
     ],
 )
-def test_json_encoded_host_edit_payloads_keep_source_assignments(payload: dict[str, object]) -> None:
+def test_json_encoded_host_edit_payloads_keep_source_assignments(
+    payload: dict[str, object],
+) -> None:
     encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
     assert scan_for_sensitive_content(encoded) == ()
 

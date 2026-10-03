@@ -540,6 +540,7 @@ class _SemanticEvaluator(Protocol):
         findings: tuple[Finding, ...],
         runtime: TaskRuntime | None = None,
         lineage_evaluation: LineageEvaluation | None = None,
+        require_complete_specification: bool = False,
     ) -> Awaitable[object]: ...
 
 
@@ -2705,6 +2706,7 @@ class Application:
         deterministic_findings: tuple[Finding, ...],
         runtime: object | None = None,
         lineage_evaluation: LineageEvaluation | None = None,
+        require_complete_specification: bool = False,
     ) -> object:
         evaluator = self.semantic_evaluator
         # Production evaluators accept the task runtime for durable job/attempt coordination.
@@ -2715,6 +2717,7 @@ class Application:
                 deterministic_findings,
                 cast(TaskRuntime | None, runtime),
                 lineage_evaluation,
+                require_complete_specification=require_complete_specification,
             )
         except TypeError:
             try:

@@ -2643,6 +2643,8 @@ class CheckRecordedPayload:
     # Opaque item identities omitted by the low-confidence never-send heuristic. The companion
     # ``content_redacted`` coverage gap is required whenever this field is present.
     semantic_withheld_item_ids: tuple[str, ...] = ()
+    # Metadata-only input coverage for the exact check packet (issue #951).
+    review_input_manifest: JsonObject | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mode", _exact_enum(self.mode, CheckMode))
@@ -2755,8 +2757,7 @@ class CheckRecordedPayload:
             type(self.semantic_withheld_item_ids) is not tuple
             or len(self.semantic_withheld_item_ids) > 64
             or any(
-                not _valid_opaque_item_id(item_id)
-                for item_id in self.semantic_withheld_item_ids
+                not _valid_opaque_item_id(item_id) for item_id in self.semantic_withheld_item_ids
             )
             or self.semantic_withheld_item_ids
             != tuple(sorted(set(self.semantic_withheld_item_ids), key=str.encode))
@@ -2764,6 +2765,11 @@ class CheckRecordedPayload:
                 self.semantic_withheld_item_ids
                 and "content_redacted" not in self.coverage.known_gaps
             )
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        if (
+            self.review_input_manifest is not None
+            and type(self.review_input_manifest) is not JsonObject
         ):
             raise ProtocolValueError("invalid_event_value_type")
         if type(self.engine_version) is not str or self.engine_version != "0.1.0":
@@ -3001,6 +3007,129 @@ def _missing_items_from_json(value: JsonValue | None) -> tuple[MissingForAssessm
         # An emitted list is never empty; absence is how a check without items is recorded.
         raise ProtocolValueError("invalid_event_value_type")
     return tuple(items)
+
+
+_REVIEW_INPUT_SECTION_NAMES: Final = frozenset(
+    {
+        "specification",
+        "current_diff",
+        "caller_evidence",
+        "latest_verification",
+        "prior_finding_context",
+    }
+)
+_REVIEW_INPUT_SECTION_STATUSES: Final = frozenset(
+    {"complete", "partial", "title_only", "missing", "withheld", "not_selected"}
+)
+_REVIEW_INPUT_OMISSION_REASONS: Final = frozenset(
+    {
+        "capture_unavailable",
+        "content_unselected",
+        "not_recorded",
+        "not_selected",
+        "redacted_never_send",
+        "task_statement_not_authorized",
+        "task_statement_not_supplied",
+        "task_statement_unavailable",
+        "truncated_payload",
+        "withheld_by_policy",
+    }
+)
+
+
+def _review_input_manifest_from_json(value: JsonValue | None) -> JsonObject | None:
+    """Validate and freeze the metadata-only per-check input manifest."""
+
+    if value is None:
+        return None
+    source = _closed_object(
+        value,
+        required=frozenset(
+            {
+                "schema",
+                "specification",
+                "current_diff",
+                "caller_evidence",
+                "latest_verification",
+                "prior_finding_context",
+                "phase",
+                "missing_inputs",
+                "selected_item_count",
+                "selected_excerpt_bytes",
+                "omitted_item_count",
+            }
+        ),
+    )
+    if _field(source, "schema") != "yoetz.review-input-manifest/1":
+        raise ProtocolValueError("invalid_event_value_type")
+    if _field(source, "phase") not in {"composed", "provider_bound"}:
+        raise ProtocolValueError("invalid_event_value_type")
+    for key in _REVIEW_INPUT_SECTION_NAMES:
+        section = _closed_object(
+            _field(source, key),
+            required=frozenset(
+                {
+                    "status",
+                    "source_refs",
+                    "item_ids",
+                    "omitted_refs",
+                    "omission_reasons",
+                    "revision",
+                    "content_digest",
+                    "content_bytes",
+                }
+            ),
+        )
+        status = _field(section, "status")
+        if status not in _REVIEW_INPUT_SECTION_STATUSES:
+            raise ProtocolValueError("invalid_event_value_type")
+        for field_name, maximum in (
+            ("source_refs", 16),
+            ("item_ids", 64),
+            ("omitted_refs", 16),
+            ("omission_reasons", 8),
+        ):
+            values = _array(_field(section, field_name))
+            if len(values) > maximum or any(type(item) is not str for item in values):
+                raise ProtocolValueError("invalid_event_value_type")
+        if any(
+            cast(str, item) not in _REVIEW_INPUT_OMISSION_REASONS
+            for item in _array(_field(section, "omission_reasons"))
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        revision = _field(section, "revision")
+        if revision is not None and (type(revision) is not int or revision < 0):
+            raise ProtocolValueError("invalid_event_value_type")
+        digest = _field(section, "content_digest")
+        if digest is not None:
+            validate_sha256_digest(cast(str, digest))
+        content_bytes = _field(section, "content_bytes")
+        if type(content_bytes) is not int or not 0 <= content_bytes <= 524288:
+            raise ProtocolValueError("invalid_event_value_type")
+    for field_name in ("selected_item_count", "selected_excerpt_bytes", "omitted_item_count"):
+        value_int = _field(source, field_name)
+        if type(value_int) is not int or value_int < 0:
+            raise ProtocolValueError("invalid_event_value_type")
+    missing = _array(_field(source, "missing_inputs"))
+    if len(missing) > 8:
+        raise ProtocolValueError("invalid_event_value_type")
+    for raw in missing:
+        item = _closed_object(
+            raw,
+            required=frozenset({"kind", "target_refs", "supplied_refs", "status"}),
+        )
+        if _field(item, "kind") not in MISSING_FOR_ASSESSMENT_KINDS:
+            raise ProtocolValueError("invalid_event_value_type")
+        if _field(item, "status") not in {"pending", "supplied", "unavailable", "repeated"}:
+            raise ProtocolValueError("invalid_event_value_type")
+        for ref_field in ("target_refs", "supplied_refs"):
+            refs = _array(_field(item, ref_field))
+            if len(refs) > MAX_MISSING_TARGET_REFS or any(type(ref) is not str for ref in refs):
+                raise ProtocolValueError("invalid_event_value_type")
+    frozen = freeze_json(value)
+    if type(frozen) is not JsonObject:
+        raise ProtocolValueError("invalid_event_value_type")
+    return frozen
 
 
 def _decode_subject_state(value: object) -> SubjectStateRef:
@@ -3555,6 +3684,7 @@ _PAYLOAD_SHAPES: Final[Mapping[str, tuple[frozenset[str], frozenset[str]]]] = Ma
                     "check_change_files",
                     "semantic_included_refs",
                     "semantic_withheld_item_ids",
+                    "review_input_manifest",
                 }
             ),
         ),
@@ -4054,9 +4184,13 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
                 else cast(tuple[str, ...], tuple(_array(included)))
             ),
             semantic_withheld_item_ids=cast(
-                tuple[str, ...], tuple(_array(_optional(source, "semantic_withheld_item_ids")))
+                tuple[str, ...],
+                tuple(_array(_optional(source, "semantic_withheld_item_ids")))
                 if _optional(source, "semantic_withheld_item_ids") is not None
-                else ()
+                else (),
+            ),
+            review_input_manifest=_review_input_manifest_from_json(
+                _optional(source, "review_input_manifest")
             ),
             semantic_provenance=(
                 None
@@ -4581,6 +4715,7 @@ def encode_payload(payload: EventPayload) -> JsonValue:
             "semantic_withheld_item_ids",
             cast(tuple[object, ...], value.semantic_withheld_item_ids),
         )
+        _optional_value(result, "review_input_manifest", value.review_input_manifest)
         return _json_object(result)
     if payload_type is ReceiptRecordedPayload:
         value = cast(ReceiptRecordedPayload, payload)

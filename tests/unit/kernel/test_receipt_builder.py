@@ -1396,13 +1396,11 @@ def test_receipt_carries_opaque_withheld_item_identity_and_reason() -> None:
                 CheckVerdict.NO_ISSUE_DETECTED,
                 _coverage(gaps=("content_redacted",)),
                 semantic_withheld_item_ids=("excerpt-heuristic",),
-            )
+            ),
         )
     )
 
-    assert tuple(item.item_id for item in receipt.semantic_withheld_items) == (
-        "excerpt-heuristic",
-    )
+    assert tuple(item.item_id for item in receipt.semantic_withheld_items) == ("excerpt-heuristic",)
     assert receipt.semantic_withheld_items[0].reason == "never_send_heuristic"
     rendered = render_receipt_human(receipt, markdown=False)
     assert "excerpt-heuristic" in rendered

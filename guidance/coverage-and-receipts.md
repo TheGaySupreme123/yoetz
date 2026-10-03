@@ -223,6 +223,35 @@ A clean local-only check is not an implementation review. When `mode=determinist
 
 A non-succeeding `semantic_status` is a coverage gap, not a failure to retry away.
 
+### Complete specification preflight and provider-bound input coverage
+
+`semantic_required` performs a metadata-only specification preflight before repository admission or
+provider dispatch. When the effective review selection includes `task_statement`, a complete
+statement is required for that check. The preflight distinguishes `complete`, `title_only`,
+`missing`, and `withheld`; it carries only the source, revision, UTF-8 byte count, digest, and a
+closed gap token. A title-only or missing statement is actionable. A policy that deliberately
+withholds the task-statement section remains an explicit `withheld` boundary and does not turn into
+a request for hidden content.
+
+An actionable preflight returns `state: "awaiting_input"`, `semantic_status: "awaiting_input"`,
+and `semantic_reason: "review_input_required"`. This is a safe continuation pause, distinct from
+`awaiting_human` privacy approval: no provider job, attempt, or egress reservation was created.
+Use the existing task binding. Through MCP, call `publish_work` with the existing `session_id`,
+`writer_id`, and `expected_frontier`, and one `plan_published` or `plan_revised` event carrying the
+task statement. Through the CLI, put that same request in a private JSON file and run
+`yoetz publish-work --input PATH`. Replay the original check request with the same `request_id`;
+the amended statement is inherited by that suspended operation. Do not create a replacement check
+or treat the input continuation as privacy consent.
+
+Every completed check that built a review packet carries `review_input_manifest`. Its composed view
+describes the selected case before admission. The manifest in a successful check result and in its
+`check_recorded` history row is the provider-bound view: `phase: "provider_bound"`, per-section
+selected item IDs, admitted source refs, omission tokens, effective content bytes, and effective
+digest. A statement or diff that is clipped or removed during minimization is therefore reported as
+`partial` or `withheld`, even when its original item ID was selected. Read `status` with
+`view: "history"` and `filter.schema_name: "check_recorded"` to retrieve this durable metadata
+after a native host run.
+
 - `not_configured`, `blocked_by_policy`, and `human_denied` will not change without owner action: take the first answer, except when installed plugin status names a `policy` route while this process reports `route_semantic_ceiling` (stale runtime / `full_restart_required`). That is an activation mismatch, not an owner privacy decision.
 - A ceiling check whose coverage also carries `optional_semantic_review_registration_drift` records that the last Codex install applied the `policy` route while an explicit `--host codex` process serves strict. Report that disagreement rather than a stale process — a strict route reached outside the install ceremony is a legitimate owner action — and name the recovery: `yoetz integrate codex mcp preview`, then `yoetz integrate codex mcp install --route-profile policy`, then a fresh Codex process. Generic, Claude, and Cursor serving identities cannot be attributed to the Codex applied-route record, so their ceiling gap stays terminal without this drift gap.
 - `unavailable` and `timeout` are retried inside a job for a transport-unavailable, provider-timeout, or rate-limited reason. By the time you see one, that job already spent its own attempt budget.

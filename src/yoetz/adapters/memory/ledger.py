@@ -71,6 +71,7 @@ from yoetz.domain.values import (
     ActorType,
     EventId,
     Frontier,
+    JsonObject,
     JsonValue,
     ObjectId,
     action_id,
@@ -212,6 +213,7 @@ from yoetz.protocol.models import (
     CoverageModel,
     FreshnessWire,
     FrontierModel,
+    ReviewInputManifestModel,
     SemanticProgressPhase,
     SemanticReason,
     SemanticStatus,
@@ -222,6 +224,7 @@ from yoetz.protocol.models import (
     StatusEvidenceItemModel,
     StatusFindingItemModel,
     StatusHistoryItemModel,
+    StatusHistoryItemV14Model,
     StatusObligationItemModel,
     StatusObservedRunModel,
     StatusResultItemModel,
@@ -1418,30 +1421,51 @@ def _projection_items(
     if view is ProjectionView.CANDIDATE_FINDINGS:
         return ()
     if view is ProjectionView.HISTORY:
-        return tuple(
-            StatusHistoryItemModel(
-                event_id=row.event_id,
-                schema_name=row.schema.name,
-                schema_version=row.schema.version,
-                actor_id=row.author.actor_id,
-                publication_channel=row.publication_channel.value,
-                ingestion_sequence=str(row.ledger.ingestion_sequence),
-                occurred_at=row.occurred_at.wire,
-                accepted_at=row.ledger.accepted_at.wire,
-                occurred_at_consistency=occurred_at_consistency(
-                    row.occurred_at, row.ledger.accepted_at
-                ),
-                projection_status=(
-                    "unknown_unprojected" if type(row) is UnknownEvent else "projected"
-                ),
-                summary_code=cast(
-                    _SummaryCode,
-                    "opaque_unknown" if type(row) is UnknownEvent else row.schema.name,
-                ),
+        result_history: list[StatusHistoryItemModel | StatusHistoryItemV14Model] = []
+        for row in records:
+            if row.session_id != session:
+                continue
+            manifest = (
+                None
+                if type(row.payload) is not CheckRecordedPayload
+                else row.payload.review_input_manifest
             )
-            for row in records
-            if row.session_id == session
-        )
+            manifest_model = (
+                None
+                if manifest is None
+                else ReviewInputManifestModel.model_validate(dict(manifest.items()))
+            )
+            history_type = (
+                StatusHistoryItemV14Model if manifest_model is not None else StatusHistoryItemModel
+            )
+            result_history.append(
+                history_type(
+                    event_id=row.event_id,
+                    schema_name=row.schema.name,
+                    schema_version=row.schema.version,
+                    actor_id=row.author.actor_id,
+                    publication_channel=row.publication_channel.value,
+                    ingestion_sequence=str(row.ledger.ingestion_sequence),
+                    occurred_at=row.occurred_at.wire,
+                    accepted_at=row.ledger.accepted_at.wire,
+                    occurred_at_consistency=occurred_at_consistency(
+                        row.occurred_at, row.ledger.accepted_at
+                    ),
+                    projection_status=(
+                        "unknown_unprojected" if type(row) is UnknownEvent else "projected"
+                    ),
+                    summary_code=cast(
+                        _SummaryCode,
+                        "opaque_unknown" if type(row) is UnknownEvent else row.schema.name,
+                    ),
+                    **(
+                        {"review_input_manifest": manifest_model}
+                        if manifest_model is not None
+                        else {}
+                    ),
+                )
+            )
+        return tuple(result_history)
     if view is ProjectionView.ASSIGNMENT:
         handed_off = {
             payload.handoff_of
@@ -1904,7 +1928,8 @@ class MemoryLedgerAdapter:
             and (operation := self._state.operations.get((case_writer_id, operation_id)))
             is not None
             and operation[0].state is OperationState.PENDING
-            and operation[0].suspension_kind is not CheckSuspensionKind.REPOSITORY_GRANT
+            and operation[0].suspension_kind
+            not in {CheckSuspensionKind.REPOSITORY_GRANT, CheckSuspensionKind.REVIEW_INPUT}
             and operation[0].owner_generation == owner_generation
             and operation[0].lease_expires_at is not None
             and operation[0].lease_expires_at > now
@@ -2520,16 +2545,20 @@ class MemoryLedgerAdapter:
                 # Already applied, before construction, by ``_evidence_page_rows``.
                 assert type(item) is StatusEvidenceItemModel
             elif type(query.filter) is HistoryProjectionFilter:
-                assert type(item) is StatusHistoryItemModel
+                assert type(item) in {StatusHistoryItemModel, StatusHistoryItemV14Model}
+                history_item = cast(StatusHistoryItemModel | StatusHistoryItemV14Model, item)
                 keep = (
                     (
                         query.filter.schema_name is None
-                        or item.schema_name == query.filter.schema_name
+                        or history_item.schema_name == query.filter.schema_name
                     )
-                    and (query.filter.actor_id is None or item.actor_id == query.filter.actor_id)
+                    and (
+                        query.filter.actor_id is None
+                        or history_item.actor_id == query.filter.actor_id
+                    )
                     and (
                         query.filter.after_sequence is None
-                        or int(item.ingestion_sequence) > query.filter.after_sequence
+                        or int(history_item.ingestion_sequence) > query.filter.after_sequence
                     )
                 )
             if keep and type(query.position) is IdProjectionPosition:
@@ -2546,8 +2575,9 @@ class MemoryLedgerAdapter:
                 )
                 keep = structural_id.encode() > query.position.last_id.encode()
             elif keep and type(query.position) is HistoryProjectionPosition:
-                assert type(item) is StatusHistoryItemModel
-                keep = int(item.ingestion_sequence) > query.position.ingestion_sequence
+                assert type(item) in {StatusHistoryItemModel, StatusHistoryItemV14Model}
+                history_item = cast(StatusHistoryItemModel | StatusHistoryItemV14Model, item)
+                keep = int(history_item.ingestion_sequence) > query.position.ingestion_sequence
             elif keep and type(query.position) is FindingProjectionPosition:
                 assert type(item) is StatusFindingItemModel
                 finding_record = effective_projection.findings[finding_id(item.finding_id)]
@@ -2581,8 +2611,9 @@ class MemoryLedgerAdapter:
         next_position = None
         if selected and len(filtered_items) > len(selected):
             last = selected[-1]
-            if type(last) is StatusHistoryItemModel:
-                next_position = HistoryProjectionPosition(int(last.ingestion_sequence))
+            if type(last) in {StatusHistoryItemModel, StatusHistoryItemV14Model}:
+                history_item = cast(StatusHistoryItemModel | StatusHistoryItemV14Model, last)
+                next_position = HistoryProjectionPosition(int(history_item.ingestion_sequence))
             elif type(last) is StatusFindingItemModel:
                 finding_record = effective_projection.findings[finding_id(last.finding_id)]
                 assert finding_record.payload is not None
@@ -2748,6 +2779,124 @@ class MemoryLedgerAdapter:
         async with self._lock:
             return check_admission_record(self._state, (writer_id, operation_id), _now(self._clock))
 
+    async def _refresh_review_input_case(
+        self,
+        prior_record: OperationRecord,
+        *,
+        session_id: str,
+        writer_id: str,
+        request_id: str,
+    ) -> tuple[DeterministicCase, OperationLease]:
+        """Rebuild a parked check after a same-session statement amendment.
+
+        A review-input suspension releases the observation barrier so a matching plan amendment
+        can append a statement-carrying event. Its original resume object therefore points at a
+        deliberately older case. Reusing that object on exact check replay would silently discard
+        the amended statement. Re-pin the case while retaining the check request identity, then
+        re-enter the local phase so deterministic policies are recomputed from the new frontier.
+        """
+
+        if prior_record.suspension_kind is not CheckSuspensionKind.REVIEW_INPUT:
+            raise ValueError("review_input_refresh_kind_invalid")
+        if prior_record.resume_object_ref is None:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT)
+        if prior_record.resume_object_ref.metadata.kind is not ObjectKind.DETERMINISTIC_RESULT:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT)
+
+        old_result_raw = await _open_exact_object(self._objects, prior_record.resume_object_ref)
+        old_result = _strict_mapping(
+            strict_json_parse(old_result_raw), reason="deterministic_result_shape_invalid"
+        )
+        old_prior = _strict_mapping(
+            old_result.get("prior_resume"), reason="deterministic_result_pointer_invalid"
+        )
+        if frozenset(old_prior) != frozenset({"object_id", "envelope_digest", "commitment"}):
+            raise _error(PublicErrorCode.STORAGE_CORRUPT)
+
+        async with self._lock:
+            current = self._state.operations.get((writer_id, request_id))
+            if current is None or current[0] != prior_record:
+                raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+            projection = self._state.projection
+            records = self._state.records
+            object_refs = dict(self._state.object_refs)
+            frontier = Frontier(projection.frontier, projection.head_digest)
+            writer = self._state.writers.get(writer_id)
+            if writer is None or writer.session_id != session_id:
+                raise _error(PublicErrorCode.SESSION_NOT_FOUND)
+            if self._pending_import(session_id):
+                raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+
+        availability = await self.load_case_availability(session_id, frontier, projection)
+
+        def build() -> tuple[DeterministicCase, str, bytes]:
+            try:
+                case = build_deterministic_case(
+                    projection,
+                    records,
+                    availability,
+                    _projection_validated=True,
+                )
+            except ValueError as exc:
+                if str(exc) == "deterministic_case_invalid":
+                    raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
+                raise
+            dependency = _case_dependency_digest(case)
+            case_json = deterministic_case_to_json(case)
+            encoded = canonical_encode(
+                {
+                    "schema_version": "1.0.0",
+                    "task_id": self._task_id,
+                    "case": case_json,
+                    "case_digest": canonical_digest(case_json),
+                    "dependency_digest": dependency,
+                    "frontier": dict(case.frontier.as_wire().items()),
+                    "request_digest": prior_record.request_digest,
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "writer_id": writer_id,
+                }
+            )
+            return case, dependency, encoded
+
+        case, dependency, resume_bytes = await _run_blocking_joined(build)
+        created_at = _now(self._clock)
+        staged_resume = await self._objects.stage(
+            ObjectSource(data=resume_bytes, declared_size=len(resume_bytes)),
+            ObjectMetadata(
+                ObjectKind.CHECK_RESUME,
+                "application/vnd.yoetz.check-resume+json",
+                self._task_id,
+                created_at,
+            ),
+        )
+        resume_ref = await self._objects.finalize(staged_resume)
+        async with self._lock:
+            current = self._state.operations.get((writer_id, request_id))
+            live_frontier = Frontier(
+                self._state.projection.frontier, self._state.projection.head_digest
+            )
+            if (
+                current is None
+                or current[0] != prior_record
+                or live_frontier != frontier
+                or self._state.object_refs != object_refs
+                or self._pending_import(session_id)
+            ):
+                raise check_admission_refused(CheckAdmissionStage.ACQUISITION_CONTENDED)
+            self._state.frozen_cases[(writer_id, request_id)] = case
+            self._remember_dependency_digest((writer_id, request_id), case, dependency)
+            _, renewed = self._replace_pending_record(
+                prior_record,
+                # Re-enter the local phase so execute_check_commit recomputes deterministic
+                # assessments from the newly bound case before semantic admission. Repointing a
+                # stale deterministic result at a newer frontier would preserve findings for
+                # material events appended while the input suspension was open.
+                phase=CheckPhase.RESERVED,
+                resume_object_ref=resume_ref,
+            )
+            return case, renewed
+
     async def _freeze_case_unrecorded(
         self,
         session_id: str,
@@ -2833,6 +2982,14 @@ class MemoryLedgerAdapter:
                 self._state.check_reservations[key] = acquisition_reservation
         if prior_record is not None:
             assert self._objects is not None
+            if prior_record.suspension_kind is CheckSuspensionKind.REVIEW_INPUT:
+                case, renewed = await self._refresh_review_input_case(
+                    prior_record,
+                    session_id=session_id,
+                    writer_id=writer_id,
+                    request_id=request_id,
+                )
+                return FrozenCase(case, renewed)
             try:
                 case = await load_frozen_case_from_resume(
                     self._objects,
@@ -3063,6 +3220,23 @@ class MemoryLedgerAdapter:
                 record,
                 lease_expires_at=_now(self._clock),
                 suspension_kind=CheckSuspensionKind.REPOSITORY_GRANT,
+            )
+            self._state.operations[(record.writer_id, record.operation_id)] = (suspended, None)
+
+    async def suspend_check_for_review_input(self, lease: OperationLease) -> None:
+        """Durably park a pre-dispatch check until its task statement is supplied."""
+
+        async with self._lock:
+            record = self._require_lease(lease)
+            if record.phase is not CheckPhase.SEMANTIC_WAIT or any(
+                job.writer_id == lease.writer_id and job.operation_id == lease.operation_id
+                for job in self._state.jobs.values()
+            ):
+                raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+            suspended = replace(
+                record,
+                lease_expires_at=_now(self._clock),
+                suspension_kind=CheckSuspensionKind.REVIEW_INPUT,
             )
             self._state.operations[(record.writer_id, record.operation_id)] = (suspended, None)
 
@@ -3599,6 +3773,7 @@ class MemoryLedgerAdapter:
         check_change_files: CheckChangeShownFiles | None = None,
         semantic_included_refs: tuple[str, ...] | None = None,
         semantic_withheld_item_ids: tuple[str, ...] = (),
+        review_input_manifest: JsonObject | None = None,
     ) -> CheckCommitResult:
         key = (frozen.lease.writer_id, frozen.lease.operation_id)
         async with self._lock:
@@ -3712,6 +3887,7 @@ class MemoryLedgerAdapter:
             check_change_files=check_change_files,
             semantic_included_refs=semantic_included_refs,
             semantic_withheld_item_ids=semantic_withheld_item_ids,
+            review_input_manifest=review_input_manifest,
         )
         event_payloads.append((event_id(self._ids.new(IdKind.EVENT)), check_payload))
         accepted_at = _now(self._clock)
@@ -3827,6 +4003,7 @@ class MemoryLedgerAdapter:
             CheckVersionSlice("0.1", "0.1.0", PROJECTION_VERSION, packs),
             missing_for_assessment=check_payload.missing_for_assessment,
             semantic_withheld_item_ids=check_payload.semantic_withheld_item_ids,
+            review_input_manifest=check_payload.review_input_manifest,
         )
         canonical = canonical_encode(
             {

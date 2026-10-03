@@ -32,9 +32,11 @@ from yoetz.domain.findings import (
     SemanticProvenance,
 )
 from yoetz.domain.privacy import SourceAuthorship
+from yoetz.domain.task_statement import SpecificationPreflight
 from yoetz.domain.values import (
     Actor,
     Frontier,
+    JsonObject,
     SemanticContinuation,
     format_rfc3339_millis,
     validate_commitment,
@@ -60,6 +62,7 @@ from yoetz.protocol.models import (
     StatusEvidenceItemModel,
     StatusFindingItemModel,
     StatusHistoryItemModel,
+    StatusHistoryItemV14Model,
     StatusObligationItemModel,
     StatusResultItemModel,
     StatusVersionSliceModel,
@@ -167,6 +170,7 @@ class CheckPhase(str, Enum):  # noqa: UP042 - exact durable enum base
 
 class CheckSuspensionKind(str, Enum):  # noqa: UP042 - exact durable enum base
     REPOSITORY_GRANT = "repository_grant"
+    REVIEW_INPUT = "review_input"
 
 
 class AttemptOutcome(str, Enum):  # noqa: UP042 - exact durable enum base
@@ -823,6 +827,7 @@ class CheckCommitResult:
     # these bounded references so recovery and every presentation surface can name the omitted
     # context without exposing matched bytes.
     semantic_withheld_item_ids: tuple[str, ...] = ()
+    review_input_manifest: JsonObject | None = None
 
     def __post_init__(self) -> None:
         if type(self.outcome) is not str or self.outcome not in {"committed", "replayed"}:
@@ -874,11 +879,15 @@ class CheckCommitResult:
             type(self.semantic_withheld_item_ids) is not tuple
             or len(self.semantic_withheld_item_ids) > 64
             or any(
-                not _valid_opaque_item_id(item_id)
-                for item_id in self.semantic_withheld_item_ids
+                not _valid_opaque_item_id(item_id) for item_id in self.semantic_withheld_item_ids
             )
             or self.semantic_withheld_item_ids
             != tuple(sorted(set(self.semantic_withheld_item_ids), key=str.encode))
+        ):
+            raise _invalid()
+        if (
+            self.review_input_manifest is not None
+            and type(self.review_input_manifest) is not JsonObject
         ):
             raise _invalid()
         if type(self.advisory_notes) is not tuple or len(self.advisory_notes) > 64:
@@ -913,6 +922,8 @@ class CheckAwaitingHuman:
     result_frontier: Frontier
     continuation: SemanticContinuation
     versions: CheckVersionSlice
+    specification_preflight: SpecificationPreflight | None = None
+    state: Literal["awaiting_human", "awaiting_input"] = "awaiting_human"
 
     def __post_init__(self) -> None:
         _id(IdKind.TASK, self.task_id)
@@ -932,6 +943,18 @@ class CheckAwaitingHuman:
         if self.continuation.request_id != self.request_id:
             raise _invalid()
         if type(self.versions) is not CheckVersionSlice:
+            raise _invalid()
+        if (
+            self.specification_preflight is not None
+            and type(self.specification_preflight) is not SpecificationPreflight
+        ):
+            raise _invalid()
+        expected_state = (
+            "awaiting_input"
+            if self.continuation.kind == "review_input_required"
+            else "awaiting_human"
+        )
+        if self.state != expected_state:
             raise _invalid()
 
 
@@ -1774,6 +1797,7 @@ type ProjectionItem = (
     | StatusEvidenceItemModel
     | StatusFindingItemModel
     | StatusHistoryItemModel
+    | StatusHistoryItemV14Model
     | StatusObligationItemModel
     | StatusResultItemModel
     | StatusVersionSliceModel
@@ -1787,6 +1811,7 @@ def _is_projection_item(value: object) -> bool:
         StatusEvidenceItemModel,
         StatusFindingItemModel,
         StatusHistoryItemModel,
+        StatusHistoryItemV14Model,
         StatusObligationItemModel,
         StatusResultItemModel,
         StatusVersionSliceModel,
@@ -1857,7 +1882,14 @@ class ProjectionPage:
             "results": StatusResultItemModel,
             "versions": StatusVersionSliceModel,
         }
-        if any(type(item) is not item_type_by_view[self.view] for item in self.items):
+        expected_item_type = item_type_by_view[self.view]
+        if self.view == "history":
+            if any(
+                type(item) not in {StatusHistoryItemModel, StatusHistoryItemV14Model}
+                for item in self.items
+            ):
+                raise _invalid()
+        elif any(type(item) is not expected_item_type for item in self.items):
             raise _invalid()
         if self.view in {"compact", "versions"} and (
             len(self.items) > 1 or self.next_position is not None
@@ -1960,6 +1992,8 @@ class LedgerPort(Protocol):
     ) -> OperationLease: ...
 
     async def suspend_check_for_repository_grant(self, lease: OperationLease) -> None: ...
+
+    async def suspend_check_for_review_input(self, lease: OperationLease) -> None: ...
 
     async def enqueue_semantic_job(
         self,
@@ -2072,6 +2106,7 @@ class LedgerPort(Protocol):
         check_change_files: CheckChangeShownFiles | None = None,
         semantic_included_refs: tuple[str, ...] | None = None,
         semantic_withheld_item_ids: tuple[str, ...] = (),
+        review_input_manifest: JsonObject | None = None,
     ) -> CheckCommitResult: ...
 
     async def fail_check_if_current(

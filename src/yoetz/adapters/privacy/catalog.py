@@ -2405,8 +2405,7 @@ class CatalogPrivacyAudit:
                 cast(str, parsed.get("scanner_registry_version") or "legacy"),
                 cast(
                     str,
-                    parsed.get("scanner_profile_digest")
-                    or "sha256:" + "0" * 64,
+                    parsed.get("scanner_profile_digest") or "sha256:" + "0" * 64,
                 ),
             )
         except Exception:

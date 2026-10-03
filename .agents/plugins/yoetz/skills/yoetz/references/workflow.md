@@ -139,8 +139,20 @@ assignment, never a transcript. A delegate's summary is a claim, not proof.
 | `publish_work` | One batch per material transition, usually one to eight events; a batch admits up to 100, so keep one transition in one batch rather than splitting it. A normal session is a handful of batches, never one per file, tool call, or message. Every set-valued reference list must already be unique and in ascending ASCII order; a one-element dry-run subset cannot demonstrate that kernel rule. |
 | `status` | After resume, compaction, or delegate handoff, and before any completion claim. Not between routine tool calls. |
 | `check` | After publishing the completion claim and its evidence, and again after any material edit or new evidence. A readable response identifying a finding that check returned is not material change, nor is acknowledging an observation-authored non-actionable finding or publishing `work_closed`; a redacted or unreadable response requires a recheck. Also consider a check when you move between subtasks or phases — after publishing that transition's batch — not only at the completion claim. Use `semantic_if_configured` only when review is known to be optional; select `semantic_required` when the user, effective policy, or named acceptance criterion requires independent AI-powered judgment; omit `mode` when relying on the configured default. Reserve `deterministic_only` for explicitly local/structural work or a deliberate no-egress choice and disclose `semantic_review_not_requested`; classify required review as unmet and keep selecting `semantic_required` in later final checks. Track required review only through `mode=semantic_required` and the receipt's AI-powered review status, never as a plan obligation or requested item: the check is the review, and an open obligation to obtain it reads to the reviewer as unfinished work. A check with no new events since the last one adds nothing. |
+
 | `respond` | Once per finding, before the final check for every finding `status view=findings` lists with `disposition: none`, and after it only for the findings that check returned that are still unanswered; a second response replaces the first. `finding_frontier` is any frontier at or after the finding's own record: the item's `finding_frontier` when status carries one, otherwise the current status frontier. Never search historical frontiers, and never use the finding's `subject_frontier`, which precedes that record. Observation-authored non-actionable (priority 3) findings need no response; acknowledge one once only to note its disclosure. |
 | `receipt` | Once at the end, then publish `work_closed` when the work is complete; neither needs another check. Request another receipt only if material state changed after the previous one. |
+
+When `semantic_required` reports `state: "awaiting_input"` with `semantic_reason:
+"review_input_required"`, the check is paused before provider admission. Use the existing task
+binding to amend the statement in place: through MCP call `publish_work` with the current
+`session_id`, `writer_id`, and `expected_frontier`, and one `plan_published` or `plan_revised`
+event at schema version `1.1.0` carrying the statement; through the CLI, put that request in a private JSON file and run
+`yoetz publish-work --input PATH`. Replay the same check request ID. This input continuation is
+separate from `awaiting_human` privacy approval. After completion, verify the
+`review_input_manifest` is `provider_bound` in the check result or the `check_recorded` row
+returned by `status view=history`; that metadata is the receipt of the effective selected and
+admitted input, including clipping and privacy omissions.
 
 Under-publishing hides the work; over-publishing buries it. The test is whether an independent reader reviewing only the ledger would reach a different conclusion without the fact.
 

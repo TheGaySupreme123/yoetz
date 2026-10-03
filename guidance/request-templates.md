@@ -125,12 +125,13 @@ put the statement in a plan `summary`, and never infer it from commit messages o
 }
 ```
 
-### `start`: revise the task statement
+### `publish_work`: revise the task statement
 
-The ordinary `publish_work` tool does not list the plan shapes that carry `task_statement`, so over
-MCP revise the statement with this reattaching `start`. It records the whole amended request on a
-`session_resumed` event, and that newest statement becomes current. Continue with the ids it
-returns.
+When a semantic-required check pauses because the complete request is missing, publish a
+statement-carrying `plan_published` or `plan_revised` event at version `1.1.0` through the same
+session and writer. Include the exact `expected_frontier` returned by the paused check, then replay
+the original check request. This preserves the check identity and lets the service recompute the
+deterministic assessment from the amended frontier.
 
 ```json
 {
@@ -582,6 +583,30 @@ choice. The examples use the configured default and the accepted bounded finding
   "client": {"kind": "cooperative_agent", "version": "0.1.0", "integration": "cooperative_mcp"}
 }
 ```
+
+### `check`: complete task specification
+
+Use `mode: "semantic_required"` when the acceptance criterion requires an independent AI-powered
+review. The review selection then performs a metadata-only preflight for the task statement before
+any repository or provider admission. A title-only or missing statement returns an actionable
+nonterminal result with `state: "awaiting_input"`, `semantic_reason: "review_input_required"`,
+and this exact continuation:
+
+```text
+yoetz publish-work --input PATH
+```
+
+`PATH` contains a same-session `publish_work` request with the existing `session_id`, `writer_id`,
+and `expected_frontier`, and one `plan_published` or `plan_revised` event at schema version
+`1.1.0` carrying `task_statement`; through MCP, call `publish_work` with that same binding. The existing suspended
+operation inherits the amended statement; a new check request would lose the request binding. A
+policy-withheld task-statement section is reported
+as `withheld` in `specification_preflight` and is not a request to disclose content outside policy.
+
+On a completed provider review, inspect `review_input_manifest.phase`. The `composed` manifest is
+the pre-admission case projection; the successful check result and its `check_recorded` history
+row expose the `provider_bound` manifest after privacy removal and bounded rendering. Use its
+section digests and byte counts when describing what the reviewer actually received.
 
 ## `check`: scoped
 

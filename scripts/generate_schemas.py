@@ -1476,6 +1476,33 @@ def _check_recorded_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     # Issue #905: the reviewer's admitted per-finding rulings, optional so every check written by
     # an earlier 0.3 build (and every check without rulings) keeps validating byte for byte.
     definitions = cast(dict[str, JsonValue], document["$defs"])
+    definitions.setdefault(
+        "opaque_ref",
+        {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string",
+        },
+    )
+    definitions.setdefault(
+        "digest",
+        {"maxLength": 71, "minLength": 71, "pattern": "^sha256:[0-9a-f]{64}$", "type": "string"},
+    )
+    definitions.setdefault(
+        "item_id_list_64",
+        {
+            "items": {"$ref": "#/$defs/opaque_ref"},
+            "maxItems": 64,
+            "minItems": 0,
+            "type": "array",
+            "uniqueItems": True,
+        },
+    )
+    definitions["review_packet"] = {"properties": {}}
+    _add_review_input_manifest_to_outbound_case({"$defs": definitions})
+    definitions.pop("review_packet", None)
+    properties["review_input_manifest"] = {"$ref": "#/$defs/review_input_manifest"}
     returned = cast(dict[str, JsonValue], properties["returned_finding_ids"])
     finding_ref = cast(dict[str, JsonValue], returned["items"])
     definitions["prior_finding_verdict"] = cast(
@@ -2741,6 +2768,7 @@ def _check_result_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     )
     definitions = cast(dict[str, JsonValue], document["$defs"])
     binding = cast(dict[str, JsonValue], definitions["semantic_binding"])
+    _add_review_input_manifest_to_check_result(document)
     for branch in cast(list[JsonValue], binding["oneOf"]):
         if not isinstance(branch, dict):
             continue
@@ -3014,6 +3042,120 @@ def _check_result_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     return document
 
 
+def _add_review_input_manifest_to_check_result(document: dict[str, JsonValue]) -> None:
+    """Add input coverage/preflight metadata to the current check-result contract."""
+
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    definitions["specification_preflight"] = {
+        "additionalProperties": False,
+        "properties": {
+            "actionable": {"type": "boolean"},
+            "content_bytes": {"maximum": 9007199254740991, "minimum": 0, "type": "integer"},
+            "content_digest": {"oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+            "gap": {
+                "oneOf": [
+                    {"enum": ["task_statement_not_authorized", "task_statement_not_supplied"]},
+                    {"type": "null"},
+                ]
+            },
+            "required": {"type": "boolean"},
+            "revision": {
+                "oneOf": [
+                    {"maximum": 9007199254740991, "minimum": 0, "type": "integer"},
+                    {"type": "null"},
+                ]
+            },
+            "source": {
+                "oneOf": [
+                    {"enum": ["agent_transcribed", "host_captured_user_prompt", "task_title_only"]},
+                    {"type": "null"},
+                ]
+            },
+            "status": {"enum": ["complete", "title_only", "missing", "withheld"], "type": "string"},
+        },
+        "required": [
+            "actionable",
+            "content_bytes",
+            "content_digest",
+            "gap",
+            "required",
+            "revision",
+            "source",
+            "status",
+        ],
+        "type": "object",
+    }
+    # Reuse the exact definitions emitted for outbound-case by constructing the small schema
+    # fragment in place; result and provider packet are independently validated documents.
+    definitions.setdefault(
+        "opaque_ref",
+        {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string",
+        },
+    )
+    definitions.setdefault(
+        "digest",
+        {"maxLength": 71, "minLength": 71, "pattern": "^sha256:[0-9a-f]{64}$", "type": "string"},
+    )
+    definitions.setdefault(
+        "item_id_list_64",
+        {
+            "items": {"$ref": "#/$defs/opaque_ref"},
+            "maxItems": 64,
+            "minItems": 0,
+            "type": "array",
+            "uniqueItems": True,
+        },
+    )
+    definitions["review_packet"] = {"properties": {}}
+    _add_review_input_manifest_to_outbound_case({"$defs": definitions})
+    definitions.pop("review_packet", None)
+    success = cast(dict[str, JsonValue], definitions["success"])
+    success_properties = cast(dict[str, JsonValue], success["properties"])
+    success_properties["review_input_manifest"] = {"$ref": "#/$defs/review_input_manifest"}
+    awaiting = cast(dict[str, JsonValue], definitions["awaiting_human"])
+    awaiting_properties = cast(dict[str, JsonValue], awaiting["properties"])
+    awaiting_properties["state"] = {"enum": ["awaiting_human", "awaiting_input"], "type": "string"}
+    awaiting_properties["semantic_status"] = {
+        "enum": ["awaiting_human", "awaiting_input"],
+        "type": "string",
+    }
+    awaiting_properties["semantic_reason"] = {
+        "enum": ["human_approval_required", "review_input_required"],
+        "type": "string",
+    }
+    awaiting_properties["specification_preflight"] = {"$ref": "#/$defs/specification_preflight"}
+    continuation = cast(dict[str, JsonValue], definitions["continuation"])
+    continuation_one_of = cast(list[JsonValue], continuation["oneOf"])
+    continuation_one_of.append(
+        {
+            "additionalProperties": False,
+            "properties": {
+                "command": {
+                    "items": False,
+                    "maxItems": 4,
+                    "minItems": 4,
+                    "prefixItems": [
+                        {"const": "yoetz"},
+                        {"const": "publish-work"},
+                        {"const": "--input"},
+                        {"const": "PATH"},
+                    ],
+                    "type": "array",
+                },
+                "instruction": {"maxLength": 4096, "minLength": 1, "type": "string"},
+                "kind": {"const": "review_input_required"},
+                "replay_request_id": {"$ref": "#/$defs/request_id"},
+            },
+            "required": ["kind", "command", "replay_request_id", "instruction"],
+            "type": "object",
+        }
+    )
+
+
 def _status_request_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     """Add project, task, and host-correlation selectors to the status request."""
 
@@ -3098,8 +3240,37 @@ def _status_result_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         "operations/status-result-1.3.0.schema.json",
     )
     definitions = cast(dict[str, JsonValue], document["$defs"])
+    # The v1.4 history row exposes the metadata-only provider-bound review manifest.  Build the
+    # shared definition in place without changing the frozen v1.0/v1.1 history schemas.
+    definitions.setdefault(
+        "opaque_ref",
+        {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string",
+        },
+    )
+    definitions.setdefault(
+        "digest",
+        {"maxLength": 71, "minLength": 71, "pattern": "^sha256:[0-9a-f]{64}$", "type": "string"},
+    )
+    definitions.setdefault(
+        "item_id_list_64",
+        {
+            "items": {"$ref": "#/$defs/opaque_ref"},
+            "maxItems": 64,
+            "minItems": 0,
+            "type": "array",
+            "uniqueItems": True,
+        },
+    )
+    definitions["review_packet"] = {"properties": {}}
+    _add_review_input_manifest_to_outbound_case({"$defs": definitions})
+    definitions.pop("review_packet", None)
     history_item = cast(dict[str, JsonValue], definitions["history_item"])
     history_properties = cast(dict[str, JsonValue], history_item["properties"])
+    history_properties["review_input_manifest"] = {"$ref": "#/$defs/review_input_manifest"}
     history_summary = cast(dict[str, JsonValue], history_properties["summary_code"])
     history_codes = cast(list[JsonValue], history_summary["enum"])
     history_codes.extend(
@@ -4304,9 +4475,160 @@ def _outbound_case_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     if "prior_finding_refs" not in packet_required:
         packet_required.append("prior_finding_refs")
     _add_task_statement_to_outbound_case(document)
+    _add_review_input_manifest_to_outbound_case(document)
     properties["schema_version"] = {"const": entry.schema_version}
     document["title"] = f"Yoetz outbound case {entry.schema_version}"
     return document
+
+
+def _add_review_input_manifest_to_outbound_case(document: dict[str, JsonValue]) -> None:
+    """Add the metadata-only composed/provider-bound input manifest (issues #951/#907)."""
+
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    section_reasons = [
+        "capture_unavailable",
+        "content_unselected",
+        "not_recorded",
+        "not_selected",
+        "redacted_never_send",
+        "task_statement_not_authorized",
+        "task_statement_not_supplied",
+        "task_statement_unavailable",
+        "truncated_payload",
+        "withheld_by_policy",
+    ]
+    definitions["review_input_section"] = {
+        "additionalProperties": False,
+        "properties": {
+            "content_bytes": {"maximum": 524288, "minimum": 0, "type": "integer"},
+            "content_digest": {"oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+            "item_ids": {"$ref": "#/$defs/item_id_list_64"},
+            "omission_reasons": {
+                "items": {"enum": section_reasons, "type": "string"},
+                "maxItems": 8,
+                "type": "array",
+                "uniqueItems": True,
+            },
+            "omitted_refs": {
+                "items": {"$ref": "#/$defs/opaque_ref"},
+                "maxItems": 16,
+                "type": "array",
+                "uniqueItems": True,
+            },
+            "revision": {
+                "oneOf": [
+                    {"maximum": 9007199254740991, "minimum": 0, "type": "integer"},
+                    {"type": "null"},
+                ]
+            },
+            "source_refs": {
+                "items": {"$ref": "#/$defs/opaque_ref"},
+                "maxItems": 16,
+                "type": "array",
+                "uniqueItems": True,
+            },
+            "status": {
+                "enum": [
+                    "complete",
+                    "partial",
+                    "title_only",
+                    "missing",
+                    "withheld",
+                    "not_selected",
+                ],
+                "type": "string",
+            },
+        },
+        "required": [
+            "content_bytes",
+            "content_digest",
+            "item_ids",
+            "omission_reasons",
+            "omitted_refs",
+            "revision",
+            "source_refs",
+            "status",
+        ],
+        "type": "object",
+    }
+    definitions["review_input_missing"] = {
+        "additionalProperties": False,
+        "properties": {
+            "kind": {
+                "enum": [
+                    "command_identity",
+                    "current_diff_for_path",
+                    "other",
+                    "plan_or_claim_text",
+                    "prior_finding_context",
+                    "task_statement",
+                    "verification_output",
+                ],
+                "type": "string",
+            },
+            "status": {
+                "enum": ["pending", "supplied", "unavailable", "repeated"],
+                "type": "string",
+            },
+            "supplied_refs": {
+                "items": {"$ref": "#/$defs/opaque_ref"},
+                "maxItems": 4,
+                "type": "array",
+                "uniqueItems": True,
+            },
+            "target_refs": {
+                "items": {"$ref": "#/$defs/opaque_ref"},
+                "maxItems": 4,
+                "type": "array",
+                "uniqueItems": True,
+            },
+        },
+        "required": ["kind", "status", "supplied_refs", "target_refs"],
+        "type": "object",
+    }
+    definitions["review_input_manifest"] = {
+        "additionalProperties": False,
+        "properties": {
+            name: {"$ref": "#/$defs/review_input_section"}
+            for name in (
+                "specification",
+                "current_diff",
+                "caller_evidence",
+                "latest_verification",
+                "prior_finding_context",
+            )
+        }
+        | {
+            "missing_inputs": {
+                "items": {"$ref": "#/$defs/review_input_missing"},
+                "maxItems": 8,
+                "type": "array",
+            },
+            "omitted_item_count": {"maximum": 64, "minimum": 0, "type": "integer"},
+            "phase": {"enum": ["composed", "provider_bound"], "type": "string"},
+            "schema": {"const": "yoetz.review-input-manifest/1", "type": "string"},
+            "selected_excerpt_bytes": {"maximum": 524288, "minimum": 0, "type": "integer"},
+            "selected_item_count": {"maximum": 256, "minimum": 0, "type": "integer"},
+        },
+        "required": [
+            "schema",
+            "specification",
+            "current_diff",
+            "caller_evidence",
+            "latest_verification",
+            "prior_finding_context",
+            "phase",
+            "missing_inputs",
+            "selected_item_count",
+            "selected_excerpt_bytes",
+            "omitted_item_count",
+        ],
+        "type": "object",
+    }
+    packet = cast(dict[str, JsonValue], definitions["review_packet"])
+    packet_properties = cast(dict[str, JsonValue], packet["properties"])
+    packet_properties["review_input_manifest"] = {"$ref": "#/$defs/review_input_manifest"}
+    packet_properties["provider_input_manifest"] = {"$ref": "#/$defs/review_input_manifest"}
 
 
 def _start_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
@@ -5296,11 +5618,15 @@ def _control_v2_9_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
             raise SchemaGenerationError(
                 "control_local_receipt_schema_template_invalid", entries=(entry.relative_path,)
             )
-        egress_source = Path(__file__).resolve().parent.parent / "schemas/privacy/egress-receipt-1.0.0.schema.json"
+        egress_source = (
+            Path(__file__).resolve().parent.parent
+            / "schemas/privacy/egress-receipt-1.0.0.schema.json"
+        )
         try:
             egress_template = cast(dict[str, JsonValue], json.loads(egress_source.read_bytes()))
             reason_schema = cast(
-                dict[str, JsonValue], cast(dict[str, JsonValue], egress_template["$defs"])["privacy_reason"]
+                dict[str, JsonValue],
+                cast(dict[str, JsonValue], egress_template["$defs"])["privacy_reason"],
             )
         except (OSError, TypeError, json.JSONDecodeError, KeyError) as exc:
             raise SchemaGenerationError(

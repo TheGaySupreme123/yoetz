@@ -77,7 +77,9 @@ from yoetz.domain.task_statement import (
     TaskStatementSource,
 )
 from yoetz.domain.values import (
+    JsonObject,
     SubjectStateRelation,
+    freeze_json,
     session_id,
     task_id,
     validate_commitment,
@@ -170,6 +172,7 @@ __all__ = [
     "review_selection_digest",
     "ReviewPacketDisclosure",
     "review_input_manifest",
+    "review_input_manifest_to_json",
     "repair_evidence_refs",
     "SemanticPacketView",
     "semantic_case_packet_view",
@@ -1722,6 +1725,10 @@ class _ExcerptSelection:
     omissions: tuple[ReviewOmission, ...]
     gaps: frozenset[str]
     over_limit: frozenset[str]
+    # Items whose admitted bytes are a bounded prefix/suffix of their recorded source.  The
+    # selection bound is distinct from a case-item bound: both must remain visible in the
+    # section manifest after provider admission.
+    truncated_item_ids: frozenset[str]
 
 
 def _captured_edit_paths(content: bytes) -> tuple[bool, tuple[str, ...]]:
@@ -2348,6 +2355,7 @@ def _select_targeted_excerpts(
     items: list[SemanticCaseItem] = []
     targeted: list[TargetedExcerptRef] = []
     over_limit: set[str] = set()
+    truncated_item_ids: set[str] = set()
     excerpt_bytes_used = 0
     # The slots other excerpts (the check-time change, ADR-031) already hold are not offered here.
     excerpt_count_limit = (
@@ -2359,6 +2367,7 @@ def _select_targeted_excerpts(
         candidate = candidates[index]
         admitted_before = len(targeted)
         truncated = candidate.clipped
+        admitted_item_ids: list[str] = []
         for part_index, part in enumerate(candidate.parts):
             part_bytes = len(part.encode("utf-8"))
             if (
@@ -2399,6 +2408,7 @@ def _select_targeted_excerpts(
                 superseded_by=superseded_by.get(index, ()),
             )
             items.append(item)
+            admitted_item_ids.append(item_id)
             targeted.append(
                 TargetedExcerptRef(
                     excerpt_item_id=item_id,
@@ -2414,12 +2424,14 @@ def _select_targeted_excerpts(
             excerpt_bytes_used += item.content_bytes
         if truncated and len(targeted) > admitted_before:
             gaps.add("truncated_payload")
+            truncated_item_ids.update(admitted_item_ids)
     return _ExcerptSelection(
         items=tuple(items),
         targeted=tuple(targeted),
         omissions=tuple(omissions),
         gaps=frozenset(gaps),
         over_limit=frozenset(over_limit),
+        truncated_item_ids=frozenset(truncated_item_ids),
     )
 
 
@@ -2853,6 +2865,9 @@ def _build_semantic_case_once(
     # not be carried whole by the case. Folded into the packet coverage below so the omission is
     # an author-visible fact rather than a silent shortening (issue #177).
     over_limit: set[str] = set()
+    # Selection-clipped excerpts need their own item-level marker so the input manifest can
+    # distinguish an admitted prefix from a complete verification or diff section.
+    truncated_item_ids: set[str] = set()
     omissions: list[ReviewOmission] = []
     task_statement_ids: list[str] = []
     task_statement_gaps: set[str] = set()
@@ -3553,6 +3568,7 @@ def _build_semantic_case_once(
         omissions.extend(excerpts.omissions)
         capture_gap_set.update(excerpts.gaps)
         over_limit.update(excerpts.over_limit)
+        truncated_item_ids.update(excerpts.truncated_item_ids)
         excerpt_bytes_used += sum(ref.content_bytes for ref in excerpts.targeted)
 
         # Parts the reservation could not hold backfill whatever budget the others left.
@@ -3570,6 +3586,11 @@ def _build_semantic_case_once(
             )
         elif check_change_admitted < len(check_change_parts):
             capture_gap_set.add(CHECK_TIME_CHANGE_TRUNCATED_GAP)
+            truncated_item_ids.update(
+                ref.excerpt_item_id
+                for ref in targeted
+                if ref.excerpt_item_id.startswith(CHECK_TIME_CHANGE_ITEM_PREFIX)
+            )
 
     lineage_items: tuple[SemanticCaseItem, ...] = ()
     if lineage_evaluation is not None:
@@ -3904,6 +3925,12 @@ def _build_semantic_case_once(
         prior_finding_refs=prior_finding_refs,
         check_time_change_selected=check_change_selected,
         check_time_change_unavailable=check_time_change_unavailable,
+        truncated_item_ids=tuple(
+            sorted(
+                (set(over_limit) | truncated_item_ids) & {item.item_id for item in items},
+                key=str.encode,
+            )
+        ),
     )
     packet = ReviewPacket(
         task_statement_item_ids=tuple(task_statement_ids),
@@ -4201,33 +4228,7 @@ def _packet_to_json(packet: ReviewPacket) -> dict[str, JsonValue]:
             **(
                 {}
                 if manifest is None
-                else {
-                    "review_input_manifest": {
-                        "caller_evidence": _review_input_section_to_json(manifest.caller_evidence),
-                        "current_diff": _review_input_section_to_json(manifest.current_diff),
-                        "latest_verification": _review_input_section_to_json(
-                            manifest.latest_verification
-                        ),
-                        "missing_inputs": [
-                            {
-                                "kind": item.kind,
-                                "status": item.status,
-                                "supplied_refs": list(item.supplied_refs),
-                                "target_refs": list(item.target_refs),
-                            }
-                            for item in manifest.missing_inputs
-                        ],
-                        "omitted_item_count": manifest.omitted_item_count,
-                        "phase": manifest.phase,
-                        "prior_finding_context": _review_input_section_to_json(
-                            manifest.prior_finding_context
-                        ),
-                        "schema": manifest.schema,
-                        "selected_excerpt_bytes": manifest.selected_excerpt_bytes,
-                        "selected_item_count": manifest.selected_item_count,
-                        "specification": _review_input_section_to_json(manifest.specification),
-                    }
-                }
+                else {"review_input_manifest": review_input_manifest_to_json(manifest)}
             ),
             "omissions": [
                 {
@@ -4270,6 +4271,34 @@ def _review_input_section_to_json(section: ReviewInputSection) -> dict[str, Json
         "revision": section.revision,
         "source_refs": list(section.source_refs),
         "status": section.status,
+    }
+
+
+def review_input_manifest_to_json(manifest: ReviewInputManifest) -> dict[str, JsonValue]:
+    """Encode one metadata-only input manifest for check, receipt and event projections."""
+
+    if type(manifest) is not ReviewInputManifest:
+        raise TypeError("review_input_manifest_invalid")
+    return {
+        "caller_evidence": _review_input_section_to_json(manifest.caller_evidence),
+        "current_diff": _review_input_section_to_json(manifest.current_diff),
+        "latest_verification": _review_input_section_to_json(manifest.latest_verification),
+        "missing_inputs": [
+            {
+                "kind": item.kind,
+                "status": item.status,
+                "supplied_refs": list(item.supplied_refs),
+                "target_refs": list(item.target_refs),
+            }
+            for item in manifest.missing_inputs
+        ],
+        "omitted_item_count": manifest.omitted_item_count,
+        "phase": manifest.phase,
+        "prior_finding_context": _review_input_section_to_json(manifest.prior_finding_context),
+        "schema": manifest.schema,
+        "selected_excerpt_bytes": manifest.selected_excerpt_bytes,
+        "selected_item_count": manifest.selected_item_count,
+        "specification": _review_input_section_to_json(manifest.specification),
     }
 
 
@@ -4368,6 +4397,7 @@ def review_input_manifest(
     prior_finding_refs: Sequence[str] = (),
     check_time_change_selected: bool = False,
     check_time_change_unavailable: bool = False,
+    truncated_item_ids: Sequence[str] = (),
 ) -> ReviewInputManifest:
     """Build the bounded per-check input manifest from frozen case material.
 
@@ -4379,6 +4409,8 @@ def review_input_manifest(
 
     typed_statement = recorded_statement
     statement_items = [item for item in items if item.item_id in set(task_statement_ids)]
+    truncated = set(truncated_item_ids)
+    statement_truncated = bool({item.item_id for item in statement_items} & truncated)
     statement_ref: str | None = None
     statement_revision: int | None = None
     statement_digest: str | None = None
@@ -4433,6 +4465,8 @@ def review_input_manifest(
         statement_status = "title_only"
     else:
         statement_status = "missing"
+    if statement_truncated and statement_status in {"complete", "title_only"}:
+        statement_status = "partial"
     statement = _manifest_section(
         "specification",
         status=statement_status,
@@ -4444,7 +4478,8 @@ def review_input_manifest(
             else ()
         ),
         omission_reasons=(
-            tuple(sorted(task_statement_gaps, key=str.encode)) if task_statement_gaps else ()
+            [*sorted(task_statement_gaps, key=str.encode)]
+            + (["truncated_payload"] if statement_truncated else [])
         ),
         revision=statement_revision,
         content_digest=statement_digest,
@@ -4473,7 +4508,7 @@ def review_input_manifest(
             "withheld",
             "not_selected",
         ] = "not_selected"
-    elif current_diff and diff_omissions:
+    elif current_diff and (diff_omissions or {item.item_id for item in current_diff} & truncated):
         diff_status = "partial"
     elif current_diff:
         diff_status = "complete"
@@ -4490,6 +4525,7 @@ def review_input_manifest(
         omitted_refs=[item.subject_ref for item in diff_omissions],
         omission_reasons=(
             [item.reason for item in diff_omissions]
+            + (["truncated_payload"] if {item.item_id for item in current_diff} & truncated else [])
             + (["capture_unavailable"] if check_time_change_unavailable else [])
         ),
         revision=diff_revision,
@@ -4516,7 +4552,8 @@ def review_input_manifest(
         "not_selected"
         if "targeted_excerpts" not in sections or review_selection.max_excerpts == 0
         else "partial"
-        if verification and verification_omissions
+        if verification
+        and (verification_omissions or {item.item_id for item in verification} & truncated)
         else "complete"
         if verification
         else "missing"
@@ -4528,7 +4565,8 @@ def review_input_manifest(
         source_refs=[item.source_ref for item in verification]
         + [item.subject_ref for item in verification_omissions],
         omitted_refs=[item.subject_ref for item in verification_omissions],
-        omission_reasons=[item.reason for item in verification_omissions],
+        omission_reasons=[item.reason for item in verification_omissions]
+        + (["truncated_payload"] if {item.item_id for item in verification} & truncated else []),
         revision=max((item.occurred_order for item in verification), default=None),
     )
 
@@ -4555,7 +4593,8 @@ def review_input_manifest(
         "not_selected"
         if "targeted_excerpts" not in sections or review_selection.max_excerpts == 0
         else "partial"
-        if caller_evidence and caller_omissions
+        if caller_evidence
+        and (caller_omissions or {item.item_id for item in caller_evidence} & truncated)
         else "complete"
         if caller_evidence
         else "missing"
@@ -4567,7 +4606,8 @@ def review_input_manifest(
         source_refs=[item.source_ref for item in caller_evidence]
         + [item.subject_ref for item in caller_omissions],
         omitted_refs=[item.subject_ref for item in caller_omissions],
-        omission_reasons=[item.reason for item in caller_omissions],
+        omission_reasons=[item.reason for item in caller_omissions]
+        + (["truncated_payload"] if {item.item_id for item in caller_evidence} & truncated else []),
         revision=max((item.occurred_order for item in caller_evidence), default=None),
     )
 
@@ -4588,6 +4628,8 @@ def review_input_manifest(
     ] = (
         "not_selected"
         if "deterministic_assessments" not in sections
+        else "partial"
+        if prior_items and {item.item_id for item in prior_items} & truncated
         else "complete"
         if prior_items
         else "missing"
@@ -4597,6 +4639,9 @@ def review_input_manifest(
         status=prior_status,
         items=prior_items,
         source_refs=[item.source_ref for item in prior_items],
+        omission_reasons=(
+            ["truncated_payload"] if {item.item_id for item in prior_items} & truncated else []
+        ),
         revision=max((item.occurred_order for item in prior_items), default=None),
     )
 
@@ -4625,11 +4670,7 @@ def review_input_manifest(
 
     omitted_item_count = min(
         MAX_REVIEW_OMISSIONS,
-        len(omissions)
-        + sum(
-            len(section.omitted_refs)
-            for section in (current_diff_section, latest_verification, caller_section)
-        ),
+        len(omissions),
     )
     return ReviewInputManifest(
         schema="yoetz.review-input-manifest/1",
@@ -5019,7 +5060,6 @@ def _provider_bound_input_manifest(
         "latest_verification",
         "prior_finding_context",
     )
-    total_selected = 0
     total_excerpt_bytes = 0
     for name in section_names:
         raw = composed.get(name)
@@ -5177,7 +5217,6 @@ def _provider_bound_input_manifest(
             )[:8],
         )
         projected[name] = cast(JsonValue, section)
-        total_selected += len(item_ids)
         total_excerpt_bytes += sum(
             content_bytes
             for item_id in item_ids
@@ -5185,7 +5224,10 @@ def _provider_bound_input_manifest(
             for content_bytes in (carried_by_id[item_id].get("content_bytes", 0),)
             if type(content_bytes) is int
         )
-    projected["selected_item_count"] = total_selected
+    # This is the count of rows that actually crossed the provider boundary.  Section manifests
+    # intentionally cover only their five named input families; structural goal/claim/decision/
+    # timeline rows are still part of ``items`` and must be included in the final accounting.
+    projected["selected_item_count"] = len(content_rows)
     projected["selected_excerpt_bytes"] = total_excerpt_bytes
     projected["omitted_item_count"] = min(MAX_REVIEW_OMISSIONS, len(omission_rows))
     admitted_refs = {
@@ -5218,6 +5260,187 @@ def _provider_bound_input_manifest(
     return projected
 
 
+_REVIEW_INPUT_MANIFEST_KEYS: Final = frozenset(
+    {
+        "caller_evidence",
+        "current_diff",
+        "latest_verification",
+        "missing_inputs",
+        "omitted_item_count",
+        "phase",
+        "prior_finding_context",
+        "schema",
+        "selected_excerpt_bytes",
+        "selected_item_count",
+        "specification",
+    }
+)
+_REVIEW_INPUT_SECTION_KEYS: Final = frozenset(
+    {
+        "content_bytes",
+        "content_digest",
+        "item_ids",
+        "omission_reasons",
+        "omitted_refs",
+        "revision",
+        "source_refs",
+        "status",
+    }
+)
+_REVIEW_INPUT_MISSING_KEYS: Final = frozenset({"kind", "status", "supplied_refs", "target_refs"})
+_REVIEW_INPUT_SECTION_NAMES: Final = (
+    "specification",
+    "current_diff",
+    "caller_evidence",
+    "latest_verification",
+    "prior_finding_context",
+)
+
+
+def _tuple_strings(value: object, *, maximum: int) -> tuple[str, ...] | None:
+    """Decode one bounded JSON string array for the typed input-manifest model."""
+
+    if type(value) not in {list, tuple}:
+        return None
+    values = tuple(cast(list[object] | tuple[object, ...], value))
+    if len(values) > maximum or any(type(item) is not str for item in values):
+        return None
+    return cast(tuple[str, ...], values)
+
+
+def _decode_review_input_manifest(
+    raw: object, *, expected_phase: Literal["composed", "provider_bound"]
+) -> ReviewInputManifest | None:
+    """Validate a wire manifest through the domain model before exposing it in disclosure."""
+
+    if not isinstance(raw, Mapping):
+        return None
+    body = cast(Mapping[str, object], raw)
+    if any(type(key) is not str for key in body) or frozenset(body) != _REVIEW_INPUT_MANIFEST_KEYS:
+        return None
+    schema = body.get("schema")
+    phase = body.get("phase")
+    if schema != "yoetz.review-input-manifest/1" or phase != expected_phase:
+        return None
+
+    section_values: dict[str, ReviewInputSection] = {}
+    for name in _REVIEW_INPUT_SECTION_NAMES:
+        value = body.get(name)
+        if not isinstance(value, Mapping):
+            return None
+        section = cast(Mapping[str, object], value)
+        if (
+            any(type(key) is not str for key in section)
+            or frozenset(section) != _REVIEW_INPUT_SECTION_KEYS
+        ):
+            return None
+        status = section.get("status")
+        revision = section.get("revision")
+        content_digest = section.get("content_digest")
+        content_bytes = section.get("content_bytes")
+        if (
+            type(status) is not str
+            or (revision is not None and type(revision) is not int)
+            or (content_digest is not None and type(content_digest) is not str)
+            or type(content_bytes) is not int
+        ):
+            return None
+        source_refs = _tuple_strings(section.get("source_refs"), maximum=16)
+        item_ids = _tuple_strings(section.get("item_ids"), maximum=64)
+        omitted_refs = _tuple_strings(section.get("omitted_refs"), maximum=16)
+        omission_reasons = _tuple_strings(section.get("omission_reasons"), maximum=8)
+        if (
+            source_refs is None
+            or item_ids is None
+            or omitted_refs is None
+            or omission_reasons is None
+        ):
+            return None
+        try:
+            section_values[name] = ReviewInputSection(
+                name=name,
+                status=cast(
+                    Literal[
+                        "complete",
+                        "partial",
+                        "title_only",
+                        "missing",
+                        "withheld",
+                        "not_selected",
+                    ],
+                    status,
+                ),
+                source_refs=source_refs,
+                selected_item_ids=item_ids,
+                omitted_refs=omitted_refs,
+                omission_reasons=omission_reasons,
+                revision=revision,
+                content_digest=content_digest,
+                content_bytes=content_bytes,
+            )
+        except TypeError, ValueError:
+            return None
+
+    missing_raw = body.get("missing_inputs")
+    if type(missing_raw) not in {list, tuple}:
+        return None
+    missing_rows: list[ReviewInputMissing] = []
+    for value in cast(list[object] | tuple[object, ...], missing_raw):
+        if not isinstance(value, Mapping):
+            return None
+        row = cast(Mapping[str, object], value)
+        if any(type(key) is not str for key in row) or frozenset(row) != _REVIEW_INPUT_MISSING_KEYS:
+            return None
+        kind = row.get("kind")
+        status = row.get("status")
+        target_refs = _tuple_strings(row.get("target_refs"), maximum=4)
+        supplied_refs = _tuple_strings(row.get("supplied_refs"), maximum=4)
+        if (
+            type(kind) is not str
+            or type(status) is not str
+            or target_refs is None
+            or supplied_refs is None
+        ):
+            return None
+        try:
+            missing_rows.append(
+                ReviewInputMissing(
+                    kind=cast(MissingForAssessmentKind, kind),
+                    target_refs=target_refs,
+                    supplied_refs=supplied_refs,
+                    status=cast(Literal["pending", "supplied", "unavailable", "repeated"], status),
+                )
+            )
+        except TypeError, ValueError:
+            return None
+
+    selected_item_count = body.get("selected_item_count")
+    selected_excerpt_bytes = body.get("selected_excerpt_bytes")
+    omitted_item_count = body.get("omitted_item_count")
+    if (
+        type(selected_item_count) is not int
+        or type(selected_excerpt_bytes) is not int
+        or type(omitted_item_count) is not int
+    ):
+        return None
+    try:
+        return ReviewInputManifest(
+            schema=cast(Literal["yoetz.review-input-manifest/1"], schema),
+            specification=section_values["specification"],
+            current_diff=section_values["current_diff"],
+            caller_evidence=section_values["caller_evidence"],
+            latest_verification=section_values["latest_verification"],
+            prior_finding_context=section_values["prior_finding_context"],
+            phase=cast(Literal["composed", "provider_bound"], phase),
+            missing_inputs=tuple(missing_rows),
+            selected_item_count=selected_item_count,
+            selected_excerpt_bytes=selected_excerpt_bytes,
+            omitted_item_count=omitted_item_count,
+        )
+    except KeyError, TypeError, ValueError:
+        return None
+
+
 @dataclass(frozen=True, slots=True)
 class ReviewPacketDisclosure:
     """What one exact sent review packet carried, read from its provider-facing bytes (#904).
@@ -5237,6 +5460,10 @@ class ReviewPacketDisclosure:
     carried: frozenset[str]
     withheld: frozenset[str]
     payload_events: frozenset[str]
+    # Metadata emitted from the exact provider-bound packet after privacy admission and
+    # minimization.  This is kept separate from the composed manifest so a receipt cannot
+    # accidentally report pre-admission selection as provider delivery.
+    provider_input_manifest: JsonObject | None = None
 
 
 def review_packet_disclosure(prepared: bytes) -> ReviewPacketDisclosure | None:
@@ -5263,6 +5490,10 @@ def review_packet_disclosure(prepared: bytes) -> ReviewPacketDisclosure | None:
     ):
         return None
     frontier = {ref for ref in cast(list[JsonValue], frontier_raw) if type(ref) is str}
+    provider_present = "provider_input_manifest" in packet_raw
+    provider_raw = packet_raw.get("provider_input_manifest")
+    if provider_present and not isinstance(provider_raw, dict):
+        return None
     omissions_raw = packet_raw.get("omissions", [])
     if type(omissions_raw) is not list:
         return None
@@ -5308,10 +5539,51 @@ def review_packet_disclosure(prepared: bytes) -> ReviewPacketDisclosure | None:
                 if type(ref) is str and ref.startswith("evd_")
             )
     kept = frozenset(((carried & frontier) - omitted) | ((finding_rows & frontier) - withheld))
+    provider_manifest: JsonObject | None = None
+    if provider_present:
+        if _decode_review_input_manifest(provider_raw, expected_phase="provider_bound") is None:
+            return None
+        try:
+            frozen_provider = freeze_json(cast(JsonValue, provider_raw))
+        except TypeError, ValueError:
+            return None
+        if type(frozen_provider) is not JsonObject:
+            return None
+        if (
+            frozen_provider.get("schema") != "yoetz.review-input-manifest/1"
+            or frozen_provider.get("phase") != "provider_bound"
+        ):
+            return None
+        composed_raw = packet_raw.get("review_input_manifest")
+        if _decode_review_input_manifest(composed_raw, expected_phase="composed") is None:
+            return None
+        content_rows: list[Mapping[str, JsonValue]] = []
+        content_item_ids: set[str] = set()
+        for row in cast(list[JsonValue], items_raw):
+            if not isinstance(row, dict) or type(row.get("item_id")) is not str:
+                return None
+            item_id = cast(str, row["item_id"])
+            if item_id in content_item_ids:
+                return None
+            content_item_ids.add(item_id)
+            content_rows.append(cast(Mapping[str, JsonValue], row))
+        expected = _provider_bound_input_manifest(
+            cast(Mapping[str, JsonValue], composed_raw),
+            content_rows,
+            cast(list[JsonValue], omissions_raw),
+        )
+        try:
+            frozen_expected = freeze_json(cast(JsonValue, expected))
+        except TypeError, ValueError:
+            return None
+        if type(frozen_expected) is not JsonObject or frozen_expected != frozen_provider:
+            return None
+        provider_manifest = frozen_provider
     return ReviewPacketDisclosure(
         carried=kept,
         withheld=frozenset(withheld & frontier),
         payload_events=frozenset(payload_events) & kept,
+        provider_input_manifest=provider_manifest,
     )
 
 

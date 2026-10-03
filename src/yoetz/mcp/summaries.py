@@ -437,15 +437,13 @@ def _semantic_withheld_item_tokens(source: Mapping[str, JsonValue]) -> tuple[str
         item_id = raw.get("item_id")
         try:
             validate_opaque_item_id(item_id)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             continue
         result.append(f"{cast(str, item_id)} (never_send_heuristic)")
     return tuple(result)
 
 
-def _semantic_withheld_items_clause(
-    source: Mapping[str, JsonValue], *, byte_budget: int
-) -> str:
+def _semantic_withheld_items_clause(source: Mapping[str, JsonValue], *, byte_budget: int) -> str:
     return _bounded_list_clause(
         "withheld review items: ",
         _semantic_withheld_item_tokens(source),
@@ -890,11 +888,11 @@ def summary_for_status(envelope: object) -> str:
         byte_budget=_MAX_SUMMARY_BYTES - len((prefix + suffix).encode("ascii")),
     )
     if view == "findings":
-            clause += _bounded_list_clause(
+        clause += _bounded_list_clause(
             "finding frontiers: ",
             _finding_frontiers_from_status(source),
             byte_budget=_MAX_SUMMARY_BYTES - len((prefix + clause + suffix).encode("ascii")),
-            )
+        )
     page = source.get("page")
     if isinstance(page, Mapping):
         clause += _semantic_withheld_items_clause(

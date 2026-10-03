@@ -54,6 +54,7 @@ from yoetz.domain.values import (
     ActorType,
     EventId,
     Frontier,
+    JsonObject,
     ObjectId,
     actor_id,
     format_rfc3339_millis,
@@ -1048,6 +1049,7 @@ class SqliteLedger:
                                 ),
                             ),
                             missing_for_assessment=check_payload.missing_for_assessment,
+                            review_input_manifest=check_payload.review_input_manifest,
                         )
                 else:
                     check_error = self._stored_check_error(cast(bytes, result_canonical))
@@ -2439,6 +2441,11 @@ class SqliteLedger:
         await self._oracle().suspend_check_for_repository_grant(lease)
         await self._sync_after_mutation()
 
+    async def suspend_check_for_review_input(self, lease: OperationLease) -> None:
+        await self._ensure_recovered()
+        await self._oracle().suspend_check_for_review_input(lease)
+        await self._sync_after_mutation()
+
     async def claim_semantic_job(self, lease: OperationLease, job_id: str) -> SemanticAttemptHandle:
         await self._ensure_recovered()
         result = await self._oracle().claim_semantic_job(lease, job_id)
@@ -2753,6 +2760,7 @@ class SqliteLedger:
         check_change_files: CheckChangeShownFiles | None = None,
         semantic_included_refs: tuple[str, ...] | None = None,
         semantic_withheld_item_ids: tuple[str, ...] = (),
+        review_input_manifest: JsonObject | None = None,
     ) -> CheckCommitResult:
         await self._ensure_recovered()
         async with self._lock:
@@ -2784,6 +2792,7 @@ class SqliteLedger:
                     check_change_files=check_change_files,
                     semantic_included_refs=semantic_included_refs,
                     semantic_withheld_item_ids=semantic_withheld_item_ids,
+                    review_input_manifest=review_input_manifest,
                 )
             except PublicOperationError:
                 # The memory oracle terminalizes a frontier conflict before raising it. Preserve

@@ -661,7 +661,7 @@ def _semantic_withheld_item_lines(document: Mapping[str, JsonValue]) -> list[str
             continue
         try:
             validate_opaque_item_id(item_id)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             continue
         items.append((cast(str, item_id), reason))
     if not items:

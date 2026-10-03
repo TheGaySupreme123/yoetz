@@ -237,7 +237,11 @@ from yoetz.domain.receipts import (
     ReceiptVersionSlice,
     SchemaVersionEntry,
 )
-from yoetz.domain.task_statement import TASK_STATEMENT_GAPS, review_selection_for_delivery
+from yoetz.domain.task_statement import (
+    TASK_STATEMENT_GAPS,
+    review_selection_for_delivery,
+    specification_preflight,
+)
 from yoetz.domain.values import (
     Frontier,
     JsonObject,
@@ -245,6 +249,7 @@ from yoetz.domain.values import (
     format_rfc3339_millis,
     parse_rfc3339_millis,
     repository_grant_continuation,
+    review_input_continuation,
     task_id,
     timestamp_from_datetime,
     validate_commitment,
@@ -2905,10 +2910,11 @@ async def _semantic_not_configured(
     findings: tuple[object, ...],
     runtime: TaskRuntime | None = None,
     lineage_evaluation: LineageEvaluation | None = None,
+    require_complete_specification: bool = False,
 ) -> FinalSemanticEvaluation:
     """Explicit path when AI-powered review is enabled but no provider endpoint is bound."""
 
-    del frozen, findings, runtime, lineage_evaluation
+    del frozen, findings, runtime, lineage_evaluation, require_complete_specification
     return FinalSemanticEvaluation(
         SemanticStatus.NOT_CONFIGURED, SemanticReason.PROVIDER_NOT_CONFIGURED
     )
@@ -2919,6 +2925,7 @@ async def _semantic_provider_unbound(
     findings: tuple[object, ...],
     runtime: TaskRuntime | None = None,
     lineage_evaluation: LineageEvaluation | None = None,
+    require_complete_specification: bool = False,
 ) -> FinalSemanticEvaluation:
     """AI-powered review is enabled, but no external provider endpoint is configured."""
 
@@ -2928,7 +2935,13 @@ async def _semantic_provider_unbound(
         reason=SemanticReason.PROVIDER_NOT_CONFIGURED.value,
         request_id=frozen.lease.operation_id,
     )
-    return await _semantic_not_configured(frozen, findings, runtime, lineage_evaluation)
+    return await _semantic_not_configured(
+        frozen,
+        findings,
+        runtime,
+        lineage_evaluation,
+        require_complete_specification,
+    )
 
 
 def _map_blocked(outcome: PrivacyOutcome, reason: object) -> FinalSemanticEvaluation:
@@ -3186,6 +3199,9 @@ def _map_egress_to_final(
                 else sent_ledger_refs(result.disclosure, projection)
             ),
             semantic_withheld_item_ids=withheld_item_ids,
+            provider_input_manifest=(
+                None if result.disclosure is None else result.disclosure.provider_input_manifest
+            ),
         )
     if type(result) is SemanticEgressAwaitingHuman:
         # The proposal id and its expiry are the only things that make this branch recoverable.
@@ -3759,6 +3775,10 @@ async def _publish_semantic_response_object(
             CanonicalJsonValue,
             list(sorted(evaluation.semantic_withheld_item_ids, key=str.encode)),
         )
+    if evaluation.provider_input_manifest is not None:
+        body["provider_input_manifest"] = cast(
+            CanonicalJsonValue, dict(evaluation.provider_input_manifest.items())
+        )
     payload = canonical_encode(cast(CanonicalJsonValue, body))
     staged = await runtime.objects.stage(
         ObjectSource(data=payload, declared_size=len(payload)),
@@ -3868,6 +3888,21 @@ async def _recover_response_evaluation(
         refs = cast(list[object], raw_disclosed)
         if all(type(ref) is str for ref in refs):
             disclosed = frozenset(cast(list[str], refs))
+    provider_manifest = None
+    raw_provider_manifest = body.get("provider_input_manifest")
+    if isinstance(raw_provider_manifest, dict):
+        try:
+            from yoetz.domain.values import JsonObject, freeze_json
+
+            frozen_provider = freeze_json(cast(CanonicalJsonValue, raw_provider_manifest))
+            if (
+                type(frozen_provider) is JsonObject
+                and frozen_provider.get("schema") == "yoetz.review-input-manifest/1"
+                and frozen_provider.get("phase") == "provider_bound"
+            ):
+                provider_manifest = frozen_provider
+        except TypeError, ValueError:
+            provider_manifest = None
     return FinalSemanticEvaluation(
         status,
         reason,
@@ -3875,6 +3910,7 @@ async def _recover_response_evaluation(
         provenance=provenance,
         case_included_refs=disclosed,
         semantic_withheld_item_ids=withheld_item_ids,
+        provider_input_manifest=provider_manifest,
     )
 
 
@@ -4273,6 +4309,7 @@ def _privacy_gated_semantic_evaluator(
         findings: tuple[object, ...],
         runtime: TaskRuntime | None = None,
         lineage_evaluation: LineageEvaluation | None = None,
+        require_complete_specification: bool = False,
     ) -> FinalSemanticEvaluation:
         from yoetz.ports.ledger import OperationLease as _OpLease
 
@@ -4347,6 +4384,74 @@ def _privacy_gated_semantic_evaluator(
                 repository,
                 route.task_id,
             )
+            typed_findings = tuple(item for item in findings if type(item) is Finding)
+            # Resolve the effective selection before repository/provider admission. This is the
+            # first full-specification gate: a missing statement must yield a supported input
+            # continuation without probing credentials or spending a provider attempt.
+            policy_app = getattr(privacy, "policy_application", None)
+            if policy_app is None:
+                # A coordinator without its policy application cannot establish the policy
+                # identity required for a semantic packet.  Preserve the pre-existing
+                # fail-closed repository admission behavior for direct/unit coordinators (and
+                # for a coordinator that is racing setup); do not manufacture a complete-spec
+                # continuation from an unbound policy.
+                try:
+                    repository_admission = await privacy.admit_repository_grant(scope)
+                except Exception:
+                    repository_admission = RepositoryGrantAdmission.UNAVAILABLE
+                if repository_admission is RepositoryGrantAdmission.MISSING:
+                    return FinalSemanticEvaluation(
+                        SemanticStatus.AWAITING_HUMAN,
+                        SemanticReason.HUMAN_APPROVAL_REQUIRED,
+                        continuation=repository_grant_continuation(
+                            request_id=frozen.lease.operation_id
+                        ),
+                    )
+                record_bounded_event_without_raising(
+                    component="semantic_composition",
+                    operation="semantic_not_dispatched_repository_scope_unavailable",
+                    reason=SemanticReason.SCOPE_NOT_AUTHORIZED.value,
+                    request_id=frozen.lease.operation_id,
+                )
+                return FinalSemanticEvaluation(
+                    SemanticStatus.BLOCKED_BY_POLICY,
+                    SemanticReason.SCOPE_NOT_AUTHORIZED,
+                )
+            effective = await policy_app.policy_store.effective_policy(scope)
+            policy = effective.policy
+            review_profile = policy.review_context_profile
+            review_selection = review_selection_for_delivery(policy)
+            policy_id = policy.policy_id
+            policy_version = str(policy.version)
+            withheld = tuple(item.value for item in policy.withheld_review_categories)
+            unsuppliable = unsuppliable_missing_kinds(review_selection, withheld)
+            if withheld:
+                record_bounded_event_without_raising(
+                    component="semantic_composition",
+                    operation="semantic_review_context_categories_withheld",
+                    reason=SemanticReason.CONTENT_CATEGORY_NOT_AUTHORIZED.value,
+                    request_id=frozen.lease.operation_id,
+                )
+            preflight = specification_preflight(
+                frozen.case.task_statement,
+                frozen.case.task_title,
+                review_selection,
+                required=require_complete_specification,
+                channel_sends_task_description=("task_statement" in review_selection.sections),
+            )
+            if preflight.actionable:
+                record_bounded_event_without_raising(
+                    component="semantic_composition",
+                    operation="semantic_suspended_review_input_required",
+                    reason="task_statement_not_supplied",
+                    request_id=frozen.lease.operation_id,
+                )
+                return FinalSemanticEvaluation(
+                    SemanticStatus.AWAITING_HUMAN,
+                    SemanticReason.HUMAN_APPROVAL_REQUIRED,
+                    continuation=review_input_continuation(request_id=frozen.lease.operation_id),
+                    specification_preflight=preflight,
+                )
             # The coordinator owns repository admission under its closure lock. Only an exactly
             # bound missing grant observed while that lock is live can yield a trusted setup
             # continuation. Closure, malformed/mismatched authority, policy failures, and failed
@@ -4374,6 +4479,7 @@ def _privacy_gated_semantic_evaluator(
                     continuation=repository_grant_continuation(
                         request_id=frozen.lease.operation_id
                     ),
+                    specification_preflight=preflight,
                 )
             if repository_admission is not RepositoryGrantAdmission.GRANTED:
                 record_bounded_event_without_raising(
@@ -4483,41 +4589,6 @@ def _privacy_gated_semantic_evaluator(
                 provider = provider if provider is not None else fallback_binding
                 assert provider is not None  # one of the two resolved above
                 operation_max_retries = max_retries
-            typed_findings = tuple(item for item in findings if type(item) is Finding)
-            # Live effective policy owns review selection; never mint a synthetic policy identity.
-            policy_app = getattr(privacy, "policy_application", None)
-            if policy_app is None:
-                record_bounded_event_without_raising(
-                    component="semantic_composition",
-                    operation="semantic_not_dispatched_policy_unavailable",
-                    reason=SemanticReason.COORDINATOR_FAILURE.value,
-                    request_id=frozen.lease.operation_id,
-                )
-                return FinalSemanticEvaluation(
-                    SemanticStatus.FAILED, SemanticReason.COORDINATOR_FAILURE
-                )
-            effective = await policy_app.policy_store.effective_policy(scope)
-            policy = effective.policy
-            review_profile = policy.review_context_profile
-            # A statement the review channel withholds is named as absent in the packet itself,
-            # not only as generic withheld context (issue #908).
-            review_selection = review_selection_for_delivery(policy)
-            policy_id = policy.policy_id
-            policy_version = str(policy.version)
-            # Selection and channel categories are configured independently. When they disagree
-            # the reviewer is handed a case with holes exactly where its profile promised
-            # material, yet still reports succeeded — so record it and carry it into coverage
-            # rather than letting a hollow review read as a complete one.
-            withheld = tuple(item.value for item in policy.withheld_review_categories)
-            # What no agent action can put in front of this reviewer (issue #907).
-            unsuppliable = unsuppliable_missing_kinds(review_selection, withheld)
-            if withheld:
-                record_bounded_event_without_raising(
-                    component="semantic_composition",
-                    operation="semantic_review_context_categories_withheld",
-                    reason=SemanticReason.CONTENT_CATEGORY_NOT_AUTHORIZED.value,
-                    request_id=frozen.lease.operation_id,
-                )
             captured_content = ()
             captured_content_scope = None
             captured_content_gaps = ()
@@ -4644,6 +4715,7 @@ def _privacy_gated_semantic_evaluator(
                     operation_lease=current_lease[0],
                     withheld_review_categories=withheld,
                 )
+            input_manifest = semantic_case.packet.input_manifest
             # Structural composition diagnostics only: never persist content, paths or hashes.
             # These counters precede privacy minimization and do not certify provider delivery.
             record_bounded_counts_without_raising(
@@ -4820,6 +4892,7 @@ def _privacy_gated_semantic_evaluator(
                     case_captured_edit_paths=packet_edit_paths,
                     case_workspace_root=workspace_root,
                     check_change_files=check_change_files,
+                    review_input_manifest=input_manifest,
                 )
 
             # Build the packet before anything durable exists. A packet that cannot be built is a
@@ -4849,6 +4922,7 @@ def _privacy_gated_semantic_evaluator(
                     case_reference_scope_reduced=reference_scope_reduced,
                     case_content_gaps=content_gaps,
                     unsuppliable_missing_kinds=unsuppliable,
+                    review_input_manifest=input_manifest,
                 )
 
             # One durable AI-powered review job per check: create/recover after freeze, before dispatch.
@@ -5113,6 +5187,7 @@ def _privacy_gated_semantic_evaluator(
                 continuation = None
                 disclosed: frozenset[str] | None = None
                 semantic_withheld_item_ids: tuple[str, ...] = ()
+                provider_manifest = None
                 if type(evaluation) is FinalSemanticEvaluation:
                     semantic_withheld_item_ids = evaluation.semantic_withheld_item_ids
                     if status is SemanticStatus.SUCCEEDED:
@@ -5120,6 +5195,7 @@ def _privacy_gated_semantic_evaluator(
                         provenance = evaluation.provenance
                         # What the exact sent packet carried, from the selected attempt (#904).
                         disclosed = evaluation.case_included_refs
+                        provider_manifest = evaluation.provider_input_manifest
                     elif (
                         status is evaluation.status
                         and reason is evaluation.reason
@@ -5145,6 +5221,8 @@ def _privacy_gated_semantic_evaluator(
                         case_content_gaps=content_gaps,
                         unsuppliable_missing_kinds=unsuppliable,
                         semantic_withheld_item_ids=semantic_withheld_item_ids,
+                        review_input_manifest=input_manifest,
+                        provider_input_manifest=provider_manifest,
                     )
                 return FinalSemanticEvaluation(
                     status,
@@ -5166,6 +5244,8 @@ def _privacy_gated_semantic_evaluator(
                     case_workspace_root=workspace_root,
                     check_change_files=check_change_files,
                     continuation=continuation,
+                    review_input_manifest=input_manifest,
+                    provider_input_manifest=provider_manifest,
                 )
 
             return cast(
