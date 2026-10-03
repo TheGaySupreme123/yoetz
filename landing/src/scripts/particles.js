@@ -19,6 +19,7 @@ export function mountParticles(canvas, options = {}) {
   const reduced = !!options.reducedMotion;
   const N = Math.max(800, Math.min(9000, options.count || 5200));
   const sun = options.sun || "#E9B200";
+  const scores = options.scores || ["60", "70", "80"];
 
   const pos = new Float32Array(N * 3);
   const tgt = new Float32Array(N * 3);
@@ -289,16 +290,22 @@ export function mountParticles(canvas, options = {}) {
       }
       case "sun": {
         spec.yawAmp = 0.05;
-        spec.ox = -0.16;
+        spec.ox = -0.1;
         const y0 = 0.38;
         const sy = 0.42 - phase * 1.0;
+        const digits = wordSet((scores[Math.min(scores.length - 1, Math.floor(phase * scores.length))] || "") + "%");
         for (i = 0; i < N; i++) {
           f = i / N;
           if (f < 0.28) {
             set(i, (R[i * 6] - 0.5) * 2.3, y0 + (R[i * 6 + 1] - 0.5) * 0.03, (R[i * 6 + 2] - 0.5) * 0.5, 0);
             continue;
           }
-          if (f < 0.66) sphere(i, 0, sy, 0, 0.17, 2);
+          if (f >= 0.78) {
+            // the benchmark score, rising with the sun: one figure per stop
+            fromSet(i, digits, 0.6, -0.72, Math.min(sy, 0.2), 0.1, 0);
+            continue;
+          }
+          if (f < 0.52) sphere(i, 0, sy, 0, 0.17, 2);
           else {
             a = R[i * 6] * 6.2832;
             const rr = 0.2 + R[i * 6 + 1] * 0.32 * (0.55 + 0.45 * Math.sin(a * 9 + t * 1.5));

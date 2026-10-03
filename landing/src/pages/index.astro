@@ -49,12 +49,9 @@ const plan = [
 
 // The sunrise is a benchmark: one model on Codex alone, then with Local FinishUP, then
 // with AI-powered FinishUP. Fill these in from the run; the page shows them as given.
-const BENCH = {
-  model: "[MODEL]",
-  alone: "[score]",
-  local: "[score]",
-  ai: "[score]",
-};
+// The three scores are drawn in dots beside the sun (see particles.js); 60/70/80 are
+// stand-ins until the run's numbers are supplied.
+const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80"] };
 ---
 
 <html lang="en">
@@ -81,6 +78,7 @@ const BENCH = {
     <meta name="twitter:image" content={`${SITE}/assets/og.png`} />
     <script type="application/ld+json" set:html={JSON.stringify(structuredData)} />
     <script is:inline type="application/json" id="story-plan" set:html={JSON.stringify(plan)} />
+    <script is:inline type="application/json" id="bench-scores" set:html={JSON.stringify(BENCH.scores)} />
   </head>
   <body>
     <header class="nav">
@@ -149,25 +147,26 @@ const BENCH = {
 
           <section id="benchmark" class="scene" data-scene="sun">
             <div class="copy-right">
-              <p class="eyebrow">Benchmark · {BENCH.model} on Codex, alone</p>
-              <p class="score">{BENCH.alone}<span class="unit">%</span></p>
-              <p class="stanza"><span class="fade">tasks truly finished</span></p>
+              <p class="eyebrow">{BENCH.suite} benchmark</p>
+              <div class="bench-logos" aria-label="Codex and DeepSWE">
+                <span class="bench-logo"><img src="/assets/openai.svg" alt="" width="22" height="22" />Codex</span>
+                <span class="bench-logo placeholder" title="DeepSWE logo goes here">[DeepSWE logo]</span>
+              </div>
+              <p class="stanza">{BENCH.model} on Codex, <span class="fade">without FinishUP.</span></p>
             </div>
           </section>
 
           <section id="local" class="scene" data-scene="sun">
             <div class="copy-right">
-              <p class="eyebrow">With Local FinishUP · free</p>
-              <p class="score">{BENCH.local}<span class="unit">%</span></p>
-              <p class="stanza">Verified on your machine.</p>
+              <p class="eyebrow">Same model · same benchmark</p>
+              <p class="stanza">+ FinishUP <span class="silver">Local</span></p>
             </div>
           </section>
 
           <section id="ai" class="scene" data-scene="sun">
             <div class="copy-right">
-              <p class="eyebrow">With AI-powered FinishUP</p>
-              <p class="score">{BENCH.ai}<span class="unit">%</span></p>
-              <p class="stanza">A second mind reviews what's left.</p>
+              <p class="eyebrow">The latest</p>
+              <p class="stanza">+ FinishUP <span class="gold">AI-powered</span></p>
             </div>
           </section>
 
@@ -264,7 +263,9 @@ const BENCH = {
       const plan: [string, number][] = planEl ? JSON.parse(planEl.textContent || "[]") : [];
       if (canvas && story && plan.length) {
         const narrow = window.innerWidth < 720;
-        const art = mountParticles(canvas, { count: narrow ? 2600 : 5200, reducedMotion: reduced });
+        const scoresEl = document.getElementById("bench-scores");
+        const scores: string[] = scoresEl ? JSON.parse(scoresEl.textContent || "[]") : [];
+        const art = mountParticles(canvas, { count: narrow ? 2600 : 5200, reducedMotion: reduced, scores });
         let raf = 0;
         let last = "";
         const slot = document.getElementById("pc-slot");
