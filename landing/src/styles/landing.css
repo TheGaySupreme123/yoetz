@@ -261,3 +261,5 @@ img, svg { max-width: 100%; }
 .copy.on a, .copy.on button { pointer-events: auto; }
 .copy.foot { align-items: flex-end; justify-content: center; }
 .copy.hero { position: absolute; }
+.paper { display: inline-flex; align-items: center; gap: 6px; font: 500 15px/1 var(--font-sans); color: var(--accent-text); text-decoration: underline; text-underline-offset: 3px; padding: 8px 0; }
+.paper svg { width: 16px; height: 16px; }

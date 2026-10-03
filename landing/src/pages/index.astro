@@ -9,6 +9,7 @@ const PYPI = "https://pypi.org/project/yoetz/";
 const NPM = "https://www.npmjs.com/package/yoetz";
 const DOCS = `${GITHUB}/tree/main/docs/usage`;
 const CONTACT_EMAIL = "[YOUR EMAIL]";
+const PAPER_URL = "[PAPER URL]";
 const RELEASES = `${GITHUB}/releases`;
 const VERSION = landingPackage.version;
 const AGENT_PROMPT = `I want to install FinishUP (${GITHUB}). Start by fetching its agent install guide and follow it exactly:
@@ -124,6 +125,7 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
           <div class="copy side" data-copy="bench">
               <div class="copy-right wide">
                 <p class="stanza">We tested {BENCH.model} on <span class="nowrap"><span class="tag"><img src="/assets/openai.svg" alt="" width="22" height="22" />Codex</span>,</span> scored on <span class="nowrap"><span class="tag wordmark">{BENCH.suite}</span><span class="bench-dot" id="bench-dot">.</span></span> <span class="nowrap reveal" id="bench-with">with <img class="fup-mark" src="/assets/finishup-mark.png" alt="" />FinishUP</span><span class="dot-word" aria-label="Local, then AI-powered" role="img"></span></p>
+                <a class="paper" href={PAPER_URL} target="_blank" rel="noopener">Read the full paper <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9" /></svg></a>
               </div>
           </div>
           <div class="copy foot" data-copy="end">
