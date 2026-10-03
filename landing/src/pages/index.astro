@@ -11,12 +11,6 @@ const DOCS = `${GITHUB}/tree/main/docs/usage`;
 const CONTACT_EMAIL = "[YOUR EMAIL]";
 const RELEASES = `${GITHUB}/releases`;
 const VERSION = landingPackage.version;
-// Unpinned on purpose: the site must never name a version PyPI does not have (a pinned
-// 0.2.0 shipped once and failed every PyPI install). uv resolves the latest release and
-// fetches Python 3.14 itself, whatever other Pythons the machine has. The package keeps
-// its `yoetz` name on PyPI and npm until the rename ships there.
-const INSTALL_COMMAND = "uv tool install --managed-python --python 3.14.6 yoetz";
-const NPM_COMMAND = "npx yoetz";
 const AGENT_PROMPT = `I want to install FinishUP (${GITHUB}). Start by fetching its agent install guide and follow it exactly:
 
 curl -fsSL https://raw.githubusercontent.com/TheGaySupreme123/yoetz/main/docs/usage/agent-start.md
@@ -173,34 +167,6 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
         </div>
       </div>
 
-      <section id="install" class="install">
-        <div class="install-inner">
-          <div>
-            <p class="eyebrow">Install</p>
-            <h2>Two minutes. Then it runs beside your agent.</h2>
-            <p class="lead">Setup asks a few questions in your terminal and connects your host. The package is still published as <code>yoetz</code> until the rename reaches PyPI and npm.</p>
-            <div class="hosts" aria-label="Officially supported agents">
-              <span>Works with</span>
-              <img src="/assets/openai.svg" alt="Codex" title="Codex" />
-              <img src="/assets/claude.svg" alt="Claude Code" title="Claude Code" />
-              <img src="/assets/cursor.svg" alt="Cursor" title="Cursor" />
-            </div>
-          </div>
-          <div class="cmds">
-            <button class="cmd copy-cmd" type="button" data-command={INSTALL_COMMAND} aria-label="Copy the uv install command">
-              <span class="lbl">uv</span>
-              <code>{INSTALL_COMMAND}</code>
-              <span class="copy" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg></span>
-            </button>
-            <button class="cmd copy-cmd" type="button" data-command={NPM_COMMAND} aria-label="Copy the npx install command">
-              <span class="lbl">npm</span>
-              <code>{NPM_COMMAND}</code>
-              <span class="copy" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg></span>
-            </button>
-            <p class="eyebrow">Needs uv · fetches its own Python · Apache-2.0</p>
-          </div>
-        </div>
-      </section>
     </main>
 
     <footer class="footer">
@@ -278,11 +244,12 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
             }
             acc += len;
           }
-          phase = Math.round(phase * 100) / 100;
-          const key = form + ":" + phase;
+          void form;
+          void phase;
+          const key = String(Math.round(screens * 400) / 400);
           if (key !== last) {
             last = key;
-            art.setScene(form, phase);
+            art.setScroll(screens);
           }
         };
         const onScroll = () => {
@@ -322,20 +289,9 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
           const ok = await copyText(el.dataset.prompt ?? "");
           show(
             ok ? "Copied. Paste it into your agent." : "Copy blocked by the browser.",
-            ok ? "Codex, Claude Code or Cursor fetch the install guide and walk you through setup. Or install yourself below." : "Scroll to Install and copy a command instead.",
+            ok ? "Codex, Claude Code or Cursor fetch the install guide and walk you through setup." : "Open the docs for the install command.",
           );
-          if (!ok) document.getElementById("install")?.scrollIntoView({ behavior: reduced ? "auto" : "smooth" });
-        });
-      }
-      for (const el of Array.from(document.querySelectorAll<HTMLButtonElement>(".copy-cmd"))) {
-        el.addEventListener("click", async () => {
-          const cmd = el.dataset.command ?? "";
-          const ok = await copyText(cmd);
-          show(
-            ok ? "Copied. Run it in your terminal." : "Copy blocked by the browser.",
-            ok ? "Then run `yoetz` to start setup and answer its questions. About two minutes." : cmd,
-          );
-        });
+                  });
       }
     </script>
   </body>

@@ -15,6 +15,33 @@ const PALETTE = {
 const HERO_WORDS = ["work", "code", "research", "science", "writing", "reviews"];
 const HERO_SECONDS = 2.2;
 
+// The scroll story, in screens. Around each boundary the two neighbouring shapes are
+// blended by scroll position (BLEND screens either side), so the dots move with the
+// reader's hand rather than racing to a new shape when a line is crossed.
+const PLAN = [["hero", 1], ["alone", 1], ["swarm", 1], ["robot", 3], ["sun", 3], ["end", 1]];
+const BLEND = 0.3;
+const clamp01 = (v) => Math.max(0, Math.min(1, v));
+const smooth = (v) => { const u = clamp01(v); return u * u * (3 - 2 * u); };
+function timeline(s) {
+  let acc = 0;
+  for (let i = 0; i < PLAN.length; i++) {
+    const [name, len] = PLAN[i];
+    const end = acc + len;
+    if (s < end || i === PLAN.length - 1) {
+      const pa = clamp01((s - acc) / len);
+      if (i < PLAN.length - 1 && s > end - BLEND) {
+        return { a: name, pa, b: PLAN[i + 1][0], pb: clamp01((s - end) / PLAN[i + 1][1]), u: smooth((s - (end - BLEND)) / (2 * BLEND)) };
+      }
+      if (i > 0 && s < acc + BLEND) {
+        return { a: PLAN[i - 1][0], pa: 1, b: name, pb: pa, u: smooth((s - (acc - BLEND)) / (2 * BLEND)) };
+      }
+      return { a: name, pa, b: null, pb: 0, u: 0 };
+    }
+    acc = end;
+  }
+  return { a: "end", pa: 1, b: null, pb: 0, u: 0 };
+}
+
 export function mountParticles(canvas, options = {}) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return { setScene() {}, setAnchor() {}, destroy() {} };
@@ -25,6 +52,8 @@ export function mountParticles(canvas, options = {}) {
 
   const pos = new Float32Array(N * 3);
   const tgt = new Float32Array(N * 3);
+  const tgtA = new Float32Array(N * 3);
+  const tcolA = new Uint8Array(N);
   const col = new Uint8Array(N);
   const tcol = new Uint8Array(N);
   const px = new Float32Array(N);
@@ -50,6 +79,7 @@ export function mountParticles(canvas, options = {}) {
   off.height = 300;
 
   let scene = { form: "hero", phase: 0 };
+  let scroll = null; // screens into the story, when the page drives the engine by scroll
   let anchor = null; // canvas-pixel position of the word "computer" in the closing copy
   let anchorN = { x: 0.32, y: 0.52 };
   let tierPx = null; // the slot in the copy where the tier word is drawn in dots
@@ -380,9 +410,29 @@ export function mountParticles(canvas, options = {}) {
     const S = cw < 720 ? cw * 0.42 : Math.min(cw, ch) * 0.46;
     if (anchor) anchorN = { x: (anchor.x - cw / 2 - ox * cw) / S, y: (anchor.y - ch / 2) / S };
     if (tierPx) tierN = { x: (tierPx.x - cw / 2 - ox * cw) / S, y: (tierPx.y - ch / 2) / S, w: tierPx.w / S, h: tierPx.h / S };
-    const spec = build(scene.form, t, Math.max(0, Math.min(1, scene.phase || 0)));
+    let spec;
+    if (scroll != null) {
+      const tl = timeline(scroll);
+      spec = build(tl.a, t, tl.pa);
+      if (tl.b && tl.u > 0) {
+        tgtA.set(tgt);
+        tcolA.set(tcol);
+        const specB = build(tl.b, t, tl.pb);
+        const u = tl.u;
+        for (let i = 0; i < N * 3; i++) tgt[i] = tgtA[i] + (tgt[i] - tgtA[i]) * u;
+        if (u < 0.5) tcol.set(tcolA);
+        spec = {
+          tilt: spec.tilt + (specB.tilt - spec.tilt) * u,
+          ox: spec.ox + (specB.ox - spec.ox) * u,
+          yawAmp: spec.yawAmp + (specB.yawAmp - spec.yawAmp) * u,
+          mouse: u < 0.5 ? spec.mouse : specB.mouse,
+        };
+      }
+    } else {
+      spec = build(scene.form, t, clamp01(scene.phase || 0));
+    }
     for (let i = 0; i < N; i++) {
-      const k = 0.04 + R[i * 6 + 4] * 0.07;
+      const k = 0.035 + R[i * 6 + 4] * 0.05;
       const j = i * 3;
       const dx = tgt[j] - pos[j];
       const dy = tgt[j + 1] - pos[j + 1];
@@ -459,7 +509,12 @@ export function mountParticles(canvas, options = {}) {
 
   return {
     setScene(form, phase) {
+      scroll = null;
       scene = { form, phase };
+    },
+    // screens scrolled into the story; the engine picks and blends the scenes itself
+    setScroll(screens) {
+      scroll = screens;
     },
     // x, y in canvas pixels; null to fall back to the default spot.
     setAnchor(x, y) {
