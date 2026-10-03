@@ -231,8 +231,8 @@ img, svg { max-width: 100%; }
 
 /* ---------- Benchmark: tier colours and the logo row ---------- */
 /* Inline tags inside a serif line: the mark sits in the text, no chip */
-.stanza .tag { display: inline-flex; align-items: center; gap: 0.14em; white-space: nowrap; }
-.stanza .tag img { width: 0.8em; height: 0.8em; }
+.stanza .tag { white-space: nowrap; }
+.stanza .tag img { width: 0.8em; height: 0.8em; vertical-align: -0.06em; margin-right: 0.14em; }
 .stanza .nowrap { white-space: nowrap; }
 .copy-right.wide { max-width: 760px; }
 /* The tier word is drawn in dots by the artwork; this is the room the sentence leaves for it */
