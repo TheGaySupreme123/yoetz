@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from typing import Any, cast
 
 import pytest
@@ -840,6 +841,33 @@ def test_resource_uri_is_a_key_not_a_path(monkeypatch: pytest.MonkeyPatch) -> No
         with pytest.raises(GuidanceResourceError, match="guidance_resource_uri_unregistered"):
             read_resource(uri)
     assert reads == []
+
+
+@pytest.mark.parametrize("profile", ("policy", "strict"))
+@pytest.mark.parametrize("family", ("plan_published", "plan_revised"))
+def test_mcp_can_amend_review_input_without_replacing_the_session(
+    profile: McpRouteProfile, family: str
+) -> None:
+    descriptor = descriptor_for("publish_work", profile)
+    examples = cast(list[dict[str, Any]], descriptor.input_schema["examples"])
+    request = deepcopy(
+        next(
+            example
+            for example in examples
+            if any(draft["schema"]["name"] == family for draft in example["event_drafts"])
+        )
+    )
+    draft = next(item for item in request["event_drafts"] if item["schema"]["name"] == family)
+    draft["schema"]["version"] = "1.1.0"
+    draft["payload"]["task_statement"] = "Preserve the complete user request in this session."
+    validator = Draft202012Validator(cast(Any, descriptor.input_schema))
+    assert validator.is_valid(request)
+    PublishWorkRequest.model_validate(request)
+    validate_schema_instance(family.replace("_", "-"), "1.1.0", draft["payload"])
+
+    # The new field must not accidentally become authorable under the frozen old wire version.
+    draft["schema"]["version"] = "1.0.0"
+    assert not validator.is_valid(request)
 
 
 def test_advertised_input_schemas_honor_presentation_keyword_budgets() -> None:

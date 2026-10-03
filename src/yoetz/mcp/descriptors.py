@@ -109,12 +109,8 @@ _BOUNDARY_TERMS: Final = re.compile(
 # Presentation keeps ordinary families through schema 1.1.0. Additive ``evidence_recorded/1.2.0``
 # (``observation_captured``) is authored only by the observation coordinator, not MCP/CLI publish.
 ORDINARY_MCP_PRESENTATION_SCHEMA_VERSIONS: Final[frozenset[str]] = frozenset({"1.0.0", "1.1.0"})
-# The statement-bearing plan 1.1.0 schemas (issue #908) stay out of the advertised draft so the
-# reviewed budgets hold; the catalog admission schema still accepts them, and an agent revises the
-# task statement through a reattaching ``start``.
-_MCP_PRESENTATION_EXCLUDED_EVENT_SCHEMAS: Final[frozenset[tuple[str, str]]] = frozenset(
-    {("plan_published", "1.1.0"), ("plan_revised", "1.1.0")}
-)
+# Statement-bearing plans stay authorable through MCP so a parked review can receive its missing
+# specification without replacing the session and writer that own the original check request.
 ORDINARY_MCP_PUBLISH_EVENT_FAMILIES: Final[frozenset[str]] = frozenset(
     {
         "plan_published",
@@ -167,12 +163,12 @@ PRESENTATION_INPUT_SCHEMA_BUDGETS: Final[Mapping[str, Mapping[str, int]]] = Mapp
         "publish-work-request": MappingProxyType(
             {
                 "max_oneof_nodes": 8,
-                "max_oneof_branches": 36,
+                "max_oneof_branches": 38,
                 "max_ref_nodes": 0,
                 "max_conditional_nodes": 0,
-                "max_defs_count": 21,
+                "max_defs_count": 23,
                 "max_defs_nest_depth": 1,
-                "max_encoded_bytes": 49_000,
+                "max_encoded_bytes": 52_000,
             }
         ),
         "check-request": MappingProxyType(
@@ -380,16 +376,17 @@ COMPACT_INITIALIZE_INSTRUCTIONS: Final = (
 # eight advertised tools, which is what the total is computed against.
 # The 0.3 surface retains the 18 ordinary lifecycle/coordination event families and the expanded
 # current-main initialize guidance, including the #789 late-start rule carried from the 0.2 line.
-# That makes the measured generic-host packaged surface about 249 KB; the reviewed 250 KB ceiling
-# leaves bounded headroom without dropping an admitted family, example, or startup rule. Claude
+# Statement-bearing plan variants add two branches and definitions for same-session input recovery
+# (#951). The measured strict generic-host packaged surface is 252,168 bytes; the reviewed 253 KB
+# ceiling retains every admitted family, example, and startup rule. Claude
 # Code, Codex and Cursor receive compact initialize bodies instead, bounded separately above.
 # The aggregate likewise carries the packaged bound plus one disclosure allowance per advertised
 # tool, because the host that inlines the instructions inlines the disclosure with them.
 ADVERTISED_SURFACE_BUDGET: Final[Mapping[str, int]] = MappingProxyType(
     {
         "instructions_copies_per_tool": 1,
-        "packaged_max_encoded_bytes": 250_000,
-        "max_encoded_bytes": 250_000 + len(YOETZ_MCP_TOOL_NAMES) * MAX_DISCLOSURE_ENCODED_BYTES,
+        "packaged_max_encoded_bytes": 253_000,
+        "max_encoded_bytes": 253_000 + len(YOETZ_MCP_TOOL_NAMES) * MAX_DISCLOSURE_ENCODED_BYTES,
     }
 )
 
@@ -1017,7 +1014,6 @@ def _project_event_draft_for_ordinary_mcp(
         if (
             family in ORDINARY_MCP_PUBLISH_EVENT_FAMILIES
             and version in ORDINARY_MCP_PRESENTATION_SCHEMA_VERSIONS
-            and (family, version) not in _MCP_PRESENTATION_EXCLUDED_EVENT_SCHEMAS
         ):
             kept.append(_mutable_json(branch_map))
             kept_families.add(family)

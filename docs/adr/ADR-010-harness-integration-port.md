@@ -312,6 +312,14 @@ bounded the adjacent surface since #128. Per-item budgets cannot catch this clas
 item can sit inside its own bound while the total doubles. Anyone inlining a document here again
 will fail CI rather than a live session.
 
+**Amendment (2026-10-03, issue #951): same-session specification recovery.** MCP advertises
+`plan_published/1.1.0` and `plan_revised/1.1.0`, including `task_statement`, so a caller can supply
+missing review input without superseding the session and writer that own its parked check. The
+older plan variants remain available and reject that field. These two variants add two branches,
+two payload definitions, and 3,000 bytes to the advertised schema. The measured publication schema
+is 51,432 bytes and the strict generic-host aggregate is 252,168 bytes. Their reviewed ceilings are
+52,000 and 253,000 bytes respectively; the compact native-host instruction ceilings are unchanged.
+
 **Amendment (2026-09-30, issue #918; also records #789): tier 0 is host-profiled.** The bridge's
 declared `--host` selects the tier-0 body. `generic` keeps `agent-instructions.md` verbatim.
 `claude` receives a compact body sized for Claude Code's observed 2,048-character cap (#789).
