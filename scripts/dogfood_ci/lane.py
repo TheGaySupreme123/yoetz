@@ -199,6 +199,39 @@ def _native_done(host: str, output: str) -> bool:
     )
 
 
+def _specification_manifest_matches(result: dict[str, Any], statement: str) -> bool:
+    """Require the provider-bound statement identity, not just successful prompt delivery."""
+
+    manifest = result.get("review_input_manifest")
+    if not isinstance(manifest, dict):
+        return False
+    manifest = cast(dict[str, Any], manifest)
+    if (
+        manifest.get("schema") != "yoetz.review-input-manifest/1"
+        or manifest.get("phase") != "provider_bound"
+    ):
+        return False
+    specification = manifest.get("specification")
+    if not isinstance(specification, dict):
+        return False
+    specification = cast(dict[str, Any], specification)
+    content = statement.encode("utf-8")
+    revision = specification.get("revision")
+    selected = specification.get("selected_item_ids")
+    if not isinstance(selected, list):
+        return False
+    selected = cast(list[object], selected)
+    return bool(
+        specification.get("status") == "complete"
+        and specification.get("content_digest") == "sha256:" + hashlib.sha256(content).hexdigest()
+        and specification.get("content_bytes") == len(content)
+        and type(revision) is int
+        and revision > 0
+        and len(selected) > 0
+        and all(type(item) is str and item for item in selected)
+    )
+
+
 def _codex_workflow_completed(output: str, expected_statement: str | None = None) -> bool:
     """Correlate native MCP successes; later hook disclosures do not undo recorded work."""
 
@@ -278,6 +311,10 @@ def _codex_workflow_completed(output: str, expected_statement: str | None = None
                 and binding in published
                 and result.get("semantic_status") != "awaiting_human"
                 and result.get("outcome") != "awaiting_human"
+                and (
+                    expected_statement is None
+                    or _specification_manifest_matches(result, expected_statement)
+                )
             ):
                 checked.add(binding)
             elif (
@@ -1498,6 +1535,20 @@ class Lane:
                 expect_zero=False,
             )
             if self.fireworks_key:
+                input_matches = _specification_manifest_matches(checked, _LEDGER_TASK_STATEMENT)
+                self.semantic["specification_manifest_matches"] = input_matches
+                self.semantic["review_input_manifest"] = checked.get("review_input_manifest")
+                self._record(
+                    "semantic_specification_input",
+                    phase,
+                    status="pass" if input_matches else "fail",
+                    reason=None if input_matches else "provider_bound_specification_not_proven",
+                    summary={
+                        "expected_statement_digest": "sha256:"
+                        + hashlib.sha256(_LEDGER_TASK_STATEMENT.encode("utf-8")).hexdigest()
+                    },
+                    fatal=False,
+                )
                 # docs/runbooks/semantic-dogfood.md §3: these rows prove a provider attempt was
                 # made; every other status/reason pair is a pre-dispatch refusal or indeterminate.
                 status = checked.get("semantic_status")

@@ -9,6 +9,7 @@ strict), and the pseudo-terminal ceremony driver against a harmless stand-in chi
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import sys
@@ -679,6 +680,20 @@ def test_codex_workflow_rejects_uncorrelated_or_unaccepted_results(mutation: str
 def test_codex_workflow_requires_exact_statement_and_terminal_check() -> None:
     events = _codex_probe_events()
     events[0]["item"]["arguments"]["task_statement"] = "full probe request"
+    checked = events[2]["item"]["result"]["structured_content"]
+    output = _codex_probe_output("DONE", events)
+    assert _LANE._codex_workflow_completed(output, "full probe request") is False
+    checked["review_input_manifest"] = {
+        "schema": "yoetz.review-input-manifest/1",
+        "phase": "provider_bound",
+        "specification": {
+            "status": "complete",
+            "revision": 1,
+            "selected_item_ids": ["statement"],
+            "content_bytes": len(b"full probe request"),
+            "content_digest": "sha256:" + hashlib.sha256(b"full probe request").hexdigest(),
+        },
+    }
     output = _codex_probe_output("DONE", events)
     assert _LANE._codex_workflow_completed(output, "full probe request") is True
     assert _LANE._codex_workflow_completed(output, "changed probe request") is False
@@ -691,3 +706,40 @@ def test_codex_workflow_requires_exact_statement_and_terminal_check() -> None:
 )
 def test_codex_workflow_requires_completed_native_turn(suffix: str) -> None:
     assert _LANE._codex_workflow_completed(_codex_probe_output("DONE") + "\n" + suffix) is False
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [None, "composed", "missing", "title_only", "digest", "length", "revision", "selection"],
+)
+def test_semantic_specification_requires_exact_provider_bound_input(defect: str | None) -> None:
+    statement = "Complete request with Unicode: שלום\u2028second line"
+    raw = statement.encode("utf-8")
+    specification: dict[str, Any] = {
+        "status": "complete",
+        "content_digest": "sha256:" + hashlib.sha256(raw).hexdigest(),
+        "content_bytes": len(raw),
+        "revision": 3,
+        "selected_item_ids": ["task-statement"],
+    }
+    manifest: dict[str, Any] = {
+        "schema": "yoetz.review-input-manifest/1",
+        "phase": "provider_bound",
+        "specification": specification,
+    }
+    result: dict[str, Any] = {"review_input_manifest": manifest}
+    if defect == "composed":
+        manifest["phase"] = "composed"
+    elif defect == "missing":
+        result.clear()
+    elif defect == "title_only":
+        specification["status"] = "title_only"
+    elif defect == "digest":
+        specification["content_digest"] = "sha256:" + "0" * 64
+    elif defect == "length":
+        specification["content_bytes"] = len(statement)
+    elif defect == "revision":
+        specification["revision"] = None
+    elif defect == "selection":
+        specification["selected_item_ids"] = []
+    assert _LANE._specification_manifest_matches(result, statement) is (defect is None)

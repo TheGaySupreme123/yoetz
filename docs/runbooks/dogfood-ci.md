@@ -232,3 +232,12 @@ because hosted macOS can refuse renaming an already read-only directory. The man
 held, payloads are sealed before rename, and the root is sealed before any runtime is returned or
 leased. A failed root seal removes only the newly created generation, allowing a later retry;
 existing generations, live application state and vault contents are never that cleanup target.
+
+
+Tracker #961 adds a specification admission assertion to the configured ledger probe. Its check
+must return a `review_input_manifest` in `provider_bound` phase with the exact UTF-8 digest and
+byte length of the supplied statement, a current revision, and a complete selected specification.
+A composed manifest, start-call argument, or model prompt alone does not satisfy this assertion.
+The Codex native workflow collector applies the same assertion to its full probe request before
+counting a check/receipt sequence as complete. This establishes bounded input delivery; useful
+findings and successful repairs still require separate defect-focused evidence.
