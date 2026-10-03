@@ -255,10 +255,9 @@ img, svg { max-width: 100%; }
 }
 .footer .lockup img { width: 26px; height: 26px; }
 .footer .lockup span { font-size: 18px; }
-.footer-cols { margin-left: auto; display: flex; gap: var(--space-12); flex-wrap: wrap; }
-.footer-col { display: flex; flex-direction: column; gap: var(--space-2); }
-.footer-col a { color: var(--ink-muted); text-decoration: none; font: 400 14px/1.5 var(--font-sans); }
-.footer-col a:hover { color: var(--ink); }
+.footer-links { margin-left: auto; display: flex; gap: var(--space-6); flex-wrap: wrap; align-items: center; }
+.footer-links a { color: var(--ink-muted); text-decoration: none; font: 500 15px/1.5 var(--font-sans); padding: 8px 0; }
+.footer-links a:hover { color: var(--ink); }
 .footer-meta {
   flex-basis: 100%;
   display: flex;
@@ -282,7 +281,7 @@ img, svg { max-width: 100%; }
   .copy-right { margin-left: 0; align-items: flex-start; text-align: left; }
   .scene { padding: 80px 16px; }
   .install-inner { grid-template-columns: minmax(0, 1fr); gap: var(--space-6); }
-  .footer-cols { margin-left: 0; }
+  .footer-links { margin-left: 0; }
 }
 
 /* ---------- Hero: copy above and below the changing word ---------- */
