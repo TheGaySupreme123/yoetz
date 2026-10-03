@@ -10,6 +10,7 @@ from enum import Enum
 from typing import Final, Literal, Protocol, cast
 
 from yoetz.domain.privacy import (
+    MAX_WITHHELD_ITEM_IDS,
     AgentProjectionAuditSubject,
     ApprovedLocalDisclosureCase,
     ApprovedOutboundCase,
@@ -498,8 +499,10 @@ class MinimizedDisclosure:
         for values in (self.included_item_ids, self.source_item_digests):
             if type(values) is not tuple or values != tuple(sorted(set(values), key=str.encode)):
                 raise _invalid()
-        if type(self.withheld_item_ids) is not tuple or self.withheld_item_ids != tuple(
-            sorted(set(self.withheld_item_ids), key=str.encode)
+        if (
+            type(self.withheld_item_ids) is not tuple
+            or len(self.withheld_item_ids) > MAX_WITHHELD_ITEM_IDS
+            or self.withheld_item_ids != tuple(sorted(set(self.withheld_item_ids), key=str.encode))
         ):
             raise _invalid()
         if any(not _valid_opaque_item_id(item_id) for item_id in self.withheld_item_ids):

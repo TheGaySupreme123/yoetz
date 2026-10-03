@@ -29,6 +29,7 @@ __all__ = [
     "MAX_EGRESS_CASE_BYTES",
     "MAX_EGRESS_ITEM_BYTES",
     "MAX_RECEIPT_FINAL_BYTES",
+    "MAX_WITHHELD_ITEM_IDS",
     "MAX_PRIVACY_CHANGES",
     "MAX_PRIVACY_CHANGE_LABELS",
     "MAX_PRIVACY_LABEL_BYTES",
@@ -123,6 +124,10 @@ MAX_EGRESS_CASE_BYTES: Final = 512 * 1024
 # domain used to admit up to ``MAX_EGRESS_CASE_BYTES``, so a receipt between 256 and 512 KiB was
 # valid in the store and invalid on the wire, and failed every page it was listed on (issue #921).
 MAX_RECEIPT_FINAL_BYTES: Final = 262_144
+# The public receipt and semantic-result contracts carry at most 64 opaque item references. Keep
+# this bound in the shared privacy domain so proposals, prepared cases, receipts, and in-process
+# results reject an overlarge omission set before any object is finalized or encoded.
+MAX_WITHHELD_ITEM_IDS: Final = 64
 AUDIT_STORE_VERSION: Final = 1
 PRIVACY_REQUEST_COMMITMENT_ALGORITHM: Final = "hmac-sha256/yoetz-privacy-egress-request-v1"
 
@@ -2026,6 +2031,8 @@ class DisclosureProposal:
             sorted(set(self.withheld_item_ids), key=str.encode)
         ):
             raise _invalid()
+        if len(self.withheld_item_ids) > MAX_WITHHELD_ITEM_IDS:
+            raise _invalid()
         for item_id in self.withheld_item_ids:
             _text(item_id, _OPAQUE)
         _text(self.scanner_registry_version, _VERSION)
@@ -2149,6 +2156,8 @@ class ApprovedOutboundCase:
         validate_sha256_digest(self.policy_digest)
         validate_sha256_digest(self.case_digest)
         object.__setattr__(self, "withheld_item_ids", _sorted_text(self.withheld_item_ids))
+        if len(self.withheld_item_ids) > MAX_WITHHELD_ITEM_IDS:
+            raise _invalid()
 
 
 @dataclass(frozen=True, slots=True)
@@ -2197,6 +2206,8 @@ class ApprovedLocalDisclosureCase:
         validate_sha256_digest(self.policy_digest)
         validate_sha256_digest(self.case_digest)
         object.__setattr__(self, "withheld_item_ids", _sorted_text(self.withheld_item_ids))
+        if len(self.withheld_item_ids) > MAX_WITHHELD_ITEM_IDS:
+            raise _invalid()
 
 
 type ApprovedProviderCase = ApprovedOutboundCase | ApprovedLocalDisclosureCase
@@ -2451,8 +2462,10 @@ class EgressReceipt:
             or self.audit_store_version != AUDIT_STORE_VERSION
         ):
             raise _invalid()
-        if type(self.withheld_item_ids) is not tuple or self.withheld_item_ids != tuple(
-            sorted(set(self.withheld_item_ids), key=str.encode)
+        if (
+            type(self.withheld_item_ids) is not tuple
+            or len(self.withheld_item_ids) > MAX_WITHHELD_ITEM_IDS
+            or self.withheld_item_ids != tuple(sorted(set(self.withheld_item_ids), key=str.encode))
         ):
             raise _invalid()
         for item_id in self.withheld_item_ids:
@@ -2507,8 +2520,10 @@ class LocalDisclosureReceipt:
             or type(self.policy) is not ReceiptPolicyBinding
         ):
             raise _invalid()
-        if type(self.withheld_item_ids) is not tuple or self.withheld_item_ids != tuple(
-            sorted(set(self.withheld_item_ids), key=str.encode)
+        if (
+            type(self.withheld_item_ids) is not tuple
+            or len(self.withheld_item_ids) > MAX_WITHHELD_ITEM_IDS
+            or self.withheld_item_ids != tuple(sorted(set(self.withheld_item_ids), key=str.encode))
         ):
             raise _invalid()
         for item_id in self.withheld_item_ids:

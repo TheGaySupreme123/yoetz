@@ -28,6 +28,7 @@ from yoetz.domain.privacy import (
     PrivacyAuditSubject,
     PrivacyPolicy,
     ProviderBinding,
+    ReceiptSecretScanStage,
 )
 from yoetz.domain.values import validate_sha256_digest
 from yoetz.ports.clock import ClockPort
@@ -536,6 +537,17 @@ class MemoryPrivacyPolicyStore:
 
 
 def _receipt_view(receipt: LocalDisclosureReceipt | EgressReceipt) -> PrivacyReceiptView:
+    if receipt.schema_version == "1.0.0":
+        # SQLite's released 1.0 bytes do not carry the additive scan-stage fields. Match that
+        # reader contract in memory instead of returning a misleading PREPARED_CASE default.
+        receipt = replace(
+            receipt,
+            secret_scan=replace(
+                receipt.secret_scan,
+                stage=ReceiptSecretScanStage.LEGACY_UNKNOWN,
+                not_run_reason=None,
+            ),
+        )
     if isinstance(receipt, LocalDisclosureReceipt):
         return LocalDisclosureReceiptView("local_disclosure", receipt)
     return NetworkEgressReceiptView("network_egress", receipt)
@@ -672,6 +684,8 @@ class MemoryPrivacyAudit:
                 list(item) for item in request.minimized.transformation_summary
             ],
             "withheld_item_ids": list(request.minimized.withheld_item_ids),
+            "scanner_registry_version": request.minimized.scanner_registry_version,
+            "scanner_profile_digest": request.minimized.scanner_profile_digest,
         }
         body = canonical_encode(value)
         commitment = _mac(self._key, _PROPOSAL_DOMAIN, body)
@@ -706,6 +720,8 @@ class MemoryPrivacyAudit:
             request.expires_at,
             commitment,
             request.minimized.withheld_item_ids,
+            request.minimized.scanner_registry_version,
+            request.minimized.scanner_profile_digest,
         )
         lookup = _mac(self._key, _LOOKUP_DOMAIN, canonical_encode(_json(proposal)))
         reservation = PrivacyAuditReservation(

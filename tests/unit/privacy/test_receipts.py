@@ -8,6 +8,7 @@ import pytest
 from yoetz.domain.privacy import (
     MAX_EGRESS_CASE_BYTES,
     MAX_RECEIPT_FINAL_BYTES,
+    MAX_WITHHELD_ITEM_IDS,
     AuthorizationScope,
     AuthorizationScopeKind,
     ConsentSource,
@@ -236,6 +237,23 @@ def test_secret_scan_stage_distinguishes_real_scan_from_not_run() -> None:
     assert not_run.not_run_reason is PrivacyReason.NEVER_SEND_DETECTED
     with pytest.raises(ValueError, match="invalid_privacy_value"):
         ReceiptSecretScan("1.0.0", _DIGEST, 0, True, ReceiptSecretScanStage.NOT_RUN)
+
+
+def test_receipts_reject_an_oversized_opaque_omission_set() -> None:
+    too_many = tuple(f"item-{index:03d}" for index in range(MAX_WITHHELD_ITEM_IDS + 1))
+
+    with pytest.raises(ValueError, match="invalid_privacy_value"):
+        replace(
+            _network_receipt(),
+            schema_version="1.1.0",
+            withheld_item_ids=too_many,
+        )
+    with pytest.raises(ValueError, match="invalid_privacy_value"):
+        replace(
+            _local_receipt(),
+            schema_version="1.1.0",
+            withheld_item_ids=too_many,
+        )
 
 
 @pytest.mark.parametrize(
