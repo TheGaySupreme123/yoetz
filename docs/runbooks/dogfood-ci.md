@@ -93,7 +93,8 @@ trusted-console ceremonies from a pseudo-terminal. Phases, in order, each record
 3. **ledger** — the host's session-start carrier first (`hooks observe`,
    `hooks claude-observe`, or `hooks cursor-observe`), whose auto-attach creates the
    workspace's task and names the session to attach to, exactly as a native host does; then
-   `start` (attach to that session), `publish-work` (dry run, then real: one plan and one
+   `start` (attach to that session with the full bounded probe specification as
+   `task_statement`), `publish-work` (dry run, then real: one plan and one
    obligation), `status`, `check` (`semantic_required` with a credential),
    `service diagnostics --request-id <check>` plus every correlation id in the instance's
    diagnostics ring, `privacy receipts list`, `receipt` (markdown), the host's post-event
@@ -103,7 +104,10 @@ trusted-console ceremonies from a pseudo-terminal. Phases, in order, each record
    accidental sibling tasks, not a lane defect.
 4. **native** — one headless agent session in the probe project (`codex exec`, `claude -p`,
    `cursor-agent -p`) asked to call `start`, `publish_work`, and `receipt` and answer `DONE`;
-   the prompt identifies the MCP namespace separately from its function names. Host discovery
+   the prompt identifies the MCP namespace separately from its function names, requires the
+   operation's packaged guidance, and asks the host to copy the full probe request into
+   `start.task_statement`. A prompt instruction alone does not prove reviewer delivery; inspect
+   the recorded check's input manifest before claiming that coverage. Host discovery
    and execution wrappers are allowed solely to reach deferred Yoetz tools; empty resource lists
    do not prove tool absence. Every native child receives the disposable pinned runtime first
    on `PATH`, so packaged hooks and recovery commands resolve that instance. Then

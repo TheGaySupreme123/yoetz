@@ -184,6 +184,40 @@ def test_prompt_names_tool_hint_workspace_and_external_ref() -> None:
     )
     assert "plugin_yoetz_yoetz" in prompt and "'/w'" in prompt and "native-claude-1" in prompt
     assert "single_atomic_change" in prompt and prompt.endswith("Do not create or edit files.")
+    assert "task_statement set to this entire user message verbatim" in prompt
+    assert "recovering incomplete pages before continuing" in prompt
+
+
+@pytest.mark.parametrize("host", ["codex", "claude", "cursor"])
+@pytest.mark.parametrize("mapped", [False, True])
+def test_ledger_probe_supplies_full_statement_on_create_and_attach(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host: str, mapped: bool
+) -> None:
+    from yoetz.protocol.models import StartRequestModel
+
+    lane = _LANE.Lane(_namespace(tmp_path, host=host))
+    lane.launcher = tmp_path / "isolated-runtime" / "bin" / "yoetz"
+    session_id = "ses_5b435d29-4f13-4349-b301-b385af5fc4ea"
+    monkeypatch.setattr(
+        lane,
+        "_hook_session_start_probe",
+        Mock(return_value={"session_id": session_id} if mapped else None),
+    )
+    captured: list[dict[str, Any]] = []
+
+    def start_only(*args: object, **kwargs: Any) -> tuple[None, None]:
+        assert args[0] == "ledger_start"
+        captured.append(json.loads(kwargs["stdin"]))
+        return None, None
+
+    monkeypatch.setattr(lane, "_yoetz", start_only)
+    lane.phase_ledger_probe()
+    request = StartRequestModel.model_validate(captured[0])
+    assert request.mode == ("attach" if mapped else "create")
+    assert request.task_statement == _LANE._LEDGER_TASK_STATEMENT
+    assert request.task_statement != request.task_title
+    if mapped:
+        assert request.session_id == session_id
 
 
 _CHILD = textwrap.dedent(
@@ -376,6 +410,15 @@ def test_codex_completion_ignores_tool_output_and_requires_completed_turn() -> N
         "malformed",
     ]:
         assert _LANE._native_done("codex", good + "\n" + suffix) is False
+
+
+@pytest.mark.parametrize("separator", ["\u0085", "\u2028", "\u2029"])
+def test_codex_completion_keeps_unicode_separators_inside_json_records(separator: str) -> None:
+    final = f"Coverage{separator}is bounded.\nDONE"
+    output = _native_output("codex", final).replace(json.dumps(separator)[1:-1], separator) + "\n"
+    assert _LANE._native_done("codex", output) is True
+    workflow = _codex_probe_output(final).replace(json.dumps(separator)[1:-1], separator) + "\n"
+    assert _LANE._codex_workflow_completed(workflow) is True
 
 
 @pytest.mark.parametrize("host", ["codex", "claude", "cursor"])

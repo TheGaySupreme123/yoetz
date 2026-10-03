@@ -101,6 +101,13 @@ PROMPT_PRIVACY_RECOMMENDED: Final = r"Use this recommended privacy policy\? \[Y/
 PROMPT_PRIVACY_CHOICE: Final = r"Choose a privacy option \[\d\]: "
 PROMPT_PRIVACY_CREATE: Final = r"Create this exact privacy proposal .*\? \[y/N\]: "
 PROMPT_PAM_PASSWORD: Final = r"Password for .*: "
+_LEDGER_TASK_STATEMENT: Final = (
+    "Exercise one isolated Yoetz workflow: attach to the host-mapped task or create the "
+    "probe task, publish a plan and an obligation for one ledger round trip, run the "
+    "configured check, retain its exact result and coverage limitations, and request a "
+    "receipt. This is a mechanics probe; do not claim the obligation is satisfied or "
+    "that the check proves product correctness."
+)
 _PROMPT_TEMPLATE: Final = (
     "You are a small integration probe. Use the MCP server/namespace containing '{tool_hint}': "
     "its functions include start, publish_work, and receipt. A function name may omit the "
@@ -108,10 +115,12 @@ _PROMPT_TEMPLATE: Final = (
     "or resource-template lists do not mean these callable tools are unavailable. "
     "You may use host tool discovery/search and execution wrappers solely "
     "to discover and invoke these tools. If they are deferred, discover them before deciding "
-    "they are unavailable. Do exactly these steps and nothing else. "
+    "they are unavailable. Read and verify the packaged guidance required for each "
+    "operation, recovering incomplete pages before continuing. Then do these steps. "
     "1) Call the start tool with protocol_version '0.1', schema_version '1.0.0', a fresh "
     "request_id of the form req_<random uuid4>, mode 'create', task_title 'dogfood native probe', "
     "workspace_ref '{workspace}', external_ref '{external_ref}', requested_view 'compact', "
+    "task_statement set to this entire user message verbatim (not just its title), "
     "actor {{actor_id: 'harness:dogfood-native', actor_type: 'harness'}}, and client "
     "{{kind: 'cooperative_agent', version: '0.1.0', integration: 'cooperative_mcp'}}. "
     "2) Call publish_work once with the session_id, writer_id and frontier that start returned "
@@ -134,7 +143,9 @@ def _native_done(host: str, output: str) -> bool:
         # Codex --json is JSONL. The last completed assistant message is authoritative;
         # a later refusal or turn failure must not inherit an earlier DONE.
         completed = False
-        for line in output.splitlines():
+        for line in output.split("\n"):
+            if not line.strip():
+                continue
             try:
                 event = json.loads(line)
             except ValueError:
@@ -191,7 +202,9 @@ def _codex_workflow_completed(output: str) -> bool:
     published: set[tuple[str, str, str]] = set()
     receipted = False
     completed = False
-    for line in output.splitlines():
+    for line in output.split("\n"):
+        if not line.strip():
+            continue
         try:
             raw = json.loads(line)
         except ValueError:
@@ -1323,6 +1336,7 @@ class Lane:
                 "external_ref": f"dogfood-ci-{self.host}-{self.stamp}",
                 "requested_view": "compact",
             }
+        start_body["task_statement"] = _LEDGER_TASK_STATEMENT
         _, started = self._yoetz(
             "ledger_start",
             phase,
@@ -1699,7 +1713,7 @@ class Lane:
         found: list[str] = []
         for path in self.root.rglob("service.diagnostics.jsonl"):
             try:
-                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+                lines = path.read_text(encoding="utf-8", errors="replace").split("\n")
             except OSError:
                 continue
             for line in lines:
