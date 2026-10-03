@@ -186,6 +186,7 @@ def test_prompt_names_tool_hint_workspace_and_external_ref() -> None:
     assert "plugin_yoetz_yoetz" in prompt and "'/w'" in prompt and "native-claude-1" in prompt
     assert "single_atomic_change" in prompt and prompt.endswith("Do not create or edit files.")
     assert "task_statement set to this entire user message verbatim" in prompt
+    assert "YOETZ_NATIVE_BINDING" in prompt and "exactly these keys" in prompt
     assert "recovering incomplete pages before continuing" in prompt
     assert "mode 'semantic_required'" in prompt
 
@@ -343,7 +344,27 @@ def test_prompt_regexes_match_the_product_prompts_as_rendered() -> None:
     assert re.search(_LANE.PROMPT_PAM_PASSWORD, "Password for runner: ")
 
 
-def _native_output(host: str, text: str) -> str:
+_NATIVE_IDS = {
+    "task_id": "tsk_00000000-0000-4000-8000-000000000001",
+    "session_id": "ses_00000000-0000-4000-8000-000000000002",
+    "writer_id": "wri_00000000-0000-4000-8000-000000000003",
+}
+_NATIVE_START_FRONTIER = {"sequence": "1", "head_digest": "sha256:" + "a" * 64}
+
+
+def _native_binding(*, frontier: dict[str, str] | None = None) -> dict[str, Any]:
+    return {
+        **_NATIVE_IDS,
+        "frontier": dict(frontier or _NATIVE_START_FRONTIER),
+    }
+
+
+def _native_output(
+    host: str,
+    text: str,
+    *,
+    binding: dict[str, Any] | None = None,
+) -> str:
     if host == "codex":
         return "\n".join(
             json.dumps(event)
@@ -353,7 +374,10 @@ def _native_output(host: str, text: str) -> str:
                 {"type": "turn.completed"},
             ]
         )
-    return json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": text})
+    result = text
+    if binding is not None:
+        result = f"YOETZ_NATIVE_BINDING {json.dumps(binding, separators=(',', ':'))}\n{text}"
+    return json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": result})
 
 
 @pytest.mark.parametrize("host", ["codex", "claude", "cursor"])
@@ -392,6 +416,51 @@ def test_native_result_error_and_malformed_output_cannot_supply_completion(host:
     result["is_error"] = False
     result["subtype"] = "error_max_turns"
     assert _LANE._native_done(host, json.dumps(result)) is False
+
+
+@pytest.mark.parametrize("host", ["claude", "cursor"])
+def test_native_binding_marker_is_a_strict_locator(host: str) -> None:
+    output = _native_output(host, "DONE", binding=_native_binding())
+    parsed = _LANE._native_binding_marker(host, output)
+    assert parsed is not None
+    assert parsed["source"] == "final_marker"
+    assert parsed["task_id"] == _NATIVE_IDS["task_id"]
+    assert parsed["frontier"] == _NATIVE_START_FRONTIER
+    assert _LANE._native_binding_marker(host, _native_output(host, "DONE")) is None
+    marker = json.loads(output)["result"].splitlines()[0]
+    malformed = _native_output(
+        host,
+        "DONE",
+        binding={**_native_binding(), "unexpected": True},
+    )
+    assert _LANE._native_binding_marker(host, malformed) is None
+    with_source = _native_output(host, "DONE", binding={**_native_binding(), "source": "fake"})
+    assert _LANE._native_binding_marker(host, with_source) is None
+    duplicate_key_payload = (
+        '{"task_id":"'
+        + _NATIVE_IDS["task_id"]
+        + '","task_id":"'
+        + _NATIVE_IDS["task_id"]
+        + '","session_id":"'
+        + _NATIVE_IDS["session_id"]
+        + '","writer_id":"'
+        + _NATIVE_IDS["writer_id"]
+        + '","frontier":{"sequence":"1","head_digest":"sha256:'
+        + "a" * 64
+        + '"}}'
+    )
+    duplicate_key = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": f"YOETZ_NATIVE_BINDING {duplicate_key_payload}\nDONE",
+        }
+    )
+    assert _LANE._native_binding_marker(host, duplicate_key) is None
+    duplicate = json.loads(output)
+    duplicate["result"] = f"{marker}\n{marker}\nDONE"
+    assert _LANE._native_binding_marker(host, json.dumps(duplicate)) is None
 
 
 def test_codex_completion_ignores_tool_output_and_requires_completed_turn() -> None:
@@ -449,14 +518,18 @@ def test_native_phase_requires_completion_even_with_preexisting_mapping(
     monkeypatch.setattr(lane, "_yoetz", Mock(return_value=(0, {})))
     lane.phase_native_agent()
     verdict = lane.report()["verdict"]
-    assert verdict["agent_ok"] is done
-    assert verdict["green"] is done
+    expected = done if host == "codex" else False
+    assert verdict["agent_ok"] is expected
+    assert verdict["green"] is expected
     step = next(s for s in lane.steps if s.name == "agent_run")
-    assert step.status == ("pass" if done else "fail")
-    assert step.reason == (None if done else "agent_completion_missing")
+    assert step.status == ("pass" if expected else "fail")
+    assert step.reason == (None if expected else "agent_completion_missing")
+    if host != "codex":
+        verification = lane.agent["native_provider_verification"]
+        assert verification["reason"] == "native_binding_marker_missing"
     lane.strict_agent = False
     assert lane.report()["verdict"]["green"] is True
-    assert lane.report()["verdict"]["agent_ok"] is done
+    assert lane.report()["verdict"]["agent_ok"] is expected
 
 
 @pytest.mark.parametrize("host", ["codex", "claude", "cursor"])
@@ -689,7 +762,7 @@ def test_codex_workflow_requires_exact_statement_and_terminal_check() -> None:
         "specification": {
             "status": "complete",
             "revision": 1,
-            "selected_item_ids": ["statement"],
+            "item_ids": ["statement"],
             "content_bytes": len(b"full probe request"),
             "content_digest": "sha256:" + hashlib.sha256(b"full probe request").hexdigest(),
         },
@@ -720,7 +793,7 @@ def test_semantic_specification_requires_exact_provider_bound_input(defect: str 
         "content_digest": "sha256:" + hashlib.sha256(raw).hexdigest(),
         "content_bytes": len(raw),
         "revision": 3,
-        "selected_item_ids": ["task-statement"],
+        "item_ids": ["task-statement"],
     }
     manifest: dict[str, Any] = {
         "schema": "yoetz.review-input-manifest/1",
@@ -741,5 +814,435 @@ def test_semantic_specification_requires_exact_provider_bound_input(defect: str 
     elif defect == "revision":
         specification["revision"] = None
     elif defect == "selection":
-        specification["selected_item_ids"] = []
+        specification["item_ids"] = []
     assert _LANE._specification_manifest_matches(result, statement) is (defect is None)
+
+
+@pytest.mark.parametrize(
+    "item_ids",
+    [
+        ["task-statement", "task-statement"],
+        ["task statement"],
+        ["x" * 129],
+        ["task-statement"] * 65,
+    ],
+)
+def test_semantic_specification_rejects_untyped_or_unbounded_item_ids(
+    item_ids: list[str],
+) -> None:
+    statement = "typed item IDs"
+    raw = statement.encode("utf-8")
+    result = {
+        "review_input_manifest": {
+            "schema": "yoetz.review-input-manifest/1",
+            "phase": "provider_bound",
+            "specification": {
+                "status": "complete",
+                "content_digest": "sha256:" + hashlib.sha256(raw).hexdigest(),
+                "content_bytes": len(raw),
+                "revision": 1,
+                "item_ids": item_ids,
+            },
+        }
+    }
+    assert _LANE._specification_manifest_matches(result, statement) is False
+
+
+def _provider_bound_history_manifest(
+    statement: str, *, digest: str | None = None
+) -> dict[str, Any]:
+    raw = statement.encode("utf-8")
+    section = {
+        "status": "missing",
+        "content_bytes": 0,
+        "content_digest": None,
+        "item_ids": [],
+        "omission_reasons": ["not_selected"],
+        "omitted_refs": [],
+        "source_refs": [],
+        "revision": None,
+    }
+    return {
+        "schema": "yoetz.review-input-manifest/1",
+        "phase": "provider_bound",
+        "specification": {
+            "status": "complete",
+            "revision": 4,
+            "item_ids": ["task-statement"],
+            "content_bytes": len(raw),
+            "content_digest": digest or "sha256:" + hashlib.sha256(raw).hexdigest(),
+            "omission_reasons": [],
+            "omitted_refs": [],
+            "source_refs": ["task-statement"],
+        },
+        "current_diff": section,
+        "caller_evidence": section,
+        "latest_verification": section,
+        "prior_finding_context": section,
+        "missing_inputs": [],
+        "selected_item_count": 1,
+        "selected_excerpt_bytes": len(raw),
+        "omitted_item_count": 0,
+    }
+
+
+def _history_item(
+    schema_name: str,
+    sequence: str,
+    *,
+    publication_channel: str,
+    manifest: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    versions = {
+        "session_opened": "1.2.0",
+        "plan_published": "1.0.0",
+        "check_recorded": "1.3.0",
+        "receipt_recorded": "1.0.0",
+    }
+    actors = {
+        "session_opened": "harness:dogfood-native",
+        "plan_published": "harness:dogfood-native",
+        "check_recorded": "yoetz.engine",
+        "receipt_recorded": "yoetz.engine",
+    }
+    item: dict[str, Any] = {
+        "event_id": f"evt_00000000-0000-4000-8000-{int(sequence):012d}",
+        "schema_name": schema_name,
+        "schema_version": versions[schema_name],
+        "actor_id": actors[schema_name],
+        "publication_channel": publication_channel,
+        "ingestion_sequence": sequence,
+        "occurred_at": "2026-10-03T12:00:00.000Z",
+        "accepted_at": "2026-10-03T12:00:00.000Z",
+        "occurred_at_consistency": "within_forward_skew_allowance",
+        "projection_status": "projected",
+        "summary_code": schema_name,
+    }
+    if manifest is not None:
+        item["review_input_manifest"] = manifest
+    return item
+
+
+def _history_status_page(
+    ids: dict[str, str],
+    frontier: dict[str, str],
+    items: list[dict[str, Any]],
+    next_cursor: str | None,
+) -> dict[str, Any]:
+    return {
+        "ok": True,
+        **ids,
+        "requested_frontier": dict(frontier),
+        "page": {"items": items, "next_cursor": next_cursor},
+    }
+
+
+def _history_fixture(
+    statement: str,
+    *,
+    current_items: list[dict[str, Any]],
+    current_frontier: dict[str, str] | None = None,
+    next_cursor: str | None = None,
+    second_page: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    marker = _native_binding()
+    marker_frontier = cast(dict[str, str], marker["frontier"])
+    current = current_frontier or {
+        "sequence": "9",
+        "head_digest": "sha256:" + "b" * 64,
+    }
+    responses = [
+        _history_status_page(_NATIVE_IDS, marker_frontier, [], None),
+        _history_status_page(_NATIVE_IDS, current, current_items, next_cursor),
+    ]
+    if second_page is not None:
+        responses.append(second_page)
+    return marker, responses
+
+
+def test_native_provider_history_reads_marked_session_without_postrun_attach(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    statement = "Claude/Cursor provider-bound statement with Unicode: שלום"
+    lane = _LANE.Lane(_namespace(tmp_path, host="claude"))
+    lane.evidence.mkdir()
+    current = {"sequence": "9", "head_digest": "sha256:" + "b" * 64}
+    items = [
+        _history_item("session_opened", "2", publication_channel="cooperative_mcp"),
+        _history_item("plan_published", "3", publication_channel="cooperative_mcp"),
+        _history_item(
+            "check_recorded",
+            "5",
+            publication_channel="engine_derived",
+            manifest=_provider_bound_history_manifest(statement),
+        ),
+        _history_item("receipt_recorded", "7", publication_channel="engine_derived"),
+    ]
+    marker, responses = _history_fixture(statement, current_items=items, current_frontier=current)
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def operator(
+        name: str, _phase: str, _args: list[str], **kwargs: Any
+    ) -> tuple[Mock, dict[str, Any]]:
+        calls.append((name, json.loads(kwargs["stdin"])))
+        return Mock(exit_code=0), responses.pop(0)
+
+    monkeypatch.setattr(lane, "_yoetz", operator)
+    assert lane._verify_native_provider_statement("native", statement, marker) is True
+    assert [name for name, _ in calls] == ["native_history_marker_frontier", "native_history_1"]
+    assert all("mode" not in request for _, request in calls)
+    assert calls[0][1]["at_frontier"] == marker["frontier"]["sequence"]
+    assert "filter" not in calls[1][1]
+    assert calls[1][1]["session_id"] == _NATIVE_IDS["session_id"]
+    assert lane.native_provider_verification["plan_sequence"] == "3"
+    assert lane.native_provider_verification["first_provider_bound_sequence"] == "5"
+    assert lane.native_provider_verification["receipt_sequence"] == "7"
+    assert lane.steps[-1].status == "pass"
+
+
+def test_native_provider_history_rejects_fake_marker_without_native_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lane = _LANE.Lane(_namespace(tmp_path, host="cursor"))
+    lane.evidence.mkdir()
+    marker, responses = _history_fixture(
+        "missing native events",
+        current_items=[_history_item("session_opened", "2", publication_channel="cooperative_mcp")],
+    )
+    calls: list[str] = []
+
+    def operator(
+        name: str, _phase: str, _args: list[str], **kwargs: Any
+    ) -> tuple[Mock, dict[str, Any]]:
+        calls.append(name)
+        if name.startswith("native_history"):
+            return Mock(exit_code=0), responses.pop(0)
+        return Mock(exit_code=0), {}
+
+    monkeypatch.setattr(lane, "_yoetz", operator)
+    assert (
+        lane._verify_native_provider_statement("native", "missing native events", marker) is False
+    )
+    assert calls == ["native_history_marker_frontier", "native_history_1"]
+    assert lane.native_provider_verification["reason"] == "native_plan_absent"
+
+
+def test_native_provider_history_requires_receipt_and_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    statement = "receipt is required"
+    lane = _LANE.Lane(_namespace(tmp_path, host="claude"))
+    lane.evidence.mkdir()
+    marker = _native_binding()
+    current = {"sequence": "9", "head_digest": "sha256:" + "c" * 64}
+    base = [
+        _history_item("session_opened", "2", publication_channel="cooperative_mcp"),
+        _history_item("plan_published", "3", publication_channel="cooperative_mcp"),
+        _history_item(
+            "check_recorded",
+            "5",
+            publication_channel="engine_derived",
+            manifest=_provider_bound_history_manifest(statement),
+        ),
+    ]
+    responses = iter(
+        [
+            _history_status_page(_NATIVE_IDS, marker["frontier"], [], None),
+            _history_status_page(_NATIVE_IDS, current, base, None),
+        ]
+    )
+    monkeypatch.setattr(
+        lane,
+        "_yoetz",
+        Mock(side_effect=[(Mock(exit_code=0), response) for response in responses]),
+    )
+    assert lane._verify_native_provider_statement("native", statement, marker) is False
+    assert lane.native_provider_verification["reason"] == "native_receipt_absent"
+
+    wrong_order = [
+        *base,
+        _history_item("receipt_recorded", "4", publication_channel="engine_derived"),
+    ]
+    responses = iter(
+        [
+            _history_status_page(_NATIVE_IDS, marker["frontier"], [], None),
+            _history_status_page(_NATIVE_IDS, current, wrong_order, None),
+        ]
+    )
+    lane.native_provider_verification = {}
+    monkeypatch.setattr(
+        lane,
+        "_yoetz",
+        Mock(side_effect=[(Mock(exit_code=0), response) for response in responses]),
+    )
+    assert lane._verify_native_provider_statement("native", statement, marker) is False
+    verification = cast(dict[str, Any], getattr(lane, "native_provider_verification", {}))
+    assert verification["reason"] == "native_workflow_order_invalid"
+
+
+def test_native_provider_history_rejects_first_manifest_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    statement = "exact statement"
+    lane = _LANE.Lane(_namespace(tmp_path, host="claude"))
+    lane.evidence.mkdir()
+    marker = _native_binding()
+    current = {"sequence": "9", "head_digest": "sha256:" + "d" * 64}
+    items = [
+        _history_item("session_opened", "2", publication_channel="cooperative_mcp"),
+        _history_item("plan_published", "3", publication_channel="cooperative_mcp"),
+        _history_item(
+            "check_recorded",
+            "5",
+            publication_channel="engine_derived",
+            manifest=_provider_bound_history_manifest(statement, digest="sha256:" + "0" * 64),
+        ),
+        _history_item("receipt_recorded", "7", publication_channel="engine_derived"),
+    ]
+    responses = iter(
+        [
+            _history_status_page(_NATIVE_IDS, marker["frontier"], [], None),
+            _history_status_page(_NATIVE_IDS, current, items, None),
+        ]
+    )
+    monkeypatch.setattr(
+        lane,
+        "_yoetz",
+        Mock(side_effect=[(Mock(exit_code=0), response) for response in responses]),
+    )
+    assert lane._verify_native_provider_statement("native", statement, marker) is False
+    assert lane.native_provider_verification["reason"] == "native_provider_bound_manifest_mismatch"
+
+
+def test_native_provider_history_exhausts_paged_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    statement = "paged native statement"
+    lane = _LANE.Lane(_namespace(tmp_path, host="cursor"))
+    lane.evidence.mkdir()
+    marker = _native_binding()
+    current = {"sequence": "9", "head_digest": "sha256:" + "e" * 64}
+    first_page = [
+        _history_item("session_opened", "2", publication_channel="cooperative_mcp"),
+        _history_item("plan_published", "3", publication_channel="cooperative_mcp"),
+        _history_item(
+            "check_recorded",
+            "5",
+            publication_channel="engine_derived",
+            manifest=_provider_bound_history_manifest(statement),
+        ),
+    ]
+    second_page = _history_status_page(
+        _NATIVE_IDS,
+        current,
+        [_history_item("receipt_recorded", "7", publication_channel="engine_derived")],
+        None,
+    )
+    responses = [
+        _history_status_page(_NATIVE_IDS, marker["frontier"], [], None),
+        _history_status_page(_NATIVE_IDS, current, first_page, "cursor-next"),
+        second_page,
+    ]
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def operator(
+        name: str, _phase: str, _args: list[str], **kwargs: Any
+    ) -> tuple[Mock, dict[str, Any]]:
+        calls.append((name, json.loads(kwargs["stdin"])))
+        return Mock(exit_code=0), responses.pop(0)
+
+    monkeypatch.setattr(lane, "_yoetz", operator)
+    assert lane._verify_native_provider_statement("native", statement, marker) is True
+    assert lane.native_provider_verification["history_pages"] == 2
+    assert calls[2][1]["cursor"] == "cursor-next"
+
+
+def test_native_provider_history_requires_locator_before_any_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lane = _LANE.Lane(_namespace(tmp_path, host="claude"))
+    lane.evidence.mkdir()
+    invoke = Mock()
+    monkeypatch.setattr(lane, "_yoetz", invoke)
+    assert lane._verify_native_provider_statement("native", "no locator") is False
+    assert invoke.call_count == 0
+    assert lane.native_provider_verification["reason"] == "native_binding_marker_missing"
+
+
+def test_native_binding_prefers_exact_observation_locator() -> None:
+    observed = {
+        "adapter": {
+            "external_ref": "native-claude-stamp",
+            "native_binding": {**_native_binding(), "source": "adapter"},
+        }
+    }
+    assert _LANE._native_binding_from_observation(observed) is None
+    result = _LANE._native_binding_from_observation(
+        observed, external_ref="native-claude-stamp", workspace="/native"
+    )
+    assert result is not None
+    assert result["source"] == "observation"
+    assert result["task_id"] == _NATIVE_IDS["task_id"]
+    direct = {**_native_binding(), "native_external_ref": "native-claude-stamp"}
+    assert (
+        _LANE._native_binding_from_observation(direct, external_ref="native-claude-stamp") == result
+    )
+
+
+def test_native_phase_uses_locator_and_read_only_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    statement = "native phase statement"
+    lane = _LANE.Lane(_namespace(tmp_path, host="claude", strict_agent=True, skip_agent=False))
+    lane.evidence.mkdir()
+    marker = _native_binding()
+    output = _native_output("claude", "DONE", binding=marker)
+    current = {"sequence": "9", "head_digest": "sha256:" + "f" * 64}
+    items = [
+        _history_item("session_opened", "2", publication_channel="cooperative_mcp"),
+        _history_item("plan_published", "3", publication_channel="cooperative_mcp"),
+        _history_item(
+            "check_recorded",
+            "5",
+            publication_channel="engine_derived",
+            manifest=_provider_bound_history_manifest(statement),
+        ),
+        _history_item("receipt_recorded", "7", publication_channel="engine_derived"),
+    ]
+    responses = [
+        _history_status_page(_NATIVE_IDS, marker["frontier"], [], None),
+        _history_status_page(_NATIVE_IDS, current, items, None),
+    ]
+    calls: list[str] = []
+    monkeypatch.setattr(lane, "_agent_command", Mock(return_value=(["native"], {}, None)))
+    monkeypatch.setattr(lane, "_run", Mock(return_value=(0, output, "", 1)))
+    monkeypatch.setattr(lane, "_observe_status", Mock(return_value={"mapping_present": True}))
+    monkeypatch.setattr(lane, "_observe_drain", Mock(return_value=None))
+    stale = {
+        "task_id": "tsk_00000000-0000-4000-8000-000000000004",
+        "session_id": "ses_00000000-0000-4000-8000-000000000005",
+        "writer_id": "wri_00000000-0000-4000-8000-000000000006",
+        "external_ref": "dogfood-ci-claude-stale-probe",
+    }
+    lane.observation = {"earlier_ledger_probe": stale}
+
+    def operator(
+        name: str, _phase: str, _args: list[str], **kwargs: Any
+    ) -> tuple[Mock, dict[str, Any]]:
+        calls.append(name)
+        if name.startswith("native_history"):
+            return Mock(exit_code=0), responses.pop(0)
+        return Mock(exit_code=0), {}
+
+    monkeypatch.setattr(lane, "_yoetz", operator)
+    lane.native_prompt = statement
+    lane.phase_native_agent()
+    assert lane.report()["verdict"]["agent_ok"] is True
+    process_steps = [step for step in lane.steps if step.name == "native_process_result"]
+    assert len(process_steps) == 1
+    assert process_steps[0].status == "pass"
+    assert process_steps[0].summary["binding_marker_present"] is True
+    assert calls[:2] == ["native_history_marker_frontier", "native_history_1"]
+    assert lane.native_provider_verification["task_id"] == marker["task_id"]
+    assert "native_operator_attach" not in calls
+    assert "start" not in calls
