@@ -7,26 +7,27 @@ const SITE = "https://yoetz.dev";
 const GITHUB = "https://github.com/TheGaySupreme123/yoetz";
 const PYPI = "https://pypi.org/project/yoetz/";
 const NPM = "https://www.npmjs.com/package/yoetz";
-const VERSION = landingPackage.version;
+const DOCS = `${GITHUB}/tree/main/docs/usage`;
 const RELEASES = `${GITHUB}/releases`;
-const ROADMAP = `${GITHUB}/issues`;
+const VERSION = landingPackage.version;
 // Unpinned on purpose: the site must never name a version PyPI does not have (a pinned
 // 0.2.0 shipped once and failed every PyPI install). uv resolves the latest release and
-// fetches Python 3.14 itself, whatever other Pythons the machine has.
+// fetches Python 3.14 itself, whatever other Pythons the machine has. The package keeps
+// its `yoetz` name on PyPI and npm until the rename ships there.
 const INSTALL_COMMAND = "uv tool install --managed-python --python 3.14.6 yoetz";
 const NPM_COMMAND = "npx yoetz";
-const AGENT_PROMPT = `I want to install Yoetz (${GITHUB}). Start by fetching its agent install guide and follow it exactly:
+const AGENT_PROMPT = `I want to install FinishUP (${GITHUB}). Start by fetching its agent install guide and follow it exactly:
 
 curl -fsSL https://raw.githubusercontent.com/TheGaySupreme123/yoetz/main/docs/usage/agent-start.md
 
 It tells you what to run yourself, what to ask me, and where to hand me the terminal. If your sandbox blocks that fetch, ask me to approve it or to paste the guide. Then help me through the CLI: setup's questions are mine to answer, so ask me each one and wait, and show me any proposed change before it is applied.`;
-const TITLE = "Yoetz: honest completion checks for AI coding agents";
+const TITLE = "FinishUP: agents start, FinishUP finishes";
 const DESCRIPTION =
-  "Yoetz is a local-first, open-source work ledger for AI coding agents. An agent publishes what it did; Yoetz checks the record and issues a receipt that states what was verified, at what coverage, and what is still open. First-party for Codex, Claude Code, and Cursor.";
+  "FinishUP checks what your coding agents actually finished and tells you what is left. Open source, fully local, free. First-party for Codex, Claude Code, and Cursor.";
 const structuredData = {
   "@context": "https://schema.org",
   "@type": "SoftwareSourceCode",
-  name: "Yoetz",
+  name: "FinishUP",
   description: DESCRIPTION,
   url: SITE,
   codeRepository: GITHUB,
@@ -35,169 +36,25 @@ const structuredData = {
   license: "https://www.apache.org/licenses/LICENSE-2.0",
 };
 
-// Terminal transcript. Colors match the design-system terminal palette.
-const faint = "#64748b";
-const dim = "#94a3b8";
-const bright = "#f8fafc";
-const soft = "#cbd5e1";
-const light = "#e2e8f0";
-const teal = "#2dd4bf";
-const glow = "#5eead4";
-const amber = "#fbbf24";
-const amberDeep = "#f59e0b";
-const amberSoft = "#fcd34d";
-
-// Host dressing for the terminal replay: each script plays as its own CLI.
-type HostKey = "codex" | "claude" | "cursor";
-type Host = { name: string; logo: string; prompt: string; accent: string; think: string; dark: boolean };
-const hosts: Record<HostKey, Host> = {
-  codex: { name: "Codex", logo: "/assets/openai.svg", prompt: "›", accent: "#7dd3fc", think: "•", dark: true },
-  claude: { name: "Claude Code", logo: "/assets/claude.svg", prompt: ">", accent: "#f4a58a", think: "⏺", dark: false },
-  cursor: { name: "Cursor", logo: "/assets/cursor.svg", prompt: "❯", accent: "#e2e8f0", think: "◆", dark: true },
-};
-
-type TermLine = {
-  pre?: string;
-  preC?: string;
-  op?: string;
-  rest?: string;
-  restC?: string;
-  finding?: boolean;
-  ts?: number;
-  d?: number;
-};
-
-type TermScript = { host: HostKey; title: string; lines: TermLine[]; hostName?: string; logo?: string; dark?: boolean };
-
-// Four replays, one per visit, one per host. Every finding shown maps to a
-// real local-check rule (work-integrity/0.1.0) or an AI-powered reviewer
-// challenge, and every receipt conclusion is a real one.
-const termScripts: TermScript[] = [
-  {
-    // stale_evidence_for_changed_state + requested_item_never_attempted
-    host: "codex",
-    title: "~/packetforge",
-    lines: [
-      { pre: "$", preC: glow, rest: "codex", restC: bright, d: 260 },
-      { pre: "›", preC: "#7dd3fc", rest: "Refactor the rate limiter. Keep the /limits response shape and make sure tests pass.", restC: light, ts: 8, d: 300 },
-      { d: 90 },
-      { pre: "•", preC: faint, rest: "I'll plan this first and record the obligations in yoetz.", restC: soft, ts: 9, d: 200 },
-      { pre: "⚙", preC: teal, op: "yoetz", rest: "start · publish_work · plan, 3 obligations", restC: dim, d: 300 },
-      { pre: "⚡", preC: amber, rest: "Edited src/limiter.py  (+118 −74)", restC: dim, d: 200 },
-      { pre: "⚡", preC: amber, rest: "Ran pytest · 41 passed", restC: dim, d: 360 },
-      { d: 90 },
-      { pre: "•", preC: faint, rest: "Tests pass. Checking with yoetz before I claim done.", restC: soft, ts: 9, d: 220 },
-      { pre: "⚙", preC: teal, op: "yoetz", rest: "check · action_required · 2 findings", restC: amber, d: 300 },
-      { pre: "✗", preC: amberDeep, rest: "“tests pass” cites a run older than the last edit", restC: amberSoft, finding: true, d: 220 },
-      { pre: "✗", preC: amberDeep, rest: "/limits response shape was never verified", restC: amberSoft, finding: true, d: 400 },
-      { d: 90 },
-      { pre: "•", preC: faint, rest: "Fair catch. Fixing, then re-running.", restC: soft, ts: 9, d: 220 },
-      { pre: "⚡", preC: amber, rest: "Restored /limits shape · Ran pytest · 43 passed", restC: dim, d: 300 },
-      { pre: "⚙", preC: teal, op: "yoetz", rest: "respond · acknowledged · check · no_issue_detected", restC: dim, d: 220 },
-      { pre: "⚙", preC: teal, op: "yoetz", rest: "receipt · unresolved_findings_remain · deterministic · coverage-bounded", restC: glow, d: 300 },
-      { d: 90 },
-      { pre: "▸", preC: teal, rest: "Done. Limiter refactored, and the receipt still carries the two findings I hit on the way.", restC: bright, ts: 8, d: 160 },
-    ],
-  },
-  {
-    // failed_work_omitted, caught through Claude Code hook observation
-    host: "claude",
-    title: "~/checkout-api",
-    lines: [
-      { pre: "$", preC: glow, rest: "claude", restC: bright, d: 260 },
-      { pre: "›", preC: "#7dd3fc", rest: "Move session storage to Redis. Logins must keep working across deploys.", restC: light, ts: 8, d: 300 },
-      { d: 90 },
-      { pre: "⚙", preC: teal, op: "yoetz", rest: "SessionStart hook · attached to task issue-204", restC: dim, d: 240 },
-      { pre: "•", preC: faint, rest: "Yoetz is already on this task. Recording the plan.", restC: soft, ts: 9, d: 200 },
-      { pre: "⚙", preC: teal, op: "yoetz", rest: "publish_work · plan, 2 obligations", restC: dim, d: 300 },
-      { pre: "⚡", preC: amber, rest: "Edited src/sessions.py  (+96 −41)", restC: dim, d: 200 },
-      { pre: "⚡", preC: amber, rest: "Ran pytest · 2 failed · 38 passed", restC: dim, d: 240 },
-      { pre: "⚙", preC: teal, op: "yoetz", rest: "publish_work · result_recorded · failure · exit 1", restC: dim, d: 240 },
-      { pre: "⚡", preC: amber, rest: "Fixed TTL rounding · Ran pytest · 40 passed", restC: dim, d: 360 },
-      { d: 90 },
-      { pre: "•", preC: faint, rest: "Green now. Claiming done, citing the passing run.", restC: soft, ts: 9, d: 220 },
-      { pre: "⚙", preC: teal, op: "yoetz", rest: "publish_work · claim_recorded · check · action_required · 1 finding", restC: amber, d: 300 },
-      { pre: "✗", preC: amberDeep, rest: "failed_work_omitted: the claim leaves out the failing run recorded earlier", restC: amberSoft, finding: true, d: 400 },
-      { d: 90 },
-      { pre: "•", preC: faint, rest: "Right — that failure is on the ledger. Disclosing it, not deleting it.", restC: soft, ts: 9, d: 220 },
-      { pre: "⚙", preC: teal, op: "yoetz", rest: "publish_work · revised claim links the failure and the fix", restC: dim, d: 240 },
-      { pre: "⚙", preC: teal, op: "yoetz", rest: "respond · acknowledged · check · no_issue_detected", restC: dim, d: 220 },
-      { pre: "⚙", preC: teal, op: "yoetz", rest: "receipt · unresolved_findings_remain · deterministic · coverage-bounded", restC: glow, d: 300 },
-      { d: 90 },
-      { pre: "▸", preC: teal, rest: "Done. Sessions live in Redis, and the receipt keeps the omitted failure visible.", restC: bright, ts: 8, d: 160 },
-    ],
-  },
-  {
-    // completion_with_open_obligations, in Cursor
-    host: "cursor",
-    title: "~/imgproxy",
-    lines: [
-      { pre: "$", preC: glow, rest: "cursor-agent", restC: bright, d: 260 },
-      { pre: "›", preC: "#7dd3fc", rest: "Add WebP output to the image pipeline. Keep peak memory where it is.", restC: light, ts: 8, d: 300 },
-      { d: 90 },
-      { pre: "•", preC: faint, rest: "Two asks, so two obligations on the ledger before I touch code.", restC: soft, ts: 9, d: 200 },
-      { pre: "⚙", preC: teal, op: "yoetz", rest: "start · publish_work · plan, 2 obligations", restC: dim, d: 300 },
-      { pre: "⚡", preC: amber, rest: "Edited src/encoder.py  (+142 −18)", restC: dim, d: 200 },
-      { pre: "⚡", preC: amber, rest: "Ran pytest · 52 passed", restC: dim, d: 360 },
-      { d: 90 },
-      { pre: "•", preC: faint, rest: "Encoder works, tests pass. Publishing the completion claim.", restC: soft, ts: 9, d: 220 },
-      { pre: "⚙", preC: teal, op: "yoetz", rest: "publish_work · claim_recorded · check · action_required · 1 finding", restC: amber, d: 300 },
-      { pre: "✗", preC: amberDeep, rest: "completion claimed while “peak memory stays flat” is still open", restC: amberSoft, finding: true, d: 400 },
-      { d: 90 },
-      { pre: "•", preC: faint, rest: "True — I never measured memory. Benchmarking before I claim again.", restC: soft, ts: 9, d: 220 },
-      { pre: "⚡", preC: amber, rest: "Ran bench_memory · peak 212MB → 214MB", restC: dim, d: 300 },
-      { pre: "⚙", preC: teal, op: "yoetz", rest: "publish_work · evidence + revised claim answers both obligations", restC: dim, d: 240 },
-      { pre: "⚙", preC: teal, op: "yoetz", rest: "respond · acknowledged · check · no_issue_detected", restC: dim, d: 220 },
-      { pre: "⚙", preC: teal, op: "yoetz", rest: "receipt · unresolved_findings_remain · deterministic · coverage-bounded", restC: glow, d: 300 },
-      { d: 90 },
-      { pre: "▸", preC: teal, rest: "Done. WebP shipped, memory actually measured, and the skipped check stays in the receipt.", restC: bright, ts: 8, d: 160 },
-    ],
-  },
-  {
-    // AI-powered reviewer challenge; clean local-check receipt
-    host: "claude",
-    title: "~/authsvc",
-    lines: [
-      { pre: "$", preC: glow, rest: "claude", restC: bright, d: 260 },
-      { pre: "›", preC: "#7dd3fc", rest: "Rotate the JWT signing key. No one gets logged out mid-session.", restC: light, ts: 8, d: 300 },
-      { d: 90 },
-      { pre: "•", preC: faint, rest: "Recording the plan. This one deserves AI-powered review at the end.", restC: soft, ts: 9, d: 200 },
-      { pre: "⚙", preC: teal, op: "yoetz", rest: "start · publish_work · plan, 2 obligations", restC: dim, d: 300 },
-      { pre: "⚡", preC: amber, rest: "Edited src/keys.py  (+88 −23)", restC: dim, d: 200 },
-      { pre: "⚡", preC: amber, rest: "Ran pytest · 47 passed", restC: dim, d: 360 },
-      { d: 90 },
-      { pre: "•", preC: faint, rest: "Claiming done, and asking for the full check, reviewer included.", restC: soft, ts: 9, d: 220 },
-      { pre: "⚙", preC: teal, op: "yoetz", rest: "publish_work · claim_recorded · check · AI-powered review · ChatGPT plan", restC: dim, d: 300 },
-      { pre: "✗", preC: amberDeep, rest: "reviewer: tokens signed by the old key are never verified during the grace window", restC: amberSoft, finding: true, d: 400 },
-      { d: 90 },
-      { pre: "•", preC: faint, rest: "The reviewer is right — I tested new-key issuance, not old-key acceptance.", restC: soft, ts: 9, d: 220 },
-      { pre: "⚡", preC: amber, rest: "Added test_grace_window_accepts_old_key · Ran pytest · 48 passed", restC: dim, d: 300 },
-      { pre: "⚙", preC: teal, op: "yoetz", rest: "publish_work · evidence · check · no_issue_detected", restC: dim, d: 220 },
-      { pre: "⚙", preC: teal, op: "yoetz", rest: "receipt · no_unresolved_deterministic_findings · coverage-bounded", restC: glow, d: 300 },
-      { d: 90 },
-      { pre: "▸", preC: teal, rest: "Done. The rotation ships with the case I forgot now tested — the reviewer caught it, not me.", restC: bright, ts: 8, d: 160 },
-    ],
-  },
+// The scroll story: one scene per screen, in order. `screens` is how many viewport
+// heights the scene spans; the sun rises across three so each stop gets its own line.
+const plan = [
+  ["hero", 1],
+  ["alone", 1],
+  ["swarm", 1],
+  ["robot", 3],
+  ["sun", 3],
+  ["end", 1],
 ];
-for (const sc of termScripts) {
-  const h = hosts[sc.host];
-  sc.hostName = h.name;
-  sc.logo = h.logo;
-  sc.dark = h.dark;
-  for (const ln of sc.lines) {
-    if (ln.pre === "›") { ln.pre = h.prompt; ln.preC = h.accent; }
-    else if (ln.pre === "•") ln.pre = h.think;
-  }
-}
-const termLines = termScripts[0].lines;
-const firstHost = hosts[termScripts[0].host];
 
-// Coming soon.
-const next = [
-  { key: "delegate", title: "Delegate", text: "A parent mints a child task with an expiring handle. The child publishes, checks, and gets its own receipt." },
-  { key: "rollup", title: "Roll up", text: "Parent receipts carry child findings one level up. A clean child receipt never proves integration." },
-  { key: "coordinate", title: "Coordinate", text: "Two live tasks in one repository get grouped. With consent on both sides, each is told the other declared the same path." },
-];
+// The sunrise is a benchmark: one model on Codex alone, then with Local FinishUP, then
+// with AI-powered FinishUP. Fill these in from the run; the page shows them as given.
+const BENCH = {
+  model: "[MODEL]",
+  alone: "[score]",
+  local: "[score]",
+  ai: "[score]",
+};
 ---
 
 <html lang="en">
@@ -208,14 +65,14 @@ const next = [
     <meta name="description" content={DESCRIPTION} />
     <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />
     <link rel="canonical" href={`${SITE}/`} />
-    <link rel="icon" href="/assets/yoetz-mark.png" type="image/png" />
-    <link rel="apple-touch-icon" href="/assets/yoetz-mark.png" />
-    <meta name="theme-color" content="#0f172a" />
+    <link rel="icon" href="/assets/finishup-mark.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/assets/finishup-mark.svg" />
+    <meta name="theme-color" content="#fafdf9" />
     <meta property="og:title" content={TITLE} />
     <meta property="og:description" content={DESCRIPTION} />
     <meta property="og:type" content="website" />
     <meta property="og:url" content={`${SITE}/`} />
-    <meta property="og:site_name" content="Yoetz" />
+    <meta property="og:site_name" content="FinishUP" />
     <meta property="og:image" content={`${SITE}/assets/og.png`} />
     <meta property="og:locale" content="en_US" />
     <meta name="twitter:card" content="summary_large_image" />
@@ -223,493 +80,239 @@ const next = [
     <meta name="twitter:description" content={DESCRIPTION} />
     <meta name="twitter:image" content={`${SITE}/assets/og.png`} />
     <script type="application/ld+json" set:html={JSON.stringify(structuredData)} />
-    <noscript>
-      <style>
-        .term-body .tl[hidden] { display: flex; }
-      </style>
-    </noscript>
+    <script is:inline type="application/json" id="story-plan" set:html={JSON.stringify(plan)} />
   </head>
   <body>
-    <!-- Hero -->
-    <section id="top" class="ds-hero">
-      <div class="hero-stack">
-        <div class="hero-copy">
-          <h1 class="ds-h1">
-            <span class="line">Agents claim they're done.</span>
-            <span class="line grad"><img class="h1-logo" src="/assets/yoetz-logo.png" alt="Yoetz" /> checks if they're actually done.</span>
-          </h1>
-          <p class="sr-only">A receipt for every claim: what was verified, and what is still open.</p>
-          <div class="hx" aria-hidden="true">
-            <div class="hx-card hx-agent">
-              <div class="hx-eyebrow">Agent says</div>
-              <div class="hx-row hx-say"><span class="hx-mark">›</span>Done. Refactored, tests pass.<span class="hx-caret"></span></div>
-            </div>
-            <div class="hx-link"><span class="hx-dot hx-dot1"></span></div>
-            <div class="hx-card hx-check">
-              <div class="hx-eyebrow">Yoetz checks the record</div>
-              <div class="hx-scan"></div>
-              <div class="hx-row hx-c1"><span class="hx-mark ok">✓</span>plan · 3 obligations</div>
-              <div class="hx-row hx-c2"><span class="hx-mark ok">✓</span>edited src/limiter.py</div>
-              <div class="hx-row hx-c3"><span class="hx-mark">·</span>tests pass · 41 passed</div>
-              <div class="hx-row hx-c4 flag"><span class="hx-mark">✗</span>that run predates the last edit</div>
-            </div>
-            <div class="hx-link"><span class="hx-dot hx-dot2"></span></div>
-            <div class="hx-card hx-receipt">
-              <div class="hx-eyebrow">You get a receipt<span class="hx-stamp">issued</span></div>
-              <div class="hx-row hx-r1"><span class="hx-k">verified</span>2 of 3 obligations</div>
-              <div class="hx-row hx-r2"><span class="hx-k">coverage</span><span class="hx-bar"><span class="hx-fill"></span></span></div>
-              <div class="hx-row hx-r3 flag"><span class="hx-k">open</span>1 finding · stale run</div>
-            </div>
-          </div>
-
-          <div class="hero-installers">
-            <div class="inst-tabs" role="group" aria-label="Install options">
-              <button class="inst-tab agent" type="button" id="agent-copy" data-command={AGENT_PROMPT}>
-                <span id="agent-copy-label">Set up with your agent</span> <span class="rec">recommended</span>
-              </button>
-              <button class="inst-tab manual" type="button" id="manual-toggle" aria-expanded="false" aria-controls="manual-panel">
-                <span id="manual-label">Install manually</span>
-                <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
-              </button>
-            </div>
-            <div class="manual-panel" id="manual-panel" hidden>
-              <span class="manual-label">Copy a command</span>
-              <button class="inst-tab" type="button" data-key="pypi" data-command={INSTALL_COMMAND}>Install with PyPI</button>
-              <button class="inst-tab" type="button" data-key="npm" data-command={NPM_COMMAND}>Install with npm</button>
-            </div>
-
-            <div class="next-steps" id="copy-toast" role="status" aria-live="polite" hidden>
-              <div class="ns-head">
-                <span class="ns-check" aria-hidden="true">✓</span>
-                <span class="ns-title" id="ns-title"></span>
-                <button class="ns-close" id="ns-close" type="button" aria-label="Dismiss">×</button>
-              </div>
-              <code class="ns-cmd" id="copy-toast-cmd" hidden></code>
-              <ol class="ns-steps" id="ns-steps"></ol>
-              <p class="ns-foot" id="ns-foot" hidden></p>
-            </div>
-
-            <p class="inst-note agent-note">
-              <span class="d">Copies a prompt. Paste it into your agent: it installs Yoetz and shows you every change first.</span>
-              <span class="m">Copies a prompt. Stable on macOS; Linux and Windows (via <a href={`${GITHUB}/blob/main/docs/usage/install-and-first-run.md#windows`}>WSL&nbsp;2</a>) experimental.</span>
-            </p>
-            <p class="inst-note platform-note">
-              <span class="d">Stable on macOS. Linux and Windows (via <a href={`${GITHUB}/blob/main/docs/usage/install-and-first-run.md#windows`}>WSL 2</a>) are experimental.</span>
-            </p>
-          </div>
-          <div class="hero-hosts" aria-label="Officially supported agents">
-            <span class="hero-hosts-label">Officially supports</span>
-            <span class="host-pill"><img src="/assets/openai.svg" alt="" /> Codex</span>
-            <span class="host-pill"><img src="/assets/claude.svg" alt="" /> Claude Code <em class="new">new</em></span>
-            <span class="host-pill"><img src="/assets/cursor.svg" alt="" /> Cursor <em class="new">new</em></span>
-          </div>
-          <div class="hero-meta">
-              <a class="hero-star" href={GITHUB} target="_blank" rel="noopener" aria-label="Star Yoetz on GitHub">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"></path></svg>
-                Star us on GitHub
-              </a>
-              <a class="hero-license" href={`${GITHUB}/blob/main/LICENSE`} target="_blank" rel="noopener">
-                <span class="l">open source</span>
-                <span class="r">Apache-2.0</span>
-              </a>
-              <a class="hero-ph" href="https://www.producthunt.com/products/yoetz?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-yoetz" target="_blank" rel="noopener noreferrer"><img alt="Yoetz - Check to see if AI really completed a task or if it had gaps | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1254021&amp;theme=light&amp;t=1789716006971" /></a>
-          </div>
-        </div>
-
+    <header class="nav">
+      <div class="nav-inner">
+        <a class="lockup" href="#top" aria-label="FinishUP home">
+          <img src="/assets/finishup-mark.svg" alt="" width="30" height="30" />
+          <span>FinishUP</span>
+        </a>
+        <nav class="nav-links" aria-label="Site">
+          <a class="lnk" href="#alone">Story</a>
+          <a class="lnk" href="#benchmark">Benchmark</a>
+          <a class="lnk" href="#local">Local</a>
+          <a class="lnk" href="#ai">AI-powered</a>
+          <a class="lnk" href={DOCS} target="_blank" rel="noopener">Docs</a>
+          <a class="lnk" href={GITHUB} target="_blank" rel="noopener">GitHub</a>
+          <button class="btn sm add-agent" type="button" data-prompt={AGENT_PROMPT}>Add to your agent</button>
+        </nav>
       </div>
-    </section>
+    </header>
 
-    <!-- Screen 2: what you see in the terminal -->
-    <section id="see" class="see-section">
-      <div class="see-inner">
-        <div class="see-copy">
-          <span class="ds-kicker">Working in the background</span>
-          <h2 class="ds-h2"><span class="brand">Yoetz</span> makes sure your agent never loses track.</h2>
-          <p class="ds-lead">By keeping two records: what the agent says it did, and what it actually did.</p>
-          <div class="see-art" aria-hidden="true">
-            <svg viewBox="0 0 400 200" fill="none" stroke-linecap="round" stroke-linejoin="round">
-              <text x="8" y="13" class="art-tag">what it says</text>
-              <rect x="8" y="20" width="154" height="48" rx="9" class="art-box on" />
-              <text x="18" y="40" class="art-txt on">claim · done ✓</text>
-              <text x="18" y="56" class="art-txt sub">“tests pass”</text>
-
-              <text x="8" y="111" class="art-tag">what it did</text>
-              <rect x="8" y="118" width="154" height="62" rx="9" class="art-box" />
-              <text x="18" y="138" class="art-txt">edited src/limiter.py</text>
-              <text x="18" y="154" class="art-txt">pytest · 41 passed</text>
-              <text x="18" y="170" class="art-txt warn">…run before the edit</text>
-
-              <path d="M162 44 C 184 44, 184 100, 206 100" class="art-line on" />
-              <path d="M162 149 C 184 149, 184 100, 206 100" class="art-line on" />
-
-              <rect x="206" y="78" width="84" height="44" rx="10" class="art-box on solid" />
-              <text x="248" y="97" class="art-txt inv" text-anchor="middle">yoetz</text>
-              <text x="248" y="112" class="art-txt inv" text-anchor="middle" opacity="0.85">compares</text>
-
-              <path d="M290 100 C 310 100, 310 52, 326 52" class="art-line warn" />
-              <path d="M290 100 C 310 100, 310 148, 326 148" class="art-line on" />
-              <rect x="326" y="34" width="72" height="36" rx="8" class="art-box warn" />
-              <text x="362" y="49" class="art-txt warn" text-anchor="middle">finding</text>
-              <text x="362" y="62" class="art-tag warn" text-anchor="middle">stale run</text>
-              <rect x="326" y="130" width="72" height="36" rx="8" class="art-box on" />
-              <text x="362" y="145" class="art-txt on" text-anchor="middle">receipt</text>
-              <text x="362" y="158" class="art-tag on" text-anchor="middle">what’s open</text>
-            </svg>
-          </div>
-          <p class="see-note">A disagreement is a finding. The agent fixes it, rechecks, and you get a receipt.</p>
+    <main>
+      <div class="story" id="story">
+        <div class="stage" aria-hidden="true">
+          <canvas id="particles"></canvas>
         </div>
-        <div class="see-demo">
-        <div class="hero-demo">
-            <div class="term-card">
-            <div class="term-head">
-              <div class="term-dots"><span></span><span></span><span></span></div>
-              <img class={`term-host${firstHost.dark ? " invert" : ""}`} src={firstHost.logo} alt="" />
-              <span class="term-title">{firstHost.name} · {termScripts[0].title}</span>
-              <span class="term-pill">yoetz · local</span>
-            </div>
-            <div class="term-body" id="term" aria-hidden="true">
-              {termLines.map((ln) =>
-                ln.pre || ln.op || ln.rest ? (
-                  <div
-                    class={`tl${ln.finding ? " tl-finding" : ""}`}
-                    hidden
-                    data-d={ln.d}
-                    data-ts={ln.ts}
-                  >
-                    <span class="tl-pre" style={`color: ${ln.preC ?? faint};`}>{ln.pre}</span>
-                    {ln.op && <span class="tl-op">{ln.op}</span>}
-                    <span class="tl-rest" style={`color: ${ln.restC ?? dim};`}>{ln.rest}</span>
-                  </div>
-                ) : (
-                  <div class="tl tl-gap" data-d={ln.d} hidden></div>
-                )
-              )}
-              <div class="term-cursor-line" id="term-cursor" hidden>
-                <span class="tl-pre">$</span>
-                <span class="dx-caret"></span>
-              </div>
+
+        <div class="scenes">
+          <section id="top" class="scene hero" data-scene="hero">
+            <p class="stanza center hero-top">We use agents to do</p>
+            <div class="hero-bottom">
+              <p class="stanza center">FinishUP <span class="accent">makes sure they do it.</span></p>
+              <div class="actions">
+                <button class="btn add-agent" type="button" data-prompt={AGENT_PROMPT}>Add to your agent</button>
+                <a class="btn quiet" href="#alone">See the story
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12l7 7 7-7" /></svg>
+                </a>
               </div>
             </div>
-          </div>
-        </div>
-      </div>
-      <script is:inline type="application/json" id="term-scripts" set:html={JSON.stringify(termScripts)} />
-    </section>
+          </section>
 
-    <!-- Screen 3: under the hood -->
-    <section id="inside" class="inside-section">
-      <div class="ds-section-head">
-        <span class="ds-kicker">Under the hood</span>
-        <h2 class="ds-h2">Hooks and MCP, one local service.</h2>
-        <p class="ds-lead centered">
-          <span class="d">The agent talks to Yoetz over MCP. The host reports through hooks. One service on your machine holds the record and checks it.</span>
-          <span class="m">Two records in, one receipt out. One service on your machine.</span>
-        </p>
-      </div>
+          <section id="alone" class="scene" data-scene="alone">
+            <p class="stanza copy-right">We used to work alone. <span class="fade">Slowly.</span></p>
+          </section>
 
-      <!-- Phone version of the diagram below: top to bottom instead of left to right. -->
-      <div class="arch-m" aria-hidden="true">
-        <svg viewBox="0 0 320 392" fill="none" stroke-linecap="round" stroke-linejoin="round">
-          <defs>
-            <marker id="arr-on-m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 L9 5 L0 9 z" fill="#14b8a6" /></marker>
-            <marker id="arr-m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 L9 5 L0 9 z" fill="#94a3b8" /></marker>
-          </defs>
-
-          <rect x="4" y="4" width="312" height="384" rx="16" class="art-box" stroke-dasharray="5 5" />
-          <text x="160" y="22" class="art-tag" text-anchor="middle">your machine · nothing leaves it</text>
-
-          <!-- agent -->
-          <rect x="40" y="36" width="240" height="72" rx="12" class="art-box" />
-          <text x="160" y="58" class="art-txt strong" text-anchor="middle">your agent</text>
-          <image href="/assets/openai.svg" x="115" y="70" width="22" height="22" />
-          <image href="/assets/claude.svg" x="149" y="70" width="22" height="22" />
-          <image href="/assets/cursor.svg" x="183" y="70" width="22" height="22" />
-
-          <!-- down: MCP -->
-          <path d="M64 108 V 124" class="art-line on" />
-          <text x="64" y="142" class="art-txt on" text-anchor="middle">MCP</text>
-          <text x="64" y="155" class="art-tag on" text-anchor="middle">what it says</text>
-          <path d="M64 162 V 190" class="art-line on" marker-end="url(#arr-on-m)" />
-
-          <!-- down: hooks -->
-          <path d="M160 108 V 124" class="art-line" />
-          <text x="160" y="142" class="art-txt" text-anchor="middle">hooks</text>
-          <text x="160" y="155" class="art-tag" text-anchor="middle">what it did</text>
-          <path d="M160 162 V 190" class="art-line" marker-end="url(#arr-m)" />
-
-          <!-- up: receipt -->
-          <path d="M256 190 V 162" class="art-line on" />
-          <text x="256" y="142" class="art-txt on" text-anchor="middle">receipt</text>
-          <text x="256" y="155" class="art-tag on" text-anchor="middle">to the chat</text>
-          <path d="M256 124 V 108" class="art-line on" marker-end="url(#arr-on-m)" />
-
-          <!-- service -->
-          <rect x="16" y="190" width="288" height="152" rx="14" class="art-box on" />
-          <text x="160" y="209" class="art-tag on" text-anchor="middle">yoetz service · one local process</text>
-
-          <rect x="22" y="222" width="84" height="50" rx="10" class="art-box" />
-          <text x="64" y="243" class="art-txt strong" text-anchor="middle">ledger</text>
-          <text x="64" y="259" class="art-tag" text-anchor="middle">append-only</text>
-
-          <path d="M106 247 H 116" class="art-line on" marker-end="url(#arr-on-m)" />
-          <rect x="118" y="222" width="84" height="50" rx="10" class="art-box on" />
-          <text x="160" y="243" class="art-txt strong" text-anchor="middle">rules</text>
-          <text x="160" y="259" class="art-tag" text-anchor="middle">local</text>
-
-          <path d="M202 247 H 212" class="art-line on" marker-end="url(#arr-on-m)" />
-          <rect x="214" y="222" width="84" height="50" rx="10" class="art-box on solid" />
-          <text x="256" y="243" class="art-txt inv" text-anchor="middle">receipt</text>
-          <text x="256" y="259" class="art-txt inv" text-anchor="middle" opacity="0.85">what's open</text>
-
-          <path d="M160 272 V 288" class="art-line" stroke-dasharray="3 4" />
-          <rect x="66" y="290" width="188" height="40" rx="10" class="art-box" stroke-dasharray="4 3" />
-          <text x="160" y="307" class="art-txt" text-anchor="middle">reviewer model · optional</text>
-          <text x="160" y="321" class="art-tag" text-anchor="middle">your API key or ChatGPT plan</text>
-
-          <text x="160" y="368" class="art-tag" text-anchor="middle">nothing goes through us</text>
-        </svg>
-      </div>
-
-      <div class="arch" aria-hidden="true">
-        <svg viewBox="0 0 960 400" fill="none" stroke-linecap="round" stroke-linejoin="round">
-          <defs>
-            <marker id="arr-on" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 L9 5 L0 9 z" fill="#14b8a6" /></marker>
-            <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 L9 5 L0 9 z" fill="#94a3b8" /></marker>
-          </defs>
-
-          <!-- boundary -->
-          <rect x="8" y="30" width="944" height="362" rx="18" class="art-box" stroke-dasharray="5 5" />
-          <text x="26" y="52" class="art-tag">your machine · nothing leaves it</text>
-
-          <!-- agent -->
-          <rect x="24" y="96" width="160" height="208" rx="14" class="art-box" />
-          <text x="104" y="124" class="art-txt strong" text-anchor="middle">your agent</text>
-          <image href="/assets/openai.svg" x="52" y="140" width="22" height="22" />
-          <image href="/assets/claude.svg" x="93" y="140" width="22" height="22" />
-          <image href="/assets/cursor.svg" x="134" y="140" width="22" height="22" />
-          <text x="104" y="182" class="art-tag" text-anchor="middle">or any MCP host</text>
-          <text x="104" y="258" class="art-txt sub" text-anchor="middle">works as usual,</text>
-          <text x="104" y="272" class="art-txt sub" text-anchor="middle">nothing to run</text>
-
-          <!-- MCP channel -->
-          <text x="352" y="88" class="art-tag on" text-anchor="middle">MCP · what the agent says it did</text>
-          <path d="M184 140 H 518" class="art-line on" marker-end="url(#arr-on)" />
-          <g class="tool-pills">
-            <rect x="204" y="104" width="88" height="20" rx="10" class="art-box on" /><text x="248" y="118" class="art-txt on" text-anchor="middle">start</text>
-            <rect x="300" y="104" width="104" height="20" rx="10" class="art-box on" /><text x="352" y="118" class="art-txt on" text-anchor="middle">publish_work</text>
-            <rect x="412" y="104" width="88" height="20" rx="10" class="art-box on" /><text x="456" y="118" class="art-txt on" text-anchor="middle">check</text>
-            <rect x="204" y="156" width="88" height="20" rx="10" class="art-box on" /><text x="248" y="170" class="art-txt on" text-anchor="middle">respond</text>
-            <rect x="300" y="156" width="104" height="20" rx="10" class="art-box on" /><text x="352" y="170" class="art-txt on" text-anchor="middle">status</text>
-            <rect x="412" y="156" width="88" height="20" rx="10" class="art-box on" /><text x="456" y="170" class="art-txt on" text-anchor="middle">receipt</text>
-          </g>
-
-          <!-- hooks channel -->
-          <text x="352" y="218" class="art-tag" text-anchor="middle">hooks · what the host actually saw</text>
-          <path d="M184 240 H 518" class="art-line" marker-end="url(#arr)" />
-          <rect x="222" y="230" width="260" height="20" rx="10" class="art-box" />
-          <text x="352" y="244" class="art-txt sub" text-anchor="middle">sessions · tool calls · edits · results</text>
-
-          <!-- return -->
-          <path d="M518 286 H 184" class="art-line on" marker-end="url(#arr-on)" />
-          <text x="352" y="304" class="art-tag on" text-anchor="middle">findings and the receipt, back in the conversation</text>
-
-          <!-- service -->
-          <rect x="520" y="62" width="416" height="306" rx="16" class="art-box on" />
-          <text x="540" y="84" class="art-tag on">yoetz service · one local process</text>
-
-          <rect x="540" y="134" width="118" height="56" rx="10" class="art-box" />
-          <text x="599" y="157" class="art-txt strong" text-anchor="middle">ledger</text>
-          <text x="599" y="172" class="art-tag" text-anchor="middle">append-only</text>
-
-          <path d="M658 162 H 670" class="art-line on" marker-end="url(#arr-on)" />
-          <rect x="672" y="134" width="118" height="56" rx="10" class="art-box on" />
-          <text x="731" y="157" class="art-txt strong" text-anchor="middle">rules</text>
-          <text x="731" y="172" class="art-tag" text-anchor="middle">local</text>
-
-          <path d="M790 162 H 802" class="art-line on" marker-end="url(#arr-on)" />
-          <rect x="804" y="134" width="118" height="56" rx="10" class="art-box on solid" />
-          <text x="863" y="157" class="art-txt inv" text-anchor="middle">receipt</text>
-          <text x="863" y="172" class="art-txt inv" text-anchor="middle" opacity="0.85">coverage-bounded</text>
-
-          <text x="599" y="214" class="art-txt sub" text-anchor="middle">SQLite · says vs. did,</text>
-          <text x="599" y="228" class="art-txt sub" text-anchor="middle">as events</text>
-          <text x="731" y="214" class="art-txt sub" text-anchor="middle">same inputs,</text>
-          <text x="731" y="228" class="art-txt sub" text-anchor="middle">same findings</text>
-          <text x="863" y="214" class="art-txt sub" text-anchor="middle">verified · coverage</text>
-          <text x="863" y="228" class="art-txt sub" text-anchor="middle">· still open</text>
-
-          <path d="M731 190 V 270" class="art-line" stroke-dasharray="3 4" />
-          <rect x="625" y="272" width="212" height="52" rx="10" class="art-box" stroke-dasharray="4 3" />
-          <text x="731" y="293" class="art-txt" text-anchor="middle">reviewer model · optional</text>
-          <text x="731" y="309" class="art-tag" text-anchor="middle">your API key or ChatGPT plan</text>
-          <text x="731" y="352" class="art-tag" text-anchor="middle">runs from here · nothing goes through us</text>
-        </svg>
-      </div>
-
-      <div class="arch-notes">
-        <div>
-          <div class="arch-k">over MCP</div>
-          <p><span class="d">The agent publishes its plan, work, claims, and evidence through six tools. Any MCP host can, with nothing installed.</span><span class="m">The agent publishes its plan, work, claims, and evidence.</span></p>
-        </div>
-        <div>
-          <div class="arch-k">through hooks</div>
-          <p><span class="d">Codex, Claude Code, and Cursor also report what actually happened: sessions, tool calls, edits. Structural facts, never your files.</span><span class="m">The host reports what actually happened. Never your files.</span></p>
-        </div>
-        <div>
-          <div class="arch-k">in one local service</div>
-          <p><span class="d">Both records land in an append-only ledger. Local rules compare them, and the receipt states exactly how far the check reached.</span><span class="m">Rules compare the two records. The receipt says how far the check reached.</span></p>
-        </div>
-      </div>
-
-      <p class="section-link">
-        <a href={`${GITHUB}/blob/main/docs/architecture.md`} target="_blank" rel="noopener">Read the architecture</a>
-        <a href={RELEASES} target="_blank" rel="noopener">Release notes</a>
-      </p>
-    </section>
-
-    <!-- Coming soon -->
-    <section id="next" class="ds-cta-dark">
-      <div class="ds-cta-glow"></div>
-      <div class="next-inner">
-        <div class="ds-section-head">
-          <span class="ds-kicker ds-kicker-on-dark">Coming soon</span>
-          <h2 class="ds-h2 ds-on-dark">More than one agent on a task.</h2>
-          <p class="ds-lead on-dark">Task lineage and project coordination. <code>/lineage</code> and <code>/project</code> in the terminal.</p>
-        </div>
-
-        <div class="nx" aria-hidden="true">
-          <div class="nx-card nx-a">
-            <div class="nx-eyebrow">Delegate</div>
-            <div class="nx-row nx-a1"><span class="nx-mark on">◆</span><span class="nx-id">tsk_9c2e</span>sessions → Redis · Codex</div>
-            <div class="nx-row nx-a2"><span class="nx-mark">└</span><span class="nx-id">tsk_c31a</span>child · tests · 30m handle</div>
-            <div class="nx-row nx-a3"><span class="nx-mark">└</span><span class="nx-id">tsk_c4f0</span>child · migration · 30m</div>
-            <div class="nx-row nx-a4"><span class="nx-mark ok">✓</span><span class="nx-id">c31a</span>check · receipt · clean</div>
-            <div class="nx-row nx-a5 flag"><span class="nx-mark">✗</span><span class="nx-id">c4f0</span>check · 1 finding · open</div>
-          </div>
-          <div class="nx-link"><span class="nx-dot nx-dot1"></span></div>
-          <div class="nx-card nx-b">
-            <div class="nx-eyebrow">Roll up</div>
-            <div class="nx-row nx-b1"><span class="nx-mark on">◆</span><span class="nx-id">tsk_9c2e</span>receipt · rolls up 2 children</div>
-            <div class="nx-row nx-b2"><span class="nx-mark ok">✓</span><span class="nx-id">c31a</span>clean · not integration</div>
-            <div class="nx-row nx-b3 flag"><span class="nx-mark">✗</span><span class="nx-id">c4f0</span>finding carried up · open</div>
-            <div class="nx-row nx-b4"><span class="nx-mark dim">·</span><span class="nx-id">parent</span>integration · unchecked</div>
-            <div class="nx-row nx-b5 on"><span class="nx-mark on">▸</span><span class="nx-id">receipt</span>unresolved_findings_remain</div>
-          </div>
-          <div class="nx-link"><span class="nx-dot nx-dot2"></span></div>
-          <div class="nx-card nx-c">
-            <div class="nx-eyebrow">Coordinate</div>
-            <div class="nx-row nx-c1"><span class="nx-mark dim">·</span><span class="nx-id">repo</span>checkout-api · 2 live tasks</div>
-            <div class="nx-row nx-c2"><span class="nx-mark on">◆</span><span class="nx-id">task A</span>wt/feature · Codex</div>
-            <div class="nx-row nx-c3"><span class="nx-mark on">◆</span><span class="nx-id">task B</span>wt/hotfix · Claude Code</div>
-            <div class="nx-row nx-c4 flag"><span class="nx-mark">!</span><span class="nx-id">overlap</span>both touch src/sessions.py</div>
-            <div class="nx-row nx-c5 on"><span class="nx-mark on">✓</span><span class="nx-id">consent</span>each told about the other</div>
-          </div>
-        </div>
-
-        <div class="next-grid">
-          {next.map((n) => (
-            <div class="next-item">
-              <h3>{n.title}</h3>
-              <p>{n.text}</p>
+          <section class="scene" data-scene="swarm">
+            <div class="copy-right">
+              <p class="eyebrow">8 agents · 1 human</p>
+              <p class="stanza">Now agents work. <span class="fade">We manage more.</span></p>
             </div>
-          ))}
-        </div>
+          </section>
 
-        <p class="section-link on-dark">
-          <a href={ROADMAP} target="_blank" rel="noopener">Follow along on GitHub</a>
-        </p>
+          <section id="agents" class="scene" data-scene="robot">
+            <p class="stanza copy-right">But agents aren't human. <span class="fade">They drift. They forget.</span></p>
+          </section>
+
+          <section class="scene" data-scene="robot">
+            <p class="stanza copy-right">FinishUP checks what they did.</p>
+          </section>
+
+          <section class="scene" data-scene="robot">
+            <div class="copy-right">
+              <p class="eyebrow done">12 checks passed · 2 left</p>
+              <p class="stanza">And finishes the work.</p>
+            </div>
+          </section>
+
+          <section id="benchmark" class="scene" data-scene="sun">
+            <div class="copy-right">
+              <p class="eyebrow">Benchmark · {BENCH.model} on Codex, alone</p>
+              <p class="score">{BENCH.alone}<span class="unit">%</span></p>
+              <p class="stanza"><span class="fade">tasks truly finished</span></p>
+            </div>
+          </section>
+
+          <section id="local" class="scene" data-scene="sun">
+            <div class="copy-right">
+              <p class="eyebrow">With Local FinishUP · free</p>
+              <p class="score">{BENCH.local}<span class="unit">%</span></p>
+              <p class="stanza">Verified on your machine.</p>
+            </div>
+          </section>
+
+          <section id="ai" class="scene" data-scene="sun">
+            <div class="copy-right">
+              <p class="eyebrow">With AI-powered FinishUP</p>
+              <p class="score">{BENCH.ai}<span class="unit">%</span></p>
+              <p class="stanza">A second mind reviews what's left.</p>
+            </div>
+          </section>
+
+          <section id="end" class="scene foot" data-scene="end">
+            <div class="copy-center">
+              <h2 class="display" style="font-size: clamp(36px, 5vw, 64px)">All of this for free.</h2>
+              <p class="stanza center sub">Open source, working locally on your computer<span class="pc-slot" id="pc-slot" aria-hidden="true"></span>.</p>
+              <div class="actions">
+                <button class="btn add-agent" type="button" data-prompt={AGENT_PROMPT}>Add to your agent</button>
+                <a class="btn quiet" href={GITHUB} target="_blank" rel="noopener">See the GitHub
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9" /></svg>
+                </a>
+              </div>
+            </div>
+          </section>
+        </div>
       </div>
-    </section>
 
-    <!-- Alpha, briefly -->
-    <section id="status" class="alpha-strip">
-      <div class="alpha-inner">
-        <div class="alpha-copy">
-          <span class="alpha-badge"><span class="alpha-pulse"></span>alpha · {VERSION}</span>
-          <h3>New, rough in places, already useful.</h3>
-          <p>
-            Yoetz is fresh. It works today with no account and no network, and every claim on this
-            page is tracked in the repository. Expect edges; tell us where they are.
-          </p>
-        </div>
-        <div class="alpha-links">
-          <a class="alpha-btn primary" href={`${GITHUB}/issues/new`} target="_blank" rel="noopener">File an issue</a>
-          <a class="alpha-btn" href={`${GITHUB}/blob/main/SECURITY.md`} target="_blank" rel="noopener">Report a security issue</a>
-        </div>
-      </div>
-    </section>
-
-    <!-- Footer -->
-    <footer class="ds-footer">
-      <div style="padding: 44px 0 8px;">
-        <div class="receipt-card">
-          <div class="rc-head">
-            <img src="/assets/yoetz-mark.png" alt="" />
-            <span>receipt · yoetz.dev · <span id="rc-date">today</span></span>
+      <section id="install" class="install">
+        <div class="install-inner">
+          <div>
+            <p class="eyebrow">Install</p>
+            <h2>Two minutes. Then it runs beside your agent.</h2>
+            <p class="lead">Setup asks a few questions in your terminal and connects your host. The package is still published as <code>yoetz</code> until the rename reaches PyPI and npm.</p>
+            <div class="hosts" aria-label="Officially supported agents">
+              <span>Works with</span>
+              <img src="/assets/openai.svg" alt="Codex" title="Codex" />
+              <img src="/assets/claude.svg" alt="Claude Code" title="Claude Code" />
+              <img src="/assets/cursor.svg" alt="Cursor" title="Cursor" />
+            </div>
           </div>
-          <div class="rc-body">
-            <div class="rc-line"><span class="k">task</span><span>read yoetz.dev to the very bottom</span></div>
-            <div class="rc-line"><span class="k">actor</span><span id="rc-actor">visitor:you</span></div>
-            <div class="rc-line"><span class="k">local_frontier</span><span id="rc-tz">your timezone</span></div>
-            <div class="rc-line"><span class="k">obligations</span><span>1 of 1 satisfied · reach_the_footer (you are here)</span></div>
-            <div class="rc-line"><span class="k">evidence</span><span>time_on_page: <span id="rc-time">a while</span> · scroll_depth: 100%</span></div>
-            <div class="rc-line"><span class="k">findings</span><span>fnd-01 · curiosity_detected · priority fun · disposition: appreciated</span></div>
-            <div class="rc-line hl"><span class="k">conclusion</span><span>visitor_had_fun · coverage bounded to this footer · <span class="nowrap">thanks for scrolling</span></span></div>
+          <div class="cmds">
+            <button class="cmd copy-cmd" type="button" data-command={INSTALL_COMMAND} aria-label="Copy the uv install command">
+              <span class="lbl">uv</span>
+              <code>{INSTALL_COMMAND}</code>
+              <span class="copy" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg></span>
+            </button>
+            <button class="cmd copy-cmd" type="button" data-command={NPM_COMMAND} aria-label="Copy the npx install command">
+              <span class="lbl">npm</span>
+              <code>{NPM_COMMAND}</code>
+              <span class="copy" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg></span>
+            </button>
+            <p class="eyebrow">Needs uv · fetches its own Python · Apache-2.0</p>
           </div>
         </div>
-      </div>
-      <div class="ds-footer-inner">
-        <div class="ds-footer-brand">
-          <img src="/assets/yoetz-mark.png" alt="" style="width: auto; height: 20px;" />
-          <span>© 2026 Yoetz. Apache-2.0. · support@yoetz.dev</span>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="footer-inner">
+        <a class="lockup" href="#top" aria-label="FinishUP home">
+          <img src="/assets/finishup-mark.svg" alt="" width="26" height="26" />
+          <span>FinishUP</span>
+        </a>
+        <div class="footer-cols">
+          <div class="footer-col">
+            <p class="eyebrow">Product</p>
+            <a href="#local">Local</a>
+            <a href="#ai">AI-powered</a>
+            <a href={DOCS} target="_blank" rel="noopener">Docs</a>
+            <a href={RELEASES} target="_blank" rel="noopener">Changelog</a>
+          </div>
+          <div class="footer-col">
+            <p class="eyebrow">Source</p>
+            <a href={GITHUB} target="_blank" rel="noopener">GitHub</a>
+            <a href={PYPI} target="_blank" rel="noopener">PyPI</a>
+            <a href={NPM} target="_blank" rel="noopener">npm</a>
+            <a href={`${GITHUB}/blob/main/LICENSE`} target="_blank" rel="noopener">Apache-2.0</a>
+          </div>
         </div>
-        <div class="ds-footer-links">
-          <a href={GITHUB} target="_blank" rel="noopener">GitHub</a>
-          <span class="ds-footer-dot"></span>
-          <a href={PYPI} target="_blank" rel="noopener">PyPI</a>
-          <span class="ds-footer-dot"></span>
-          <a href={NPM} target="_blank" rel="noopener">npm</a>
-          <span class="ds-footer-dot"></span>
-          <a href={`${GITHUB}/blob/main/SECURITY.md`} target="_blank" rel="noopener">Security</a>
-          <span class="ds-footer-dot"></span>
-          <a href={`${GITHUB}/blob/main/CONTRIBUTING.md`} target="_blank" rel="noopener">Contributing</a>
-          <span class="ds-footer-dot"></span>
-          <a href={`${GITHUB}/blob/main/CHANGELOG.md`} target="_blank" rel="noopener">Changelog</a>
+        <div class="footer-meta">
+          <span>© 2026 FinishUP</span>
+          <span>Open source · fully local · free</span>
         </div>
       </div>
     </footer>
 
-    <script>
-      const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      const hasIO = typeof IntersectionObserver !== "undefined";
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden>
+      <span class="ok" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg></span>
+      <div>
+        <p id="toast-title">Copied.</p>
+        <p class="sub" id="toast-sub"></p>
+      </div>
+      <button class="close" type="button" id="toast-close" aria-label="Dismiss"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12" /></svg></button>
+    </div>
 
-      // --- Install tabs: a click copies the command and confirms it ---
-      const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>(".inst-tab:not(.agent)"));
-      const toast = document.getElementById("copy-toast");
-      const toastCmd = document.getElementById("copy-toast-cmd");
-      const nsTitle = document.getElementById("ns-title");
-      const nsSteps = document.getElementById("ns-steps");
-      const nsFoot = document.getElementById("ns-foot");
-      const nsClose = document.getElementById("ns-close");
-      const SETUP_TIME = "About two to three minutes.";
-      const UV_NOTE =
-        "Needs `uv` (curl -LsSf https://astral.sh/uv/install.sh | sh); it fetches Python 3.14 itself, so your other Pythons do not matter.";
-      const HOST_NOTE =
-        "Setup connects Codex. For Claude Code or Cursor, run `yoetz integrate claude plugin preview` or `yoetz integrate cursor plugin preview` afterwards.";
-      // Steps may carry `code` spans marked with backticks; everything is built as text nodes.
-      function fillInline(el: HTMLElement, text: string) {
-        el.replaceChildren();
-        text.split("`").forEach((part, i) => {
-          if (!part) return;
-          if (i % 2 === 1) {
-            const code = document.createElement("code");
-            code.textContent = part;
-            el.appendChild(code);
-          } else {
-            el.appendChild(document.createTextNode(part));
+    <script>
+      import { mountParticles } from "../scripts/particles.js";
+
+      const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      // --- The artwork follows the scroll ---
+      const canvas = document.getElementById("particles") as HTMLCanvasElement | null;
+      const story = document.getElementById("story");
+      const planEl = document.getElementById("story-plan");
+      const plan: [string, number][] = planEl ? JSON.parse(planEl.textContent || "[]") : [];
+      if (canvas && story && plan.length) {
+        const narrow = window.innerWidth < 720;
+        const art = mountParticles(canvas, { count: narrow ? 2600 : 5200, reducedMotion: reduced });
+        let raf = 0;
+        let last = "";
+        const slot = document.getElementById("pc-slot");
+        const update = () => {
+          raf = 0;
+          const vh = window.innerHeight || 900;
+          if (slot) {
+            const r = slot.getBoundingClientRect();
+            const c = canvas.getBoundingClientRect();
+            art.setAnchor(r.left + r.width / 2 - c.left, r.top + r.height / 2 - c.top);
           }
-        });
+          const top = -story.getBoundingClientRect().top;
+          const screens = (top + vh * 0.5) / vh;
+          let acc = 0;
+          let form = plan[plan.length - 1][0];
+          let phase = 1;
+          for (let i = 0; i < plan.length; i++) {
+            const [name, len] = plan[i];
+            if (screens < acc + len || i === plan.length - 1) {
+              form = name;
+              phase = Math.max(0, Math.min(1, (screens - acc) / len));
+              break;
+            }
+            acc += len;
+          }
+          phase = Math.round(phase * 100) / 100;
+          const key = form + ":" + phase;
+          if (key !== last) {
+            last = key;
+            art.setScene(form, phase);
+          }
+        };
+        const onScroll = () => {
+          if (!raf) raf = requestAnimationFrame(update);
+        };
+        window.addEventListener("scroll", onScroll, { passive: true });
+        window.addEventListener("resize", onScroll);
+        update();
       }
+
+      // --- Copy: the agent prompt, or an install command ---
+      const toast = document.getElementById("toast");
+      const toastTitle = document.getElementById("toast-title");
+      const toastSub = document.getElementById("toast-sub");
+      const toastClose = document.getElementById("toast-close");
+      let hideTimer = 0;
       async function copyText(text: string): Promise<boolean> {
         if (!text) return false;
         try {
@@ -719,263 +322,35 @@ const next = [
           return false;
         }
       }
-      function showNextSteps(title: string, steps: string[], command?: string, foot?: string) {
-        if (!toast || !toastCmd || !nsTitle || !nsSteps || !nsFoot) return;
-        nsTitle.textContent = title;
-        toastCmd.textContent = command ?? "";
-        toastCmd.hidden = !command;
-        nsSteps.replaceChildren();
-        for (const step of steps) {
-          const li = document.createElement("li");
-          fillInline(li, step);
-          nsSteps.appendChild(li);
-        }
-        if (foot) fillInline(nsFoot, foot);
-        nsFoot.hidden = !foot;
+      function show(title: string, sub: string) {
+        if (!toast || !toastTitle || !toastSub) return;
+        toastTitle.textContent = title;
+        toastSub.textContent = sub;
         toast.hidden = false;
+        window.clearTimeout(hideTimer);
+        hideTimer = window.setTimeout(() => { toast.hidden = true; }, 9000);
       }
-      nsClose?.addEventListener("click", () => {
-        if (toast) toast.hidden = true;
-      });
-      for (const tab of tabs) {
-        tab.addEventListener("click", async () => {
-          const cmd = tab.dataset.command ?? "";
-          if (!cmd) return;
-          const copied = await copyText(cmd);
-          const steps = tab.dataset.key === "pypi"
-            ? [
-                `Paste the command into your terminal and press Enter to install. ${UV_NOTE}`,
-                `Run \`yoetz\` to start setup, and answer its questions. ${SETUP_TIME}`,
-                HOST_NOTE,
-              ]
-            : [
-                `Paste the command into your terminal and press Enter. \`npx yoetz\` installs Yoetz and starts setup. ${UV_NOTE}`,
-                `Answer setup’s questions in your terminal. ${SETUP_TIME}`,
-                HOST_NOTE,
-              ];
-          showNextSteps(copied ? "Copied. Run it in your terminal." : "Copy this command, then run it in your terminal.", steps, cmd);
+      toastClose?.addEventListener("click", () => { if (toast) toast.hidden = true; });
+      for (const el of Array.from(document.querySelectorAll<HTMLButtonElement>(".add-agent"))) {
+        el.addEventListener("click", async () => {
+          const ok = await copyText(el.dataset.prompt ?? "");
+          show(
+            ok ? "Copied. Paste it into your agent." : "Copy blocked by the browser.",
+            ok ? "Codex, Claude Code or Cursor fetch the install guide and walk you through setup. Or install yourself below." : "Scroll to Install and copy a command instead.",
+          );
+          if (!ok) document.getElementById("install")?.scrollIntoView({ behavior: reduced ? "auto" : "smooth" });
         });
       }
-
-      // --- Manual install disclosure ---
-      const manualToggle = document.getElementById("manual-toggle");
-      const manualPanel = document.getElementById("manual-panel");
-      const manualLabel = document.getElementById("manual-label");
-      manualToggle?.addEventListener("click", () => {
-        if (!manualPanel) return;
-        const open = manualPanel.hidden;
-        manualPanel.hidden = !open;
-        manualToggle.setAttribute("aria-expanded", String(open));
-        manualToggle.classList.toggle("open", open);
-        if (manualLabel) manualLabel.textContent = open ? "Install options" : "Install manually";
-      });
-
-      // --- Copy: agent setup prompt ---
-      const agentBtn = document.getElementById("agent-copy");
-      const agentLabel = document.getElementById("agent-copy-label");
-      const agentDefaultLabel = agentLabel?.textContent ?? "";
-      let agentTimer: ReturnType<typeof setTimeout>;
-      agentBtn?.addEventListener("click", async () => {
-        const prompt = agentBtn.dataset.command ?? "";
-        const copied = await copyText(prompt);
-        showNextSteps(
-          copied ? "Copied. Now paste it into your agent." : "Copy this prompt, then paste it into your agent.",
-          [
-            "Open Codex, Claude Code, or Cursor and paste the prompt into the chat. Send it.",
-            "Your agent installs Yoetz and hands you the terminal for setup’s questions.",
-            `Answer them in your terminal. ${SETUP_TIME}`,
-          ],
-          copied ? undefined : prompt,
-          "Any other MCP agent works too, with nothing else installed."
-        );
-        if (!copied) return;
-        if (agentLabel) agentLabel.textContent = "Copied to your clipboard";
-        agentBtn.classList.add("copied");
-        clearTimeout(agentTimer);
-        agentTimer = setTimeout(() => {
-          if (agentLabel) agentLabel.textContent = agentDefaultLabel;
-          agentBtn.classList.remove("copied");
-        }, 2000);
-      });
-
-      // --- Terminal replay ---
-      const term = document.getElementById("term");
-      const cursor = document.getElementById("term-cursor");
-      if (term && cursor) {
-        let lines = Array.from(term.querySelectorAll<HTMLElement>(".tl"));
-        const card = term.closest<HTMLElement>(".term-card");
-        const titleEl = card?.querySelector<HTMLElement>(".term-title");
-        const logoEl = card?.querySelector<HTMLImageElement>(".term-host");
-        type TermScriptData = {
-          title: string;
-          hostName?: string;
-          logo?: string;
-          dark?: boolean;
-          lines: { pre?: string; preC?: string; op?: string; rest?: string; restC?: string; finding?: boolean; ts?: number; d?: number }[];
-        };
-        let scripts: TermScriptData[] = [];
-        try {
-          scripts = JSON.parse(document.getElementById("term-scripts")?.textContent ?? "[]");
-        } catch {
-          scripts = [];
-        }
-        let scriptIdx = 0;
-        let played = false;
-        // Swap the server-rendered transcript for the chosen script's lines.
-        const buildScript = (idx: number) => {
-          const s = scripts[idx];
-          if (!s) return;
-          for (const l of lines) l.remove();
-          const frag = document.createDocumentFragment();
-          for (const ln of s.lines) {
-            const div = document.createElement("div");
-            div.hidden = true;
-            div.dataset.d = String(ln.d ?? 180);
-            if (ln.pre || ln.op || ln.rest) {
-              div.className = "tl" + (ln.finding ? " tl-finding" : "");
-              if (ln.ts) div.dataset.ts = String(ln.ts);
-              const pre = document.createElement("span");
-              pre.className = "tl-pre";
-              pre.style.color = ln.preC ?? "#64748b";
-              pre.textContent = ln.pre ?? "";
-              div.appendChild(pre);
-              if (ln.op) {
-                const op = document.createElement("span");
-                op.className = "tl-op";
-                op.textContent = ln.op;
-                div.appendChild(op);
-              }
-              const rest = document.createElement("span");
-              rest.className = "tl-rest";
-              rest.style.color = ln.restC ?? "#94a3b8";
-              rest.textContent = ln.rest ?? "";
-              div.appendChild(rest);
-            } else {
-              div.className = "tl tl-gap";
-            }
-            frag.appendChild(div);
-          }
-          term.insertBefore(frag, cursor);
-          lines = Array.from(term.querySelectorAll<HTMLElement>(".tl"));
-          if (titleEl) titleEl.textContent = `${s.hostName ?? ""} · ${s.title}`;
-          if (logoEl && s.logo) {
-            logoEl.src = s.logo;
-            logoEl.classList.toggle("invert", Boolean(s.dark));
-          }
-        };
-        if (reduced || !hasIO) {
-          for (const l of lines) l.hidden = false;
-          cursor.hidden = false;
-        } else {
-          for (const l of lines) l.hidden = true;
-          const scrollEnd = () => {
-            term.scrollTop = term.scrollHeight;
-          };
-          // Every line writes itself out, one at a time: speech types at
-          // human pace, tool/yoetz output at a brisker machine pace.
-          const typeLine = (line: HTMLElement, done: () => void) => {
-            const rest = line.querySelector<HTMLElement>(".tl-rest");
-            const full = rest?.textContent ?? "";
-            const ts = Number(line.dataset.ts || 7);
-            const d = Number(line.dataset.d || 180);
-            if (!rest || !full) {
-              line.hidden = false;
-              scrollEnd();
-              setTimeout(done, d);
-              return;
-            }
-            rest.textContent = "▌";
-            line.hidden = false;
-            scrollEnd();
-            let j = 0;
-            const tick = () => {
-              j += Math.random() < 0.25 ? 2 : 1;
-              rest.textContent = full.slice(0, j) + (j < full.length ? "▌" : "");
-              scrollEnd();
-              if (j < full.length) setTimeout(tick, ts * (0.55 + Math.random() * 0.9));
-              else setTimeout(done, d);
-            };
-            setTimeout(tick, 60);
-          };
-          // Replay from the top only when the visitor has actually left the
-          // terminal and comes back after it has been idle for a while.
-          const REPLAY_AFTER_MS = 10000;
-          let playing = false;
-          let finishedAt = 0;
-          let awayFromView = true;
-          const play = () => {
-            card?.classList.add("playing");
-            let i = 0;
-            const next = () => {
-              if (i >= lines.length) {
-                card?.classList.remove("playing");
-                cursor.hidden = false;
-                scrollEnd();
-                playing = false;
-                finishedAt = Date.now();
-                return;
-              }
-              typeLine(lines[i++], next);
-            };
-            next();
-          };
-          const start = () => {
-            if (playing) return;
-            playing = true;
-            awayFromView = false;
-            // A different script each visit: random on the first play,
-            // never the one just shown on a replay.
-            if (scripts.length > 0) {
-              let idx = Math.floor(Math.random() * scripts.length);
-              if (played && scripts.length > 1 && idx === scriptIdx) idx = (idx + 1) % scripts.length;
-              scriptIdx = idx;
-              played = true;
-              buildScript(idx);
-            }
-            for (const l of lines) l.hidden = true;
-            cursor.hidden = true;
-            term.scrollTop = 0;
-            setTimeout(play, 500);
-          };
-          const io = new IntersectionObserver(
-            (entries) => {
-              const visible = entries.some((e) => e.isIntersecting);
-              if (!visible) {
-                if (!playing) awayFromView = true;
-                return;
-              }
-              if (awayFromView && (finishedAt === 0 || Date.now() - finishedAt > REPLAY_AFTER_MS)) start();
-            },
-            { threshold: 0.3 }
+      for (const el of Array.from(document.querySelectorAll<HTMLButtonElement>(".copy-cmd"))) {
+        el.addEventListener("click", async () => {
+          const cmd = el.dataset.command ?? "";
+          const ok = await copyText(cmd);
+          show(
+            ok ? "Copied. Run it in your terminal." : "Copy blocked by the browser.",
+            ok ? "Then run `yoetz` to start setup and answer its questions. About two minutes." : cmd,
           );
-          io.observe(term);
-        }
+        });
       }
-
-      // --- Footer receipt easter egg: the visitor's own session ---
-      const rcDate = document.getElementById("rc-date");
-      const rcActor = document.getElementById("rc-actor");
-      const rcTz = document.getElementById("rc-tz");
-      const rcTime = document.getElementById("rc-time");
-      if (rcDate && rcActor && rcTz && rcTime) {
-        const now = new Date();
-        rcDate.textContent = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-        const ua = navigator.userAgent;
-        const browser = /edg\//i.test(ua) ? "edge" : /firefox/i.test(ua) ? "firefox" : /chrome|crios/i.test(ua) ? "chrome" : /safari/i.test(ua) ? "safari" : "browser";
-        const os = /iphone|ipad/i.test(ua) ? "ios" : /android/i.test(ua) ? "android" : /mac/i.test(ua) ? "macos" : /win/i.test(ua) ? "windows" : /linux/i.test(ua) ? "linux" : "somewhere";
-        rcActor.textContent = `visitor:${browser}_on_${os}`;
-        try {
-          rcTz.textContent = `${now.toTimeString().slice(0, 5)} · ${Intl.DateTimeFormat().resolvedOptions().timeZone}`;
-        } catch {
-          rcTz.textContent = now.toTimeString().slice(0, 5);
-        }
-        const update = () => {
-          rcTime.textContent = `${Math.max(1, Math.round(performance.now() / 1000))}s`;
-        };
-        update();
-        setInterval(update, 1000);
-      }
-
     </script>
   </body>
 </html>
