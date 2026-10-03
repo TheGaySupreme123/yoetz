@@ -89,6 +89,27 @@ For the current advertised `read_guidance` 1.1.0 route, read one bounded page fr
 field instead of repeating the document:
 
 ```js
+const utf8ByteLength = (value) => {
+  let bytes = 0;
+  for (let i = 0; i < value.length; i++) {
+    let code = value.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        code = 0x10000 + ((code - 0xd800) << 10) + next - 0xdc00;
+        i++;
+      } else {
+        bytes += 3;
+        continue;
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      bytes += 3;
+      continue;
+    }
+    bytes += code <= 0x7f ? 1 : code <= 0x7ff ? 2 : code <= 0xffff ? 3 : 4;
+  }
+  return bytes;
+};
 const g = await tools.mcp__yoetz__read_guidance({
   uri: "yoetz://guidance/workflow.md",
   page: "0",
@@ -97,7 +118,7 @@ const g = await tools.mcp__yoetz__read_guidance({
 // `structuredContent.text` is the bounded page body; `content` is only a pointer here.
 const page = g.structuredContent;
 if (!page || page.ok !== true || typeof page.text !== "string") throw new Error("guidance page missing");
-if (new TextEncoder().encode(page.text).byteLength !== page.page_byte_count) throw new Error("guidance page clipped");
+if (utf8ByteLength(page.text) !== page.page_byte_count) throw new Error("guidance page clipped");
 if (page.revision !== page.digest || page.complete !== (Number(page.page) + 1 === Number(page.page_count))) {
   throw new Error("guidance page metadata mismatch");
 }
@@ -211,7 +232,7 @@ use the structured result as the bounded page and keep the page metadata checks.
 Code, and Cursor use the marked text channel.
 
 Keep each page request and response in its own code-mode cell. Validate the raw structured page
-before calling `text(...)`, including `TextEncoder().encode(page.text).byteLength`, offsets,
+before calling `text(...)`, including `utf8ByteLength(page.text)`, offsets,
 page count, the revision/digest pair, and the final-page continuation rule. Print at most one
 bounded page plus its small metadata record per cell, and choose `page_size` below the actual host
 cap. Never print all pages, a reconstructed document, or a full raw response in one cell: the
@@ -223,9 +244,30 @@ is present.
 The minimal raw-page check in a code-mode cell is:
 
 ```js
+const utf8ByteLength = (value) => {
+  let bytes = 0;
+  for (let i = 0; i < value.length; i++) {
+    let code = value.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        code = 0x10000 + ((code - 0xd800) << 10) + next - 0xdc00;
+        i++;
+      } else {
+        bytes += 3;
+        continue;
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      bytes += 3;
+      continue;
+    }
+    bytes += code <= 0x7f ? 1 : code <= 0x7ff ? 2 : code <= 0xffff ? 3 : 4;
+  }
+  return bytes;
+};
 const page = r.structuredContent;
 if (!page || page.ok !== true || typeof page.text !== "string") throw new Error("guidance page missing");
-if (new TextEncoder().encode(page.text).byteLength !== page.page_byte_count) throw new Error("guidance page clipped");
+if (utf8ByteLength(page.text) !== page.page_byte_count) throw new Error("guidance page clipped");
 if (page.revision !== page.digest) throw new Error("guidance revision mismatch");
 if (page.complete !== (Number(page.page) + 1 === Number(page.page_count))) throw new Error("guidance completion mismatch");
 text(JSON.stringify({page: page.page, page_count: page.page_count, complete: page.complete, digest: page.digest, text: page.text}));
