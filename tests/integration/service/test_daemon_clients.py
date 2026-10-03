@@ -62,6 +62,7 @@ from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import (
     CheckRequest,
     CheckResult,
+    OperationFailureModel,
     PublishWorkAcceptedEventModel,
     PublishWorkAcceptedProjectionUnavailableModel,
     PublishWorkRequest,
@@ -73,6 +74,7 @@ from yoetz.protocol.models import (
     StartRequest,
     StartResult,
     StatusRequest,
+    StatusResult,
     StatusSuccessModel,
 )
 from yoetz.service.client import _connected_client  # pyright: ignore[reportPrivateUsage]
@@ -1246,9 +1248,106 @@ async def test_status_read_projection_failure_correlation_resolves(
     assert found[0]["operation"] == "status_read_projection_failed"
     assert found[0]["component"] == "service.daemon"
     assert found[0]["request_id"] == "req_00000000-0000-4000-8000-000000000040"
+    assert found[0]["phase"] == "projection"
+    assert result.body.phase == "projection"
     for forbidden in ("traceback", "exception", "payload", "path", "message"):
         assert forbidden not in found[0]
     assert "must-not-leak" not in str(found[0])
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_status_projection_recovery_is_one_incident_with_bounded_attempts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fresh status retries retain the binding and report one bounded recovery incident."""
+
+    import yoetz.observability.diagnostics as diagnostics
+
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    application.projection_failures = 2
+    fallback_projection = application.project_result_for_client
+
+    async def project(
+        context: ClientProjectionContext,
+        binding: ControlProjectionBinding,
+        result: object,
+    ) -> ProjectedControlBody:
+        if binding.method is ControlMethod.STATUS:
+            application.projections.append(context)
+            if application.projection_failures:
+                application.projection_failures -= 1
+                raise RuntimeError("one-shot-projection-failure")
+            assert binding.original_request_id is not None
+            return StatusResult.model_validate(
+                {
+                    "protocol_version": "0.1",
+                    "schema_version": "1.0.0",
+                    "request_id": binding.original_request_id,
+                    "ok": False,
+                    "error": {
+                        "code": "INTERNAL_ERROR",
+                        "message": "The status read was unavailable.",
+                        "retryable": True,
+                        "correlation_id": "err_00000000-0000-4000-8000-000000000099",
+                    },
+                }
+            )
+        return await fallback_projection(context, binding, result)
+
+    application.project_result_for_client = project  # type: ignore[method-assign]
+
+    first_body = _status_body()
+    first = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.STATUS, first_body),
+    )
+    second_body = first_body.model_copy(
+        update={"request_id": "req_00000000-0000-4000-8000-000000000043"}
+    )
+    second = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.STATUS, second_body),
+    )
+    third_body = first_body.model_copy(
+        update={"request_id": "req_00000000-0000-4000-8000-000000000044"}
+    )
+    recovered = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.STATUS, third_body),
+    )
+
+    assert isinstance(first.body, ControlError)
+    assert isinstance(second.body, ControlError)
+    assert first.body.reason == second.body.reason == "read_projection_failed"
+    assert first.body.retryable is True and second.body.retryable is True
+    assert first.body.phase == second.body.phase == "projection"
+    assert first.body.correlation_id == second.body.correlation_id
+    assert recovered.outcome == "ok", repr(recovered.body)
+    assert first_body.session_id == second_body.session_id == third_body.session_id
+    assert first_body.writer_id == second_body.writer_id == third_body.writer_id
+    assert len(application.projections) == 3
+
+    assert first.body.correlation_id is not None
+    found = lookup_diagnostic_records(first.body.correlation_id, root=tmp_path)
+    assert [record["operation"] for record in found] == [
+        "status_read_projection_failed",
+        "status_read_projection_recovered",
+    ]
+    assert found[0]["phase"] == found[1]["phase"] == "projection"
+    duration_ms = found[1]["duration_ms"]
+    assert type(duration_ms) is int and duration_ms >= 0
+    assert found[1]["operation_count"] == 2
+    assert lookup_diagnostic_records(
+        request_id="req_00000000-0000-4000-8000-000000000043", root=tmp_path
+    ) == ()
+    recovery_records = lookup_diagnostic_records(
+        request_id="req_00000000-0000-4000-8000-000000000044", root=tmp_path
+    )
+    assert len(recovery_records) == 1
+    assert recovery_records[0]["operation"] == "status_read_projection_recovered"
     await daemon.close()
 
 
@@ -1289,8 +1388,76 @@ async def test_status_handler_attribute_error_is_retryable_read_failure(
     assert found[0]["operation"] == "status_read_projection_failed"
     assert found[0]["component"] == "service.daemon"
     assert found[0]["request_id"] == "req_00000000-0000-4000-8000-000000000040"
+    assert found[0]["phase"] == "handler"
+    assert result.body.phase == "handler"
     for forbidden in ("traceback", "exception", "payload", "path", "message", "sequence"):
         assert forbidden not in found[0]
+    await daemon.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("code", "retryable", "safe_details"),
+    [
+        (
+            PublicErrorCode.FRONTIER_CONFLICT,
+            True,
+            {"reason_code": "frontier_changed"},
+        ),
+        (
+            PublicErrorCode.SESSION_NOT_FOUND,
+            False,
+            {"reason_code": "session_superseded"},
+        ),
+        (PublicErrorCode.INVALID_REQUEST, False, None),
+    ],
+)
+async def test_status_handler_public_failures_keep_their_typed_recovery(
+    code: PublicErrorCode,
+    retryable: bool,
+    safe_details: Mapping[str, object] | None,
+) -> None:
+    """Known status outcomes keep their code and continuation instead of becoming outages."""
+
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+
+    async def fail(
+        request: object,
+        *,
+        repository_privacy_context: RepositoryPrivacyContext | None = None,
+    ) -> object:
+        del request, repository_privacy_context
+        raise PublicOperationError(
+            code,
+            "The status request reached a known boundary.",
+            retryable,
+            safe_details=safe_details,
+        )
+
+    application.status = fail  # type: ignore[method-assign]
+    result = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.STATUS, _status_body()),
+    )
+
+    assert result.outcome == "ok"
+    assert isinstance(result.body, StatusResult)
+    assert isinstance(result.body.root, OperationFailureModel)
+    error = result.body.root.error
+    assert error.code is code
+    assert error.retryable is retryable
+    if safe_details is None:
+        assert error.safe_details is None
+    else:
+        assert isinstance(error.safe_details, Mapping)
+        details = error.safe_details
+        assert details["reason_code"] == safe_details["reason_code"]
+        expected_continuation = {
+            "frontier_changed": "frontier_refresh_required",
+            "session_superseded": "session_rebind_required",
+        }[str(safe_details["reason_code"])]
+        assert details["continuation"] == expected_continuation
     await daemon.close()
 
 

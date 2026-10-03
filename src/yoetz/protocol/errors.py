@@ -790,6 +790,13 @@ def _normalize_detail(key: str, value: object) -> SafeDetailValue | None:
         if type(value) is str and value in _QUARANTINE_CODES:
             return value
         return None
+    if key == "phase":
+        # Stage names are structural tokens owned by the service boundary. Accepting the
+        # normalized token here lets an internal control failure carry an explicit handler,
+        # projection, or unknown stage without exposing exception text.
+        if type(value) is str and _LOWER_SNAKE_PATTERN.fullmatch(value) is not None:
+            return value
+        return None
     if key in _ENUM_DETAIL_KEYS:
         if issubclass(type(value), Enum):
             enum_value: object = cast(Enum, value).value

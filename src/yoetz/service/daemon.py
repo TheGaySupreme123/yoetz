@@ -88,6 +88,7 @@ from yoetz.observability.logging import (
     LogMode,
     configure_logging,
     get_logger,
+    record_bounded_counts_without_raising,
     record_bounded_event_without_raising,
     record_public_error_without_raising,
     record_unexpected_exception_without_raising,
@@ -491,10 +492,36 @@ def _safe_body_request_id(request: ControlCallRequest) -> str | None:
     return candidate if type(candidate) is str else None
 
 
+def _read_projection_incident_key(
+    request: ControlCallRequest,
+) -> tuple[str, str, str, str, str] | None:
+    """Return the validated status binding used to join failed polls into one incident."""
+
+    if request.method is not ControlMethod.STATUS or not isinstance(request.body, StatusRequest):
+        return None
+    return (
+        request.method.value,
+        request.body.session_id,
+        request.body.writer_id,
+        request.body.view,
+        "" if request.body.task_id is None else request.body.task_id,
+    )
+
+
 class _Listener(Protocol):
     async def accept(self) -> ControlStream: ...
 
     async def aclose(self) -> None: ...
+
+
+@dataclass(slots=True)
+class _ReadProjectionIncident:
+    """One transient read incident, independent of the requests that poll it."""
+
+    started_at: float
+    attempts: int
+    phase: str
+    correlation_id: str
 
 
 class _ServiceLockAuthority(Protocol):
@@ -707,6 +734,12 @@ class ServiceDaemon:
         self._connection_tasks: set[asyncio.Task[None]] = set()
         self._check_waits = CheckWaits()
         self._check_read_window = CheckReadWindow()
+        # A transient status projection is one logical incident even when a host polls several
+        # times before it recovers. This process-local map contains only bounded structural state;
+        # the task/session binding remains authoritative in the ledger and is never rotated here.
+        self._read_projection_incidents: dict[
+            tuple[str, str, str, str, str], _ReadProjectionIncident
+        ] = {}
         # Set when a check was refused behind an outstanding native capture handoff. The check
         # held both dispatch gates, so the handoff's structural delivery could not run; waking the
         # sweeper drains it as soon as those gates are free instead of an idle interval later.
@@ -992,19 +1025,12 @@ class ServiceDaemon:
             # classification used when projection itself fails for STATUS. Surfacing non-retryable
             # internal_error for a pure status/privacy read is what stranded run-4's
             # status view=operation recovery (AttributeError → retryable: false).
-            request_id = _safe_body_request_id(request)
             if _request_is_read_only(request):
-                reason = "read_projection_failed"
-                correlation_id = record_unexpected_exception_without_raising(
-                    exc,
-                    component="service.daemon",
-                    operation=f"{request.method.value}_{reason}",
-                    request_id=request_id,
-                )
                 return self._error_result(
                     request,
-                    ControlError(reason, retryable=True, correlation_id=correlation_id),
+                    self._read_projection_failure(request, exc, phase="unknown"),
                 )
+            request_id = _safe_body_request_id(request)
             correlation_id = record_unexpected_exception_without_raising(
                 exc,
                 component="service.daemon",
@@ -1199,6 +1225,70 @@ class ServiceDaemon:
                 if observation_acquired and isinstance(observation_gate, asyncio.Lock):
                     observation_gate.release()
 
+    def _read_projection_failure(
+        self,
+        request: ControlCallRequest,
+        exc: BaseException,
+        *,
+        phase: str,
+        reason: str = "read_projection_failed",
+    ) -> ControlError:
+        """Classify one read failure and join repeated polls to one bounded incident."""
+
+        request_id = _safe_body_request_id(request)
+        key = _read_projection_incident_key(request)
+        incident = None if key is None else self._read_projection_incidents.get(key)
+        if incident is None:
+            correlation_id = record_unexpected_exception_without_raising(
+                exc,
+                component="service.daemon",
+                operation=f"{request.method.value}_{reason}",
+                request_id=request_id,
+                phase=phase,
+            )
+            if key is not None:
+                if len(self._read_projection_incidents) >= 64:
+                    oldest_key = min(
+                        self._read_projection_incidents,
+                        key=lambda candidate: self._read_projection_incidents[candidate].started_at,
+                    )
+                    self._read_projection_incidents.pop(oldest_key, None)
+                incident = _ReadProjectionIncident(time.monotonic(), 1, phase, correlation_id)
+                self._read_projection_incidents[key] = incident
+        else:
+            incident.attempts += 1
+            correlation_id = incident.correlation_id
+            phase = incident.phase
+        return ControlError(
+            reason,
+            retryable=True,
+            correlation_id=correlation_id,
+            phase=phase,
+        )
+
+    def _read_projection_recovered(self, request: ControlCallRequest) -> None:
+        """Record one recovery for a status binding after a successful fresh read."""
+
+        key = _read_projection_incident_key(request)
+        if key is None:
+            return
+        incident = self._read_projection_incidents.pop(key, None)
+        if incident is None:
+            return
+        duration_ms = max(0, min(int((time.monotonic() - incident.started_at) * 1_000), 2**53 - 1))
+        record_bounded_counts_without_raising(
+            component="service.daemon",
+            operation="status_read_projection_recovered",
+            outcome="recovered",
+            request_id=_safe_body_request_id(request),
+            correlation_id=incident.correlation_id,
+            counts={
+                "duration_ms": duration_ms,
+                "operation_count": incident.attempts,
+                "phase": incident.phase,
+            },
+        )
+
     async def _dispatch_ready_under_maintenance_gate(
         self,
         projection_context: ClientProjectionContext,
@@ -1226,31 +1316,46 @@ class ServiceDaemon:
             handler = getattr(application, request.method.value, None)
             if not callable(handler):
                 raise ControlError("method_forbidden")
-            if request.deadline_ms is None or detached_check:
-                internal = await self._invoke_ready_handler(
-                    handler, request, repository_privacy_context
-                )
-            else:
-                try:
+            try:
+                if request.deadline_ms is None or detached_check:
+                    internal = await self._invoke_ready_handler(
+                        handler, request, repository_privacy_context
+                    )
+                else:
                     async with asyncio.timeout(request.deadline_ms / 1_000):
                         internal = await self._invoke_ready_handler(
                             handler, request, repository_privacy_context
                         )
-                except TimeoutError as exc:
-                    # Includes local observation-store contention inside the handler: the wire
-                    # vocabulary is closed, so it stays the retryable ``request_timeout`` while
-                    # the store's lock reporter names the contention and its holder (#689).
-                    raise ControlError("request_timeout", retryable=True) from exc
+            except TimeoutError as exc:
+                # Includes local observation-store contention inside the handler: the wire
+                # vocabulary is closed, so it stays the retryable ``request_timeout`` while
+                # the store's lock reporter names the contention and its holder (#689).
+                if _request_is_read_only(request):
+                    raise self._read_projection_failure(
+                        request, exc, phase="handler", reason="request_timeout"
+                    ) from exc
+                raise ControlError("request_timeout", retryable=True) from exc
+            except (ControlError, LifecycleError, PublicOperationError):
+                # Deliberate application outcomes carry their own code, retryability and
+                # continuation. Only an untyped exception is a transient projection incident.
+                raise
+            except Exception as exc:
+                if _request_is_read_only(request):
+                    raise self._read_projection_failure(request, exc, phase="handler") from exc
+                raise
             # The handler has returned, so a write may already be durable. Everything below only
             # shapes the response; an unexpected failure there must not be reported as a failed
             # operation.
-            return await self._project_completed_response(
+            projected = await self._project_completed_response(
                 projection_context,
                 request,
                 application,
                 internal,
                 repository_privacy_context,
             )
+            if _request_is_read_only(request):
+                self._read_projection_recovered(request)
+            return projected
         finally:
             if admission is not None:
                 await self._composition.lifecycle.release(admission)
@@ -1399,11 +1504,16 @@ class ServiceDaemon:
             # One correlation id for the unexpected failure path: shared by the reduced publish
             # envelope (when built), the diagnostic ring, and the ControlError raised to the
             # bridge — no second mint when the agent-facing public error is shaped.
+            if reason == "read_projection_failed":
+                raise self._read_projection_failure(
+                    request, exc, phase="projection"
+                ) from exc
             correlation_id = record_unexpected_exception_without_raising(
                 exc,
                 component="service.daemon",
                 operation=f"{request.method.value}_{reason}",
                 request_id=request_id,
+                phase="projection",
             )
             if request.method is ControlMethod.PUBLISH_WORK:
                 reduced = _publish_accepted_projection_unavailable(
@@ -1412,14 +1522,13 @@ class ServiceDaemon:
                 if reduced is not None:
                     self._validate_success_body(request, reduced)
                     return reduced
-            accepted_state = (
-                None if reason == "read_projection_failed" else _accepted_state(internal)
-            )
+            accepted_state = _accepted_state(internal)
             raise ControlError(
                 reason,
                 retryable=True,
                 accepted_state=accepted_state,
                 correlation_id=correlation_id,
+                phase="projection",
             ) from exc
 
     async def _accept_loop(

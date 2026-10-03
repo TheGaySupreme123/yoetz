@@ -5136,12 +5136,43 @@ def _control_v2_9_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         required.extend(["selected_capacity_label", "effective_capacity_label", "effective_budget"])
         definitions["observation_effective_budget"] = _observation_effective_budget_schema(token)
         _admit_privacy_audit_unreadable(entry, definitions)
+        _admit_control_error_phase(entry, definitions)
     return _admit_privacy_policy_v1_2(document)
 
 
 # The largest page ``privacy_receipts_list`` answers; a partial page cannot skip more rows than it
 # reads.
 _PRIVACY_RECEIPT_PAGE_MAX: Final = 100
+
+
+def _admit_control_error_phase(
+    entry: _RegistryEntry, definitions: dict[str, JsonValue]
+) -> None:
+    """Add the bounded stage token carried by active service read failures (#954)."""
+
+    if entry.schema_name != "control-result":
+        return
+    error_body = definitions.get("error_body")
+    if not isinstance(error_body, dict):
+        raise SchemaGenerationError(
+            "control_error_schema_template_invalid", entries=(entry.relative_path,)
+        )
+    error_branches = error_body.get("oneOf")
+    if not isinstance(error_branches, list):
+        raise SchemaGenerationError(
+            "control_error_schema_template_invalid", entries=(entry.relative_path,)
+        )
+    phase_schema: dict[str, JsonValue] = {
+        "maxLength": 64,
+        "pattern": "^[a-z][a-z0-9_]{0,63}$",
+        "type": "string",
+    }
+    for error_branch in error_branches:
+        if not isinstance(error_branch, dict):
+            continue
+        properties = error_branch.get("properties")
+        if isinstance(properties, dict):
+            properties["phase"] = dict(phase_schema)
 
 
 def _admit_privacy_audit_unreadable(

@@ -42,6 +42,7 @@ _FIELD_ORDER: Final = (
     "operation",
     "reason",
     "reason_code",
+    "phase",
     "origin",
     "request_id",
     "semantic_conclusion",
@@ -90,6 +91,7 @@ def append_diagnostic_record(
     request_id: str | None = None,
     origin: str | None = None,
     reason_code: str | None = None,
+    phase: str | None = None,
     counts: Mapping[str, object] | None = None,
     root: Path | None = None,
     now: datetime | None = None,
@@ -105,6 +107,7 @@ def append_diagnostic_record(
             request_id=request_id,
             origin=origin,
             reason_code=reason_code,
+            phase=phase,
             counts=counts,
             now=now,
         )
@@ -167,6 +170,7 @@ def _build_record(
     request_id: str | None,
     origin: str | None,
     reason_code: str | None,
+    phase: str | None,
     counts: Mapping[str, object] | None,
     now: datetime | None,
 ) -> dict[str, object] | None:
@@ -191,6 +195,8 @@ def _build_record(
         raw["origin"] = origin
     if reason_code is not None:
         raw["reason_code"] = reason_code
+    if phase is not None:
+        raw["phase"] = phase
     if counts is not None:
         # Only names already in _FIELD_ORDER survive the projection below, and each still passes
         # the same value fence as every other field: a caller cannot widen the record from here.

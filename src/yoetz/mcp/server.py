@@ -1455,6 +1455,9 @@ def _control_error_result(
             safe_details=details,
         )
     if error.reason == "read_projection_failed":
+        details: dict[str, object] = dict(_READ_PROJECTION_FAILED_DETAILS)
+        if error.phase is not None:
+            details["phase"] = error.phase
         return _control_public_error_result(
             error,
             request_id,
@@ -1463,7 +1466,7 @@ def _control_error_result(
             message=_READ_PROJECTION_FAILED_MESSAGE,
             retryable=True,
             host_profile=host_profile,
-            safe_details=dict(_READ_PROJECTION_FAILED_DETAILS),
+            safe_details=details,
         )
     if error.reason == "privacy_projection_unavailable":
         return _control_public_error_result(
@@ -1505,6 +1508,8 @@ def _control_error_result(
         # message, which the native text channel drops by design; a typed continuation carries it
         # to the model that has to act on it (issue #669).
         timeout_details: dict[str, object] = {"reason_code": "request_timeout"}
+        if error.phase is not None:
+            timeout_details["phase"] = error.phase
         if operation_kind == "write" and request_id is not None:
             timeout_details["replay_request_id"] = request_id
             if timeout_handle is not None:

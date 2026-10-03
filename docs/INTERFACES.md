@@ -2750,9 +2750,14 @@ surface as a failure (`INTERNAL_ERROR` or otherwise).
 Unexpected exceptions recorded in that window (and at other process boundaries) emit the existing
 stderr structural line and also append one owner-only JSONL diagnostic record under `log_dir()`
 (`service.diagnostics.jsonl`, mode `0o600`, size-capped ring). Fields are limited to
-`timestamp`, `correlation_id`, `component`, `operation`, `reason`, optional `origin`, optional
+`timestamp`, `correlation_id`, `component`, `operation`, `reason`, optional `phase`, optional `origin`, optional
 `request_id`, and the optional bounded integer counts `duration_ms` and `operation_count` — no
-exception text, payload, or paths. The daemon's control-plane watchdog samples event-loop lag from a plain OS thread and
+exception text, payload, or paths. A transient status read records `phase` as `handler`, `projection`,
+or `unknown`; repeated polls on the same validated `(session_id, writer_id, view, task_id)` binding
+reuse one incident correlation. A later successful fresh read emits one
+`status_read_projection_recovered` record with the incident's phase, elapsed `duration_ms`, and
+failure `operation_count`, then clears the process-local incident. A changed or superseded binding
+cannot close that incident. The daemon's control-plane watchdog samples event-loop lag from a plain OS thread and
 appends `control_plane_saturation_entered`/`_persists`/`_cleared` records (component
 `service.daemon`) with those counts at a bounded cadence, so a starved control plane is diagnosed
 while it is happening rather than never (#238); sweep failures append
@@ -6882,9 +6887,10 @@ All are non-retryable. Sites that already had specific fixed wording keep it (`T
 unreadable.`, `The status case is unreadable.`, `The stored operation result is invalid.`, `Host
 lineage status is inconsistent.`). Each classification records one diagnostic with component
 `application.status`, operation `status_<view>_<stage>_failed`, the reviewed exception-class
-reason token, the innermost `yoetz` source `origin` of the original exception (never the stage
-boundary), and the request id. The public error carries that record's correlation id, so the
-daemon and MCP bridge reuse it and mint no second `status_public_error` record; `yoetz service
+reason token, the structural `phase` stage, the innermost `yoetz` source `origin` of the original
+exception (never the stage boundary), and the request id. The public error carries that record's
+correlation id and the same safe `phase`, so the daemon and MCP bridge reuse it and mint no second
+`status_public_error` record; `yoetz service
 diagnostics --correlation-id` or `--request-id` resolves the failure. The record never contains an
 exception message, a validation payload, a path, or user content. `CoordinationError` and
 `ProjectCommandError` are reviewed exception-class tokens (`exception_coordination_error`,

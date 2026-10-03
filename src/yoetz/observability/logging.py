@@ -20,7 +20,7 @@ from yoetz.observability.privacy import (
     redact_diagnostic_value,
 )
 from yoetz.ports.clock import ClockPort
-from yoetz.protocol.ids import IdKind, new_id
+from yoetz.protocol.ids import IdKind, new_id, validate_id
 
 __all__ = [
     "LogMode",
@@ -48,6 +48,7 @@ _FIELD_ORDER: Final = (
     "outcome",
     "reason",
     "reason_code",
+    "phase",
     "origin",
     "engine_version",
     "policy_version",
@@ -446,6 +447,7 @@ def record_unexpected_exception_without_raising(
     component: str = "process_boundary",
     operation: str = "unexpected_exception",
     request_id: str | None = None,
+    phase: str | None = None,
 ) -> str:
     """Emit bounded structural identity for an unexpected internal exception.
 
@@ -468,6 +470,7 @@ def record_unexpected_exception_without_raising(
             outcome="internal_error",
             reason=reason,
             origin=origin,
+            phase=phase,
         )
     except BaseException:
         pass
@@ -481,6 +484,7 @@ def record_unexpected_exception_without_raising(
             reason=reason,
             request_id=request_id,
             origin=origin,
+            phase=phase,
         )
     except BaseException:
         pass
@@ -519,6 +523,7 @@ def record_classified_exception_without_raising(
     component: str,
     operation: str,
     request_id: str | None = None,
+    phase: str | None = None,
 ) -> str:
     """Record a public classified failure with bounded exception identity.
 
@@ -535,6 +540,7 @@ def record_classified_exception_without_raising(
         outcome="public_error",
         request_id=request_id,
         origin=exception_origin(exc),
+        phase=phase,
     )
 
 
@@ -580,6 +586,7 @@ def _record_bounded_without_raising(
     request_id: str | None,
     origin: str | None = None,
     reason_code: str | None = None,
+    phase: str | None = None,
 ) -> str:
     """Mint one correlation id and write it to both sinks. Never raises to callers."""
 
@@ -593,6 +600,7 @@ def _record_bounded_without_raising(
             reason=reason,
             origin=origin,
             reason_code=reason_code,
+            phase=phase,
         )
     except BaseException:
         pass
@@ -607,6 +615,7 @@ def _record_bounded_without_raising(
             request_id=request_id,
             origin=origin,
             reason_code=reason_code,
+            phase=phase,
         )
     except BaseException:
         pass
@@ -620,6 +629,7 @@ def record_bounded_counts_without_raising(
     outcome: str,
     counts: Mapping[str, object],
     request_id: str | None = None,
+    correlation_id: str | None = None,
 ) -> str:
     """Emit bounded structural counters for a reviewed non-exception event.
 
@@ -631,7 +641,13 @@ def record_bounded_counts_without_raising(
     this would otherwise be the only trace.
     """
 
-    correlation_id = _new_correlation()
+    if correlation_id is None:
+        correlation_id = _new_correlation()
+    else:
+        try:
+            validate_id(IdKind.CORRELATION, correlation_id)
+        except BaseException:
+            correlation_id = _new_correlation()
     # Excluding the names bound directly below is load-bearing, not tidiness: a caller that put
     # ``outcome`` (or a correlation/request id) in ``counts`` would hand the logger the same
     # keyword twice, and the TypeError is swallowed by the guard below — the record would vanish

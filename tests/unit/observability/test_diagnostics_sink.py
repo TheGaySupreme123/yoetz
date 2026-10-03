@@ -271,7 +271,7 @@ def test_bounded_counts_reach_the_durable_ring(
         component="service.daemon",
         operation="control_plane_saturation_entered",
         outcome="event_loop_lag",
-        counts={"duration_ms": 12_345, "operation_count": 7},
+        counts={"duration_ms": 12_345, "operation_count": 7, "phase": "projection"},
     )
 
     found = lookup_diagnostic_records(correlation_id, root=tmp_path)
@@ -280,6 +280,7 @@ def test_bounded_counts_reach_the_durable_ring(
     assert found[0]["reason"] == "event_loop_lag"
     assert found[0]["duration_ms"] == 12_345
     assert found[0]["operation_count"] == 7
+    assert found[0]["phase"] == "projection"
 
 
 @pytest.mark.parametrize(
