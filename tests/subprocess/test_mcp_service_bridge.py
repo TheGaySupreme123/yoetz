@@ -747,7 +747,7 @@ async def test_closure_prepare_refuses_an_unbounded_mcp_result(
 async def test_cursor_closure_prepare_refuses_projected_frame_with_escaped_content(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    escaped_detail = ('"\\\n\r\t' * 60_000)
+    escaped_detail = '"\\\n\r\t' * 60_000
 
     async def prepare(*_args: object, **_kwargs: object) -> dict[str, JsonValue]:
         return {

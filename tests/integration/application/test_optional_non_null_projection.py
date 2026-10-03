@@ -67,6 +67,7 @@ from yoetz.protocol.models import (
     PublicErrorModel,
     PublishWorkAcceptedEventModel,
     PublishWorkRequest,
+    ReadGuidanceSuccessModel,
     RespondEvidenceSummaryModel,
     RespondResponseModel,
     StartSuccessModel,
@@ -138,6 +139,24 @@ _RESULT_OPTIONAL_NON_NULL: tuple[tuple[type[BaseModel], frozenset[str]], ...] = 
     (ProjectTextRefModel, frozenset({"envelope_digest"})),
     (PublishWorkAcceptedEventModel, frozenset({"summary"})),
     (PublicErrorModel, frozenset({"safe_details"})),
+    (
+        ReadGuidanceSuccessModel,
+        frozenset(
+            {
+                "document_id",
+                "revision",
+                "digest",
+                "total_byte_count",
+                "page",
+                "page_size",
+                "page_offset",
+                "page_byte_count",
+                "page_count",
+                "complete",
+                "continuation",
+            }
+        ),
+    ),
     (RespondEvidenceSummaryModel, frozenset({"description"})),
     (RespondResponseModel, frozenset({"reason", "waiver_scope", "waiver_expiry"})),
     (
@@ -208,6 +227,8 @@ _REQUEST_SIDE_OPTIONAL_NON_NULL = frozenset(
         "StatusEvidenceFilterModel",
         "StatusFindingsFilterModel",
         "StatusHistoryFilterModel",
+        "ReadGuidanceRequest",
+        "ReadGuidanceRequestModel",
         "StatusObligationsFilterModel",
     }
 )
@@ -1182,6 +1203,22 @@ def test_every_result_optional_non_null_field_has_an_unset_projection_case() -> 
     covered["StatusResultItemModel", "observed_run"] = (
         "test_results_view_names_tool_occurrence_commitment_and_exit_status"
     )
+    for field in (
+        "document_id",
+        "revision",
+        "digest",
+        "total_byte_count",
+        "page",
+        "page_size",
+        "page_offset",
+        "page_byte_count",
+        "page_count",
+        "complete",
+        "continuation",
+    ):
+        covered["ReadGuidanceSuccessModel", field] = (
+            "test_legacy_guidance_result_omits_unset_paging_metadata"
+        )
     expected = {
         (model_type.__name__, field)
         for model_type, fields in _RESULT_OPTIONAL_NON_NULL
@@ -1191,3 +1228,16 @@ def test_every_result_optional_non_null_field_has_an_unset_projection_case() -> 
         f"unset-projection coverage drifted: missing={expected - set(covered)} "
         f"extra={set(covered) - expected}"
     )
+
+
+async def test_legacy_guidance_result_omits_unset_paging_metadata() -> None:
+    from yoetz.mcp.server import dispatch_read_guidance
+
+    result = await dispatch_read_guidance({"uri": "yoetz://guidance/workflow.md"})
+    assert result.isError is False
+    assert result.structuredContent is not None
+    wire = result.structuredContent
+    assert wire["ok"] is True
+    assert wire["text"]
+    for field in ReadGuidanceSuccessModel.optional_non_null_fields:
+        assert field not in wire
