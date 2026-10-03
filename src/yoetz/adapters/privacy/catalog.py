@@ -2402,7 +2402,7 @@ class CatalogPrivacyAudit:
                 parse_rfc3339_millis(parsed["expires_at"]),
                 commitment,
                 tuple(sorted(_strings(parsed.get("withheld_item_ids") or []), key=str.encode)),
-                cast(str, parsed.get("scanner_registry_version") or "legacy"),
+                cast(str, parsed.get("scanner_registry_version") or "unknown"),
                 cast(
                     str,
                     parsed.get("scanner_profile_digest") or "sha256:" + "0" * 64,

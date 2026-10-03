@@ -1335,7 +1335,11 @@ async def run_durable_semantic_attempts(
                 return build_final(
                     SemanticStatus.UNAVAILABLE if uncertain else SemanticStatus.TIMEOUT,
                     terminal_reason,
-                    None,
+                    # A fallback endpoint can reach its frozen cutoff while the total operation
+                    # deadline remains live. Keep the prior evaluation as the bounded carrier for
+                    # omission identities; ``build_final`` copies only those identities when the
+                    # terminal status/reason cannot reuse its provider provenance.
+                    last,
                     await _accounting(),
                 )
             failure_stage = "dispatch_entered"
@@ -1576,6 +1580,9 @@ async def run_durable_semantic_attempts(
                 # uncertainty instead of claiming the original policy outcome is replay-safe.
                 terminal_status = SemanticStatus.UNAVAILABLE
                 terminal_reason = SemanticReason.RECEIPT_PERSISTENCE_UNKNOWN
+                terminal_evaluation: _AttemptEvaluation | None = None
+            else:
+                terminal_evaluation = evaluation
             await ledger.record_attempt_outcome(
                 handle,
                 AttemptOutcome.FAILED,
@@ -1586,7 +1593,12 @@ async def run_durable_semantic_attempts(
             await _resolve_disclosure_wait_after_terminal(
                 ledger, current_lease, job.job_id, handle.attempt_id
             )
-            return build_final(terminal_status, terminal_reason, evaluation, await _accounting())
+            return build_final(
+                terminal_status,
+                terminal_reason,
+                terminal_evaluation,
+                await _accounting(),
+            )
 
         except BaseException as exc:
             record_unexpected_exception_without_raising(

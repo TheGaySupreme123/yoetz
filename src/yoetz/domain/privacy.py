@@ -1995,7 +1995,9 @@ class DisclosureProposal:
     withheld_item_ids: tuple[str, ...] = ()
     # Scanner identity is persisted with the proposal so a resume receipt can state the exact
     # scanner that guarded the prepared case, rather than inventing a clean ``resume`` profile.
-    scanner_registry_version: str = "legacy"
+    # Old proposal rows did not persist scanner identity. ``unknown`` keeps that fact explicit;
+    # ``legacy`` would misleadingly name a scanner registry that was never observed.
+    scanner_registry_version: str = "unknown"
     scanner_profile_digest: str = "sha256:" + "0" * 64
 
     def __post_init__(self) -> None:

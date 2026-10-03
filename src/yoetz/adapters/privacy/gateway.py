@@ -967,19 +967,16 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
         return _preconsume_result(case, reason)
 
     async def _park_attempt_reconciliation(self, dispatch_id: str, receipt: EgressReceipt) -> None:
-        """Best-effort durable recovery material for one admitted physical attempt."""
+        """Persist recovery material before an admitted physical attempt can dispatch."""
 
         park = getattr(self._audit, "park_attempt_reconciliation", None)
         if not callable(park):
-            return
+            raise RuntimeError("privacy_audit_reconciliation_parking_unavailable")
         typed_park = cast(
             Callable[[str, EgressReceipt], Awaitable[None]],
             park,
         )
-        try:
-            await typed_park(dispatch_id, receipt)
-        except Exception:  # noqa: BLE001 - parking is recovery material, never the attempt itself
-            pass
+        await typed_park(dispatch_id, receipt)
 
     async def _shielded_receipt(self, dispatch_id: str, receipt: EgressReceipt) -> None:
         """Keep ownership of the local receipt write through repeated cancellation."""

@@ -454,8 +454,8 @@ def test_canaries_absent_from_structural_surfaces(tmp_path: Path) -> None:
     assert canary.decode() not in repr(manifest)
 
 
-def test_local_policy_denial_records_scan_not_run_without_claiming_passed(tmp_path: Path) -> None:
-    """A pre-scan local category denial keeps an explicit, failed not-run scan state."""
+def test_local_policy_denial_records_candidate_scan_without_false_not_run(tmp_path: Path) -> None:
+    """Classification runs before local policy denial, so the receipt names its candidate scan."""
 
     env = _Env(tmp_path)
 
@@ -473,9 +473,10 @@ def test_local_policy_denial_records_scan_not_run_without_claiming_passed(tmp_pa
 
     result = asyncio.run(run())
     assert type(result) is LocalDisclosureBlocked
-    assert result.receipt.secret_scan.stage is ReceiptSecretScanStage.NOT_RUN
-    assert result.receipt.secret_scan.passed is False
-    assert result.receipt.secret_scan.not_run_reason is not None
+    assert result.receipt.secret_scan.stage is ReceiptSecretScanStage.CANDIDATE
+    assert result.receipt.secret_scan.passed is True
+    assert result.receipt.secret_scan.match_count == 0
+    assert result.receipt.secret_scan.not_run_reason is None
 
 
 @pytest.mark.anyio

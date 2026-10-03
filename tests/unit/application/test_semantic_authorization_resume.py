@@ -133,6 +133,10 @@ def _proposal(*, expires_at: datetime) -> DisclosureProposal:
     )
 
 
+def test_proposals_without_persisted_scanner_identity_remain_explicitly_unknown() -> None:
+    assert _proposal(expires_at=_NOW + timedelta(minutes=5)).scanner_registry_version == "unknown"
+
+
 class _Audit:
     def __init__(self, status: str, proposal: DisclosureProposal) -> None:
         self.status = status
@@ -361,6 +365,42 @@ async def test_consumed_attempt_recovery_is_terminal_unknown_without_dispatch() 
     assert isinstance(result, SemanticEgressAttemptUnknown)
     assert result.request_id == _REQUEST
     assert result.privacy_proposal_id == _PROPOSAL
+
+
+@pytest.mark.anyio
+async def test_proposal_read_failure_does_not_turn_recovery_ids_into_an_empty_tuple() -> None:
+    """Unreadable proposal state must remain an explicit recovery failure."""
+
+    coordinator = _coordinator(
+        "receipt_pending",
+        expires_at=_NOW + timedelta(minutes=5),
+    )
+    audit = cast(_Audit, coordinator._audit)  # pyright: ignore[reportPrivateUsage]
+
+    async def unreadable(_proposal_id: str) -> DisclosureProposal | None:
+        raise RuntimeError("proposal_store_unavailable")
+
+    audit.load_disclosure_proposal = unreadable  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="proposal_store_unavailable"):
+        await coordinator.recover_started_attempt(_REQUEST, _CASE_DIGEST, _deadline())
+
+
+@pytest.mark.anyio
+async def test_missing_proposal_does_not_look_like_a_clean_unknown_recovery() -> None:
+    coordinator = _coordinator(
+        "receipt_pending",
+        expires_at=_NOW + timedelta(minutes=5),
+    )
+    audit = cast(_Audit, coordinator._audit)  # pyright: ignore[reportPrivateUsage]
+
+    async def missing(_proposal_id: str) -> DisclosureProposal | None:
+        return None
+
+    audit.load_disclosure_proposal = missing  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="privacy_audit_proposal_unavailable"):
+        await coordinator.recover_started_attempt(_REQUEST, _CASE_DIGEST, _deadline())
 
 
 def _packet_with_excerpts(count: int) -> bytes:

@@ -12,7 +12,7 @@ from yoetz.adapters.privacy.local_enforcer import (
     scan_exact_bytes,
     scan_exact_bytes_with_confidence,
 )
-from yoetz.application.egress import PrivacyCoordinator
+from yoetz.application.egress import PrivacyCoordinator, _heuristic_only_item_ids
 from yoetz.domain.privacy import (
     AuthorizationScope,
     AuthorizationScopeKind,
@@ -269,6 +269,7 @@ def test_heuristic_only_item_is_withheld_without_blocking_clean_item() -> None:
     assert classified.items[0].heuristic_findings == ()
     assert classified.items[1].forbidden_findings == ()
     assert classified.items[1].heuristic_findings == (ForbiddenDataKind.API_CREDENTIAL,)
+    assert _heuristic_only_item_ids(classified) == ("heuristic",)
 
     decision = _decision(classified)
     minimized = enforcer.minimize_and_scan(classified, decision)

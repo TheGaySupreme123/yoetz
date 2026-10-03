@@ -124,6 +124,38 @@ def _validate_withheld_item_ids(value: object) -> None:
             raise ValueError("semantic_withheld_item_ids_invalid") from exc
 
 
+def _classified_scan_match_count(classified: ClassifiedContext) -> int:
+    """Count findings from the candidate scan without retaining matched content."""
+
+    return sum(
+        len(item.forbidden_findings) + len(item.heuristic_findings)
+        for item in classified.items
+    )
+
+
+def _heuristic_only_item_ids(classified: ClassifiedContext) -> tuple[str, ...]:
+    """Return opaque ids whose only finding is the bounded heuristic assignment signal."""
+
+    return tuple(
+        sorted(
+            {
+                item.candidate.item_id
+                for item in classified.items
+                if item.scope_valid
+                and item.heuristic_findings
+                and not item.forbidden_findings
+            },
+            key=str.encode,
+        )
+    )
+
+
+def _minimized_scan_match_count(minimized: MinimizedDisclosure) -> int:
+    """Count findings in the exact prepared case scan."""
+
+    return len(set(minimized.forbidden_findings) | set(minimized.heuristic_findings))
+
+
 class RepositoryGrantAdmission(StrEnum):
     """Admission-locked repository authority outcome for check composition.
 
@@ -677,15 +709,24 @@ class PrivacyCoordinator:
             return await typed_loader(request_id, case_digest)
         raise ValueError("privacy_audit_attempt_lookup_unavailable")
 
+    async def _load_disclosure_proposal(self, proposal_id: str) -> DisclosureProposal | None:
+        try:
+            proposal = await self._audit.load_disclosure_proposal(proposal_id)
+        except Exception as exc:
+            record_unexpected_exception_without_raising(
+                exc,
+                component="privacy_egress",
+                operation="audit_disclosure_proposal_lookup_failed",
+            )
+            raise
+        return proposal if type(proposal) is DisclosureProposal else None
+
     async def _withheld_item_ids_for_proposal(self, proposal_id: str) -> tuple[str, ...]:
         """Recover bounded heuristic omission identities for terminal replay paths."""
 
-        try:
-            proposal = await self._audit.load_disclosure_proposal(proposal_id)
-        except Exception:
-            return ()
-        if type(proposal) is not DisclosureProposal:
-            return ()
+        proposal = await self._load_disclosure_proposal(proposal_id)
+        if proposal is None:
+            raise RuntimeError("privacy_audit_proposal_unavailable")
         return proposal.withheld_item_ids
 
     async def _semantic_dispatch_is_current(self) -> bool:
@@ -723,9 +764,9 @@ class PrivacyCoordinator:
                 classified,
                 effective,
                 decision,
-                scan_stage=ReceiptSecretScanStage.NOT_RUN,
-                scan_match_count=0,
-                not_run_reason=decision.reason or PrivacyReason.POLICY_DENIED,
+                scan_stage=ReceiptSecretScanStage.CANDIDATE,
+                scan_match_count=_classified_scan_match_count(classified),
+                withheld_item_ids=_heuristic_only_item_ids(classified),
             )
         minimized = self._classifier.minimize_and_scan(classified, decision)
         if minimized.forbidden_findings or minimized.heuristic_findings:
@@ -991,12 +1032,9 @@ class PrivacyCoordinator:
             )
         status = state.status
         if status in {"reserved", "awaiting_human"}:
-            try:
-                pending = await self._audit.load_disclosure_proposal(
-                    state.reservation.privacy_proposal_id
-                )
-            except Exception:
-                pending = None
+            pending = await self._load_disclosure_proposal(
+                state.reservation.privacy_proposal_id
+            )
             if (
                 pending is None
                 or pending.prepared_case_digest != case_digest
@@ -1079,12 +1117,9 @@ class PrivacyCoordinator:
                 privacy_proposal_id=state.reservation.privacy_proposal_id,
                 withheld_item_ids=withheld_item_ids,
             )
-        try:
-            proposal = await self._audit.load_disclosure_proposal(
-                state.reservation.privacy_proposal_id
-            )
-        except Exception:
-            proposal = None
+        proposal = await self._load_disclosure_proposal(
+            state.reservation.privacy_proposal_id
+        )
         if (
             proposal is None
             or proposal.prepared_case_digest != case_digest
@@ -1262,10 +1297,8 @@ class PrivacyCoordinator:
                 decision.outcome,
                 decision.reason or PrivacyReason.POLICY_DENIED,
                 scan_stage=ReceiptSecretScanStage.CANDIDATE,
-                scan_match_count=sum(
-                    len(item.forbidden_findings) + len(item.heuristic_findings)
-                    for item in classified.items
-                ),
+                scan_match_count=_classified_scan_match_count(classified),
+                withheld_item_ids=_heuristic_only_item_ids(classified),
             )
 
         minimized = self._classifier.minimize_and_scan(classified, decision)
@@ -1280,6 +1313,8 @@ class PrivacyCoordinator:
                     PrivacyOutcome.BLOCKED_BY_POLICY,
                     PrivacyReason.SCOPE_MISMATCH,
                     withheld_item_ids=minimized.withheld_item_ids,
+                    scan_stage=ReceiptSecretScanStage.PREPARED_CASE,
+                    scan_match_count=_minimized_scan_match_count(minimized),
                 )
             refreshed = await self._activate_repository_admitted(candidate.scope)
             if refreshed is None or refreshed[1] != authority_digest:
@@ -1289,6 +1324,8 @@ class PrivacyCoordinator:
                     PrivacyOutcome.BLOCKED_BY_POLICY,
                     PrivacyReason.SCOPE_MISMATCH,
                     withheld_item_ids=minimized.withheld_item_ids,
+                    scan_stage=ReceiptSecretScanStage.PREPARED_CASE,
+                    scan_match_count=_minimized_scan_match_count(minimized),
                 )
             effective = refreshed[0]
         else:
@@ -1311,10 +1348,8 @@ class PrivacyCoordinator:
                 refreshed_decision.outcome,
                 refreshed_decision.reason or PrivacyReason.POLICY_DENIED,
                 scan_stage=ReceiptSecretScanStage.CANDIDATE,
-                scan_match_count=sum(
-                    len(item.forbidden_findings) + len(item.heuristic_findings)
-                    for item in refreshed_classified.items
-                ),
+                scan_match_count=_classified_scan_match_count(refreshed_classified),
+                withheld_item_ids=_heuristic_only_item_ids(refreshed_classified),
             )
         refreshed_minimized = self._classifier.minimize_and_scan(
             refreshed_classified, refreshed_decision
@@ -1329,6 +1364,8 @@ class PrivacyCoordinator:
                 PrivacyOutcome.BLOCKED_BY_POLICY,
                 PrivacyReason.POLICY_DENIED,
                 withheld_item_ids=refreshed_minimized.withheld_item_ids,
+                scan_stage=ReceiptSecretScanStage.PREPARED_CASE,
+                scan_match_count=_minimized_scan_match_count(refreshed_minimized),
             )
         minimized = refreshed_minimized
         # Concrete credentials and scanner saturation still block the whole case. A heuristic
@@ -1342,9 +1379,7 @@ class PrivacyCoordinator:
                 PrivacyReason.NEVER_SEND_DETECTED,
                 withheld_item_ids=minimized.withheld_item_ids,
                 scan_stage=ReceiptSecretScanStage.PREPARED_CASE,
-                scan_match_count=len(
-                    set(minimized.forbidden_findings) | set(minimized.heuristic_findings)
-                ),
+                scan_match_count=_minimized_scan_match_count(minimized),
             )
         if not minimized.included_item_ids:
             return await self._complete_semantic_predispatch(
@@ -1354,9 +1389,7 @@ class PrivacyCoordinator:
                 PrivacyReason.INSUFFICIENT_APPROVED_CONTEXT,
                 withheld_item_ids=minimized.withheld_item_ids,
                 scan_stage=ReceiptSecretScanStage.PREPARED_CASE,
-                scan_match_count=len(
-                    set(minimized.forbidden_findings) | set(minimized.heuristic_findings)
-                ),
+                scan_match_count=_minimized_scan_match_count(minimized),
             )
         # Channel ceilings are operator-visible policy dimensions; fail closed when exceeded.
         llm = next(
@@ -1372,9 +1405,7 @@ class PrivacyCoordinator:
                 PrivacyReason.POLICY_DENIED,
                 withheld_item_ids=minimized.withheld_item_ids,
                 scan_stage=ReceiptSecretScanStage.PREPARED_CASE,
-                scan_match_count=len(
-                    set(minimized.forbidden_findings) | set(minimized.heuristic_findings)
-                ),
+                scan_match_count=_minimized_scan_match_count(minimized),
             )
         if llm.max_tokens > 0 and minimized.token_count > llm.max_tokens:
             return await self._complete_semantic_predispatch(
@@ -1384,9 +1415,7 @@ class PrivacyCoordinator:
                 PrivacyReason.POLICY_DENIED,
                 withheld_item_ids=minimized.withheld_item_ids,
                 scan_stage=ReceiptSecretScanStage.PREPARED_CASE,
-                scan_match_count=len(
-                    set(minimized.forbidden_findings) | set(minimized.heuristic_findings)
-                ),
+                scan_match_count=_minimized_scan_match_count(minimized),
             )
         # The approved excerpt limits are authoritative here too: a review packet with more
         # excerpts, or more excerpt bytes, than the effective policy approved is refused whole,
@@ -1401,9 +1430,7 @@ class PrivacyCoordinator:
                 PrivacyReason.POLICY_DENIED,
                 withheld_item_ids=minimized.withheld_item_ids,
                 scan_stage=ReceiptSecretScanStage.PREPARED_CASE,
-                scan_match_count=len(
-                    set(minimized.forbidden_findings) | set(minimized.heuristic_findings)
-                ),
+                scan_match_count=_minimized_scan_match_count(minimized),
             )
 
         task_id = candidate.scope.task_id
@@ -1415,9 +1442,7 @@ class PrivacyCoordinator:
                 PrivacyReason.SCOPE_MISMATCH,
                 withheld_item_ids=minimized.withheld_item_ids,
                 scan_stage=ReceiptSecretScanStage.PREPARED_CASE,
-                scan_match_count=len(
-                    set(minimized.forbidden_findings) | set(minimized.heuristic_findings)
-                ),
+                scan_match_count=_minimized_scan_match_count(minimized),
             )
 
         now = self._clock.now_utc()

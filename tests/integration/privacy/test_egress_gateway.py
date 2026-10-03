@@ -1762,7 +1762,7 @@ def test_unregistered_endpoint_profile_reports_factory_unavailable_not_a_silent_
     ]
 
 
-@pytest.mark.parametrize("phase", ["parking", "provider", "receipt"])
+@pytest.mark.parametrize("phase", ["parking", "parking_failure", "provider", "receipt"])
 @pytest.mark.parametrize("clock_delta", [30, -30])
 def test_cancellation_at_each_admitted_await_terminalizes_without_redispatch(
     phase: str, clock_delta: int, monkeypatch: pytest.MonkeyPatch
@@ -1789,6 +1789,8 @@ def test_cancellation_at_each_admitted_await_terminalizes_without_redispatch(
     build = factory.build_evaluator
 
     async def parking(dispatch_id: str, receipt: EgressReceipt) -> None:
+        if phase == "parking_failure":
+            raise RuntimeError("reconciliation_store_unavailable")
         if phase == "parking":
             await pause_once()
         await park(dispatch_id, receipt)
@@ -1831,11 +1833,15 @@ def test_cancellation_at_each_admitted_await_terminalizes_without_redispatch(
         pending = asyncio.create_task(
             gateway.dispatch_external_semantic(case, authorization, _deadline(clock))
         )
-        await asyncio.wait_for(entered.wait(), 5)
-        clock.utc += timedelta(seconds=clock_delta)
-        pending.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(pending, 5)
+        if phase == "parking_failure":
+            with pytest.raises(RuntimeError, match="reconciliation_store_unavailable"):
+                await asyncio.wait_for(pending, 5)
+        else:
+            await asyncio.wait_for(entered.wait(), 5)
+            clock.utc += timedelta(seconds=clock_delta)
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(pending, 5)
         assert audit.authorization_state(authorization.authorization_id) == "consumed"
 
     asyncio.run(run())
@@ -1844,8 +1850,13 @@ def test_cancellation_at_each_admitted_await_terminalizes_without_redispatch(
     if phase != "receipt":
         assert receipt.outcome is PrivacyOutcome.TRANSPORT_FAILED
         assert receipt.safe_failure_reason is PrivacyReason.OUTCOME_UNKNOWN
-        assert receipt.finished_at == _NOW + timedelta(seconds=max(0, clock_delta))
+        expected_finished_at = _NOW if phase == "parking_failure" else _NOW + timedelta(
+            seconds=max(0, clock_delta)
+        )
+        assert receipt.finished_at == expected_finished_at
     else:
         # The provider result already existed; cancellation preserves it instead of replacing it.
         assert receipt.outcome is not PrivacyOutcome.TRANSPORT_FAILED
-    assert sum(item.evaluate_calls for item in factory.built) <= 1
+    assert sum(item.evaluate_calls for item in factory.built) <= (
+        0 if phase == "parking_failure" else 1
+    )

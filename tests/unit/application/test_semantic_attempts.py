@@ -1070,6 +1070,60 @@ async def test_terminal_non_success_replays_withheld_item_ids_from_response_obje
 
 
 @pytest.mark.anyio
+async def test_terminal_response_persistence_failure_is_unknown_without_replayable_evaluation() -> None:
+    """A failed omission-object write cannot return ids that terminal replay cannot recover."""
+
+    lease = _lease()
+    job = _queued_job()
+    ledger = _FakeLedger(job, lease)
+    evaluation = _Eval(
+        SemanticStatus.BLOCKED_BY_POLICY,
+        SemanticReason.NETWORK_EGRESS_DENIED,
+        semantic_withheld_item_ids=("item_secret",),
+    )
+
+    async def dispatch(handle: SemanticAttemptHandle, deadline: Deadline) -> _Eval:
+        del handle, deadline
+        return evaluation
+
+    async def publish(handle: SemanticAttemptHandle, value: object) -> ObjectRef:
+        del handle, value
+        raise OSError("response_store_unavailable")
+
+    def build_final(
+        status: SemanticStatus,
+        reason: SemanticReason,
+        value: object | None,
+        accounting: SemanticAttemptAccounting,
+    ) -> object:
+        return status, reason, value, accounting
+
+    result = cast(
+        tuple[SemanticStatus, SemanticReason, object | None, SemanticAttemptAccounting],
+        await run_durable_semantic_attempts(
+            ledger=ledger,
+            lease=lease,
+            job=job,
+            deadline=Deadline(datetime(2030, 1, 1, tzinfo=UTC), 1000.0),
+            max_retries=0,
+            now_monotonic=lambda: 0.0,
+            dispatch=dispatch,
+            publish_success_response=publish,
+            sleep=lambda _: _async_noop(),
+            build_final=build_final,
+        ),
+    )
+
+    assert result[:3] == (
+        SemanticStatus.UNAVAILABLE,
+        SemanticReason.RECEIPT_PERSISTENCE_UNKNOWN,
+        None,
+    )
+    assert ledger.attempts is not None
+    assert ledger.attempts[_ATT1].result_object_ref is None
+
+
+@pytest.mark.anyio
 async def test_terminal_succeeded_job_recovers_via_selected_callback() -> None:
     """Crash after select_attempt: recover judgment/provenance without re-claim."""
 
