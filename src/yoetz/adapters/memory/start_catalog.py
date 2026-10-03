@@ -1623,7 +1623,16 @@ class MemoryStartCatalogAdapter:
                 if expected is not None and (
                     actual is None or not hmac.compare_digest(expected, actual)
                 ):
-                    raise _error(PublicErrorCode.SESSION_CONFLICT)
+                    raise _error(
+                        PublicErrorCode.SESSION_CONFLICT,
+                        safe_details={
+                            "reason_code": (
+                                "repository_identity_required"
+                                if actual is None
+                                else "repository_identity_mismatch"
+                            )
+                        },
+                    )
                 if expected is None and actual is not None:
                     if self._provenance_spans_general_projects(
                         route.task_id,
