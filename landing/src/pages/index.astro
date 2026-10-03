@@ -147,10 +147,10 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
 
           <section id="benchmark" class="scene" data-scene="sun">
             <div class="copy-right">
-              <p class="eyebrow">{BENCH.suite} benchmark</p>
+              <p class="eyebrow">Score on {BENCH.suite}</p>
               <div class="bench-logos" aria-label="Codex and DeepSWE">
                 <span class="bench-logo"><img src="/assets/openai.svg" alt="" width="22" height="22" />Codex</span>
-                <span class="bench-logo placeholder" title="DeepSWE logo goes here">[DeepSWE logo]</span>
+                <span class="bench-logo wordmark">DeepSWE</span>
               </div>
               <p class="stanza">{BENCH.model} on Codex, <span class="fade">without FinishUP.</span></p>
             </div>
@@ -158,14 +158,14 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
 
           <section id="local" class="scene" data-scene="sun">
             <div class="copy-right">
-              <p class="eyebrow">Same model · same benchmark</p>
+              <p class="eyebrow">Score on {BENCH.suite} · same model</p>
               <p class="stanza">+ FinishUP <span class="silver">Local</span></p>
             </div>
           </section>
 
           <section id="ai" class="scene" data-scene="sun">
             <div class="copy-right">
-              <p class="eyebrow">The latest</p>
+              <p class="eyebrow">Score on {BENCH.suite} · the latest</p>
               <p class="stanza">+ FinishUP <span class="gold">AI-powered</span></p>
             </div>
           </section>
