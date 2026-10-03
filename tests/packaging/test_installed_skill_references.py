@@ -49,13 +49,25 @@ def test_the_skill_is_packaged_at_all() -> None:
 
 
 def test_step_zero_stops_on_an_empty_guidance_read() -> None:
-    """An empty resources/read is a silent miss, not a successful Step 0 (issue #203)."""
+    """A missing or clipped guidance body must enter the bounded recovery route."""
 
     text = _skill_text()
     collapsed = " ".join(text.split())
     assert "resolve without any repository checkout" not in collapsed
-    assert "If a `resources/read` result has no text, call `read_guidance`" in collapsed
-    assert "with the same URI" in collapsed
+    assert (
+        "If its body is empty, carries a truncation marker, or is nonempty but clipped, call the "
+        "advertised `read_guidance` route and verify the returned page before using it."
+    ) in collapsed
+    assert "read_guidance` input/output schema `1.1.0`" in collapsed
+    assert "canonical `page` and `page_size`" in collapsed
+    assert "returned revision/digest continuation" in collapsed
+    assert "structuredContent.text" in collapsed
+    assert "utf8ByteLength(page.text)" in collapsed
+    assert "page.page_byte_count" in collapsed
+    assert "page.page_offset" in collapsed
+    assert "A service page with `complete: true` means only" in collapsed
+    assert "not proof that the host delivered every page" in collapsed
+    assert "Print at most one bounded page plus its small metadata record per cell" in collapsed
     assert "`references/<name>.md`" in collapsed
     assert "Do not call `start` on an empty guidance body" in collapsed
     # #300 trimmed the inlined set to agent-instructions.md. The skill must not tell the agent it

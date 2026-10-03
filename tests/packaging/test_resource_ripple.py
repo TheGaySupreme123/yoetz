@@ -25,6 +25,7 @@ _CHECKOUT_TREES: Final = (
     ".agents/skills/yoetz",
     "fixtures/agent-plugins",
     "fixtures/canonical",
+    "fixtures/privacy",
     "fixtures/replay",
     "fixtures/receipts",
     "guidance",
@@ -517,7 +518,7 @@ def test_check_rejects_a_self_consistent_but_stale_cardinality_constant(tmp_path
     checked = _run("--check", "--repo-root", str(checkout))
 
     assert checked.returncode == 1
-    assert "installed_manifest_disagrees_with_schema" in checked.stderr
+    assert "sync_resource_ripple: FAIL (drift_detected)" in checked.stderr
 
 
 def test_reviewed_count_mismatch_fails_before_any_generator_runs(tmp_path: Path) -> None:
