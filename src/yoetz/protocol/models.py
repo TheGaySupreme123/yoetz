@@ -142,6 +142,7 @@ __all__ = [
     "CheckChildrenPreviewModel",
     "CheckAdvisoryNoteModel",
     "CheckMissingItemModel",
+    "SemanticWithheldItemModel",
     "StatusLineageChildModel",
     "StatusLineageAnnotationModel",
     "StatusLineagePageModel",
@@ -936,6 +937,14 @@ HmacSha256Commitment = Annotated[str, BeforeValidator(_commitment_wire)]
 TimestampWire = Annotated[str, BeforeValidator(_timestamp_wire)]
 JsonPointer = Annotated[str, BeforeValidator(_json_pointer_wire)]
 String1To256 = Annotated[str, Field(min_length=1, max_length=256)]
+OpaqueItemId = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    ),
+]
 String1To4096 = Annotated[str, Field(min_length=1, max_length=4096)]
 String1To8192 = Annotated[str, Field(min_length=1, max_length=8192)]
 String0To1024 = Annotated[str, Field(max_length=1024)]
@@ -2912,6 +2921,13 @@ class CheckMissingItemModel(_ClosedModel):
         return self
 
 
+class SemanticWithheldItemModel(_ClosedModel):
+    """One safe opaque case item omitted by the never-send heuristic."""
+
+    item_id: OpaqueItemId
+    reason: Literal["never_send_heuristic"]
+
+
 class CheckVersionSliceModel(_ClosedModel):
     protocol_version: Literal["0.1"]
     engine_version: VersionWire
@@ -3057,7 +3073,13 @@ class CheckFindingChecklistModel(_ClosedModel):
 
 class CheckSuccessModel(_ClosedModel):
     optional_non_null_fields = frozenset(
-        {"children", "advisory_notes", "missing_for_assessment", "finding_checklist"}
+        {
+            "children",
+            "advisory_notes",
+            "missing_for_assessment",
+            "finding_checklist",
+            "semantic_withheld_items",
+        }
     )
 
     protocol_version: Literal["0.1"]
@@ -3083,6 +3105,7 @@ class CheckSuccessModel(_ClosedModel):
     advisory_notes: tuple[CheckAdvisoryNoteModel, ...] = ()
     missing_for_assessment: tuple[CheckMissingItemModel, ...] = ()
     finding_checklist: CheckFindingChecklistModel | None = None
+    semantic_withheld_items: tuple[SemanticWithheldItemModel, ...] = ()
     coverage: CoverageModel
     versions: CheckVersionSliceModel
     privacy_projection: PrivacyProjectionModel
@@ -3107,6 +3130,12 @@ class CheckSuccessModel(_ClosedModel):
         _require_unique(
             tuple((item.kind, item.target_refs) for item in self.missing_for_assessment),
             limit=MAX_MISSING_FOR_ASSESSMENT,
+        )
+        if len(self.semantic_withheld_items) > 64:
+            raise ValueError("semantic_withheld_item_count_invalid")
+        _require_unique(
+            tuple(item.item_id for item in self.semantic_withheld_items),
+            limit=64,
         )
         if not 1 <= len(self.policy_executions) <= 3 or len(set(self.policy_executions)) != len(
             self.policy_executions
@@ -4354,7 +4383,9 @@ class StatusCheckAdmissionModel(_ClosedModel):
 class StatusOperationPageModel(_ClosedModel):
     """One request-id-keyed operation recovery page within the authenticated task."""
 
-    optional_non_null_fields = frozenset({"semantic_progress", "admission"})
+    optional_non_null_fields = frozenset(
+        {"semantic_progress", "admission", "semantic_withheld_items"}
+    )
 
     operation_request_id: RequestIdWire
     found: bool
@@ -4371,6 +4402,9 @@ class StatusOperationPageModel(_ClosedModel):
     # Issue #571 A2: structural progress of the AI-powered review job behind a check. Omitted when
     # the operation is not a check or no durable progress was recorded for it.
     semantic_progress: StatusSemanticProgressModel | None = None
+    # A completed check may disclose the bounded opaque identities omitted by the never-send
+    # heuristic. Old operation rows omit this field entirely.
+    semantic_withheld_items: tuple[SemanticWithheldItemModel, ...] = ()
     # Issue #838: pre-admission stage of a check request that has no operation record yet.
     # Omitted whenever the service knows of no reservation or refusal for the exact key.
     admission: StatusCheckAdmissionModel | None = None
@@ -4384,6 +4418,13 @@ class StatusOperationPageModel(_ClosedModel):
             self.operation_kind == "check" and self.state in {"pending", "complete"}
         ):
             raise ValueError("status_operation_page_invalid")
+        if self.semantic_withheld_items:
+            if not (self.operation_kind == "check" and self.state == "complete"):
+                raise ValueError("status_operation_page_invalid")
+            _require_unique(
+                tuple(item.item_id for item in self.semantic_withheld_items),
+                limit=64,
+            )
         if (
             self.continuation is not None
             and self.continuation.replay_request_id != self.operation_request_id
@@ -5031,6 +5072,10 @@ _CHECK_STRUCTURAL_POINTERS: Final = (
     + _prefix_leaf_patterns("/privacy_projection", _PRIVACY_PROJECTION_LEAVES)
     + _prefix_leaf_patterns("/versions", _BASIC_VERSION_LEAVES)
     + _prefix_leaf_patterns("/semantic_provenance", _SEMANTIC_PROVENANCE_LEAVES)
+    + _prefix_leaf_patterns(
+        "/semantic_withheld_items/*",
+        ("item_id", "reason"),
+    )
     + (
         "/finding_checklist/attempt_budget",
         "/finding_checklist/counts/acknowledged_not_done",
@@ -5428,6 +5473,8 @@ _STATUS_OPERATION_STRUCTURAL_POINTERS: Final = (
         "/page/semantic_progress/remaining_ms",
         "/page/semantic_progress/terminal_outcome",
         "/page/semantic_progress/terminal_reason",
+        "/page/semantic_withheld_items/*/item_id",
+        "/page/semantic_withheld_items/*/reason",
         "/page/state",
         "/page/subject_frontier",
     )
@@ -5596,6 +5643,10 @@ _RECEIPT_STRUCTURAL_POINTERS: Final = (
         _SEMANTIC_PROVENANCE_LEAVES,
     )
     + _prefix_leaf_patterns("/document/semantic_provenance", _SEMANTIC_PROVENANCE_LEAVES)
+    + _prefix_leaf_patterns(
+        "/document/semantic_withheld_items/*",
+        ("item_id", "reason"),
+    )
     + _prefix_leaf_patterns(
         "/document/obligations/*",
         ("obligation_id", "source_refs/*", "status"),
@@ -5850,7 +5901,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 1201:
+    if len(result) != 1207:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

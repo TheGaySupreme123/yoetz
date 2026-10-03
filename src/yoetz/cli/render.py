@@ -14,6 +14,7 @@ from yoetz.domain.review_input_render import (
 )
 from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.errors import normalize_safe_details
+from yoetz.protocol.ids import validate_opaque_item_id
 from yoetz.protocol.models import (
     CheckAwaitingHumanModel,
     CheckFindingChecklistModel,
@@ -301,6 +302,10 @@ def render_human_check(result: CheckSuccessModel) -> str:
         # Issue #907: a check limitation, never a finding. Recheck only after supplying an
         # agent-suppliable item; otherwise report the limitation.
         lines.extend(render_missing_for_assessment_lines(result.missing_for_assessment))
+    if result.semantic_withheld_items:
+        lines.append("Withheld review items (the reviewer continued without them):")
+        for item in result.semantic_withheld_items:
+            lines.append(f"- {item.item_id}: {_token(item.reason)}")
     if result.coverage.known_gaps:
         lines.append("Coverage gaps: " + ", ".join(result.coverage.known_gaps))
         lines.extend(_check_time_change_sentences(result.coverage.known_gaps))
@@ -435,6 +440,12 @@ def render_human_status(result: StatusSuccessModel) -> str:
             )
         if result.page.semantic_progress is not None:
             lines.extend(render_semantic_progress_lines(result.page.semantic_progress))
+        if result.page.semantic_withheld_items:
+            lines.append("Withheld review items (the reviewer continued without them):")
+            lines.extend(
+                f"- {item.item_id}: {_token(item.reason)}"
+                for item in result.page.semantic_withheld_items
+            )
         if result.page.admission is not None:
             lines.extend(render_check_admission_lines(result.page.admission))
     elif isinstance(result.page, StatusLineagePageModel):
@@ -617,6 +628,9 @@ def render_human_receipt(result: ReceiptSuccessModel) -> str:
     lines.append("Limitations: " + (", ".join(limitations) if limitations else "none declared"))
     document = result.document
     if isinstance(document, Mapping):
+        withheld = _semantic_withheld_item_lines(document)
+        if withheld:
+            lines.extend(withheld)
         provenance = document.get("semantic_provenance")
         if isinstance(provenance, Mapping):
             lines.extend(
@@ -629,6 +643,33 @@ def render_human_receipt(result: ReceiptSuccessModel) -> str:
     if result.suppressed_finding_count:
         lines.append(f"Suppressed findings: {result.suppressed_finding_count}")
     return "\n".join(lines)
+
+
+def _semantic_withheld_item_lines(document: Mapping[str, JsonValue]) -> list[str]:
+    """Render only the closed opaque identity and reason from a receipt document."""
+
+    raw_items = document.get("semantic_withheld_items")
+    if not isinstance(raw_items, (list, tuple)):
+        return []
+    items: list[tuple[str, str]] = []
+    for raw in raw_items:
+        if not isinstance(raw, Mapping):
+            continue
+        item_id = raw.get("item_id")
+        reason = raw.get("reason")
+        if type(reason) is not str or reason != "never_send_heuristic":
+            continue
+        try:
+            validate_opaque_item_id(item_id)
+        except (TypeError, ValueError):
+            continue
+        items.append((cast(str, item_id), reason))
+    if not items:
+        return []
+    return [
+        "Withheld review items (the reviewer continued without them):",
+        *(f"- {item_id}: {reason}" for item_id, reason in items),
+    ]
 
 
 def render_recovery_directive_lines(

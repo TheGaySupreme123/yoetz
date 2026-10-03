@@ -154,6 +154,7 @@ def _check(
     semantic_conclusion: str | None = None,
     missing_for_assessment: tuple[MissingForAssessmentItem, ...] = (),
     review_input_manifest: dict[str, object] | None = None,
+    semantic_withheld_item_ids: tuple[str, ...] = (),
 ) -> CheckRecordedPayload:
     return CheckRecordedPayload(
         mode=(
@@ -196,6 +197,7 @@ def _check(
         ),
         engine_version="0.1.0",
         projection_version="yoetz/0.1.0",
+        semantic_withheld_item_ids=semantic_withheld_item_ids,
     )
 
 
@@ -1383,6 +1385,28 @@ def test_receipt_carries_applicable_semantic_provenance_and_usage() -> None:
     assert "input=100" in rendered
     assert "thread-1" not in rendered
     assert "provider_request_id" not in rendered
+
+
+def test_receipt_carries_opaque_withheld_item_identity_and_reason() -> None:
+    receipt = _build(
+        _context(
+            coverage=_coverage(gaps=("content_redacted",)),
+            gaps=(CaseGap("content_redacted", "content_redacted", ()),),
+            check=_check(
+                CheckVerdict.NO_ISSUE_DETECTED,
+                _coverage(gaps=("content_redacted",)),
+                semantic_withheld_item_ids=("excerpt-heuristic",),
+            )
+        )
+    )
+
+    assert tuple(item.item_id for item in receipt.semantic_withheld_items) == (
+        "excerpt-heuristic",
+    )
+    assert receipt.semantic_withheld_items[0].reason == "never_send_heuristic"
+    rendered = render_receipt_human(receipt, markdown=False)
+    assert "excerpt-heuristic" in rendered
+    assert "never_send_heuristic" in rendered
 
 
 def test_receipt_omits_absent_semantic_provenance_for_historical_bytes() -> None:

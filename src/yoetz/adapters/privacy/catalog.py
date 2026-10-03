@@ -41,6 +41,7 @@ from yoetz.domain.privacy import (
     ReceiptCounts,
     ReceiptPolicyBinding,
     ReceiptSecretScan,
+    ReceiptSecretScanStage,
     ReceiptTransformations,
     RequestCommitment,
     ReviewContextProfile,
@@ -161,7 +162,22 @@ def _mac(key: MacKeyHandle, domain: bytes, data: bytes) -> str:
 
 
 def _receipt_bytes(receipt: LocalDisclosureReceipt | EgressReceipt) -> bytes:
-    return canonical_encode(_json(receipt))
+    raw_encoded = _json(receipt)
+    if type(raw_encoded) is not dict:
+        raise TypeError("privacy_receipt_canonical_value_invalid")
+    encoded = cast(dict[str, JsonValue], raw_encoded)
+    if encoded.get("schema_version") == "1.0.0":
+        # Keep the released 1.0 durable shape byte-compatible.  The domain rejects withheld
+        # identities for this version, while the stage fields are safely represented by the
+        # legacy match_count/passed pair when they are omitted here.
+        raw_scan = encoded.get("secret_scan")
+        scan = cast(dict[str, JsonValue], raw_scan) if type(raw_scan) is dict else None
+        if type(scan) is dict:
+            scan.pop("stage", None)
+            scan.pop("not_run_reason", None)
+        encoded.pop("withheld_item_ids", None)
+        encoded.pop("withheld_item_reason", None)
+    return canonical_encode(cast(JsonValue, encoded))
 
 
 def _mapping(value: JsonValue) -> dict[str, JsonValue]:
@@ -207,7 +223,7 @@ def _string_values(items: tuple[str, ...]) -> list[JsonValue]:
 
 
 class _ReceiptCommon(TypedDict):
-    schema_version: Literal["1.0.0"]
+    schema_version: Literal["1.0.0", "1.1.0"]
     receipt_id: str
     request_id: str
     privacy_proposal_id: str
@@ -222,6 +238,8 @@ class _ReceiptCommon(TypedDict):
     counts: ReceiptCounts
     transformations: ReceiptTransformations
     secret_scan: ReceiptSecretScan
+    withheld_item_ids: tuple[str, ...]
+    withheld_item_reason: Literal["never_send_heuristic"] | None
     safe_failure_reason: PrivacyReason | None
     audit_store_version: Literal[1]
 
@@ -237,14 +255,26 @@ def _receipt_common_from_json(source: dict[str, JsonValue]) -> _ReceiptCommon:
     counts = _mapping(source["counts"])
     transforms = _mapping(source["transformations"])
     scan = _mapping(source["secret_scan"])
-    if source["schema_version"] != "1.0.0" or source["audit_store_version"] != 1:
+    outcome = PrivacyOutcome(cast(str, source["outcome"]))
+    scan_match_count = _integer(scan["match_count"])
+    scan_passed = cast(bool, scan["passed"])
+    # Rows written before the explicit scan-stage extension did not distinguish a prepared
+    # clean scan from a blocked or unrun operation.  Preserve that uncertainty for every
+    # stage-less row, including historical ``completed`` rows with ``passed=true``.
+    scan_stage = (
+        ReceiptSecretScanStage.LEGACY_UNKNOWN
+        if "stage" not in scan
+        else ReceiptSecretScanStage(cast(str, scan["stage"]))
+    )
+    if source["schema_version"] not in {"1.0.0", "1.1.0"} or source["audit_store_version"] != 1:
         raise ValueError("privacy_audit_row_corrupt")
+    schema_version = cast(Literal["1.0.0", "1.1.0"], source["schema_version"])
     return {
-        "schema_version": "1.0.0",
+        "schema_version": schema_version,
         "receipt_id": cast(str, source["receipt_id"]),
         "request_id": cast(str, source["request_id"]),
         "privacy_proposal_id": cast(str, source["privacy_proposal_id"]),
-        "outcome": PrivacyOutcome(cast(str, source["outcome"])),
+        "outcome": outcome,
         "finished_at": parse_rfc3339_millis(source["finished_at"]),
         "scope": _scope_from_json(source["scope"]),
         "purpose": cast(str, source["purpose"]),
@@ -280,8 +310,22 @@ def _receipt_common_from_json(source: dict[str, JsonValue]) -> _ReceiptCommon:
         "secret_scan": ReceiptSecretScan(
             cast(str, scan["registry_version"]),
             cast(str, scan["scanner_profile_digest"]),
-            _integer(scan["match_count"]),
-            cast(bool, scan["passed"]),
+            scan_match_count,
+            scan_passed,
+            scan_stage,
+            (
+                None
+                if scan.get("not_run_reason") is None
+                else PrivacyReason(cast(str, scan["not_run_reason"]))
+            ),
+        ),
+        "withheld_item_ids": tuple(
+            sorted(_strings(source.get("withheld_item_ids") or []), key=str.encode)
+        ),
+        "withheld_item_reason": (
+            None
+            if source.get("withheld_item_reason") is None
+            else cast(Literal["never_send_heuristic"], source["withheld_item_reason"])
         ),
         "safe_failure_reason": (
             None
@@ -1906,6 +1950,8 @@ class CatalogPrivacyAudit:
                 list(item) for item in request.minimized.transformation_summary
             ],
             "withheld_item_ids": list(request.minimized.withheld_item_ids),
+            "scanner_registry_version": request.minimized.scanner_registry_version,
+            "scanner_profile_digest": request.minimized.scanner_profile_digest,
         }
         proposal_bytes = canonical_encode(cast(JsonValue, proposal_value))
         proposal_commitment = _mac(self._key, _PROPOSAL_DOMAIN, proposal_bytes)
@@ -1945,6 +1991,8 @@ class CatalogPrivacyAudit:
             request.expires_at,
             proposal_commitment,
             request.minimized.withheld_item_ids,
+            request.minimized.scanner_registry_version,
+            request.minimized.scanner_profile_digest,
         )
         structural = canonical_encode(
             {
@@ -2354,6 +2402,12 @@ class CatalogPrivacyAudit:
                 parse_rfc3339_millis(parsed["expires_at"]),
                 commitment,
                 tuple(sorted(_strings(parsed.get("withheld_item_ids") or []), key=str.encode)),
+                cast(str, parsed.get("scanner_registry_version") or "legacy"),
+                cast(
+                    str,
+                    parsed.get("scanner_profile_digest")
+                    or "sha256:" + "0" * 64,
+                ),
             )
         except Exception:
             return None

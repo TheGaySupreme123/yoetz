@@ -3598,6 +3598,7 @@ class MemoryLedgerAdapter:
         missing_for_assessment: tuple[MissingForAssessmentItem, ...] = (),
         check_change_files: CheckChangeShownFiles | None = None,
         semantic_included_refs: tuple[str, ...] | None = None,
+        semantic_withheld_item_ids: tuple[str, ...] = (),
     ) -> CheckCommitResult:
         key = (frozen.lease.writer_id, frozen.lease.operation_id)
         async with self._lock:
@@ -3710,6 +3711,7 @@ class MemoryLedgerAdapter:
             prior_finding_verdicts=prior_finding_verdicts,
             check_change_files=check_change_files,
             semantic_included_refs=semantic_included_refs,
+            semantic_withheld_item_ids=semantic_withheld_item_ids,
         )
         event_payloads.append((event_id(self._ids.new(IdKind.EVENT)), check_payload))
         accepted_at = _now(self._clock)
@@ -3824,6 +3826,7 @@ class MemoryLedgerAdapter:
             findings.coverage,
             CheckVersionSlice("0.1", "0.1.0", PROJECTION_VERSION, packs),
             missing_for_assessment=check_payload.missing_for_assessment,
+            semantic_withheld_item_ids=check_payload.semantic_withheld_item_ids,
         )
         canonical = canonical_encode(
             {

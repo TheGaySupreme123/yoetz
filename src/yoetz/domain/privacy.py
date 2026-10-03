@@ -87,6 +87,7 @@ __all__ = [
     "ReceiptCounts",
     "ReceiptPolicyBinding",
     "ReceiptSecretScan",
+    "ReceiptSecretScanStage",
     "ReceiptTransformations",
     "REVIEW_PACKET_ITEM_ID",
     "RequestCommitment",
@@ -1987,6 +1988,10 @@ class DisclosureProposal:
     # prepared proposal so a restart/replay can report the same coverage loss without reopening
     # or re-scanning the original plaintext.
     withheld_item_ids: tuple[str, ...] = ()
+    # Scanner identity is persisted with the proposal so a resume receipt can state the exact
+    # scanner that guarded the prepared case, rather than inventing a clean ``resume`` profile.
+    scanner_registry_version: str = "legacy"
+    scanner_profile_digest: str = "sha256:" + "0" * 64
 
     def __post_init__(self) -> None:
         validate_id(IdKind.PRIVACY_PROPOSAL, self.privacy_proposal_id)
@@ -2021,11 +2026,10 @@ class DisclosureProposal:
             sorted(set(self.withheld_item_ids), key=str.encode)
         ):
             raise _invalid()
-        if any(
-            type(item_id) is not str or not item_id or len(item_id.encode("utf-8")) > 128
-            for item_id in self.withheld_item_ids
-        ):
-            raise _invalid()
+        for item_id in self.withheld_item_ids:
+            _text(item_id, _OPAQUE)
+        _text(self.scanner_registry_version, _VERSION)
+        validate_sha256_digest(self.scanner_profile_digest)
 
 
 type PrivacyAuditSubject = (
@@ -2116,6 +2120,7 @@ class ApprovedOutboundCase:
     authorization_id: str
     policy_digest: str
     case_digest: str
+    withheld_item_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         validate_id(IdKind.OUTBOUND_CASE, self.case_id)
@@ -2143,6 +2148,7 @@ class ApprovedOutboundCase:
         validate_id(IdKind.EGRESS_AUTHORIZATION, self.authorization_id)
         validate_sha256_digest(self.policy_digest)
         validate_sha256_digest(self.case_digest)
+        object.__setattr__(self, "withheld_item_ids", _sorted_text(self.withheld_item_ids))
 
 
 @dataclass(frozen=True, slots=True)
@@ -2162,6 +2168,7 @@ class ApprovedLocalDisclosureCase:
     purpose: str
     policy_digest: str
     case_digest: str
+    withheld_item_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         validate_id(IdKind.OUTBOUND_CASE, self.case_id)
@@ -2189,6 +2196,7 @@ class ApprovedLocalDisclosureCase:
         _text(self.purpose, _PURPOSE)
         validate_sha256_digest(self.policy_digest)
         validate_sha256_digest(self.case_digest)
+        object.__setattr__(self, "withheld_item_ids", _sorted_text(self.withheld_item_ids))
 
 
 type ApprovedProviderCase = ApprovedOutboundCase | ApprovedLocalDisclosureCase
@@ -2278,12 +2286,25 @@ class ReceiptTransformations:
         _nonnegative(self.blocked_items)
 
 
+class ReceiptSecretScanStage(str, Enum):  # noqa: UP042 - durable receipt vocabulary
+    CANDIDATE = "candidate"
+    PREPARED_CASE = "prepared_case"
+    RENDERED_BODY = "rendered_body"
+    NOT_RUN = "not_run"
+    # Compatibility marker for pre-stage receipts.  Older rows did not say whether a zero-match
+    # result came from a prepared scan or from a pre-dispatch refusal; readers preserve that
+    # uncertainty instead of presenting it as a clean scan.
+    LEGACY_UNKNOWN = "legacy_unknown"
+
+
 @dataclass(frozen=True, slots=True)
 class ReceiptSecretScan:
     registry_version: str
     scanner_profile_digest: str
     match_count: int
     passed: bool
+    stage: ReceiptSecretScanStage = ReceiptSecretScanStage.PREPARED_CASE
+    not_run_reason: PrivacyReason | None = None
 
     def __post_init__(self) -> None:
         _text(self.registry_version, _VERSION)
@@ -2291,11 +2312,29 @@ class ReceiptSecretScan:
         _nonnegative(self.match_count)
         if type(self.passed) is not bool:
             raise _invalid()
+        _enum(self.stage, ReceiptSecretScanStage)
+        if self.stage is ReceiptSecretScanStage.NOT_RUN:
+            if self.match_count != 0 or self.passed or self.not_run_reason is None:
+                raise _invalid()
+        elif self.stage is ReceiptSecretScanStage.LEGACY_UNKNOWN:
+            # Pre-stage receipts carried only ``match_count`` and ``passed``.  Keep their
+            # uncertainty for every historical combination, including blocked/unrun rows that
+            # stored ``passed=false`` with ``match_count=0``; a reader must not reinterpret that
+            # shape as a prepared clean scan.  ``not_run_reason`` is a field introduced with the
+            # explicit NOT_RUN stage.
+            if self.not_run_reason is not None:
+                raise _invalid()
+        elif self.not_run_reason is not None or self.passed is not (self.match_count == 0):
+            raise _invalid()
+        if self.not_run_reason is not None:
+            _enum(self.not_run_reason, PrivacyReason)
 
 
 @dataclass(frozen=True, slots=True)
 class EgressReceipt:
-    schema_version: Literal["1.0.0"]
+    # ``1.0.0`` is retained for durable rows written before the additive receipt extension;
+    # newly written receipts use ``1.1.0`` while the active control contract accepts both.
+    schema_version: Literal["1.0.0", "1.1.0"]
     receipt_id: str
     request_id: str
     privacy_proposal_id: str
@@ -2318,9 +2357,11 @@ class EgressReceipt:
     dispatch_id: str | None = None
     dispatch_started_at: datetime | None = None
     request_commitment: RequestCommitment | None = None
+    withheld_item_ids: tuple[str, ...] = ()
+    withheld_item_reason: Literal["never_send_heuristic"] | None = None
 
     def __post_init__(self) -> None:
-        if type(self.schema_version) is not str or self.schema_version != "1.0.0":
+        if type(self.schema_version) is not str or self.schema_version not in {"1.0.0", "1.1.0"}:
             raise _invalid()
         validate_id(IdKind.EGRESS_RECEIPT, self.receipt_id)
         validate_id(IdKind.REQUEST, self.request_id)
@@ -2410,11 +2451,28 @@ class EgressReceipt:
             or self.audit_store_version != AUDIT_STORE_VERSION
         ):
             raise _invalid()
+        if type(self.withheld_item_ids) is not tuple or self.withheld_item_ids != tuple(
+            sorted(set(self.withheld_item_ids), key=str.encode)
+        ):
+            raise _invalid()
+        for item_id in self.withheld_item_ids:
+            _text(item_id, _OPAQUE)
+        if self.withheld_item_ids:
+            if self.withheld_item_reason is None:
+                object.__setattr__(self, "withheld_item_reason", "never_send_heuristic")
+            elif self.withheld_item_reason != "never_send_heuristic":
+                raise _invalid()
+        elif self.withheld_item_reason is not None:
+            raise _invalid()
+        if self.schema_version == "1.0.0" and self.withheld_item_ids:
+            # The released 1.0 wire contract has no safe place for omission identities.  Do not
+            # let a caller construct a value that a legacy encoder would silently truncate.
+            raise _invalid()
 
 
 @dataclass(frozen=True, slots=True)
 class LocalDisclosureReceipt:
-    schema_version: Literal["1.0.0"]
+    schema_version: Literal["1.0.0", "1.1.0"]
     receipt_id: str
     request_id: str
     privacy_proposal_id: str
@@ -2432,9 +2490,11 @@ class LocalDisclosureReceipt:
     secret_scan: ReceiptSecretScan
     safe_failure_reason: PrivacyReason | None
     audit_store_version: Literal[1]
+    withheld_item_ids: tuple[str, ...] = ()
+    withheld_item_reason: Literal["never_send_heuristic"] | None = None
 
     def __post_init__(self) -> None:
-        if type(self.schema_version) is not str or self.schema_version != "1.0.0":
+        if type(self.schema_version) is not str or self.schema_version not in {"1.0.0", "1.1.0"}:
             raise _invalid()
         validate_id(IdKind.EGRESS_RECEIPT, self.receipt_id)
         validate_id(IdKind.REQUEST, self.request_id)
@@ -2446,6 +2506,21 @@ class LocalDisclosureReceipt:
             type(self.scope) is not AuthorizationScope
             or type(self.policy) is not ReceiptPolicyBinding
         ):
+            raise _invalid()
+        if type(self.withheld_item_ids) is not tuple or self.withheld_item_ids != tuple(
+            sorted(set(self.withheld_item_ids), key=str.encode)
+        ):
+            raise _invalid()
+        for item_id in self.withheld_item_ids:
+            _text(item_id, _OPAQUE)
+        if self.withheld_item_ids:
+            if self.withheld_item_reason is None:
+                object.__setattr__(self, "withheld_item_reason", "never_send_heuristic")
+            elif self.withheld_item_reason != "never_send_heuristic":
+                raise _invalid()
+        elif self.withheld_item_reason is not None:
+            raise _invalid()
+        if self.schema_version == "1.0.0" and self.withheld_item_ids:
             raise _invalid()
         _text(self.purpose, _PURPOSE)
         _enum(self.consent_source, ConsentSource)

@@ -56,6 +56,7 @@ from yoetz.protocol.coverage import (
     weakest,
 )
 from yoetz.protocol.errors import ProtocolValueError
+from yoetz.protocol.ids import validate_opaque_item_id
 from yoetz.protocol.models import (
     ReceiptRedactionProfile,
     SemanticReason,
@@ -97,6 +98,7 @@ __all__ = [
     "ReceiptResponse",
     "ReceiptSection",
     "ReceiptSectionKey",
+    "ReceiptSemanticWithheldItem",
     "ReceiptVersionSlice",
     "SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP",
     "SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP",
@@ -365,6 +367,23 @@ class ReceiptSectionKey(str, Enum):  # noqa: UP042 - exact wire enum base
     EVIDENCE_AND_CLAIM_BASIS = "evidence_and_claim_basis"
     LIMITATIONS_AND_COVERAGE = "limitations_and_coverage"
     VERSION_AND_POLICY_IDENTITY = "version_and_policy_identity"
+
+
+@dataclass(frozen=True, slots=True)
+class ReceiptSemanticWithheldItem:
+    """One opaque review item omitted by the never-send heuristic."""
+
+    item_id: str
+    reason: Literal["never_send_heuristic"] = "never_send_heuristic"
+
+    def __post_init__(self) -> None:
+        invalid = "invalid_receipt_semantic_withheld_item"
+        try:
+            validate_opaque_item_id(self.item_id)
+        except (TypeError, ValueError) as exc:
+            raise ProtocolValueError(invalid) from exc
+        if self.reason != "never_send_heuristic":
+            raise ProtocolValueError(invalid)
 
 
 _SUMMARY_SECTION_KEYS: Final = (
@@ -907,6 +926,9 @@ class ReceiptDocument:
     # Absent (empty) keeps every earlier receipt's exact bytes.
     acknowledged_not_done_finding_ids: tuple[FindingId, ...] = ()
     rejection_accepted_finding_ids: tuple[FindingId, ...] = ()
+    # Opaque review item identities withheld by the never-send heuristic.  The field is omitted
+    # when empty so historical receipt objects retain their exact bytes.
+    semantic_withheld_items: tuple[ReceiptSemanticWithheldItem, ...] = ()
 
     def __post_init__(self) -> None:
         invalid = "invalid_receipt_document"
@@ -974,6 +996,13 @@ class ReceiptDocument:
             object.__setattr__(self, name, ids)
         if set(self.acknowledged_not_done_finding_ids) & set(self.rejection_accepted_finding_ids):
             raise ProtocolValueError(invalid)
+        withheld = _validate_tuple(self.semantic_withheld_items, 0, 64, invalid)
+        if any(type(value) is not ReceiptSemanticWithheldItem for value in withheld):
+            raise ProtocolValueError(invalid)
+        typed_withheld = cast(tuple[ReceiptSemanticWithheldItem, ...], withheld)
+        withheld_ids = tuple(item.item_id for item in typed_withheld)
+        if withheld_ids != tuple(sorted(set(withheld_ids), key=str.encode)):
+            raise ProtocolValueError("receipt_semantic_withheld_items_not_canonical")
         section_keys = tuple(cast(ReceiptSection, section).key for section in sections)
         if section_keys not in _VALID_SECTION_KEY_SEQUENCES:
             raise ProtocolValueError("invalid_receipt_section_order")
@@ -1272,6 +1301,20 @@ def _section_from_json(value: object) -> ReceiptSection:
     )
 
 
+def _semantic_withheld_item_from_json(value: object) -> ReceiptSemanticWithheldItem:
+    invalid = "invalid_receipt_semantic_withheld_item"
+    source = _closed_object(
+        value,
+        frozenset({"item_id", "reason"}),
+        frozenset(),
+        invalid,
+    )
+    return ReceiptSemanticWithheldItem(
+        item_id=cast(str, _field(source, "item_id", invalid)),
+        reason=cast(Literal["never_send_heuristic"], _field(source, "reason", invalid)),
+    )
+
+
 def receipt_document_from_json(value: object) -> ReceiptDocument:
     """Decode the exact closed receipt-document schema into immutable domain values."""
 
@@ -1313,6 +1356,7 @@ def receipt_document_from_json(value: object) -> ReceiptDocument:
                 "acknowledged_not_done_finding_ids",
                 "children",
                 "rejection_accepted_finding_ids",
+                "semantic_withheld_items",
                 "semantic_provenance",
             }
         ),
@@ -1361,6 +1405,14 @@ def receipt_document_from_json(value: object) -> ReceiptDocument:
         if "semantic_provenance" in source
         else None
     )
+    semantic_withheld_items = (
+        tuple(
+            _semantic_withheld_item_from_json(item)
+            for item in _array(_field(source, "semantic_withheld_items", invalid), invalid)
+        )
+        if "semantic_withheld_items" in source
+        else ()
+    )
     document = ReceiptDocument(
         receipt_id=receipt_id(_field(source, "receipt_id", invalid)),
         task_id=task_id(_field(source, "task_id", invalid)),
@@ -1397,6 +1449,7 @@ def receipt_document_from_json(value: object) -> ReceiptDocument:
             finding_id(item)
             for item in _array(source.get("rejection_accepted_finding_ids", ()), invalid)
         ),
+        semantic_withheld_items=semantic_withheld_items,
     )
     return document
 
@@ -1548,6 +1601,11 @@ def receipt_document_to_json(document: ReceiptDocument) -> dict[str, object]:
         )
     if document.rejection_accepted_finding_ids:
         result["rejection_accepted_finding_ids"] = list(document.rejection_accepted_finding_ids)
+    if document.semantic_withheld_items:
+        result["semantic_withheld_items"] = [
+            {"item_id": item.item_id, "reason": item.reason}
+            for item in document.semantic_withheld_items
+        ]
     # Omit absent provenance rather than emitting null: local-only and historical receipt
     # documents therefore retain their exact pre-extension bytes.
     if document.semantic_provenance is not None:
@@ -1713,6 +1771,23 @@ def render_receipt_human(document: ReceiptDocument, *, markdown: bool) -> str:
                     "The agent rejected these AI-powered findings with a reason and a later "
                     "review withdrew them. They are not resolved and stay on the record.",
                     *(f"- {item}" for item in document.rejection_accepted_finding_ids),
+                )
+            )
+        )
+    if document.semantic_withheld_items:
+        count = len(document.semantic_withheld_items)
+        noun = "item" if count == 1 else "items"
+        heading = "## Withheld review items" if markdown else "Withheld review items"
+        parts.append(
+            "\n".join(
+                (
+                    heading,
+                    f"AI-powered review continued without {count} review {noun}. "
+                    "The item text was not sent or echoed; reason: never_send_heuristic.",
+                    *(
+                        f"- {item.item_id}: {item.reason}"
+                        for item in document.semantic_withheld_items
+                    ),
                 )
             )
         )

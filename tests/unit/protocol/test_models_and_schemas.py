@@ -309,9 +309,9 @@ _STATUS_PAGE_DEF_BY_VIEW_FOR_TEST: tuple[tuple[str, str], ...] = (
     ("versions", "versions_page"),
 )
 _EXPECTED_RESULT_PATTERN_COUNTS: dict[tuple[str, str | None], int] = {
-    ("check", None): 237,
+    ("check", None): 239,
     ("publish_work", None): 57,
-    ("receipt", None): 274,
+    ("receipt", None): 276,
     ("respond", None): 53,
     ("start", None): 72,
     ("status", None): 53,
@@ -324,7 +324,7 @@ _EXPECTED_RESULT_PATTERN_COUNTS: dict[tuple[str, str | None], int] = {
     ("status", "history"): 12,
     ("status", "lineage"): 16,
     ("status", "obligations"): 33,
-    ("status", "operation"): 42,
+    ("status", "operation"): 44,
     ("status", "project"): 67,
     ("status", "results"): 11,
     ("status", "versions"): 13,
@@ -1245,6 +1245,7 @@ def test_protocol_models_public_exports_are_closed() -> None:
         CheckMissingItemModel MAX_MISSING_FOR_ASSESSMENT MAX_MISSING_REASON_BYTES
         MAX_MISSING_TARGET_REFS MISSING_FOR_ASSESSMENT_KINDS MISSING_ITEM_AVAILABILITIES
         ProviderJudgmentNoDiscrepancyModel
+        SemanticWithheldItemModel
         MAX_PRIOR_FINDING_VERDICTS PriorFindingVerdictWire ProviderPriorFindingVerdictModel
         ReceiptFormat ReceiptInclude ReceiptRedactionProfile
         ReceiptRequest ReceiptRequestModel ReceiptResult ReceiptResultModel
@@ -2428,7 +2429,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     rules = cast(tuple[Any, ...], getattr(models, "_RESULT_LEAF_RULES"))
 
     derived_patterns = _derived_result_success_patterns(catalog)
-    assert len(derived_patterns) == 1176
+    assert len(derived_patterns) == 1182
 
     derived_counts = {
         context: sum(1 for method, view, _ in derived_patterns if (method, view) == context)
@@ -2437,7 +2438,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert derived_counts == _EXPECTED_RESULT_PATTERN_COUNTS
 
     assert type(rules) is tuple
-    assert len(rules) == 1201
+    assert len(rules) == 1207
     assert rules == tuple(sorted(rules, key=_test_rule_sort_key))
 
     rule_keys = {
@@ -2446,7 +2447,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert len(rule_keys) == len(rules)
 
     registry_patterns = {(rule.method, rule.status_view, rule.segments) for rule in rules}
-    assert len(registry_patterns) == 1176
+    assert len(registry_patterns) == 1182
     assert registry_patterns == derived_patterns
 
     content_rules = _expected_nonpublish_content_rules(models)
@@ -3034,7 +3035,7 @@ def test_schema_catalog_reports_complete_registry() -> None:
     assert SCHEMA_NAMESPACE == "https://schemas.yoetz.dev/0.1/"
     assert SCHEMA_MANIFEST_SCHEMA == "yoetz.schema-manifest/1.0.0"
     assert SCHEMA_MANIFEST_VERSION == "1.0.0"
-    assert SCHEMA_MEMBER_COUNT == 220
+    assert SCHEMA_MEMBER_COUNT == 221
     assert len(catalog.documents) == SCHEMA_MEMBER_COUNT
 
     paths = tuple(document.relative_path for document in catalog.documents)
@@ -3118,7 +3119,7 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     root = resources.files("yoetz").joinpath("resources", "schemas")
     manifest_bytes = root.joinpath("manifest.json").read_bytes()
     assert catalog.manifest_digest == f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
-    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 7_191
+    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 7_251
 
 
 def test_schema_name_derivation_and_version_maps_are_exact() -> None:

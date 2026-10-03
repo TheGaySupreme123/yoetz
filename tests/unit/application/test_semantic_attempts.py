@@ -266,6 +266,7 @@ class _Eval:
     reason: SemanticReason
     judgment: object | None = None
     provenance: object | None = None
+    semantic_withheld_item_ids: tuple[str, ...] = ()
 
 
 @dataclass
@@ -971,6 +972,101 @@ async def test_terminal_failed_job_recovers_without_claim() -> None:
     assert result[1] is SemanticReason.PROVIDER_TIMEOUT
     assert result[2].attempted_count == 1
     assert ledger.renew_count >= 1
+
+
+@pytest.mark.anyio
+async def test_terminal_non_success_replays_withheld_item_ids_from_response_object() -> None:
+    """A failed semantic job keeps omission identities available after terminal replay."""
+
+    lease = _lease()
+    job = SemanticJobRecord(
+        _JOB,
+        _WRITER,
+        _OP,
+        _CASE,
+        _case_ref(),
+        "queued",
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    ledger = _FakeLedger(job, lease)
+    evaluation = _Eval(
+        SemanticStatus.BLOCKED_BY_POLICY,
+        SemanticReason.NETWORK_EGRESS_DENIED,
+        semantic_withheld_item_ids=("item_secret",),
+    )
+    published: list[tuple[str, tuple[str, ...]]] = []
+
+    async def dispatch(handle: SemanticAttemptHandle, deadline: Deadline) -> _Eval:
+        return evaluation
+
+    async def publish(handle: SemanticAttemptHandle, value: object) -> ObjectRef:
+        assert isinstance(value, _Eval)
+        published.append((handle.attempt_id, value.semantic_withheld_item_ids))
+        return _response_ref()
+
+    def build_final(
+        status: SemanticStatus,
+        reason: SemanticReason,
+        value: object | None,
+        accounting: SemanticAttemptAccounting,
+    ) -> object:
+        return (status, reason, value, accounting)
+
+    first = cast(
+        tuple[SemanticStatus, SemanticReason, object | None, SemanticAttemptAccounting],
+        await run_durable_semantic_attempts(
+            ledger=ledger,
+            lease=lease,
+            job=job,
+            deadline=Deadline(datetime(2030, 1, 1, tzinfo=UTC), 1000.0),
+            max_retries=0,
+            now_monotonic=lambda: 0.0,
+            dispatch=dispatch,
+            publish_success_response=publish,
+            sleep=lambda _: _async_noop(),
+            build_final=build_final,
+        ),
+    )
+    assert first[0] is SemanticStatus.BLOCKED_BY_POLICY
+    assert published == [(_ATT1, ("item_secret",))]
+    assert ledger.attempts is not None
+    assert ledger.attempts[_ATT1].result_object_ref == _response_ref()
+
+    async def recover_response(ref: ObjectRef) -> _Eval | None:
+        assert ref == _response_ref()
+        return evaluation
+
+    second = cast(
+        tuple[SemanticStatus, SemanticReason, object | None, SemanticAttemptAccounting],
+        await run_durable_semantic_attempts(
+            ledger=ledger,
+            lease=lease,
+            job=ledger.job,
+            deadline=Deadline(datetime(2030, 1, 1, tzinfo=UTC), 1000.0),
+            max_retries=0,
+            now_monotonic=lambda: 0.0,
+            dispatch=dispatch,
+            publish_success_response=publish,
+            sleep=lambda _: _async_noop(),
+            build_final=build_final,
+            recover_response=recover_response,
+        ),
+    )
+    assert second[0] is SemanticStatus.BLOCKED_BY_POLICY
+    assert second[1] is SemanticReason.NETWORK_EGRESS_DENIED
+    assert second[2] is evaluation
+    assert isinstance(second[2], _Eval)
+    assert second[2].semantic_withheld_item_ids == ("item_secret",)
+    assert published == [(_ATT1, ("item_secret",))]
+    assert ledger.claim_calls == 1
 
 
 @pytest.mark.anyio

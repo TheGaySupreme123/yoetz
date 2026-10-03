@@ -42,6 +42,7 @@ from yoetz.domain.privacy import (
     ReceiptCounts,
     ReceiptPolicyBinding,
     ReceiptSecretScan,
+    ReceiptSecretScanStage,
     ReceiptTransformations,
     RequestCommitment,
 )
@@ -74,7 +75,7 @@ from yoetz.ports.privacy import (
     PrivacyReceiptView,
 )
 from yoetz.protocol.canonical import parse_canonical_integer_string
-from yoetz.protocol.ids import IdKind, new_id, validate_id
+from yoetz.protocol.ids import IdKind, new_id, validate_id, validate_opaque_item_id
 from yoetz.protocol.models import (
     CheckRequest,
     CheckResult,
@@ -433,7 +434,7 @@ def prepare_project_request(
 
 
 class _ReceiptCommon(TypedDict):
-    schema_version: Literal["1.0.0"]
+    schema_version: Literal["1.0.0", "1.1.0"]
     receipt_id: str
     request_id: str
     privacy_proposal_id: str
@@ -448,6 +449,8 @@ class _ReceiptCommon(TypedDict):
     counts: ReceiptCounts
     transformations: ReceiptTransformations
     secret_scan: ReceiptSecretScan
+    withheld_item_ids: tuple[str, ...]
+    withheld_item_reason: Literal["never_send_heuristic"] | None
     safe_failure_reason: PrivacyReason | None
     audit_store_version: Literal[1]
 
@@ -545,13 +548,29 @@ def _transformations_from_wire(value: object) -> ReceiptTransformations:
     )
 
 
-def _secret_scan_from_wire(value: object) -> ReceiptSecretScan:
+def _secret_scan_from_wire(
+    value: object, *, legacy_unknown: bool = False
+) -> ReceiptSecretScan:
     source = _object(value)
+    match_count = _decimal(source["match_count"])
+    passed = cast(bool, source["passed"])
+    raw_stage = source.get("stage")
+    stage = (
+        ReceiptSecretScanStage.LEGACY_UNKNOWN
+        if legacy_unknown and raw_stage is None
+        else ReceiptSecretScanStage(cast(str, raw_stage or "prepared_case"))
+    )
     return ReceiptSecretScan(
         registry_version=cast(str, source["registry_version"]),
         scanner_profile_digest=cast(str, source["scanner_profile_digest"]),
-        match_count=_decimal(source["match_count"]),
-        passed=cast(bool, source["passed"]),
+        match_count=match_count,
+        passed=passed,
+        stage=stage,
+        not_run_reason=(
+            None
+            if source.get("not_run_reason") is None
+            else PrivacyReason(cast(str, source["not_run_reason"]))
+        ),
     )
 
 
@@ -560,6 +579,23 @@ def _categories_from_wire(value: object) -> tuple[DataCategory, ...]:
         raise ValueError("privacy_receipt_wire_invalid")
     members = cast(tuple[object, ...], value)
     return tuple(DataCategory(cast(str, item)) for item in members)
+
+
+def _withheld_item_ids_from_wire(value: object) -> tuple[str, ...]:
+    if type(value) is not tuple:
+        raise ValueError("privacy_receipt_wire_invalid")
+    members = cast(tuple[object, ...], value)
+    if any(not _valid_opaque_item_id(item) for item in members):
+        raise ValueError("privacy_receipt_wire_invalid")
+    return tuple(cast(str, item) for item in members)
+
+
+def _valid_opaque_item_id(value: object) -> bool:
+    try:
+        validate_opaque_item_id(value)
+    except ValueError:
+        return False
+    return True
 
 
 def _destination_from_wire(value: object) -> ProviderBinding | NonLlmDestination:
@@ -593,8 +629,12 @@ def _request_commitment_from_wire(value: object) -> RequestCommitment:
 def _receipt_view_from_wire(value: object) -> PrivacyReceiptView:
     wrapper = _object(value)
     receipt = _object(wrapper["receipt"])
+    # Stage-less v1.0 receipts cannot prove whether scanning reached a prepared case.  Preserve
+    # that uncertainty even for a historical completed/passed row instead of manufacturing a
+    # clean PREPARED_CASE state.
+    legacy_scan_unknown = "stage" not in _object(receipt["secret_scan"])
     common: _ReceiptCommon = {
-        "schema_version": cast(Literal["1.0.0"], receipt["schema_version"]),
+        "schema_version": cast(Literal["1.0.0", "1.1.0"], receipt["schema_version"]),
         "receipt_id": cast(str, receipt["receipt_id"]),
         "request_id": cast(str, receipt["request_id"]),
         "privacy_proposal_id": cast(str, receipt["privacy_proposal_id"]),
@@ -608,7 +648,17 @@ def _receipt_view_from_wire(value: object) -> PrivacyReceiptView:
         "blocked_categories": _categories_from_wire(receipt["blocked_categories"]),
         "counts": _counts_from_wire(receipt["counts"]),
         "transformations": _transformations_from_wire(receipt["transformations"]),
-        "secret_scan": _secret_scan_from_wire(receipt["secret_scan"]),
+        "secret_scan": _secret_scan_from_wire(
+            receipt["secret_scan"], legacy_unknown=legacy_scan_unknown
+        ),
+        "withheld_item_ids": _withheld_item_ids_from_wire(
+            receipt.get("withheld_item_ids", ())
+        ),
+        "withheld_item_reason": (
+            None
+            if receipt.get("withheld_item_reason") is None
+            else cast(Literal["never_send_heuristic"], receipt["withheld_item_reason"])
+        ),
         "safe_failure_reason": (
             None
             if "safe_failure_reason" not in receipt

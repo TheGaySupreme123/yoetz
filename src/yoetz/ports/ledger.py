@@ -48,7 +48,7 @@ from yoetz.kernel.projections import ProjectionState
 from yoetz.ports.objects import ObjectKind, ObjectRef
 from yoetz.protocol.coverage import Coverage, PublicationChannel
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
-from yoetz.protocol.ids import IdKind, validate_actor_id, validate_id
+from yoetz.protocol.ids import IdKind, validate_actor_id, validate_id, validate_opaque_item_id
 from yoetz.protocol.models import (
     MAX_EVENTS_PER_BATCH,
     CheckScopeModel,
@@ -305,6 +305,14 @@ def _id(kind: IdKind, value: object) -> str:
         return validate_id(kind, value)
     except ValueError as exc:
         raise _invalid() from exc
+
+
+def _valid_opaque_item_id(value: object) -> bool:
+    try:
+        validate_opaque_item_id(value)
+    except ValueError:
+        return False
+    return True
 
 
 def _uint(value: object, *, positive: bool = False, sqlite: bool = False) -> int:
@@ -811,6 +819,10 @@ class CheckCommitResult:
     # Structural record of what an ``insufficient_packet`` review named as missing (issue #907).
     missing_for_assessment: tuple[MissingForAssessmentItem, ...] = ()
     finding_checklist: CheckFindingChecklist | None = None
+    # Opaque case item identities withheld by the never-send heuristic. The check result keeps
+    # these bounded references so recovery and every presentation surface can name the omitted
+    # context without exposing matched bytes.
+    semantic_withheld_item_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.outcome) is not str or self.outcome not in {"committed", "replayed"}:
@@ -856,6 +868,17 @@ class CheckCommitResult:
         if (
             self.finding_checklist is not None
             and type(self.finding_checklist) is not CheckFindingChecklist
+        ):
+            raise _invalid()
+        if (
+            type(self.semantic_withheld_item_ids) is not tuple
+            or len(self.semantic_withheld_item_ids) > 64
+            or any(
+                not _valid_opaque_item_id(item_id)
+                for item_id in self.semantic_withheld_item_ids
+            )
+            or self.semantic_withheld_item_ids
+            != tuple(sorted(set(self.semantic_withheld_item_ids), key=str.encode))
         ):
             raise _invalid()
         if type(self.advisory_notes) is not tuple or len(self.advisory_notes) > 64:
@@ -2048,6 +2071,7 @@ class LedgerPort(Protocol):
         missing_for_assessment: tuple[MissingForAssessmentItem, ...] = (),
         check_change_files: CheckChangeShownFiles | None = None,
         semantic_included_refs: tuple[str, ...] | None = None,
+        semantic_withheld_item_ids: tuple[str, ...] = (),
     ) -> CheckCommitResult: ...
 
     async def fail_check_if_current(

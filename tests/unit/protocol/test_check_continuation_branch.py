@@ -124,6 +124,34 @@ def test_the_branch_carries_the_exact_command_the_user_must_run() -> None:
     )
 
 
+def test_completed_check_operation_page_carries_withheld_item_identity() -> None:
+    page = StatusOperationPageModel.model_validate(
+        {
+            "operation_request_id": _REQUEST,
+            "found": True,
+            "state": "complete",
+            "operation_kind": "check",
+            "semantic_withheld_items": [
+                {"item_id": "excerpt-heuristic", "reason": "never_send_heuristic"}
+            ],
+        }
+    )
+    assert page.semantic_withheld_items[0].item_id == "excerpt-heuristic"
+    assert page.semantic_withheld_items[0].reason == "never_send_heuristic"
+
+
+def test_old_completed_check_operation_page_omits_withheld_items() -> None:
+    page = StatusOperationPageModel.model_validate(
+        {
+            "operation_request_id": _REQUEST,
+            "found": True,
+            "state": "complete",
+            "operation_kind": "check",
+        }
+    )
+    assert page.semantic_withheld_items == ()
+
+
 def test_missing_repository_grant_carries_standing_setup_without_one_use_fields() -> None:
     result = CheckResultModel.model_validate(
         _awaiting(continuation=_repository_grant_continuation())

@@ -1622,6 +1622,20 @@ def _check_recorded_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         "type": "array",
         "uniqueItems": True,
     }
+    # Issue #920: bounded opaque item identities omitted by the heuristic never-send class.
+    # The companion coverage gap is enforced by CheckRecordedPayload; the field itself remains
+    # optional so older completed checks retain their exact event bytes.
+    properties["semantic_withheld_item_ids"] = {
+        "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "type": "string",
+        },
+        "maxItems": 64,
+        "type": "array",
+        "uniqueItems": True,
+    }
     return document
 
 
@@ -1660,6 +1674,106 @@ def _simple_versioned_schema(
     entry: _RegistryEntry, source: str, replacements: Mapping[str, str]
 ) -> dict[str, JsonValue]:
     return _load_versioned_template(entry, source, replacements=replacements)
+
+
+_RECEIPT_SCAN_STAGES: Final[tuple[str, ...]] = (
+    "candidate",
+    "legacy_unknown",
+    "not_run",
+    "prepared_case",
+    "rendered_body",
+)
+_WITHHELD_ITEM_ID_SCHEMA: Final[dict[str, JsonValue]] = {
+    "maxLength": 128,
+    "minLength": 1,
+    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    "type": "string",
+}
+_WITHHELD_ITEM_IDS_SCHEMA: Final[dict[str, JsonValue]] = {
+    "items": _WITHHELD_ITEM_ID_SCHEMA,
+    "maxItems": 64,
+    "minItems": 1,
+    "type": "array",
+    "uniqueItems": True,
+}
+_WITHHELD_ITEM_REASON_SCHEMA: Final[dict[str, JsonValue]] = {
+    "const": "never_send_heuristic",
+    "type": "string",
+}
+
+
+def _extend_receipt_schema_fields(
+    receipt: dict[str, JsonValue],
+    *,
+    reason_schema: dict[str, JsonValue],
+    definitions: dict[str, JsonValue] | None = None,
+) -> None:
+    """Add the stage and heuristic-omission fields to an active receipt shape.
+
+    The fields are optional for the active contract because old durable rows are read through the
+    same projection.  Their dependencies remain closed: an omission identity always names the
+    closed reason, and a ``not_run`` stage always names why no scan was performed.
+    """
+
+    properties = receipt.get("properties")
+    local_definitions = receipt.get("$defs") if definitions is None else definitions
+    if not isinstance(properties, dict) or not isinstance(local_definitions, dict):
+        raise SchemaGenerationError("receipt_schema_template_invalid")
+    scan = local_definitions.get("secret_scan")
+    if scan is not None:
+        if not isinstance(scan, dict) or not isinstance(scan.get("properties"), dict):
+            raise SchemaGenerationError("receipt_secret_scan_schema_template_invalid")
+        scan_properties = cast(dict[str, JsonValue], scan["properties"])
+        scan_properties["stage"] = {"enum": list(_RECEIPT_SCAN_STAGES), "type": "string"}
+        scan_properties["not_run_reason"] = reason_schema
+        scan_all_of = scan.setdefault("allOf", [])
+        if not isinstance(scan_all_of, list):
+            raise SchemaGenerationError("receipt_secret_scan_schema_template_invalid")
+        scan_all_of.extend(
+            [
+                {
+                    "if": {"properties": {"stage": {"const": "not_run"}}, "required": ["stage"]},
+                    "then": {"required": ["not_run_reason"]},
+                },
+                {
+                    "if": {"required": ["not_run_reason"]},
+                    "then": {
+                        "required": ["stage"],
+                        "properties": {"stage": {"const": "not_run"}},
+                    },
+                },
+            ]
+        )
+    properties["withheld_item_ids"] = _WITHHELD_ITEM_IDS_SCHEMA
+    properties["withheld_item_reason"] = _WITHHELD_ITEM_REASON_SCHEMA
+    receipt_all_of = receipt.setdefault("allOf", [])
+    if not isinstance(receipt_all_of, list):
+        raise SchemaGenerationError("receipt_schema_template_invalid")
+    receipt_all_of.extend(
+        [
+            {
+                "if": {"required": ["withheld_item_ids"]},
+                "then": {"required": ["withheld_item_reason"]},
+            },
+            {
+                "if": {"required": ["withheld_item_reason"]},
+                "then": {"required": ["withheld_item_ids"]},
+            },
+        ]
+    )
+
+
+def _egress_receipt_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Derive the additive receipt contract while retaining old row compatibility."""
+
+    document = _load_versioned_template(entry, "privacy/egress-receipt-1.0.0.schema.json")
+    properties = cast(dict[str, JsonValue], document["properties"])
+    properties["schema_version"] = {"enum": ["1.0.0", "1.1.0"], "type": "string"}
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    reason_schema = cast(dict[str, JsonValue], definitions["privacy_reason"])
+    _extend_receipt_schema_fields(document, reason_schema=reason_schema)
+    document["title"] = "Yoetz egress receipt 1.1.0"
+    return document
 
 
 def _control_request_v2_6_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
@@ -2792,6 +2906,27 @@ def _check_result_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         "type": "array",
         "uniqueItems": True,
     }
+    # Issue #920: bounded opaque item identities omitted by the heuristic never-send class.
+    definitions["semantic_withheld_item"] = {
+        "additionalProperties": False,
+        "properties": {
+            "item_id": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                "type": "string",
+            },
+            "reason": {"const": "never_send_heuristic"},
+        },
+        "required": ["item_id", "reason"],
+        "type": "object",
+    }
+    properties["semantic_withheld_items"] = {
+        "items": {"$ref": "#/$defs/semantic_withheld_item"},
+        "maxItems": 64,
+        "type": "array",
+        "uniqueItems": True,
+    }
     # Issue #905: the task's findings as a to-do list after this check (structural only).
     definitions["todo_state"] = _todo_state_schema()
     definitions["checklist_item"] = {
@@ -3565,6 +3700,28 @@ def _add_status_semantic_progress(definitions: dict[str, JsonValue]) -> None:
     operation_page = cast(dict[str, JsonValue], definitions["operation_page"])
     operation_properties = cast(dict[str, JsonValue], operation_page["properties"])
     operation_properties["semantic_progress"] = {"$ref": "#/$defs/semantic_progress"}
+    # Issue #920: completed checks may disclose bounded opaque identities omitted by the
+    # heuristic never-send class. Older operation rows omit this additive field.
+    definitions["semantic_withheld_item"] = {
+        "additionalProperties": False,
+        "properties": {
+            "item_id": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                "type": "string",
+            },
+            "reason": {"const": "never_send_heuristic"},
+        },
+        "required": ["item_id", "reason"],
+        "type": "object",
+    }
+    operation_properties["semantic_withheld_items"] = {
+        "items": {"$ref": "#/$defs/semantic_withheld_item"},
+        "maxItems": 64,
+        "type": "array",
+        "uniqueItems": True,
+    }
     operation_rules = cast(list[JsonValue], operation_page.setdefault("allOf", []))
     operation_rules.append(
         {
@@ -3573,6 +3730,18 @@ def _add_status_semantic_progress(definitions: dict[str, JsonValue]) -> None:
                 "properties": {
                     "operation_kind": {"const": "check"},
                     "state": {"enum": ["pending", "complete"]},
+                },
+                "required": ["operation_kind", "state"],
+            },
+        }
+    )
+    operation_rules.append(
+        {
+            "if": {"required": ["semantic_withheld_items"]},
+            "then": {
+                "properties": {
+                    "operation_kind": {"const": "check"},
+                    "state": {"const": "complete"},
                 },
                 "required": ["operation_kind", "state"],
             },
@@ -3766,6 +3935,29 @@ def _receipt_document_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]
             "type": "array",
             "uniqueItems": True,
         }
+    # Issue #920: preserve only bounded opaque identities and the fixed heuristic reason in
+    # receipt JSON. Empty arrays are omitted by the domain codec for historical byte stability.
+    definitions["semantic_withheld_item"] = {
+        "additionalProperties": False,
+        "properties": {
+            "item_id": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                "type": "string",
+            },
+            "reason": {"const": "never_send_heuristic"},
+        },
+        "required": ["item_id", "reason"],
+        "type": "object",
+    }
+    properties["semantic_withheld_items"] = {
+        "items": {"$ref": "#/$defs/semantic_withheld_item"},
+        "maxItems": 64,
+        "minItems": 1,
+        "type": "array",
+        "uniqueItems": True,
+    }
     required = cast(list[JsonValue], document["required"])
     if "children" not in required:
         required.append("children")
@@ -5076,13 +5268,18 @@ def _control_v2_9_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         + "operations/respond-request-1.1.0.schema.json",
         SCHEMA_NAMESPACE + "operations/respond-result-1.0.0.schema.json": SCHEMA_NAMESPACE
         + "operations/respond-result-1.1.0.schema.json",
+        SCHEMA_NAMESPACE + "privacy/egress-receipt-1.0.0.schema.json": SCHEMA_NAMESPACE
+        + "privacy/egress-receipt-1.1.0.schema.json",
     }
 
     def retarget_respond(node: JsonValue) -> None:
         if isinstance(node, dict):
             for key, value in tuple(node.items()):
                 if type(value) is str:
-                    node[key] = respond_replacements.get(value, value)
+                    rewritten = value
+                    for before, after in respond_replacements.items():
+                        rewritten = rewritten.replace(before, after)
+                    node[key] = rewritten
                 else:
                     retarget_respond(value)
         elif isinstance(node, list):
@@ -5090,6 +5287,34 @@ def _control_v2_9_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
                 retarget_respond(value)
 
     retarget_respond(document)
+    # The active control result carries both network and local receipts.  Extend its inline local
+    # shape with the same additive scan/omission vocabulary as the external receipt schema.
+    if entry.schema_name == "control-result":
+        definitions = cast(dict[str, JsonValue], document["$defs"])
+        local_receipt = definitions.get("local_disclosure_receipt")
+        if not isinstance(local_receipt, dict):
+            raise SchemaGenerationError(
+                "control_local_receipt_schema_template_invalid", entries=(entry.relative_path,)
+            )
+        egress_source = Path(__file__).resolve().parent.parent / "schemas/privacy/egress-receipt-1.0.0.schema.json"
+        try:
+            egress_template = cast(dict[str, JsonValue], json.loads(egress_source.read_bytes()))
+            reason_schema = cast(
+                dict[str, JsonValue], cast(dict[str, JsonValue], egress_template["$defs"])["privacy_reason"]
+            )
+        except (OSError, TypeError, json.JSONDecodeError, KeyError) as exc:
+            raise SchemaGenerationError(
+                "control_local_receipt_schema_template_invalid", entries=(entry.relative_path,)
+            ) from exc
+        cast(dict[str, JsonValue], local_receipt["properties"])["schema_version"] = {
+            "enum": ["1.0.0", "1.1.0"],
+            "type": "string",
+        }
+        _extend_receipt_schema_fields(
+            local_receipt,
+            reason_schema=reason_schema,
+            definitions=definitions,
+        )
     if entry.schema_name == "control-request":
         definitions = cast(dict[str, JsonValue], document["$defs"])
         envelope = _individual_observation_envelope(definitions)
@@ -5211,7 +5436,7 @@ def _admit_privacy_audit_unreadable(
     }
     list_properties["undecodable_receipt_ids"] = {
         "items": {
-            "$ref": SCHEMA_NAMESPACE + "privacy/egress-receipt-1.0.0.schema.json#/$defs/receipt_id"
+            "$ref": SCHEMA_NAMESPACE + "privacy/egress-receipt-1.1.0.schema.json#/$defs/receipt_id"
         },
         "maxItems": _PRIVACY_RECEIPT_PAGE_MAX,
         "minItems": 0,
@@ -7651,6 +7876,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         lambda: __import__("yoetz.domain.privacy", fromlist=["EgressReceipt"]).EgressReceipt,
     ),
     _RegistryEntry(
+        "privacy/egress-receipt-1.1.0.schema.json",
+        "egress-receipt",
+        "1.1.0",
+        "request_result",
+        "privacy-audit",
+        lambda: __import__("yoetz.domain.privacy", fromlist=["EgressReceipt"]).EgressReceipt,
+    ),
+    _RegistryEntry(
         "privacy/outbound-case-1.0.0.schema.json",
         "outbound-case",
         "1.0.0",
@@ -8749,6 +8982,8 @@ def build_schema_documents(
             normalized = _privacy_policy_v1_1_schema(entry)
         elif entry.relative_path == "privacy/privacy-policy-1.2.0.schema.json":
             normalized = _privacy_policy_v1_2_schema(entry)
+        elif entry.relative_path == "privacy/egress-receipt-1.1.0.schema.json":
+            normalized = _egress_receipt_v1_1_schema(entry)
         elif entry.relative_path == "events/session-resumed-1.2.0.schema.json":
             normalized = _with_required_task_statement(
                 entry, "events/session-resumed-1.1.0.schema.json"

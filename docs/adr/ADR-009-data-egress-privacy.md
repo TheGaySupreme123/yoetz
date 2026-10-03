@@ -734,6 +734,10 @@ heuristic class as a backstop. A corrected check builds a new prepared case and 
 replacement content; it never reuses the withheld bytes or silently carries the old omission as
 approved content. The exact omission identity is persisted with a resumable proposal so recovery
 reports the same coverage limitation without reconstructing plaintext.
+The public check result, CLI/TUI, MCP, hook-relayed response, and receipt projections carry the
+same bounded withheld identity and `never_send_heuristic` reason. A receipt's secret scan records
+`candidate`, `prepared_case`, or `rendered_body` only when that stage ran; `not_run` carries a
+closed reason and cannot be represented as a clean passed scan.
 
 The detector precision rule ignores only unquoted source expressions with syntax evidence: a
 `const`/`let`/`var` declaration for a token call or member call, an explicit member assignment

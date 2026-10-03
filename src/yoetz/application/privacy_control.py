@@ -265,6 +265,19 @@ def encode_privacy_receipt_view(view: PrivacyReceiptView) -> JsonObject:
         counts["estimated_input_tokens"] = str(receipt.counts.estimated_input_tokens)
     if receipt.counts.request_body_bytes is not None:
         counts["request_body_bytes"] = str(receipt.counts.request_body_bytes)
+    # v1.0 is a released wire shape with ``additionalProperties=false``.  New scan-stage and
+    # withheld-item fields are additive in v1.1, so an old receipt view must retain its exact
+    # historical shape rather than emitting fields that a v1.0 consumer rejects.
+    secret_scan: dict[str, JsonValue] = {
+        "registry_version": receipt.secret_scan.registry_version,
+        "scanner_profile_digest": receipt.secret_scan.scanner_profile_digest,
+        "match_count": str(receipt.secret_scan.match_count),
+        "passed": receipt.secret_scan.passed,
+    }
+    if receipt.schema_version != "1.0.0":
+        secret_scan["stage"] = receipt.secret_scan.stage.value
+        if receipt.secret_scan.not_run_reason is not None:
+            secret_scan["not_run_reason"] = receipt.secret_scan.not_run_reason.value
     body: dict[str, JsonValue] = {
         "schema_version": receipt.schema_version,
         "receipt_id": receipt.receipt_id,
@@ -289,14 +302,14 @@ def encode_privacy_receipt_view(view: PrivacyReceiptView) -> JsonObject:
             "redacted_spans": str(receipt.transformations.redacted_spans),
             "blocked_items": str(receipt.transformations.blocked_items),
         },
-        "secret_scan": {
-            "registry_version": receipt.secret_scan.registry_version,
-            "scanner_profile_digest": receipt.secret_scan.scanner_profile_digest,
-            "match_count": str(receipt.secret_scan.match_count),
-            "passed": receipt.secret_scan.passed,
-        },
+        "secret_scan": secret_scan,
         "audit_store_version": receipt.audit_store_version,
     }
+    if receipt.withheld_item_ids and receipt.schema_version != "1.0.0":
+        # Item identities are bounded opaque references.  The matched bytes and source prose
+        # never cross this receipt surface.
+        body["withheld_item_ids"] = list(receipt.withheld_item_ids)
+        body["withheld_item_reason"] = receipt.withheld_item_reason
     if receipt.safe_failure_reason is not None:
         body["safe_failure_reason"] = receipt.safe_failure_reason.value
     if isinstance(view, NetworkEgressReceiptView):

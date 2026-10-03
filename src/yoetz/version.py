@@ -63,7 +63,7 @@ __all__ = [
 PROTOCOL_VERSION: Final = "0.1"
 CONTROL_PROTOCOL_VERSION: Final = "1.0"
 PRIVACY_POLICY_SCHEMA_VERSION: Final = "1.2.0"
-EGRESS_RECEIPT_SCHEMA_VERSION: Final = "1.0.0"
+EGRESS_RECEIPT_SCHEMA_VERSION: Final = "1.1.0"
 PRIVACY_CLASSIFIER_RULESET_VERSION: Final = "privacy-classifier/0.1.0"
 ENGINE_VERSION: Final = "0.1.0"
 PROJECTION_VERSION: Final = "yoetz/0.1.0"
@@ -102,7 +102,7 @@ _RESOURCE_LIMIT: Final = 4_194_304
 # One independently reviewed cardinality tripwire guards the generated resource manifest. All
 # per-kind counts are derived from the manifest entries so adding a resource has exactly one
 # hand-authored count to review and the owning resource-ripple command can regenerate the rest.
-REVIEWED_RESOURCE_COUNT: Final = 288
+REVIEWED_RESOURCE_COUNT: Final = 289
 _RESOURCE_KINDS: Final = frozenset(
     {
         "canonical_vector",
@@ -129,7 +129,7 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("control-request", "2.9.0"),
     ("control-result", "2.9.0"),
     ("coverage", "1.0.0"),
-    ("egress-receipt", "1.0.0"),
+    ("egress-receipt", "1.1.0"),
     ("finding", "1.3.0"),
     ("frontier", "1.0.0"),
     ("lineage-acceptance", "1.0.0"),

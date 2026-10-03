@@ -62,6 +62,7 @@ from yoetz.domain.privacy import (
     ReceiptCounts,
     ReceiptPolicyBinding,
     ReceiptSecretScan,
+    ReceiptSecretScanStage,
     ReceiptTransformations,
     RequestCommitment,
 )
@@ -651,9 +652,14 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
                 case, authorization, PrivacyReason.PROVIDER_UNAVAILABLE
             )
 
-        if self._classifier.scan_exact_bytes(body):
+        final_findings = self._classifier.scan_exact_bytes(body)
+        if final_findings:
             return await self._preconsume_failure(
-                case, authorization, PrivacyReason.NEVER_SEND_DETECTED
+                case,
+                authorization,
+                PrivacyReason.NEVER_SEND_DETECTED,
+                scan_stage=ReceiptSecretScanStage.RENDERED_BODY,
+                scan_match_count=len(final_findings),
             )
 
         body_digest = "sha256:" + hashlib.sha256(body).hexdigest()
@@ -886,7 +892,13 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
         return authority_epoch if current is True else None
 
     async def _preconsume_failure(
-        self, case: ApprovedOutboundCase, authorization: EgressAuthorization, reason: PrivacyReason
+        self,
+        case: ApprovedOutboundCase,
+        authorization: EgressAuthorization,
+        reason: PrivacyReason,
+        *,
+        scan_stage: ReceiptSecretScanStage = ReceiptSecretScanStage.NOT_RUN,
+        scan_match_count: int = 0,
     ) -> SemanticResult:
         outcome = _PRECONSUME_OUTCOME[reason]
         now = self._clock.now_utc()
@@ -894,7 +906,7 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
             None if outcome in _NO_AUTHORIZATION_ID_OUTCOMES else authorization.authorization_id
         )
         receipt = EgressReceipt(
-            "1.0.0",
+            "1.1.0",
             self._ids.new(IdKind.EGRESS_RECEIPT),
             case.request_id,
             authorization.privacy_proposal_id,
@@ -920,10 +932,18 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
                 None,
             ),
             ReceiptTransformations(0, 0, len(case.included_item_ids)),
-            ReceiptSecretScan(_SCAN.version, _SCAN.profile_digest, 0, True),
+            ReceiptSecretScan(
+                _SCAN.version,
+                _SCAN.profile_digest,
+                scan_match_count,
+                scan_stage is not ReceiptSecretScanStage.NOT_RUN and scan_match_count == 0,
+                scan_stage,
+                reason if scan_stage is ReceiptSecretScanStage.NOT_RUN else None,
+            ),
             reason,
             1,
             authorization_id=authorization_id,
+            withheld_item_ids=case.withheld_item_ids,
         )
         # Every pre-dispatch refusal returns the same public shape (`unavailable`, no receipt id,
         # so the composition reports `receipt_persistence_unknown`). The exact closed reason is
@@ -1006,7 +1026,7 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
         included_items = len(case.included_item_ids) if disclosed else 0
         final_bytes = case.byte_count if disclosed else 0
         return EgressReceipt(
-            "1.0.0",
+            "1.1.0",
             self._ids.new(IdKind.EGRESS_RECEIPT),
             case.request_id,
             authorization.privacy_proposal_id,
@@ -1037,13 +1057,20 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
                 len(body) if disclosed else 0,
             ),
             ReceiptTransformations(0, 0, len(case.included_item_ids) - included_items),
-            ReceiptSecretScan(_SCAN.version, _SCAN.profile_digest, 0, True),
+            ReceiptSecretScan(
+                _SCAN.version,
+                _SCAN.profile_digest,
+                0,
+                True,
+                ReceiptSecretScanStage.RENDERED_BODY,
+            ),
             reason,
             1,
             authorization_id=authorization.authorization_id,
             dispatch_id=dispatch_id,
             dispatch_started_at=dispatch_started_at,
             request_commitment=RequestCommitment(PRIVACY_REQUEST_COMMITMENT_ALGORITHM, commitment),
+            withheld_item_ids=case.withheld_item_ids,
         )
 
     # -- local dispatch -------------------------------------------------------------------------

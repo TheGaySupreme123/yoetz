@@ -346,7 +346,7 @@ from yoetz.ports.start_catalog import (
 from yoetz.protocol.canonical import JsonValue as CanonicalJsonValue
 from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
-from yoetz.protocol.ids import IdKind, new_id, validate_id
+from yoetz.protocol.ids import IdKind, new_id, validate_id, validate_opaque_item_id
 from yoetz.protocol.models import (
     SemanticProgressPhase,
     SemanticReason,
@@ -3046,10 +3046,23 @@ def _provider_provenance(
     )
 
 
+def _egress_withheld_item_ids(result: object) -> tuple[str, ...]:
+    """Read the bounded heuristic omission identities from an egress result.
+
+    Privacy owns the result dataclasses and keeps this field optional for old in-process fakes
+    and recovery rows.  The final evaluation validates the tuple's canonical bounded shape before
+    it can reach a check result or a durable response object.
+    """
+
+    value = getattr(result, "withheld_item_ids", ())
+    return cast(tuple[str, ...], value) if type(value) is tuple else ()
+
+
 def _map_provider_outcome(
     result: SemanticEgressProviderOutcome, *, attempt_id: str
 ) -> FinalSemanticEvaluation:  # attempt_id is the durable semantic_attempts row identity
     provider = result.result
+    withheld_item_ids = _egress_withheld_item_ids(result)
     status: SemanticStatus
     reason: SemanticReason
     if type(provider) is SemanticResultRefused:
@@ -3104,13 +3117,24 @@ def _map_provider_outcome(
             )
             reason = SemanticReason.TRANSPORT_UNAVAILABLE
     else:
-        return FinalSemanticEvaluation(SemanticStatus.FAILED, SemanticReason.COORDINATOR_FAILURE)
+        return FinalSemanticEvaluation(
+            SemanticStatus.FAILED,
+            SemanticReason.COORDINATOR_FAILURE,
+            semantic_withheld_item_ids=withheld_item_ids,
+        )
     provenance = _provider_provenance(result, status=status, reason=reason, attempt_id=attempt_id)
     if provenance is None:
         return FinalSemanticEvaluation(
-            SemanticStatus.UNAVAILABLE, SemanticReason.RECEIPT_PERSISTENCE_UNKNOWN
+            SemanticStatus.UNAVAILABLE,
+            SemanticReason.RECEIPT_PERSISTENCE_UNKNOWN,
+            semantic_withheld_item_ids=withheld_item_ids,
         )
-    return FinalSemanticEvaluation(status, reason, provenance=provenance)
+    return FinalSemanticEvaluation(
+        status,
+        reason,
+        provenance=provenance,
+        semantic_withheld_item_ids=withheld_item_ids,
+    )
 
 
 def _map_egress_to_final(
@@ -3136,6 +3160,7 @@ def _map_egress_to_final(
         resolved_attempt = ids.new(IdKind.SEMANTIC_ATTEMPT)
 
     if type(result) is SemanticEgressSuccess:
+        withheld_item_ids = _egress_withheld_item_ids(result)
         provenance = _provider_provenance(
             result,
             status=SemanticStatus.SUCCEEDED,
@@ -3144,7 +3169,9 @@ def _map_egress_to_final(
         )
         if provenance is None:
             return FinalSemanticEvaluation(
-                SemanticStatus.UNAVAILABLE, SemanticReason.RECEIPT_PERSISTENCE_UNKNOWN
+                SemanticStatus.UNAVAILABLE,
+                SemanticReason.RECEIPT_PERSISTENCE_UNKNOWN,
+                semantic_withheld_item_ids=withheld_item_ids,
             )
         return FinalSemanticEvaluation(
             SemanticStatus.SUCCEEDED,
@@ -3158,6 +3185,7 @@ def _map_egress_to_final(
                 if projection is None
                 else sent_ledger_refs(result.disclosure, projection)
             ),
+            semantic_withheld_item_ids=withheld_item_ids,
         )
     if type(result) is SemanticEgressAwaitingHuman:
         # The proposal id and its expiry are the only things that make this branch recoverable.
@@ -3169,6 +3197,7 @@ def _map_egress_to_final(
         return FinalSemanticEvaluation(
             SemanticStatus.AWAITING_HUMAN,
             SemanticReason.HUMAN_APPROVAL_REQUIRED,
+            semantic_withheld_item_ids=_egress_withheld_item_ids(result),
             continuation=disclosure_continuation(
                 pending_id=result.privacy_proposal_id,
                 expires_at=result.expires_at,
@@ -3181,9 +3210,13 @@ def _map_egress_to_final(
         return FinalSemanticEvaluation(
             SemanticStatus.UNAVAILABLE,
             SemanticReason.OUTCOME_UNKNOWN,
+            semantic_withheld_item_ids=_egress_withheld_item_ids(result),
         )
     if type(result) is SemanticEgressBlocked:
-        return _map_blocked(result.outcome, result.reason)
+        return replace(
+            _map_blocked(result.outcome, result.reason),
+            semantic_withheld_item_ids=_egress_withheld_item_ids(result),
+        )
     if type(result) is SemanticEgressProviderOutcome:
         return _map_provider_outcome(result, attempt_id=resolved_attempt)
     return FinalSemanticEvaluation(SemanticStatus.FAILED, SemanticReason.COORDINATOR_FAILURE)
@@ -3719,6 +3752,13 @@ async def _publish_semantic_response_object(
         body["disclosed_content_refs"] = cast(
             CanonicalJsonValue, sorted(evaluation.case_included_refs, key=str.encode)
         )
+    if evaluation.semantic_withheld_item_ids:
+        # Keep only bounded opaque identities in the durable response.  Matched bytes and source
+        # prose stay in the encrypted proposal/case path and never enter this recovery object.
+        body["semantic_withheld_item_ids"] = cast(
+            CanonicalJsonValue,
+            list(sorted(evaluation.semantic_withheld_item_ids, key=str.encode)),
+        )
     payload = canonical_encode(cast(CanonicalJsonValue, body))
     staged = await runtime.objects.stage(
         ObjectSource(data=payload, declared_size=len(payload)),
@@ -3730,6 +3770,36 @@ async def _publish_semantic_response_object(
         ),
     )
     return await runtime.objects.finalize(staged)
+
+
+def _semantic_response_withheld_item_ids(
+    body: Mapping[str, object],
+) -> tuple[str, ...] | None:
+    """Decode the optional bounded omission identities from a response object."""
+
+    raw = body.get("semantic_withheld_item_ids")
+    if raw is None:
+        return ()
+    if type(raw) is not list:
+        return None
+    values = tuple(item for item in cast(list[object], raw) if type(item) is str)
+    if len(values) != len(cast(list[object], raw)):
+        return None
+    if (
+        len(values) > 64
+        or any(not _valid_opaque_item_id(item) for item in values)
+        or values != tuple(sorted(set(values), key=str.encode))
+    ):
+        return None
+    return values
+
+
+def _valid_opaque_item_id(value: object) -> bool:
+    try:
+        validate_opaque_item_id(value)
+    except ValueError:
+        return False
+    return True
 
 
 async def _recover_selected_evaluation(
@@ -3764,6 +3834,9 @@ async def _recover_response_evaluation(
     if type(parsed) is not dict:
         return None
     body = cast(dict[str, object], parsed)
+    withheld_item_ids = _semantic_response_withheld_item_ids(body)
+    if withheld_item_ids is None:
+        return None
     try:
         status = SemanticStatus(cast(str, body["status"]))
         reason = SemanticReason(cast(str, body["reason"]))
@@ -3796,7 +3869,12 @@ async def _recover_response_evaluation(
         if all(type(ref) is str for ref in refs):
             disclosed = frozenset(cast(list[str], refs))
     return FinalSemanticEvaluation(
-        status, reason, judgment=judgment, provenance=provenance, case_included_refs=disclosed
+        status,
+        reason,
+        judgment=judgment,
+        provenance=provenance,
+        case_included_refs=disclosed,
+        semantic_withheld_item_ids=withheld_item_ids,
     )
 
 
@@ -5034,7 +5112,9 @@ def _privacy_gated_semantic_evaluator(
                 provenance = None
                 continuation = None
                 disclosed: frozenset[str] | None = None
+                semantic_withheld_item_ids: tuple[str, ...] = ()
                 if type(evaluation) is FinalSemanticEvaluation:
+                    semantic_withheld_item_ids = evaluation.semantic_withheld_item_ids
                     if status is SemanticStatus.SUCCEEDED:
                         judgment = evaluation.judgment
                         provenance = evaluation.provenance
@@ -5064,6 +5144,7 @@ def _privacy_gated_semantic_evaluator(
                         case_reference_scope_reduced=reference_scope_reduced,
                         case_content_gaps=content_gaps,
                         unsuppliable_missing_kinds=unsuppliable,
+                        semantic_withheld_item_ids=semantic_withheld_item_ids,
                     )
                 return FinalSemanticEvaluation(
                     status,
@@ -5076,6 +5157,7 @@ def _privacy_gated_semantic_evaluator(
                     case_content_over_item_limit=over_item_limit,
                     case_reference_scope_reduced=reference_scope_reduced,
                     case_included_refs=disclosed,
+                    semantic_withheld_item_ids=semantic_withheld_item_ids,
                     case_content_gaps=content_gaps,
                     unsuppliable_missing_kinds=unsuppliable,
                     case_prior_finding_refs=packet_prior_refs,
@@ -5102,6 +5184,7 @@ def _privacy_gated_semantic_evaluator(
                     publish_success_response=_publish_success,
                     build_final=_build_final,
                     recover_selected=_recover_selected,
+                    recover_response=lambda ref: _recover_response_evaluation(runtime, ref),
                     on_lease_renewed=_on_lease_renewed,
                     fallback=fallback_plan,
                     dispatch_fallback=(

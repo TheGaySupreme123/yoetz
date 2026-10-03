@@ -147,7 +147,7 @@ from yoetz.protocol.coverage import (
     weakest,
 )
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
-from yoetz.protocol.ids import IdKind
+from yoetz.protocol.ids import IdKind, validate_opaque_item_id
 from yoetz.protocol.models import (
     MISSING_FOR_ASSESSMENT_KINDS,
     CheckRequest,
@@ -249,6 +249,14 @@ class SemanticJudgmentRejected(ValueError):
 
 def _invalid(reason: str = "check_coordinator_invalid") -> ValueError:
     return ValueError(reason)
+
+
+def _valid_opaque_item_id(value: object) -> bool:
+    try:
+        validate_opaque_item_id(value)
+    except ValueError:
+        return False
+    return True
 
 
 def _rejected(reason: str) -> SemanticJudgmentRejected:
@@ -448,6 +456,19 @@ def check_internal_json(result: CheckCommitResult) -> dict[str, JsonValue]:
             # returns an immutable JsonObject, so thaw only its root container;
             # nested values remain canonical JSON mappings.
             else dict(semantic_provenance_to_json(result.semantic_provenance).items())
+        ),
+        **(
+            {}
+            if not result.semantic_withheld_item_ids
+            else {
+                "semantic_withheld_items": tuple(
+                    {
+                        "item_id": item_id,
+                        "reason": "never_send_heuristic",
+                    }
+                    for item_id in result.semantic_withheld_item_ids
+                )
+            }
         ),
         "coverage": coverage_to_json(result.coverage),
         "versions": {
@@ -1153,6 +1174,10 @@ class FinalSemanticEvaluation:
     # envelope bounding and privacy minimization (issue #904); None when no packet was sent or it
     # could not be read. The check records them only for a completed reduced review.
     case_included_refs: frozenset[str] | None = None
+    # Opaque case item identities omitted by the low-confidence never-send heuristic. The
+    # public check result names these identities and the closed remediation reason, never bytes
+    # or source prose.
+    semantic_withheld_item_ids: tuple[str, ...] = ()
     case_content_gaps: tuple[str, ...] = ()
     # Missing-item kinds the effective review selection or channel can never carry (issue #907).
     # Computed where the case is composed, so the check can classify what a reviewer names.
@@ -1185,6 +1210,17 @@ class FinalSemanticEvaluation:
         if self.case_included_refs is not None and (
             type(self.case_included_refs) is not frozenset
             or any(type(ref) is not str for ref in self.case_included_refs)
+        ):
+            raise _invalid("semantic_judgment_invalid")
+        if (
+            type(self.semantic_withheld_item_ids) is not tuple
+            or self.semantic_withheld_item_ids
+            != tuple(sorted(set(self.semantic_withheld_item_ids), key=str.encode))
+            or len(self.semantic_withheld_item_ids) > 64
+            or any(
+                not _valid_opaque_item_id(item_id)
+                for item_id in self.semantic_withheld_item_ids
+            )
         ):
             raise _invalid("semantic_judgment_invalid")
         if (
@@ -2725,6 +2761,7 @@ def _judgment_rejected_evaluation(
         case_content_over_item_limit=result.case_content_over_item_limit,
         case_reference_scope_reduced=result.case_reference_scope_reduced,
         case_included_refs=result.case_included_refs,
+        semantic_withheld_item_ids=result.semantic_withheld_item_ids,
         case_content_gaps=result.case_content_gaps,
     )
 
@@ -3067,6 +3104,11 @@ async def execute_check_commit(
             and semantic_result.withheld_review_categories
         ):
             declared_gaps.add(SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP)
+        if semantic_result.semantic_withheld_item_ids:
+            # Item-level omission is a useful review outcome, but it is still a material
+            # content loss. Keep the established content_redacted gap visible on every public
+            # result so CLI, MCP, hooks, and receipts share one coverage vocabulary.
+            declared_gaps.add("content_redacted")
         # A challenge the fence dropped is material the reviewer raised and the check does not
         # carry. Saying so is what keeps a dropped challenge from reading as one never made.
         if review.challenges_rejected:
@@ -3168,6 +3210,7 @@ async def execute_check_commit(
             ),
             missing_for_assessment=missing.items,
             semantic_included_refs=semantic_included_refs(semantic_result),
+            semantic_withheld_item_ids=semantic_result.semantic_withheld_item_ids,
         )
         preview = _lineage_preview(lineage_evaluation, frozen.case.frontier)
         projected = committed if preview is None else replace(committed, children=preview)

@@ -3543,6 +3543,11 @@ body match remain whole-case no-dispatch refusals. The final-body backstop scans
 an omission construction failure cannot turn into disclosure. Recovery persists the omission
 identities with the exact proposal; a corrected check supplies a new prepared case. No matched
 bytes, caller prose, raw exception, or detector output enters a structural notice or receipt.
+The check result and CLI/TUI rendering expose each withheld identity with that closed reason; MCP,
+hook-relayed, and receipt projections use the same bounded fields. Privacy receipts mark the
+secret-scan stage as `candidate`, `prepared_case`, or `rendered_body` when that scan actually ran.
+`not_run` is explicit and carries its closed reason; a clean `passed` value is never used as a
+placeholder for a scan that did not execute.
 Only unquoted parser/member/call/enum expressions with source syntax evidence are excluded: a
 `const`/`let`/`var` declaration for a token call or member call, an explicit member assignment
 such as `parser.token = Token.EOF`, or a lower-case object property such as `token:

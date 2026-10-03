@@ -830,6 +830,7 @@ async def _recover_terminal_job(
     max_retries: int,
     fallback: SemanticFallbackPlan | None,
     recover_selected: Callable[[SemanticJobRecord], Awaitable[_AttemptEvaluation | None]] | None,
+    recover_response: Callable[[ObjectRef], Awaitable[_AttemptEvaluation | None]] | None,
     build_final: Callable[
         [SemanticStatus, SemanticReason, _AttemptEvaluation | None, SemanticAttemptAccounting],
         object,
@@ -862,7 +863,16 @@ async def _recover_terminal_job(
     except ValueError:
         status = SemanticStatus.FAILED
         reason = SemanticReason.COORDINATOR_FAILURE
-    return build_final(status, reason, None, accounting)
+    evaluation: _AttemptEvaluation | None = None
+    if recover_response is not None:
+        # A terminal failed job may carry a response object even though it was never selected.
+        # This is the durable carrier for privacy omission identities on non-success outcomes;
+        # only the latest attempt can be relevant because the terminal write is its authority.
+        attempts = await ledger.list_semantic_attempts(job.job_id)
+        latest = max(attempts, key=lambda attempt: attempt.attempt_ordinal, default=None)
+        if latest is not None and latest.result_object_ref is not None:
+            evaluation = await recover_response(latest.result_object_ref)
+    return build_final(status, reason, evaluation, accounting)
 
 
 async def _terminalize_after_failure(
@@ -1016,6 +1026,7 @@ async def run_durable_semantic_attempts(
     recover_selected: (
         Callable[[SemanticJobRecord], Awaitable[_AttemptEvaluation | None]] | None
     ) = None,
+    recover_response: Callable[[ObjectRef], Awaitable[_AttemptEvaluation | None]] | None = None,
     on_lease_renewed: Callable[[OperationLease], None] | None = None,
     fallback: SemanticFallbackPlan | None = None,
     dispatch_fallback: SemanticAttemptDispatch | None = None,
@@ -1059,6 +1070,36 @@ async def run_durable_semantic_attempts(
         return await _accounting_for(
             ledger, current_lease, job.job_id, max_retries=max_retries, fallback=fallback
         )
+
+    async def _publish_terminal_response(
+        handle: SemanticAttemptHandle, evaluation: _AttemptEvaluation
+    ) -> tuple[ObjectRef | None, bool]:
+        """Persist privacy omission identities for a terminal non-success attempt.
+
+        Successful attempts already publish their response object before selection. A blocked,
+        exhausted, or otherwise non-success attempt is never selected, but its withheld item
+        identities are still part of the public result. Store that bounded metadata in the same
+        authenticated response object so terminal replay can recover it without re-dispatching.
+        Publishing is best effort here: the terminal status remains authoritative if object
+        storage itself fails, and no unverified identity is written into the ledger.
+        """
+
+        if not getattr(evaluation, "semantic_withheld_item_ids", ()):
+            return None, False
+        try:
+            return await publish_success_response(handle, evaluation), False
+        except asyncio.CancelledError:
+            # Cancellation must reach the coordinator's durable cleanup path. Swallowing it
+            # here could return a terminal result whose omission metadata was never persisted.
+            raise
+        except Exception as exc:
+            record_unexpected_exception_without_raising(
+                exc,
+                component="semantic_attempts",
+                operation="semantic_attempt_terminal_response_persistence_failed",
+                request_id=current_lease.operation_id,
+            )
+            return None, True
 
     async def _exhaustion_from_rows(
         last_status: SemanticStatus, last_reason: SemanticReason
@@ -1121,6 +1162,7 @@ async def run_durable_semantic_attempts(
             max_retries=max_retries,
             fallback=fallback,
             recover_selected=recover_selected,
+            recover_response=recover_response,
             build_final=build_final,
         )
 
@@ -1227,6 +1269,7 @@ async def run_durable_semantic_attempts(
                     max_retries=max_retries,
                     fallback=fallback,
                     recover_selected=recover_selected,
+                    recover_response=recover_response,
                     build_final=build_final,
                 )
             if fallback is not None:
@@ -1508,9 +1551,35 @@ async def run_durable_semantic_attempts(
                 max_retries=max_retries,
                 fallback=fallback,
             )
+            try:
+                terminal_response_ref, terminal_response_failed = await _publish_terminal_response(
+                    handle, evaluation
+                )
+            except asyncio.CancelledError:
+                # Complete the terminal ledger write under shielding, then restore cancellation
+                # to the caller. The cancellation path intentionally does not manufacture a
+                # replayable response object after its write was interrupted.
+                await _terminalize_cancellation_safe(
+                    ledger=ledger,
+                    renew=_renew,
+                    lease_holder=lambda: current_lease,
+                    job_id=job.job_id,
+                    handle=handle,
+                    token_usage=_attempt_token_usage(evaluation),
+                    max_retries=max_retries,
+                    fallback=fallback,
+                )
+                raise
+            if terminal_response_failed:
+                # A non-success result with omitted items is only replayable when its bounded
+                # omission identities reach durable storage. Surface a bounded persistence
+                # uncertainty instead of claiming the original policy outcome is replay-safe.
+                terminal_status = SemanticStatus.UNAVAILABLE
+                terminal_reason = SemanticReason.RECEIPT_PERSISTENCE_UNKNOWN
             await ledger.record_attempt_outcome(
                 handle,
                 AttemptOutcome.FAILED,
+                result_object_ref=terminal_response_ref,
                 terminal_code=terminal_reason,
                 token_usage=_attempt_token_usage(evaluation),
             )

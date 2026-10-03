@@ -10,6 +10,7 @@ from yoetz.protocol.models import (
     CoverageModel,
     SemanticReason,
     SemanticStatus,
+    SemanticWithheldItemModel,
 )
 from yoetz.protocol.recovery import (
     RECOVERY_DIRECTIVES,
@@ -215,6 +216,30 @@ def test_check_renderers_project_registry_text_without_raw_output() -> None:
     assert "Continuation: semantic_transport_retry" in rendered
     assert directive_for("semantic_transport_retry") is not None
     assert _CANARY not in rendered
+
+
+def test_human_check_names_opaque_heuristic_withheld_items_without_content() -> None:
+    result = CheckSuccessModel.model_construct(
+        verdict="incomplete_check",
+        semantic_status="succeeded",
+        semantic_reason="completed",
+        semantic_provenance=None,
+        findings=(),
+        suppressed_count="0",
+        coverage=CoverageModel.model_construct(known_gaps=("content_redacted",)),
+        children=None,
+        advisory_notes=(),
+        semantic_withheld_items=(
+            SemanticWithheldItemModel(
+                item_id="excerpt-heuristic",
+                reason="never_send_heuristic",
+            ),
+        ),
+    )
+    rendered = render_human_check(result)
+    assert "Withheld review items" in rendered
+    assert "excerpt-heuristic: never_send_heuristic" in rendered
+    assert "auth_token" not in rendered
 
 
 def test_human_check_and_status_state_why_the_check_time_change_was_unavailable() -> None:

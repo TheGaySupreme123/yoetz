@@ -434,7 +434,7 @@ def test_semantic_heuristic_omission_keeps_review_packet_reference_closure() -> 
     assert any(
         isinstance(row, dict)
         and row.get("subject_ref") == withheld_ref
-        and row.get("reason") == "withheld_by_policy"
+        and row.get("reason") == "never_send_heuristic"
         for row in omissions
     )
     targeted = review_packet["targeted_excerpts"]

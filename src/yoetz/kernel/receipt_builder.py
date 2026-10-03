@@ -54,6 +54,7 @@ from yoetz.domain.receipts import (
     ReceiptResponse,
     ReceiptSection,
     ReceiptSectionKey,
+    ReceiptSemanticWithheldItem,
     ReceiptVersionSlice,
     check_time_change_gap_sentence,
     receipt_document_carries_terminal_sections,
@@ -1918,4 +1919,12 @@ def build_receipt(
         ),
         acknowledged_not_done_finding_ids=acknowledged_not_done_ids,
         rejection_accepted_finding_ids=rejection_accepted_ids,
+        semantic_withheld_items=tuple(
+            ReceiptSemanticWithheldItem(item_id=item_id)
+            for item_id in (
+                ()
+                if context.applicable_check is None
+                else context.applicable_check.semantic_withheld_item_ids
+            )
+        ),
     )

@@ -98,7 +98,8 @@ _TOKEN_ASSIGNMENT = re.compile(
 # turn a whole review into a credential refusal, but a bare dotted value is ambiguous without
 # source syntax. These filters run on bounded matches and never retain or log the value inspected.
 _SOURCE_DECLARATION = re.compile(
-    rb"(?ix)(?:^|[\s{;(])(?:export\s+)?(?:const|let|var)\s+"
+    rb"(?ix)(?:^|[\s{;(+\-'\"])"
+    rb"(?:export\s+)?(?:const|let|var)\s+"
     rb"[A-Za-z_][A-Za-z0-9_]*\s*$"
 )
 _CODE_LIKE_CALL_VALUE = re.compile(
@@ -371,7 +372,13 @@ def _assignment_value_is_code(match: re.Match[bytes], *, preceding: bytes = b"")
     # heuristic class so a value such as ``TOKEN='nextToken(parser)'`` is still withheld.
     if value.startswith((b"'", b'"')):
         return False
+    # Unified diffs carry added/removed source lines as ``+token: ...``/``-token: ...``.
+    # The marker is transport syntax, not part of the object property name; retain it in the
+    # surrounding context check while removing it from the token-like-name test.  This narrow
+    # normalization still leaves ``+TOKEN=opaque.value`` heuristic because only the explicit
+    # source-expression branches below can return True.
     lhs = raw[: separator.start()].strip(b" \t\r\n'\"")
+    lhs = lhs.lstrip(b"+-").strip()
     lhs_name = lhs.rsplit(b".", 1)[-1].strip()
     if _TOKEN_LIKE_ASSIGNMENT_NAME.fullmatch(lhs_name) is None:
         return False

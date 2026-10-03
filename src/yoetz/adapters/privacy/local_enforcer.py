@@ -209,6 +209,8 @@ _SEMANTIC_PACKET_SCHEMA = "yoetz.review-packet-case/2"
 def _assemble_semantic_review_payload(
     classified: ClassifiedContext,
     included: tuple[ClassifiedContextItem, ...],
+    *,
+    withheld_item_ids: tuple[str, ...] = (),
 ) -> bytes:
     """Assemble the versioned review-packet document from privacy-approved case items.
 
@@ -259,6 +261,7 @@ def _assemble_semantic_review_payload(
         cast(dict[str, object], envelope),
         content_by_id=content_by_id,
         included_item_ids=set(included_by_id),
+        withheld_item_ids=set(withheld_item_ids),
     )
 
 
@@ -356,8 +359,25 @@ class LocalPrivacyEnforcer:
             and not item.heuristic_findings
             and item.data_class is not DataClass.SECRET_OR_CRYPTOGRAPHIC
         )
+        included_id_set = {entry.candidate.item_id for entry in included}
+        withheld_item_ids = tuple(
+            sorted(
+                {
+                    item.candidate.item_id
+                    for item in classified.items
+                    if item.scope_valid
+                    and item.heuristic_findings
+                    and item.candidate.item_id not in included_id_set
+                },
+                key=str.encode,
+            )
+        )
         if classified.candidate.purpose == "semantic-review":
-            prepared = _assemble_semantic_review_payload(classified, included)
+            prepared = _assemble_semantic_review_payload(
+                classified,
+                included,
+                withheld_item_ids=withheld_item_ids,
+            )
         else:
             rows = [
                 {
@@ -381,16 +401,6 @@ class LocalPrivacyEnforcer:
             )
         )
         included_ids = tuple(sorted((item.candidate.item_id for item in included), key=str.encode))
-        heuristic_item_ids = tuple(
-            sorted(
-                (
-                    item.candidate.item_id
-                    for item in classified.items
-                    if item.heuristic_findings and item.candidate.item_id not in included_ids
-                ),
-                key=str.encode,
-            )
-        )
         approved_categories = tuple(
             sorted({item.candidate.category for item in included}, key=lambda value: value.value)
         )
@@ -408,7 +418,7 @@ class LocalPrivacyEnforcer:
             scanner_registry_version=self._scanner.version,
             scanner_profile_digest=self._scanner.profile_digest,
             forbidden_findings=prepared_scan.high_confidence,
-            withheld_item_ids=heuristic_item_ids,
+            withheld_item_ids=withheld_item_ids,
             heuristic_findings=prepared_scan.heuristic,
         )
 

@@ -150,7 +150,11 @@ type ContentVisibility = Literal[
     "redacted_never_send",
 ]
 type ReviewOmissionReason = Literal[
-    "not_recorded", "not_selected", "withheld_by_policy", "redacted_never_send"
+    "not_recorded",
+    "not_selected",
+    "withheld_by_policy",
+    "redacted_never_send",
+    "never_send_heuristic",
 ]
 type AssessmentLimitField = Literal[
     "subject_refs",
@@ -310,7 +314,13 @@ _CONTENT_VISIBILITIES: Final = frozenset(
     }
 )
 _OMISSION_REASONS: Final = frozenset(
-    {"not_recorded", "not_selected", "withheld_by_policy", "redacted_never_send"}
+    {
+        "not_recorded",
+        "not_selected",
+        "withheld_by_policy",
+        "redacted_never_send",
+        "never_send_heuristic",
+    }
 )
 _CONCLUSIONS: Final = frozenset(
     {"no_material_discrepancy", "challenges_returned", "insufficient_packet"}

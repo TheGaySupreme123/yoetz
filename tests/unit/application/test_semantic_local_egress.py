@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -92,9 +93,11 @@ class _Gateway:
     def __init__(self) -> None:
         self.result = scripted_success(SemanticJudgment("no_material_discrepancy", ())).result
         self.calls = 0
+        self.payloads: list[bytes] = []
 
     async def dispatch_local_semantic(self, case: object, deadline: Deadline) -> object:
-        del case, deadline
+        self.payloads.append(cast(bytes, getattr(case, "payload")))
+        del deadline
         self.calls += 1
         return self.result
 
@@ -195,6 +198,7 @@ async def _dispatch(
     deadline: Deadline = Deadline(_NOW + timedelta(minutes=1), 60.0),
     monotonic: float = 1.0,
     prepared_bytes: bytes | None = None,
+    withheld_item_ids: tuple[str, ...] = (),
 ) -> tuple[object, _Audit, _Gateway]:
     binding = _binding()
     audit = _Audit(persist=persist)
@@ -208,22 +212,69 @@ async def _dispatch(
         ready_composition.IdPort(),
     )
     coordinator._semantic_dispatch_guard = dispatch_guard  # pyright: ignore[reportPrivateUsage]
+    selected_bytes = b"{}" if prepared_bytes is None else prepared_bytes
+    minimized = replace(
+        _minimized(),
+        prepared_bytes=selected_bytes,
+        byte_count=len(selected_bytes),
+        case_digest="sha256:" + hashlib.sha256(selected_bytes).hexdigest(),
+        withheld_item_ids=withheld_item_ids,
+    )
+    proposal = replace(
+        _proposal(binding, expires_at=proposal_expires_at),
+        prepared_bytes=selected_bytes,
+        prepared_case_digest=minimized.case_digest,
+    )
     result = await coordinator._dispatch_approved(  # pyright: ignore[reportPrivateUsage]
         _candidate(binding),
         _effective(binding),
-        (
-            _proposal(binding, expires_at=proposal_expires_at)
-            if prepared_bytes is None
-            else replace(
-                _proposal(binding, expires_at=proposal_expires_at), prepared_bytes=prepared_bytes
-            )
-        ),
-        _minimized(),
+        proposal,
+        minimized,
         ConsentSource.BASELINE_POLICY,
         deadline,
         subject_digest=_SUBJECT_DIGEST,
     )
     return result, audit, gateway
+
+
+@pytest.mark.anyio
+async def test_withheld_notice_allows_a_safe_replacement_on_the_next_check() -> None:
+    """The next review dispatch uses the caller's replacement packet, not stale withheld bytes."""
+
+    first_payload = b'{"items":[{"item_id":"clean"}]}'
+    first, first_audit, first_gateway = await _dispatch(
+        persist=True,
+        prepared_bytes=first_payload,
+        withheld_item_ids=("excerpt-heuristic",),
+    )
+    assert isinstance(first, SemanticEgressSuccess)
+    assert first.withheld_item_ids == ("excerpt-heuristic",)
+    assert first_gateway.payloads == [first_payload]
+    assert b"auth_token" not in first_gateway.payloads[0]
+    assert first_audit.receipt is not None
+    assert first_audit.receipt.withheld_item_ids == ("excerpt-heuristic",)
+
+    replacement_payload = b'{"items":[{"item_id":"excerpt-replacement","content":"safe context"}]}'
+    second, second_audit, second_gateway = await _dispatch(
+        persist=True,
+        prepared_bytes=replacement_payload,
+    )
+    assert isinstance(second, SemanticEgressSuccess)
+    assert second.withheld_item_ids == ()
+    assert second_gateway.payloads == [replacement_payload]
+    assert b"excerpt-replacement" in second_gateway.payloads[0]
+    assert second_audit.receipt is not None
+    assert second_audit.receipt.withheld_item_ids == ()
+
+
+def test_egress_results_enforce_the_shared_opaque_item_id_shape() -> None:
+    with pytest.raises(ValueError, match="semantic_withheld_item_ids_invalid"):
+        SemanticEgressBlocked(
+            _REQUEST,
+            PrivacyOutcome.BLOCKED_BY_POLICY,
+            PrivacyReason.POLICY_DENIED,
+            withheld_item_ids=("has whitespace",),
+        )
 
 
 @pytest.mark.anyio

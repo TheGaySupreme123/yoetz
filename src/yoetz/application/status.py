@@ -730,6 +730,62 @@ async def _operation_semantic_progress(
         return None
 
 
+async def _operation_semantic_withheld_items(
+    runtime: TaskRuntime, operation: object | None
+) -> tuple[dict[str, JsonValue], ...] | None:
+    """Recover withheld opaque identities from the completed check event, when present."""
+
+    if (
+        type(operation) is not OperationRecord
+        or operation.operation_kind is not OperationKind.CHECK
+        or operation.state is not OperationState.COMPLETE
+        or operation.result_locator is None
+        or operation.result_locator.first_ingestion_sequence is None
+        or operation.result_locator.last_ingestion_sequence is None
+    ):
+        return None
+    locator = operation.result_locator
+    first_sequence = locator.first_ingestion_sequence
+    last_sequence = locator.last_ingestion_sequence
+    if first_sequence is None or last_sequence is None:
+        return None
+    event_ids = frozenset(locator.structural_ids)
+    try:
+        records = [
+            record
+            async for record in runtime.ledger.load_events(
+                runtime.session_id,
+                after=first_sequence - 1,
+                through=last_sequence,
+            )
+        ]
+        for record in records:
+            if str(record.event_id) not in event_ids:
+                continue
+            if getattr(record.schema, "name", None) != "check_recorded":
+                continue
+            payload = getattr(record, "payload", None)
+            raw_item_ids = getattr(payload, "semantic_withheld_item_ids", ())
+            if type(raw_item_ids) is not tuple or not raw_item_ids:
+                return None
+            raw_items = cast(tuple[object, ...], raw_item_ids)
+            if any(type(item_id) is not str for item_id in raw_items):
+                return None
+            item_ids = cast(tuple[str, ...], raw_items)
+            return tuple(
+                {"item_id": item_id, "reason": "never_send_heuristic"}
+                for item_id in item_ids
+            )
+    except Exception as exc:  # noqa: BLE001 - status enrichment must never block recovery
+        record_unexpected_exception_without_raising(
+            exc,
+            component="application.status",
+            operation="status_semantic_withheld_items_unavailable",
+            request_id=operation.operation_id,
+        )
+    return None
+
+
 def check_admission_wire(
     record: CheckAdmissionRecord, observed_at: datetime
 ) -> dict[str, JsonValue]:
@@ -790,6 +846,7 @@ def _operation_page_from_record(
     operation: object | None,
     continuation: Mapping[str, JsonValue] | None = None,
     semantic_progress: Mapping[str, JsonValue] | None = None,
+    semantic_withheld_items: tuple[Mapping[str, JsonValue], ...] | None = None,
     admission: Mapping[str, JsonValue] | None = None,
 ) -> StatusOperationPageModel:
     """Project one operation record into the recovery page, or a bounded not-found page.
@@ -853,6 +910,10 @@ def _operation_page_from_record(
             }
             if semantic_progress is not None and kind == "check":
                 complete["semantic_progress"] = cast(JsonValue, dict(semantic_progress))
+            if semantic_withheld_items is not None and kind == "check":
+                complete["semantic_withheld_items"] = cast(
+                    JsonValue, tuple(dict(item) for item in semantic_withheld_items)
+                )
             return StatusOperationPageModel.model_validate(complete)
         source = _mapping(strict_json_parse(record.result_canonical))
         accepted_raw = source["accepted"]
@@ -1442,6 +1503,7 @@ async def execute_status(
                     operation,
                 )
             semantic_progress = await _operation_semantic_progress(app, runtime, operation)
+            semantic_withheld_items = await _operation_semantic_withheld_items(runtime, operation)
             admission = (
                 await _operation_admission(
                     app, runtime, request.writer_id, request.filter.operation_request_id
@@ -1453,9 +1515,10 @@ async def execute_status(
                 page = _operation_page_from_record(
                     request.filter.operation_request_id,
                     operation,
-                    continuation,
-                    semantic_progress,
-                    admission,
+                    continuation=continuation,
+                    semantic_progress=semantic_progress,
+                    semantic_withheld_items=semantic_withheld_items,
+                    admission=admission,
                 )
             except (AttributeError, TypeError, ValueError) as exc:
                 raise StatusFault(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from yoetz.mcp.summaries import summary_for_check
+from yoetz.mcp.summaries import summary_for_check, summary_for_receipt, summary_for_status
 
 
 def test_summary_for_deterministic_only_leads_with_semantic_not_requested() -> None:
@@ -57,3 +57,55 @@ def test_check_summary_states_why_the_check_time_change_was_unavailable() -> Non
     )
     assert "The check-time change was unavailable: the working tree kept changing" in text
     assert len(text.encode("ascii")) <= 512
+
+
+def test_check_summary_names_opaque_withheld_item_and_closed_reason() -> None:
+    text = summary_for_check(
+        {
+            "verdict": "incomplete_check",
+            "findings": [],
+            "suppressed_count": "0",
+            "semantic_status": "succeeded",
+            "semantic_reason": "completed",
+            "semantic_withheld_items": [
+                {"item_id": "excerpt-heuristic", "reason": "never_send_heuristic"}
+            ],
+            "result_frontier": {"sequence": "3", "head_digest": "sha256:" + "a" * 64},
+        }
+    )
+    assert "excerpt-heuristic (never_send_heuristic)" in text
+    assert len(text.encode("ascii")) <= 512
+
+
+def test_receipt_and_status_summaries_preserve_withheld_item_identity() -> None:
+    receipt = summary_for_receipt(
+        {
+            "conclusion": "insufficient_coverage",
+            "coverage": {"known_gaps": ["content_redacted"]},
+            "suppressed_finding_count": "0",
+            "result_frontier": {"sequence": "3", "head_digest": "sha256:" + "a" * 64},
+            "document": {
+                "semantic_withheld_items": [
+                    {"item_id": "excerpt-heuristic", "reason": "never_send_heuristic"}
+                ]
+            },
+        }
+    )
+    status = summary_for_status(
+        {
+            "view": "operation",
+            "gaps": [],
+            "closure_readiness": {},
+            "coverage": {"ledger_freshness": "current"},
+            "head_frontier": {"sequence": "3", "head_digest": "sha256:" + "a" * 64},
+            "page": {
+                "state": "complete",
+                "operation_kind": "check",
+                "semantic_withheld_items": [
+                    {"item_id": "excerpt-heuristic", "reason": "never_send_heuristic"}
+                ],
+            },
+        }
+    )
+    assert "excerpt-heuristic (never_send_heuristic)" in receipt
+    assert "excerpt-heuristic (never_send_heuristic)" in status

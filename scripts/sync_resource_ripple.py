@@ -200,6 +200,8 @@ def _write_pass(repo_root: Path) -> bool:
             "--only",
             "privacy/privacy-policy-1.1.0.schema.json",
             "--only",
+            "privacy/egress-receipt-1.1.0.schema.json",
+            "--only",
             "operations/status-result-1.1.0.schema.json",
             "--only",
             "operations/status-result-1.2.0.schema.json",

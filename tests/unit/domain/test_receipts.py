@@ -151,12 +151,36 @@ def test_receipt_document_is_frozen_and_exactly_shaped() -> None:
         "semantic_provenance",
         "acknowledged_not_done_finding_ids",
         "rejection_accepted_finding_ids",
+        "semantic_withheld_items",
     )
     assert is_dataclass(document)
     assert ReceiptDocument.__slots__ == expected_fields
     assert tuple(item.name for item in fields(document)) == expected_fields
     with pytest.raises(FrozenInstanceError):
         setattr(document, "suppressed_finding_count", 1)
+
+
+def test_receipt_withheld_items_round_trip_and_human_projection() -> None:
+    wire = _variant("deterministic-current.case.json", "current_complete")
+    wire["semantic_withheld_items"] = [
+        {"item_id": "excerpt-heuristic", "reason": "never_send_heuristic"}
+    ]
+
+    document = receipt_document_from_json(wire)
+    encoded = receipt_document_to_json(document)
+    assert encoded["semantic_withheld_items"] == wire["semantic_withheld_items"]
+    assert receipt_document_from_json(encoded) == document
+    rendered = render_receipt_human(document, markdown=False)
+    assert "excerpt-heuristic" in rendered
+    assert "never_send_heuristic" in rendered
+    assert "item text was not sent or echoed" in rendered
+
+
+def test_historical_receipt_omits_withheld_items() -> None:
+    wire = _variant("deterministic-current.case.json", "current_complete")
+    document = receipt_document_from_json(wire)
+    assert document.semantic_withheld_items == ()
+    assert "semantic_withheld_items" not in receipt_document_to_json(document)
 
 
 def test_children_use_receipt_document_1_3_artifact_and_keep_inner_version() -> None:

@@ -2752,6 +2752,7 @@ class SqliteLedger:
         missing_for_assessment: tuple[MissingForAssessmentItem, ...] = (),
         check_change_files: CheckChangeShownFiles | None = None,
         semantic_included_refs: tuple[str, ...] | None = None,
+        semantic_withheld_item_ids: tuple[str, ...] = (),
     ) -> CheckCommitResult:
         await self._ensure_recovered()
         async with self._lock:
@@ -2782,6 +2783,7 @@ class SqliteLedger:
                     prior_finding_verdicts=prior_finding_verdicts,
                     check_change_files=check_change_files,
                     semantic_included_refs=semantic_included_refs,
+                    semantic_withheld_item_ids=semantic_withheld_item_ids,
                 )
             except PublicOperationError:
                 # The memory oracle terminalizes a frontier conflict before raising it. Preserve

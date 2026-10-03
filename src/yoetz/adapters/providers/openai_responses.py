@@ -169,6 +169,9 @@ PACKET_GAP_GLOSSARY: Final[Mapping[str, str]] = MappingProxyType(
             "an older digest record does not say which bytes were hashed"
         ),
         "host_outcome_unavailable": "the host did not report whether an observed call succeeded",
+        "never_send_heuristic": (
+            "a secret-like assignment heuristic withheld the item before dispatch"
+        ),
         "missing_ref": "a referenced ledger event is absent from this ledger",
         "not_recorded": "the referenced record's content is not available to this packet",
         "not_selected": "the selection policy did not carry the item",

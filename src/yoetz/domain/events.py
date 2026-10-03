@@ -103,6 +103,7 @@ from yoetz.protocol.errors import (
     PublicErrorCode,
     PublicOperationError,
 )
+from yoetz.protocol.ids import validate_opaque_item_id
 from yoetz.protocol.models import (
     MAX_MISSING_FOR_ASSESSMENT,
     MAX_MISSING_TARGET_REFS,
@@ -597,6 +598,14 @@ def _included_ref(value: object) -> str:
     if constructor is None:
         raise ProtocolValueError("invalid_event_value_type")
     return constructor(value)
+
+
+def _valid_opaque_item_id(value: object) -> bool:
+    try:
+        validate_opaque_item_id(value)
+    except ProtocolValueError:
+        return False
+    return True
 
 
 def _evidence_result_ref(value: object) -> EvidenceId | ResultId:
@@ -2631,6 +2640,9 @@ class CheckRecordedPayload:
     # completed review whose coverage records the reduced scope; resolution tests a finding's
     # relevant material against it.
     semantic_included_refs: tuple[str, ...] | None = None
+    # Opaque item identities omitted by the low-confidence never-send heuristic. The companion
+    # ``content_redacted`` coverage gap is required whenever this field is present.
+    semantic_withheld_item_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mode", _exact_enum(self.mode, CheckMode))
@@ -2739,6 +2751,21 @@ class CheckRecordedPayload:
                     field="semantic_included_refs",
                 ),
             )
+        if (
+            type(self.semantic_withheld_item_ids) is not tuple
+            or len(self.semantic_withheld_item_ids) > 64
+            or any(
+                not _valid_opaque_item_id(item_id)
+                for item_id in self.semantic_withheld_item_ids
+            )
+            or self.semantic_withheld_item_ids
+            != tuple(sorted(set(self.semantic_withheld_item_ids), key=str.encode))
+            or (
+                self.semantic_withheld_item_ids
+                and "content_redacted" not in self.coverage.known_gaps
+            )
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
         if type(self.engine_version) is not str or self.engine_version != "0.1.0":
             raise ProtocolValueError("invalid_event_value_type")
         if type(self.projection_version) is not str or self.projection_version != "yoetz/0.1.0":
@@ -3527,6 +3554,7 @@ _PAYLOAD_SHAPES: Final[Mapping[str, tuple[frozenset[str], frozenset[str]]]] = Ma
                     "missing_for_assessment",
                     "check_change_files",
                     "semantic_included_refs",
+                    "semantic_withheld_item_ids",
                 }
             ),
         ),
@@ -4024,6 +4052,11 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
                 None
                 if (included := _optional(source, "semantic_included_refs")) is None
                 else cast(tuple[str, ...], tuple(_array(included)))
+            ),
+            semantic_withheld_item_ids=cast(
+                tuple[str, ...], tuple(_array(_optional(source, "semantic_withheld_item_ids")))
+                if _optional(source, "semantic_withheld_item_ids") is not None
+                else ()
             ),
             semantic_provenance=(
                 None
@@ -4543,6 +4576,11 @@ def encode_payload(payload: EventPayload) -> JsonValue:
         if value.check_change_files is not None:
             result["check_change_files"] = check_change_files_to_json(value.check_change_files)
         _optional_value(result, "semantic_included_refs", value.semantic_included_refs)
+        _optional_tuple(
+            result,
+            "semantic_withheld_item_ids",
+            cast(tuple[object, ...], value.semantic_withheld_item_ids),
+        )
         return _json_object(result)
     if payload_type is ReceiptRecordedPayload:
         value = cast(ReceiptRecordedPayload, payload)

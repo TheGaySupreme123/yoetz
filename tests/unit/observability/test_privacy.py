@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 from dataclasses import dataclass
 
 import pytest
@@ -167,8 +168,11 @@ def test_assignment_heuristic_preserves_source_expressions_but_withholds_quoted_
         b"const token = parser.getToken();",
         b"const token = nextToken(parser)",
         b"let token = lexer.next();",
+        b"+const token = parser.getToken();",
         b"parser.token = Token.EOF",
         b"token: Token.ConstKeyword",
+        b"+token: Token.ConstKeyword",
+        b"-token: Token.ConstKeyword",
     ):
         assert scan_for_sensitive_content(source) == ()
 
@@ -191,6 +195,37 @@ def test_ambiguous_unquoted_assignments_remain_heuristic(data: bytes) -> None:
     findings = scan_for_sensitive_content(data)
     assert len(findings) == 1
     assert findings[0].confidence is ScanConfidence.HEURISTIC
+
+
+@pytest.mark.parametrize("data", [b"+TOKEN: opaque.value", b"-TOKEN: opaque.value"])
+def test_diff_property_with_ambiguous_value_remains_heuristic(data: bytes) -> None:
+    findings = scan_for_sensitive_content(data)
+    assert len(findings) == 1
+    assert findings[0].confidence is ScanConfidence.HEURISTIC
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "tool_name": "apply_patch",
+            "tool_input": {"patch": "*** Begin Patch\\n+const token = parser.getToken();"},
+        },
+        {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Edit",
+            "tool_input": {"new_string": "const token = parser.getToken();"},
+        },
+        {
+            "hook_event_name": "postToolUse",
+            "tool_name": "cursor_file_edit",
+            "tool_input": {"newText": "+const token = parser.getToken();"},
+        },
+    ],
+)
+def test_json_encoded_host_edit_payloads_keep_source_assignments(payload: dict[str, object]) -> None:
+    encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
+    assert scan_for_sensitive_content(encoded) == ()
 
 
 def test_heuristic_scan_saturation_is_bounded_without_exposing_matches() -> None:

@@ -15,7 +15,7 @@ from yoetz.domain.review_input_render import render_review_input_manifest_compac
 from yoetz.mcp.errors import VALIDATION_REASON_TOKENS
 from yoetz.protocol.canonical import JsonValue, ensure_canonical_value
 from yoetz.protocol.errors import PublicErrorCode, normalize_safe_details
-from yoetz.protocol.ids import IdKind, is_valid_id
+from yoetz.protocol.ids import IdKind, is_valid_id, validate_opaque_item_id
 from yoetz.protocol.readiness_text import READINESS_STATES, readiness_directive
 from yoetz.protocol.recovery import (
     RecoveryDirective,
@@ -424,6 +424,35 @@ def _safe_status_gap_codes(source: Mapping[str, JsonValue]) -> tuple[str, ...]:
     )
 
 
+def _semantic_withheld_item_tokens(source: Mapping[str, JsonValue]) -> tuple[str, ...]:
+    """Return only validated opaque identities and the fixed omission reason."""
+
+    raw_items = source.get("semantic_withheld_items")
+    if not isinstance(raw_items, (list, tuple)):
+        return ()
+    result: list[str] = []
+    for raw in raw_items:
+        if not isinstance(raw, Mapping) or raw.get("reason") != "never_send_heuristic":
+            continue
+        item_id = raw.get("item_id")
+        try:
+            validate_opaque_item_id(item_id)
+        except (TypeError, ValueError):
+            continue
+        result.append(f"{cast(str, item_id)} (never_send_heuristic)")
+    return tuple(result)
+
+
+def _semantic_withheld_items_clause(
+    source: Mapping[str, JsonValue], *, byte_budget: int
+) -> str:
+    return _bounded_list_clause(
+        "withheld review items: ",
+        _semantic_withheld_item_tokens(source),
+        byte_budget=byte_budget,
+    )
+
+
 def _bounded(summary: str) -> str:
     try:
         encoded = summary.encode("ascii", errors="strict")
@@ -742,6 +771,10 @@ def summary_for_check(envelope: object) -> str:
         source,
         byte_budget=_MAX_SUMMARY_BYTES - len((prefix + clause + suffix).encode("ascii")),
     )
+    clause += _semantic_withheld_items_clause(
+        source,
+        byte_budget=_MAX_SUMMARY_BYTES - len((prefix + clause + suffix).encode("ascii")),
+    )
     return _bounded(prefix + clause + suffix)
 
 
@@ -857,9 +890,15 @@ def summary_for_status(envelope: object) -> str:
         byte_budget=_MAX_SUMMARY_BYTES - len((prefix + suffix).encode("ascii")),
     )
     if view == "findings":
-        clause += _bounded_list_clause(
+            clause += _bounded_list_clause(
             "finding frontiers: ",
             _finding_frontiers_from_status(source),
+            byte_budget=_MAX_SUMMARY_BYTES - len((prefix + clause + suffix).encode("ascii")),
+            )
+    page = source.get("page")
+    if isinstance(page, Mapping):
+        clause += _semantic_withheld_items_clause(
+            cast(Mapping[str, JsonValue], page),
             byte_budget=_MAX_SUMMARY_BYTES - len((prefix + clause + suffix).encode("ascii")),
         )
     return _bounded(prefix + clause + suffix)
@@ -1093,8 +1132,17 @@ def summary_for_receipt(envelope: object) -> str:
         byte_budget=obligation_budget,
     )
     remaining -= len(obligation_clause.encode("ascii"))
+    document = source.get("document")
+    withheld_clause = (
+        _semantic_withheld_items_clause(
+            cast(Mapping[str, JsonValue], document), byte_budget=remaining
+        )
+        if isinstance(document, Mapping)
+        else ""
+    )
+    remaining -= len(withheld_clause.encode("ascii"))
     gap_clause = _bounded_list_clause("gap codes: ", gap_codes, byte_budget=remaining)
-    return _bounded(prefix + obligation_clause + gap_clause + suffix)
+    return _bounded(prefix + obligation_clause + withheld_clause + gap_clause + suffix)
 
 
 def summary_for_read_guidance(envelope: object) -> str:

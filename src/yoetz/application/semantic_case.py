@@ -294,7 +294,11 @@ _TASK_STATEMENT_CONTENT_SCHEMA: Final = "yoetz.task-statement/1"
 MAX_TASK_STATEMENT_ITEM_BYTES: Final = MAX_SEMANTIC_ITEM_BYTES
 _PLAN_FAMILIES: Final = frozenset({"plan_published", "plan_revised"})
 type _OmissionReason = Literal[
-    "not_recorded", "not_selected", "withheld_by_policy", "redacted_never_send"
+    "not_recorded",
+    "not_selected",
+    "withheld_by_policy",
+    "redacted_never_send",
+    "never_send_heuristic",
 ]
 
 # The observation ingest bound is intentionally larger than one AI-powered review case item. The service-side
@@ -4701,6 +4705,7 @@ def assemble_filtered_review_packet(
     *,
     content_by_id: Mapping[str, bytes],
     included_item_ids: frozenset[str] | set[str],
+    withheld_item_ids: frozenset[str] | set[str] = frozenset(),
 ) -> bytes:
     """Assemble ``yoetz.review-packet-case/2`` from a builder envelope + approved content.
 
@@ -4710,6 +4715,7 @@ def assemble_filtered_review_packet(
     """
 
     included = set(included_item_ids)
+    withheld = set(withheld_item_ids)
     frontier_raw = envelope.get("frontier_refs")
     local_raw = envelope.get("local_check_refs")
     frontier_refs: set[str] = (
@@ -4808,7 +4814,9 @@ def assemble_filtered_review_packet(
                 dict[str, JsonValue],
                 {
                     "category": category if type(category) is str else "",
-                    "reason": "withheld_by_policy",
+                    "reason": (
+                        "never_send_heuristic" if item_id in withheld else "withheld_by_policy"
+                    ),
                     "source_kind": source_kind if type(source_kind) is str else "task",
                     "subject_ref": subject,
                 },

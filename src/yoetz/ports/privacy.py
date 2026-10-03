@@ -37,7 +37,7 @@ from yoetz.domain.values import format_rfc3339_millis, validate_commitment, vali
 from yoetz.ports.objects import ObjectKind, ObjectRef
 from yoetz.ports.semantic import Deadline, SemanticResult
 from yoetz.protocol.canonical import canonical_encode, strict_json_parse
-from yoetz.protocol.ids import IdKind, validate_id
+from yoetz.protocol.ids import IdKind, validate_id, validate_opaque_item_id
 from yoetz.protocol.models import DataCategory
 
 # The largest prepared disclosure the privacy port carries, whatever a channel ceiling allows.
@@ -110,6 +110,14 @@ _CURSOR = re.compile(
 
 def _invalid() -> ValueError:
     return ValueError("invalid_privacy_port_value")
+
+
+def _valid_opaque_item_id(value: object) -> bool:
+    try:
+        validate_opaque_item_id(value)
+    except ValueError:
+        return False
+    return True
 
 
 # Why a stored receipt, or the page built from stored receipts, could not be read. Each names the
@@ -495,7 +503,7 @@ class MinimizedDisclosure:
         ):
             raise _invalid()
         if any(
-            type(item_id) is not str or not item_id or len(item_id.encode("utf-8")) > 128
+            not _valid_opaque_item_id(item_id)
             for item_id in self.withheld_item_ids
         ):
             raise _invalid()

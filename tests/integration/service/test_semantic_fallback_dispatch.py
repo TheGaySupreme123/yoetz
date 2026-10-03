@@ -105,11 +105,13 @@ class _PairedPrivacy(_Privacy):
         task_id: str,
         primary_failure_class: SemanticFailureClass = SemanticFailureClass.TRANSPORT,
         primary_content_invalid: bool = False,
+        withheld_item_ids: tuple[str, ...] = (),
     ) -> None:
         super().__init__(task_id=task_id)
         self.bindings: list[ProviderBinding] = []
         self.primary_failure_class = primary_failure_class
         self.primary_content_invalid = primary_content_invalid
+        self.withheld_item_ids = withheld_item_ids
 
     async def evaluate_semantic(self, candidate: object, deadline: object) -> object:
         del deadline
@@ -148,6 +150,7 @@ class _PairedPrivacy(_Privacy):
                 case_digest="sha256:" + "5" * 64,
                 privacy_receipt_id=receipt,
                 request_commitment="hmac-sha256:" + "6" * 64,
+                withheld_item_ids=self.withheld_item_ids,
             )
         assert binding == _FALLBACK
         return SemanticEgressSuccess(
@@ -162,6 +165,7 @@ class _PairedPrivacy(_Privacy):
             case_digest="sha256:" + "5" * 64,
             privacy_receipt_id=receipt,
             request_commitment="hmac-sha256:" + "6" * 64,
+            withheld_item_ids=self.withheld_item_ids,
         )
 
 
@@ -288,6 +292,7 @@ class _DisclosingPrivacy(_PairedPrivacy):
             disclosure=ReviewPacketDisclosure(
                 carried=self.disclosed, withheld=frozenset(), payload_events=frozenset()
             ),
+            withheld_item_ids=("excerpt-heuristic",),
         )
 
 
@@ -315,12 +320,47 @@ async def test_the_selected_attempt_carries_what_its_sent_packet_included(
 
     assert original.status is SemanticStatus.SUCCEEDED
     assert original.case_included_refs == _DisclosingPrivacy.disclosed
+    assert original.semantic_withheld_item_ids == ("excerpt-heuristic",)
     assert original.operation_lease is not None
     calls = cast(int, getattr(privacy, "calls"))
     recovered = await evaluator(FrozenCase(frozen.case, original.operation_lease), (), runtime)
     assert getattr(privacy, "calls") == calls
     assert recovered.status is SemanticStatus.SUCCEEDED
     assert recovered.case_included_refs == _DisclosingPrivacy.disclosed
+    assert recovered.semantic_withheld_item_ids == ("excerpt-heuristic",)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "adapter_factory",
+    (memory_adapter, sqlite_adapter),
+    ids=("memory", "sqlite"),
+)
+async def test_provider_outcome_keeps_withheld_item_ids_in_the_durable_final(
+    adapter_factory: Callable[[object], MemoryLedgerAdapter | SqliteLedger],
+) -> None:
+    """A failed provider attempt still reports the bounded omission identities."""
+
+    adapter = adapter_factory(append_command())
+    frozen, runtime = await _durable_semantic_case(adapter)
+    privacy = _PairedPrivacy(
+        task_id=runtime.task_id,
+        withheld_item_ids=("excerpt-heuristic",),
+    )
+
+    evaluator = _paired_evaluator(
+        privacy,
+        runtime,
+        fallback_binding=None,
+        primary_retries=0,
+    )
+    result = await evaluator(frozen, (), runtime)
+
+    assert (result.status, result.reason) == (
+        SemanticStatus.UNAVAILABLE,
+        SemanticReason.TRANSPORT_UNAVAILABLE,
+    )
+    assert result.semantic_withheld_item_ids == ("excerpt-heuristic",)
 
 
 @pytest.mark.anyio
