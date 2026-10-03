@@ -1850,8 +1850,8 @@ def test_cancellation_at_each_admitted_await_terminalizes_without_redispatch(
     if phase != "receipt":
         assert receipt.outcome is PrivacyOutcome.TRANSPORT_FAILED
         assert receipt.safe_failure_reason is PrivacyReason.OUTCOME_UNKNOWN
-        expected_finished_at = _NOW if phase == "parking_failure" else _NOW + timedelta(
-            seconds=max(0, clock_delta)
+        expected_finished_at = (
+            _NOW if phase == "parking_failure" else _NOW + timedelta(seconds=max(0, clock_delta))
         )
         assert receipt.finished_at == expected_finished_at
     else:

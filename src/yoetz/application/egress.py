@@ -128,8 +128,7 @@ def _classified_scan_match_count(classified: ClassifiedContext) -> int:
     """Count findings from the candidate scan without retaining matched content."""
 
     return sum(
-        len(item.forbidden_findings) + len(item.heuristic_findings)
-        for item in classified.items
+        len(item.forbidden_findings) + len(item.heuristic_findings) for item in classified.items
     )
 
 
@@ -141,9 +140,7 @@ def _heuristic_only_item_ids(classified: ClassifiedContext) -> tuple[str, ...]:
             {
                 item.candidate.item_id
                 for item in classified.items
-                if item.scope_valid
-                and item.heuristic_findings
-                and not item.forbidden_findings
+                if item.scope_valid and item.heuristic_findings and not item.forbidden_findings
             },
             key=str.encode,
         )
@@ -1032,9 +1029,7 @@ class PrivacyCoordinator:
             )
         status = state.status
         if status in {"reserved", "awaiting_human"}:
-            pending = await self._load_disclosure_proposal(
-                state.reservation.privacy_proposal_id
-            )
+            pending = await self._load_disclosure_proposal(state.reservation.privacy_proposal_id)
             if (
                 pending is None
                 or pending.prepared_case_digest != case_digest
@@ -1117,9 +1112,7 @@ class PrivacyCoordinator:
                 privacy_proposal_id=state.reservation.privacy_proposal_id,
                 withheld_item_ids=withheld_item_ids,
             )
-        proposal = await self._load_disclosure_proposal(
-            state.reservation.privacy_proposal_id
-        )
+        proposal = await self._load_disclosure_proposal(state.reservation.privacy_proposal_id)
         if (
             proposal is None
             or proposal.prepared_case_digest != case_digest

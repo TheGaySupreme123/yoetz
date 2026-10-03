@@ -1070,7 +1070,9 @@ async def test_terminal_non_success_replays_withheld_item_ids_from_response_obje
 
 
 @pytest.mark.anyio
-async def test_terminal_response_persistence_failure_is_unknown_without_replayable_evaluation() -> None:
+async def test_terminal_response_persistence_failure_is_unknown_without_replayable_evaluation() -> (
+    None
+):
     """A failed omission-object write cannot return ids that terminal replay cannot recover."""
 
     lease = _lease()
