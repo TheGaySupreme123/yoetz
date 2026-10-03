@@ -2391,10 +2391,10 @@ discover or attach another task. When no usable persisted recovery selector appl
 session advice remain bundle-resident; installation coordination uses the catalog without
 transferring their content or authority.
 
-**No new tools and future boundaries.** The series adds no MCP tool. Its six workflow operations
-are `start`, `publish_work`, `check`, `status`, `receipt`, and `respond`, plus the existing
-read-only `read_guidance` support tool; lineage/project behavior composes those surfaces without
-adding another one. The 2026-09-05
+**Historical no-new-tool boundary.** The following paragraph records the pre-#953 series. At that
+point its six workflow operations were `start`, `publish_work`, `check`, `status`, `receipt`, and
+`respond`, plus the existing read-only `read_guidance` support tool; lineage/project behavior
+composed those surfaces without adding another one. The 2026-09-05
 pre-trim snapshot was 204,404 bytes (policy) and 204,658 bytes (strict) against 205,000 bytes.
 After #504 step 0, the source baseline is 148,308 bytes (policy) and 148,562 bytes (strict),
 including 12,385/12,409-byte initialize instructions and 8,218/8,304 bytes of descriptions; it
@@ -2524,7 +2524,7 @@ lifecycle, observation-control, and CLI/UI-only methods. The privacy subset is e
 privacy_pending_list|privacy_receipts_list|privacy_receipts_get`. The observation subset is exactly
 `observation_ingest|observation_status|observation_pause|observation_resume|observation_revoke`
 (local CLI/UI only; never MCP tools — the public MCP surface remains the six workflow tools
-plus read-only `read_guidance`).
+plus read-only `read_guidance` and `closure_prepare`).
 Observation status uses a versioned body containing `schema_version`, `request_id`, and `query`;
 pause, resume, and revoke use `command` in place of `query`. Their successful control responses
 contain `schema_version`, the same `request_id`, and `status`. The support adapter translates these
@@ -6607,8 +6607,8 @@ facade and are never MCP tools.
 - `service/human_control.py`, `service/secret_ingress.py`, `cli/unlock.py`, and
   `cli/privacy_control.py`: server ceremony/secret consumers plus the separately trusted foreground
   TTY helpers; no ordinary approval flag/token or server import in the helper graph.
-- `mcp/server.py`: low-level `Server("yoetz")`, generated seven-tool registry (six workflow
-  operations plus read-only `read_guidance`), dispatch, prevalidated fallbacks
+- `mcp/server.py`: low-level `Server("yoetz")`, generated eight-tool registry (six workflow
+  operations plus read-only `read_guidance` and `closure_prepare`), dispatch, prevalidated fallbacks
   (`LAST_RESORT_INTERNAL_ERROR_RESULT`), the initialize `instructions` string, a read-only
   guidance resource registry, and one `ServiceClient`; it owns no runtime/application/provider/key
   state. `read_guidance` does not use the service client. On the policy route
@@ -6616,7 +6616,8 @@ facade and are never MCP tools.
   tolerant loader the logging sink uses, only to render the AI-powered review destination disclosure
   (issue #479); it keeps no configuration state and the strict route never reads it.
 - `mcp/descriptors.py`: the one owner of every agent-read string on the MCP surface — the six
-  workflow tool names, `read_guidance`, descriptions, and annotations, plus the `instructions` text.
+  workflow tool names, `read_guidance`, `closure_prepare`, descriptions, and annotations, plus
+  the `instructions` text.
   All are loaded from the packaged `guidance/` resources and verified against the resource manifest
   before use; none is composed at runtime from user, task, provider, or environment values, with one
   typed exception: the policy-route AI-powered review destination disclosure (issue #479, ADR-018
@@ -6662,7 +6663,7 @@ facade and are never MCP tools.
   `*.model_validate`. `ToolDescriptor.output_schema` adds the MCP-required literal root `type:
   object` to the equivalent success/error object union; `catalog_output_schema` preserves the exact
   frozen catalogue bundle, and result admission remains owned by `*.model_validate`. `status` and
-  `read_guidance` carry `readOnlyHint=true`; `receipt` carries `readOnlyHint=false` because it
+  `read_guidance` and `closure_prepare` carry `readOnlyHint=true`; `receipt` carries `readOnlyHint=false` because it
   stages an object and appends a `receipt_recorded` event. Every tool carries an explicit
   `idempotentHint=true`. Policy `check` carries `openWorldHint=true`; strict `check` carries
   `openWorldHint=false` and names the external AI-powered review ceiling. The hint is inspectable
@@ -6912,8 +6913,10 @@ member omission without receiving private row content.
 
 ### Evidence-aware closure preparation (issues #569, #618, #657, #660, #666)
 
-`yoetz closure-prepare` is a read-only CLI support command, not a seventh workflow operation.
-It reads privacy-projected `status` pages at one pinned frontier, preserving cursor query identity.
+`yoetz closure-prepare` is a read-only CLI support command, not a workflow operation. The current
+MCP surface also exposes `closure_prepare/1.0.0` as a support tool with the same composer and
+selection model. Both routes read privacy-projected `status` pages at one pinned frontier,
+preserving cursor query identity.
 It exposes inventory and composes one explicit selection into an existing `publish_work`, `respond`,
 or `receipt` request. `yoetz closure-schema` exposes the closed selection-input schema. IDs it
 creates are lowercase UUID v4. Publication drafts use `dry_run=true`; preparation is non-evidential.
@@ -6930,6 +6933,13 @@ only where the filesystem cannot open or flush a directory), and prints a bounde
 saved. A directory flush that fails after the rename fails as `closure_output_not_durable`: the new
 file is in place but may not survive a crash, and no summary is printed. Each page it reads is still an ordinary privacy-projected `status` call with its
 own local-disclosure receipt; the file changes where the result goes, not what was disclosed.
+
+The MCP route sends the returned session and writer identities with an explicit selection. It is
+read-only and preparation-only: it never appends, judges work, or claims completion. Its complete
+response frame is bounded; an oversized inventory returns `LIMIT_EXCEEDED` with no partial success,
+so callers use the CLI `--output` fallback for a larger local inventory. The route is shared by
+Codex, Claude Code, and Cursor on macOS, Linux, and WSL 2 through the local bridge. Native Windows
+has no supported Yoetz MCP route; host activation and native dogfood remain separate evidence.
 
 The obligations status row adds optional `command_attempts` (at most 64 rows). Each row contains
 `requested_item_index` (canonical string 0–63), `relation`, `asserted_action_ids`, and

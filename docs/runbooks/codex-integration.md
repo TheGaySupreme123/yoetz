@@ -261,7 +261,7 @@ Codex `0.157.1` runs in code mode: the model has one `exec` tool and calls Yoetz
 `tools.mcp__yoetz__<tool>(...)`. Raw MCP results stay in the script sandbox; only what the script
 prints reaches the model. Each `ALL_TOOLS` entry's description is composed by Codex from the
 initialize instructions, the tool description and a generated declaration, so the instructions
-are charged once per advertised tool (seven copies). The `--host codex` profile keeps every
+are charged once per advertised tool (eight copies on the current surface). The `--host codex` profile keeps every
 ceremony step and makes each one cheaper:
 
 - **Compact initialize body.** The bridge serves `COMPACT_INITIALIZE_INSTRUCTIONS` instead of the
@@ -544,7 +544,7 @@ first-party observation arm is present. A present v0.1 trigger only prompts the 
 by calling `status` — it records no observation, changes no coverage, and remains optional. When
 the cell advertises observation, enablement requires one workspace-level observation consent
 (workspace commitment, never a raw path in logs); live ingest uses local control methods
-(`observation_ingest|status|pause|resume|revoke`), not a seventh MCP tool. `hook_observed` is earned
+(`observation_ingest|status|pause|resume|revoke`), not an MCP tool. `hook_observed` is earned
 only from real observation evidence. `AdviceSnapshot` surfaces via nonblocking hooks and ordinary
 `status`. Skill installation never configures hooks. If the profile is absent or a trigger/observation
 path fails, use the ordinary manual resume/compaction procedure and cooperative publication; do not
@@ -1694,6 +1694,18 @@ CLI closure composer uses the same projected status inputs; it does not grant ca
 These shared regressions are synthetic contract evidence, not live-host certification. A dogfood
 transcript showing this host citing its own or filtered evidence IDs without an unfiltered walk,
 and dogfood CI across macOS, Linux and WSL 2, are not yet recorded; that gap is owned by #914.
+
+### Mechanical closure preparation (#953)
+
+The current Codex MCP surface advertises the read-only `closure_prepare/1.0.0` support tool.
+Discover its declaration before use and pass the returned session and writer identities with an
+explicit selection. It inventories one pinned status frontier or prepares one explicit draft; it
+never appends, judges work, or claims completion. The complete response frame is bounded: an
+oversized inventory returns `LIMIT_EXCEEDED` without partial data. When the declaration is absent,
+use `yoetz closure-prepare --session-id <returned-session> --writer-id <returned-writer>` with
+`--output <file>` outside the repository. This shared route is supported through the local bridge
+on macOS, Linux, and WSL 2; native Windows has no supported Yoetz MCP route. MCP discovery,
+activation, and native host dogfood remain separate evidence.
 
 ### Observation limitation findings and closure rechecks (issue #911)
 

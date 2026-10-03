@@ -1358,6 +1358,18 @@ These shared regressions are synthetic contract evidence, not live-host certific
 transcript showing this host citing its own or filtered evidence IDs without an unfiltered walk,
 and dogfood CI across macOS, Linux and WSL 2, are not yet recorded; that gap is owned by #914.
 
+### Mechanical closure preparation (#953)
+
+The current Cursor MCP surface advertises the read-only `closure_prepare/1.0.0` support tool.
+Discover its declaration before use and pass the returned session and writer identities with an
+explicit selection. It inventories one pinned status frontier or prepares one explicit draft; it
+never appends, judges work, or claims completion. The complete response frame is bounded: an
+oversized inventory returns `LIMIT_EXCEEDED` without partial data. When the declaration is absent,
+use `yoetz closure-prepare --session-id <returned-session> --writer-id <returned-writer>` with
+`--output <file>` outside the repository. This shared route is supported through the local bridge
+on macOS, Linux, and WSL 2; native Windows has no supported Yoetz MCP route. MCP discovery,
+activation, and native host dogfood remain separate evidence.
+
 ### Observation limitation findings and closure rechecks (issue #911)
 
 Cursor's paired ordinary profile can yield `unpaired_event`, lag, or drain gaps and deliver the

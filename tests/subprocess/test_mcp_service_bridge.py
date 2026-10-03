@@ -711,11 +711,13 @@ async def test_closure_prepare_refuses_an_unbounded_mcp_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def prepare(*_args: object, **_kwargs: object) -> dict[str, JsonValue]:
+        history_row: dict[str, JsonValue] = {"event_id": "evt_" + "a" * 40_000}
+        history: list[JsonValue] = [history_row] * 30
         return {
             "preparatory_only": True,
             "frontier": {"sequence": "0", "head_digest": "genesis"},
             "closure_readiness": {},
-            "inventory": {"history": [{"event_id": "evt_" + "a" * 40_000}] * 30},
+            "inventory": {"history": history},
             "request": None,
             "notes": ["Nothing was published or judged."],
         }

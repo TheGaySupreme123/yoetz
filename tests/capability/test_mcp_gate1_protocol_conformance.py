@@ -464,7 +464,8 @@ async def test_mcp_tools_call_all_six_dispatch(tmp_path: Path) -> None:
         assert closure_result.isError is True
         assert closure_result.structuredContent is not None
         closure_structured = cast(dict[str, object], closure_result.structuredContent)
-        assert closure_structured["error"]["code"] in _DEGRADED_CODES
+        closure_error = cast(dict[str, object], closure_structured["error"])
+        assert closure_error["code"] in _DEGRADED_CODES
         assert closure_structured["ok"] is False
     _record_pass(
         tmp_path,

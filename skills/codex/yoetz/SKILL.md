@@ -372,6 +372,24 @@ with current schemas. `client` is exactly `{kind, version, integration}`; canoni
 JSON strings. The adjacent `manifest.json` binds compatibility evidence; an empty profile set
 advertises no tested harness version or hook.
 
+## Mechanical closure preparation
+
+Current Yoetz MCP descriptors may include the read-only `closure_prepare/1.0.0` support tool.
+Discover its declaration before calling it, then pass the returned `session_id` and `writer_id`
+with an explicit `selection`. Start with `{"phase":"inventory"}` and use only IDs and
+requested-item indexes returned by that pinned inventory for a later `attempt`, `respond`,
+`resolve`, `claim`, or `receipt` selection. The helper can return one dry-run publication draft,
+one finding response, or one receipt request, but it never appends, judges work, or proves
+completion. Its output is bounded as a complete frame: `LIMIT_EXCEEDED` has no partial success.
+
+If the MCP declaration is absent, keep the supported fallback:
+`yoetz closure-prepare --session-id <returned-session> --writer-id <returned-writer>`, optionally
+with `--output <file>` outside the repository. Review the canonical saved output and submit each
+draft through the ordinary operation with its stated recovery identity. Do not substitute an
+undocumented tool name or treat a clipped response as a complete inventory. This path is a shared
+local contract for Codex, Claude Code, and Cursor on macOS, Linux, and WSL 2; native Windows has
+no supported Yoetz MCP route. Host activation and native dogfood remain separate evidence.
+
 ## Evidence-first closure
 
 Before a material evidence publication or completion claim, cite the evidence IDs your own

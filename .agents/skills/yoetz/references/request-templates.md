@@ -1187,6 +1187,51 @@ Pagination recovery keeps the original limit with the cursor. A request with a d
 must start at a null cursor. The composer performs this preservation automatically and refuses an
 incomplete or drifting snapshot rather than authoring from a partial inventory.
 
+## MCP `closure_prepare`
+
+When `tools/list` advertises `closure_prepare/1.0.0`, use the read-only MCP support route for the
+same bounded composer. The request has exactly the returned `session_id`, `writer_id`, and an
+explicit `selection`; callers should send the phase explicitly. This inventory example is
+schema-valid:
+
+```json
+{
+  "session_id": "ses_00000000-0000-4000-8000-000000000001",
+  "writer_id": "wri_00000000-0000-4000-8000-000000000001",
+  "selection": {"phase": "inventory"}
+}
+```
+
+After reviewing that inventory, a schema-valid explicit attempt shape is:
+
+```json
+{
+  "session_id": "ses_00000000-0000-4000-8000-000000000001",
+  "writer_id": "wri_00000000-0000-4000-8000-000000000001",
+  "selection": {
+    "phase": "attempt",
+    "obligation_ids": ["obl_00000000-0000-4000-8000-000000000001"],
+    "requested_item_indexes": [0],
+    "action_kind": "command",
+    "command": "uv run pytest tests/integration/application/test_closure_composer.py"
+  }
+}
+```
+
+Replace every example identity and requested-item index with values returned by the same pinned
+inventory. A syntactically valid example is not a semantic selection: a moving frontier, missing
+item, or unavailable ID is refused. The helper never writes, resolves, or claims work, and a
+publication draft is always `dry_run=true`. The response has a bounded total frame;
+`LIMIT_EXCEEDED` is an explicit refusal with no partial inventory. If the current host does not
+advertise the MCP route, use the CLI fallback with `--output <file>` outside the repository:
+
+```text
+yoetz closure-prepare --session-id <returned-session> --writer-id <returned-writer> --output <file>
+```
+
+Review the saved canonical JSON before any submission. Native host support follows the host runbook: macOS,
+Linux, and WSL 2 use the shared local route; native Windows has no supported route.
+
 
 ## Setup and consent
 
