@@ -12,7 +12,7 @@ const PALETTE = {
   gold: "#C48A0E",
 };
 
-const HERO_WORDS = ["work", "code", "research", "writing", "reviews"];
+const HERO_WORDS = ["work", "code", "research", "science", "writing", "reviews"];
 const HERO_SECONDS = 2.2;
 
 export function mountParticles(canvas, options = {}) {
