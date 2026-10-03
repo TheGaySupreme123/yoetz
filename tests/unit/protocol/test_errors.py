@@ -858,6 +858,8 @@ def test_safe_details_allowlist_and_types_are_exact() -> None:
     )
     assert tuple(accepted) == expected_keys
     assert accepted["component"] == "ready"
+    assert normalize_safe_details({"phase": "projection"}) == {"phase": "projection"}
+    assert normalize_safe_details({"phase": "user_supplied_value"}) == {}
     assert all(type(value) in {str, int, bool} for value in accepted.values())
     assert isinstance(accepted, MappingProxyType)
     hostile = _KnownKeyOnlyMapping()

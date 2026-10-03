@@ -1425,7 +1425,8 @@ def _without_policy_v12(value: Any) -> Any:
 
 def test_v29_changes_only_the_selection_runtime_and_keeps_frozen_v28() -> None:
     """2.9 derives from 2.8 by one runtime definition, the partial receipt page (#921) and the
-    privacy-policy 1.2.0 admission (issue #908); the 2.8 documents are not rewritten."""
+    privacy-policy 1.2.0 admission (issue #908), and bounded fault-stage attribution (#954);
+    the 2.8 documents are not rewritten."""
 
     for name in ("control-hello", "control-hello-result", "control-request", "control-result"):
         v28 = cast(
@@ -1487,6 +1488,15 @@ def test_v29_changes_only_the_selection_runtime_and_keeps_frozen_v28() -> None:
         }
         v28_errors = cast(list[Any], v28_defs["error_body"]["oneOf"])
         v29_errors = cast(list[Any], v29_defs["error_body"]["oneOf"])
+        # A read failure may identify its service-owned stage. The field stays optional, and
+        # stripping that one additive member must recover each frozen error branch exactly.
+        for branch in v29_errors:
+            assert branch["properties"].pop("phase") == {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                "maxLength": 64,
+            }
+            assert "phase" not in branch["required"]
         added = [branch for branch in v29_errors if branch not in v28_errors]
         assert [branch for branch in v29_errors if branch in v28_errors] == v28_errors
         assert [branch["properties"]["code"] for branch in added] == [
