@@ -33,11 +33,13 @@ with the exact full probe statement, an accepted/projected plan publication, a t
 and a receipt for the same task/session/writer, followed
 by a completed turn. Model text cannot replace those calls; later hook disclosures do not undo
 them. `native_mcp_completed` records this proof separately from the informational `done_marker`.
-Claude and Cursor's result-only output confirms completion through a `DONE` marker in the
-successful final response (a standalone line, or a terminal token after a disclosure). Tool
-outputs, prompt echoes, malformed output, and error results cannot supply that marker. Those
-hosts' marker remains a model assertion, not independent proof of every MCP step. The mapping
-can predate the native run. None of these checks establishes semantic usefulness. Read
+Claude and Cursor return a `YOETZ_NATIVE_BINDING` locator in their successful final response.
+The lane uses it to read the original native session through the public status API, verifies its
+frontier, and exhausts pinned history pages. Completion requires an ordered MCP plan publication,
+engine-recorded check with the exact provider-bound statement, and engine-recorded receipt.
+The locator and `DONE` marker alone prove none of these steps. A scoped observation binding may
+supply the locator when it names this native run. The verifier never attaches again after the run,
+because attach creates a new session. None of these checks establishes semantic usefulness. Read
 `lane-report.json` and the native transcript before quoting any cell.
 
 ## Matrix and connection modes
@@ -238,6 +240,7 @@ Tracker #961 adds a specification admission assertion to the configured ledger p
 must return a `review_input_manifest` in `provider_bound` phase with the exact UTF-8 digest and
 byte length of the supplied statement, a current revision, and a complete selected specification.
 A composed manifest, start-call argument, or model prompt alone does not satisfy this assertion.
-The Codex native workflow collector applies the same assertion to its full probe request before
-counting a check/receipt sequence as complete. This establishes bounded input delivery; useful
+The Codex native workflow collector and the Claude/Cursor public-history verifier apply the same
+assertion to the full probe request before counting a check/receipt sequence as complete.
+This establishes bounded input delivery; useful
 findings and successful repairs still require separate defect-focused evidence.
