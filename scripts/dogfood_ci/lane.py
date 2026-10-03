@@ -129,7 +129,11 @@ _PROMPT_TEMPLATE: Final = (
     "millisecond precision, causal_parents [], artifact_refs [], evidence_refs [], payload "
     "{{plan_version: 1, summary: 'native probe', obligation_refs: [], "
     "no_obligations_reason: 'single_atomic_change'}}. "
-    "3) Call receipt with task_id, session_id, writer_id, the frontier returned by publish_work "
+    "3) Call check with the same session_id and writer_id, the publish result frontier as "
+    "expected_frontier, and mode 'semantic_required'. Preserve the returned coverage limits. "
+    "A pending approval is not a completed check; follow its exact continuation. "
+    "4) Read status view 'compact' to obtain the current frontier. Call receipt with "
+    "task_id, session_id, writer_id, that status frontier "
     "as expected_frontier, format 'markdown', include 'standard', redaction_profile "
     "'default_local_export'. Then answer with the single word DONE. Do not create or edit files."
 )
@@ -195,11 +199,12 @@ def _native_done(host: str, output: str) -> bool:
     )
 
 
-def _codex_workflow_completed(output: str) -> bool:
+def _codex_workflow_completed(output: str, expected_statement: str | None = None) -> bool:
     """Correlate native MCP successes; later hook disclosures do not undo recorded work."""
 
     started: set[tuple[str, str, str]] = set()
     published: set[tuple[str, str, str]] = set()
+    checked: set[tuple[str, str, str]] = set()
     receipted = False
     completed = False
     for line in output.split("\n"):
@@ -250,7 +255,8 @@ def _codex_workflow_completed(output: str) -> bool:
             continue
         binding = cast(tuple[str, str, str], ids)
         if tool == "start":
-            started.add(binding)
+            if expected_statement is None or args.get("task_statement") == expected_statement:
+                started.add(binding)
         elif args.get("session_id") == binding[1]:
             if (
                 tool == "publish_work"
@@ -268,8 +274,15 @@ def _codex_workflow_completed(output: str) -> bool:
                             ):
                                 published.add(binding)
             elif (
-                tool == "receipt"
+                tool == "check"
                 and binding in published
+                and result.get("semantic_status") != "awaiting_human"
+                and result.get("outcome") != "awaiting_human"
+            ):
+                checked.add(binding)
+            elif (
+                tool == "receipt"
+                and binding in checked
                 and args.get("task_id") == binding[0]
                 and isinstance(result.get("receipt_id"), str)
                 and result["receipt_id"].startswith("rcp_")
@@ -443,6 +456,7 @@ class Lane:
         self.identity: dict[str, Any] = {}
         self.semantic: dict[str, Any] = {"configured": bool(self.fireworks_key)}
         self.agent: dict[str, Any] = {"ran": False}
+        self.native_prompt: str | None = None
         self.observation: dict[str, Any] = {}
         self.ledger: dict[str, Any] = {}
         self.plugin_dir: Path | None = None
@@ -1730,6 +1744,7 @@ class Lane:
             workspace=str(self.project),
             external_ref=f"native-{self.host}-{self.stamp}",
         )
+        self.native_prompt = prompt
         assert self.launcher is not None
         # setup run supplies this launch PATH because packaged hooks invoke bare yoetz.
         # The first executable is the disposable instance-pinned launcher (ADR-028).
@@ -1835,7 +1850,9 @@ class Lane:
         output_file = self._save("agent-output", out or "", ".txt")
         stderr_file = self._save("agent-stderr", err or "", ".txt")
         done = _native_done(self.host, out)
-        native_mcp_completed = _codex_workflow_completed(out) if self.host == "codex" else None
+        native_mcp_completed = (
+            _codex_workflow_completed(out, self.native_prompt) if self.host == "codex" else None
+        )
         completion_confirmed = native_mcp_completed if self.host == "codex" else done
         self.agent = {
             "ran": True,
@@ -1846,6 +1863,9 @@ class Lane:
             "output_bytes": len(out.encode("utf-8")),
             "done_marker": done,
             "native_mcp_completed": native_mcp_completed,
+            "expected_statement_digest": _digest(self.native_prompt)
+            if self.native_prompt is not None
+            else None,
             "completion_confirmed": completion_confirmed,
             "output_file": output_file,
             "stderr_file": stderr_file,

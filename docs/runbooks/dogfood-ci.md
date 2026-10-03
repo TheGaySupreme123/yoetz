@@ -28,8 +28,9 @@ It does **not** mean Yoetz is correct or useful. A native model that ignores the
 times out, or exits nonzero is recorded in the lane report (`agent_ok: false`) and the lane stays
 green unless the `strict_agent` input is set, because model compliance with a one-paragraph prompt
 is not what this lane certifies. `agent_ok: true` requires zero exit, an observation mapping,
-and confirmed completion. For Codex, the native JSONL must record successful Yoetz MCP `start`,
-an accepted/projected plan publication, and a receipt for the same task/session/writer, followed
+and confirmed completion. For Codex, the native JSONL must record successful Yoetz MCP `start`
+with the exact full probe statement, an accepted/projected plan publication, a terminal check,
+and a receipt for the same task/session/writer, followed
 by a completed turn. Model text cannot replace those calls; later hook disclosures do not undo
 them. `native_mcp_completed` records this proof separately from the informational `done_marker`.
 Claude and Cursor's result-only output confirms completion through a `DONE` marker in the
@@ -103,7 +104,7 @@ trusted-console ceremonies from a pseudo-terminal. Phases, in order, each record
    `create_or_attach` refuse with `workspace_task_exists`, which is the product's rule against
    accidental sibling tasks, not a lane defect.
 4. **native** — one headless agent session in the probe project (`codex exec`, `claude -p`,
-   `cursor-agent -p`) asked to call `start`, `publish_work`, and `receipt` and answer `DONE`;
+   `cursor-agent -p`) asked to call `start`, `publish_work`, `check`, and `receipt` and answer `DONE`;
    the prompt identifies the MCP namespace separately from its function names, requires the
    operation's packaged guidance, and asks the host to copy the full probe request into
    `start.task_statement`. A prompt instruction alone does not prove reviewer delivery; inspect

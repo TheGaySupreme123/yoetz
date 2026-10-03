@@ -186,6 +186,7 @@ def test_prompt_names_tool_hint_workspace_and_external_ref() -> None:
     assert "single_atomic_change" in prompt and prompt.endswith("Do not create or edit files.")
     assert "task_statement set to this entire user message verbatim" in prompt
     assert "recovering incomplete pages before continuing" in prompt
+    assert "mode 'semantic_required'" in prompt
 
 
 @pytest.mark.parametrize("host", ["codex", "claude", "cursor"])
@@ -565,6 +566,16 @@ def _codex_probe_events() -> list[dict[str, Any]]:
             },
         ),
         (
+            "check",
+            binding,
+            {
+                "ok": True,
+                "task_id": "tsk_probe",
+                "session_id": "ses_probe",
+                "semantic_status": "succeeded",
+            },
+        ),
+        (
             "receipt",
             binding,
             {
@@ -613,7 +624,7 @@ def test_codex_completion_uses_correlated_mcp_results_not_wording(final: str) ->
     assert _LANE._codex_workflow_completed(_native_output("codex", "DONE")) is False
 
 
-@pytest.mark.parametrize("omitted", [0, 1, 2])
+@pytest.mark.parametrize("omitted", [0, 1, 2, 3])
 def test_codex_workflow_requires_every_successful_step(omitted: int) -> None:
     events = _codex_probe_events()
     del events[omitted]
@@ -655,13 +666,23 @@ def test_codex_workflow_rejects_uncorrelated_or_unaccepted_results(mutation: str
     elif mutation == "wrong_result_writer":
         result["writer_id"] = "wri_other"
     elif mutation == "wrong_task":
-        events[2]["item"]["arguments"]["task_id"] = "tsk_other"
+        events[3]["item"]["arguments"]["task_id"] = "tsk_other"
     elif mutation == "no_plan":
         result["accepted_events"] = []
     elif mutation == "dry_run":
         result["outcome"] = "dry_run"
     elif mutation == "no_receipt":
-        del events[2]["item"]["result"]["structured_content"]["receipt_id"]
+        del events[3]["item"]["result"]["structured_content"]["receipt_id"]
+    assert _LANE._codex_workflow_completed(_codex_probe_output("DONE", events)) is False
+
+
+def test_codex_workflow_requires_exact_statement_and_terminal_check() -> None:
+    events = _codex_probe_events()
+    events[0]["item"]["arguments"]["task_statement"] = "full probe request"
+    output = _codex_probe_output("DONE", events)
+    assert _LANE._codex_workflow_completed(output, "full probe request") is True
+    assert _LANE._codex_workflow_completed(output, "changed probe request") is False
+    events[2]["item"]["result"]["structured_content"]["semantic_status"] = "awaiting_human"
     assert _LANE._codex_workflow_completed(_codex_probe_output("DONE", events)) is False
 
 
