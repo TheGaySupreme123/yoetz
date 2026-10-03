@@ -98,10 +98,11 @@ The through-line is that "Codex is first" had been encoded as "Codex is the only
    resource URI is a key into a frozen table, never a path.
 
 6. **`mcp/descriptors.py` owns every agent-read string** — the six workflow tool names, the
-   read-only `read_guidance` tool, descriptions, and annotations, plus `instructions` — loaded from
-   verified packaged resources, never composed at runtime, and bound by the same honesty lint as
-   the guidance ("verified", "proved", "authenticated", "complete" rejected unless the sentence
-   states the exact sufficient coverage). `status` and `read_guidance` carry `readOnlyHint=true`;
+   read-only `read_guidance` and `closure_prepare` support tools, descriptions, and annotations,
+   plus `instructions` — loaded from verified packaged resources, never composed at runtime, and
+   bound by the same honesty lint as the guidance ("verified", "proved", "authenticated", "complete"
+   rejected unless the sentence states the exact sufficient coverage). `status`, `read_guidance`,
+   and `closure_prepare` carry `readOnlyHint=true`;
    `receipt` carries `readOnlyHint=false` because it stages a receipt object and appends a
    `receipt_recorded` event. Every tool carries an explicit `idempotentHint=true`. Nothing carries
    `destructiveHint`, because no Yoetz operation deletes recorded evidence. `read_guidance` is
@@ -469,20 +470,31 @@ session-scoped current advice; migration `0003` is immutable. Local advice consu
 evidence offline and materializes through existing `finding_recorded`; ordinary
 `status(view="advice")` loads only the advice for the routed workspace and Yoetz session, and safe
 hook context surfaces the same bounded finding/evidence identities. The MCP registry remains the
-six workflow tools plus read-only `read_guidance`. Observation is not a seventh workflow tool.
+six workflow tools plus read-only `read_guidance` and `closure_prepare` support tools. Observation
+is not a workflow tool.
 
 A fork can make Yoetz first-party on another harness by writing one adapter and one profile. It
 edits no port, no registry, no guidance, and no schema. That is the property this ADR exists to
 guarantee, and it follows from the ports/adapters pattern the rest of the tree already uses.
 
 Any MCP host works on day one with no integration, no skill, and no configuration: six workflow
-tools, `read_guidance`, the tier-0 instructions, and five fetchable guidance documents. The
+tools, `read_guidance`, the read-only `closure_prepare` support route, the tier-0 instructions,
+and five fetchable guidance documents. The
 request-template resource keeps
 all six requests and all nine ordinary publication families authorable when a host drops schema
 metadata; the catalog schema remains admission authority. The host earns `cooperative_mcp` with
 `self_asserted` authorship and `published_only` artifact observation — the weakest honest coverage,
 which the coverage vector already expresses precisely. That is not a degraded mode needing a warning
 label; it is an accurate one.
+
+**Amendment (2026-10-03, issue #953): bounded closure preparation is an MCP support route.**
+`closure_prepare/1.0.0` exposes the existing mechanical closure composer through the same
+cooperative identities and explicit selections as the CLI. It reads one pinned, privacy-projected
+inventory and prepares at most one request; it never appends, judges work, or claims completion.
+The bridge refuses a result after the complete host projection and JSON-RPC serialization would
+exceed the stdio frame bound, including Cursor's structured-content plus canonical-text copies,
+and directs larger inventories to the CLI `--output` fallback. This adds a read-only support tool,
+not a workflow operation or a new authority boundary.
 
 First-party Codex integration therefore buys ergonomics and, when the observation arm is
 capability-proven and consented, stronger coverage via `hook_observed`. It never buys a different

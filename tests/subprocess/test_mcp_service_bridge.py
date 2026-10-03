@@ -744,6 +744,49 @@ async def test_closure_prepare_refuses_an_unbounded_mcp_result(
 
 
 @pytest.mark.anyio
+async def test_cursor_closure_prepare_refuses_projected_frame_with_escaped_content(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    escaped_detail = ('"\\\n\r\t' * 60_000)
+
+    async def prepare(*_args: object, **_kwargs: object) -> dict[str, JsonValue]:
+        return {
+            "preparatory_only": True,
+            "frontier": {"sequence": "0", "head_digest": "genesis"},
+            "closure_readiness": {},
+            "inventory": {"history": [{"description": escaped_detail}]},
+            "request": None,
+            "notes": ["Nothing was published or judged."],
+        }
+
+    monkeypatch.setattr(bridge, "prepare_closure", prepare)
+    # Bypass the inexpensive pre-projection guard so this regression exercises the actual
+    # JSON-RPC projection bound. Cursor carries the structured body and a canonical JSON copy.
+    monkeypatch.setattr(bridge, "_MAX_CLOSURE_RESULT_BYTES", 2_000_000)
+    runtime = bridge.build_bridge_runtime(
+        host_profile="cursor", workspace_locator=WorkspaceLocator(str(tmp_path))
+    )
+
+    result = await bridge.dispatch_closure_prepare(
+        {
+            "session_id": _id("session", 1),
+            "writer_id": _id("writer", 1),
+            "selection": {"phase": "inventory"},
+        },
+        runtime,
+        transport_request_id=1,
+    )
+
+    assert result.isError is True
+    assert result.structuredContent is not None
+    assert result.structuredContent["error"]["code"] == "LIMIT_EXCEEDED"
+    assert result.structuredContent["error"]["safe_details"] == {
+        "reason_code": "payload_too_large",
+    }
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
 async def test_closure_prepare_replay_rejects_malformed_selection_in_one_turn() -> None:
     runtime = bridge.build_bridge_runtime()
     base = {

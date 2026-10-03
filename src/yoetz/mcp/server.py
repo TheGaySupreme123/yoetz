@@ -20,6 +20,7 @@ import anyio
 from mcp import types
 from mcp.server import InitializationOptions, NotificationOptions, Server
 from mcp.server.lowlevel.helper_types import ReadResourceContents
+from mcp.server.lowlevel.server import request_ctx
 from mcp.shared.exceptions import McpError
 from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
 from pydantic import AnyUrl, BaseModel, ValidationError
@@ -183,6 +184,9 @@ _MAX_CURSOR_ROOT_URI_BYTES: Final = MAX_WORKSPACE_LOCATOR_BYTES * 2
 # Leave room for the JSON-RPC method, id, and MCP result wrapper. A complete closure inventory is
 # useful only when the bridge can deliver it as one bounded frame; refusing before projection
 # prevents the transport from clipping a superficially successful preparation (#953/#950).
+# The transport checks the serialized JSON-RPC payload before it appends the JSONL newline. The
+# closure helper performs the same check after host projection below; this constant remains an
+# inexpensive pre-projection refusal for very large preparations.
 _MAX_CLOSURE_RESULT_BYTES: Final = MAX_JSON_FRAME_BYTES - 65_536
 _CLOSURE_PUBLIC_REASON_CODES: Final = MappingProxyType(
     {
@@ -862,6 +866,24 @@ def result_from_public_model(
         structuredContent=cast(dict[str, object], wire),
         isError=wire.get("ok") is False,
     )
+
+
+def _serialized_mcp_result_bytes(
+    result: types.CallToolResult,
+    *,
+    transport_request_id: types.RequestId | None,
+) -> int:
+    """Measure the exact JSON-RPC payload that ``bounded_stdio_server`` will write."""
+
+    # Direct dispatcher tests have no transport envelope id. The live handler supplies the
+    # context request ID; zero keeps the direct path measurable without fabricating user data.
+    wire_id: types.RequestId = 0 if transport_request_id is None else transport_request_id
+    response = types.JSONRPCResponse(
+        jsonrpc="2.0",
+        id=wire_id,
+        result=result.model_dump(by_alias=True, mode="json", exclude_none=True),
+    )
+    return len(response.model_dump_json(by_alias=True, exclude_none=True).encode("utf-8"))
 
 
 def _result_from_wire(
@@ -2624,7 +2646,10 @@ async def dispatch_status(
 
 
 async def dispatch_closure_prepare(
-    arguments: Mapping[str, object], runtime: BridgeRuntime = BRIDGE_RUNTIME
+    arguments: Mapping[str, object],
+    runtime: BridgeRuntime = BRIDGE_RUNTIME,
+    *,
+    transport_request_id: types.RequestId | None = None,
 ) -> types.CallToolResult:
     """Prepare one explicit closure request from a pinned, paginated status inventory."""
 
@@ -2784,7 +2809,23 @@ async def dispatch_closure_prepare(
 
     await _clear_availability(runtime)
     try:
-        return result_from_public_model(result, host_profile=runtime.host_profile)
+        projected = result_from_public_model(result, host_profile=runtime.host_profile)
+        if (
+            _serialized_mcp_result_bytes(
+                projected,
+                transport_request_id=transport_request_id,
+            )
+            > MAX_JSON_FRAME_BYTES
+        ):
+            return structured_error_result(
+                PublicErrorCode.LIMIT_EXCEEDED,
+                "closure_result_too_large: use the CLI closure-prepare --output path or read status pages directly.",
+                request_id=request_id,
+                safe_details={"reason_code": "payload_too_large"},
+                operation="closure_prepare",
+                host_profile=runtime.host_profile,
+            )
+        return projected
     except Exception as exc:
         correlation_id = record_unexpected_exception_without_raising(
             exc,
@@ -3037,6 +3078,8 @@ async def call_tool(
     name: str,
     arguments: dict[str, object],
     runtime: BridgeRuntime = BRIDGE_RUNTIME,
+    *,
+    transport_request_id: types.RequestId | None = None,
 ) -> types.CallToolResult:
     """Dispatch one registered operation with bridge-owned strict validation.
 
@@ -3058,6 +3101,12 @@ async def call_tool(
     if dispatcher is None:
         raise McpError(
             types.ErrorData(code=types.INVALID_PARAMS, message=sanitize_unknown_tool_name(name))
+        )
+    if name == "closure_prepare":
+        return await dispatch_closure_prepare(
+            arguments,
+            runtime,
+            transport_request_id=transport_request_id,
         )
     return await dispatcher(arguments, runtime)
 
@@ -3086,7 +3135,19 @@ async def _handle_call_tool_request(
         )
         if binding_error is not None:
             return types.ServerResult(binding_error)
-    result = await call_tool(name, arguments, runtime)
+    try:
+        transport_request_id = request_ctx.get().request_id
+    except LookupError:
+        transport_request_id = None
+    if name == "closure_prepare":
+        result = await call_tool(
+            name,
+            arguments,
+            runtime,
+            transport_request_id=transport_request_id,
+        )
+    else:
+        result = await call_tool(name, arguments, runtime)
     return types.ServerResult(result)
 
 

@@ -6935,9 +6935,11 @@ file is in place but may not survive a crash, and no summary is printed. Each pa
 own local-disclosure receipt; the file changes where the result goes, not what was disclosed.
 
 The MCP route sends the returned session and writer identities with an explicit selection. It is
-read-only and preparation-only: it never appends, judges work, or claims completion. Its complete
-response frame is bounded; an oversized inventory returns `LIMIT_EXCEEDED` with no partial success,
-so callers use the CLI `--output` fallback for a larger local inventory. The route is shared by
+read-only and preparation-only: it never appends, judges work, or claims completion. The bridge
+checks the final host projection and JSON-RPC serialization, including Cursor's structured-content
+and canonical-text copies, before returning success. Its complete response frame is bounded; an
+oversized inventory returns `LIMIT_EXCEEDED` with no partial success, so callers use the CLI
+`--output` fallback for a larger local inventory. The route is shared by
 Codex, Claude Code, and Cursor on macOS, Linux, and WSL 2 through the local bridge. Native Windows
 has no supported Yoetz MCP route; host activation and native dogfood remain separate evidence.
 
