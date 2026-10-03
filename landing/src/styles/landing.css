@@ -247,27 +247,18 @@ img, svg { max-width: 100%; }
 .footer-inner {
   max-width: 1280px;
   margin: 0 auto;
-  padding: 56px var(--space-6) 40px;
+  padding: 28px var(--space-6);
   display: flex;
   flex-wrap: wrap;
-  gap: 40px;
-  align-items: flex-start;
+  gap: var(--space-6);
+  align-items: center;
 }
 .footer .lockup img { width: 26px; height: 26px; }
 .footer .lockup span { font-size: 18px; }
 .footer-links { margin-left: auto; display: flex; gap: var(--space-6); flex-wrap: wrap; align-items: center; }
 .footer-links a { color: var(--ink-muted); text-decoration: none; font: 500 15px/1.5 var(--font-sans); padding: 8px 0; }
 .footer-links a:hover { color: var(--ink); }
-.footer-meta {
-  flex-basis: 100%;
-  display: flex;
-  justify-content: space-between;
-  gap: var(--space-4);
-  flex-wrap: wrap;
-  color: var(--ink-muted);
-  font: 400 14px/1.5 var(--font-sans);
-  margin-top: var(--space-6);
-}
+.footer-meta { color: var(--ink-muted); font: 400 14px/1.5 var(--font-sans); }
 
 /* ---------- Motion ---------- */
 @media (prefers-reduced-motion: reduce) {
