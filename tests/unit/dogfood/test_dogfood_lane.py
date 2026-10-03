@@ -1027,6 +1027,49 @@ def test_native_provider_history_rejects_fake_marker_without_native_events(
     assert lane.native_provider_verification["reason"] == "native_plan_absent"
 
 
+def test_native_provider_history_ignores_rows_at_or_before_marker_frontier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A complete older session history must not prove a fresh native run."""
+
+    statement = "fresh native statement"
+    lane = _LANE.Lane(_namespace(tmp_path, host="claude"))
+    lane.evidence.mkdir()
+    marker = _native_binding(frontier={"sequence": "7", "head_digest": "sha256:" + "7" * 64})
+    old_history = [
+        _history_item("plan_published", "2", publication_channel="cooperative_mcp"),
+        _history_item(
+            "check_recorded",
+            "3",
+            publication_channel="engine_derived",
+            manifest=_provider_bound_history_manifest(statement),
+        ),
+        _history_item("receipt_recorded", "4", publication_channel="engine_derived"),
+    ]
+    responses = iter(
+        [
+            _history_status_page(_NATIVE_IDS, marker["frontier"], [], None),
+            _history_status_page(
+                _NATIVE_IDS,
+                {"sequence": "8", "head_digest": "sha256:" + "8" * 64},
+                [
+                    *old_history,
+                    _history_item("session_opened", "8", publication_channel="cooperative_mcp"),
+                ],
+                None,
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        lane,
+        "_yoetz",
+        Mock(side_effect=[(Mock(exit_code=0), response) for response in responses]),
+    )
+
+    assert lane._verify_native_provider_statement("native", statement, marker) is False
+    assert lane.native_provider_verification["reason"] == "native_plan_absent"
+
+
 def test_native_provider_history_requires_receipt_and_order(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

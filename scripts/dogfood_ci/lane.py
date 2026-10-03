@@ -2353,6 +2353,11 @@ class Lane:
                     manifest_value = item.get("review_input_manifest")
                     if manifest_value is not None and not isinstance(manifest_value, dict):
                         return fail("native_history_manifest_invalid")
+                # The marker frontier is the native session's start boundary.  Public history
+                # also includes earlier rows from the same task/session, so they must not be
+                # allowed to satisfy this run's plan/check/receipt proof.
+                if sequence_number <= int(marker_frontier["sequence"]):
+                    continue
                 history_items.append(item)
             if next_cursor_value is None:
                 break
