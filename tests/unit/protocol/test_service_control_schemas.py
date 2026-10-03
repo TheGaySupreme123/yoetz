@@ -1469,7 +1469,9 @@ def test_v29_changes_only_the_selection_runtime_and_keeps_frozen_v28() -> None:
         assert set(v29_defs) - set(v28_defs) == {"observation_effective_budget"}
         changed = {key for key in v28_defs if v28_defs[key] != v29_defs[key]}
         assert changed == {
+            "local_disclosure_receipt",
             "observation_selection_runtime",
+            "privacy_receipt_view",
             "privacy_receipts_list_body",
             "error_body",
         }

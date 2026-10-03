@@ -290,6 +290,8 @@ class _Ledger:
         missing_for_assessment: tuple[MissingForAssessmentItem, ...] = (),
         check_change_files: CheckChangeShownFiles | None = None,
         semantic_included_refs: tuple[str, ...] | None = None,
+        semantic_withheld_item_ids: tuple[str, ...] = (),
+        review_input_manifest: object | None = None,
     ) -> CheckCommitResult:
         assert frozen == self.frozen
         self.last_verdicts = prior_finding_verdicts

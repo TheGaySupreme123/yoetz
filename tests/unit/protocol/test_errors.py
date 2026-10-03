@@ -141,6 +141,7 @@ invalid_continuation_expiry
 invalid_continuation_kind
 invalid_continuation_pending_id
 invalid_continuation_repository_setup
+invalid_continuation_review_input
 invalid_cost_fields
 invalid_coverage_value
 invalid_digest
@@ -248,6 +249,7 @@ obligation_change_invalid
 obligation_resolution_invalid
 obligation_resolution_mismatch
 observation_selection_session_limit
+opaque_item_id_invalid
 operation_recovery_unavailable
 ownership_contended
 payload_redaction_mismatch
@@ -275,6 +277,7 @@ receipt_coverage_mismatch
 receipt_gap_not_in_coverage
 receipt_json_projection_blocked
 receipt_json_shape_invalid
+receipt_semantic_withheld_items_not_canonical
 redaction_target_required
 ref_mirror_mismatch
 repository_identity_mismatch
@@ -499,7 +502,7 @@ def test_public_error_code_membership() -> None:
 def test_protocol_reason_registry_is_exact_and_import_order_independent() -> None:
     source_values = cast(tuple[str, ...], getattr(errors_module, "_PROTOCOL_REASON_CODE_VALUES"))
     assert source_values == _EXPECTED_REASON_CODES
-    assert len(source_values) == 301
+    assert len(source_values) == 304
     assert source_values == tuple(sorted(source_values, key=str.encode))
     assert len(source_values) == len(set(source_values))
     assert PROTOCOL_REASON_CODES == frozenset(_EXPECTED_REASON_CODES)

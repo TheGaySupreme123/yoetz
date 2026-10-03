@@ -165,6 +165,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "invalid_continuation_kind",
     "invalid_continuation_pending_id",
     "invalid_continuation_repository_setup",
+    "invalid_continuation_review_input",
     "invalid_cost_fields",
     "invalid_coverage_value",
     "invalid_digest",
@@ -272,6 +273,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "obligation_resolution_invalid",
     "obligation_resolution_mismatch",
     "observation_selection_session_limit",
+    "opaque_item_id_invalid",
     "operation_recovery_unavailable",
     "ownership_contended",
     "payload_redaction_mismatch",
@@ -299,6 +301,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "receipt_gap_not_in_coverage",
     "receipt_json_projection_blocked",
     "receipt_json_shape_invalid",
+    "receipt_semantic_withheld_items_not_canonical",
     "redaction_target_required",
     "ref_mirror_mismatch",
     "repository_identity_mismatch",
@@ -358,7 +361,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
 )
 
 _REASON_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 301
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 304
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)
@@ -587,6 +590,7 @@ REASON_CODE_CONTINUATIONS: Mapping[str, str] = MappingProxyType(
         "invalid_continuation_kind": "lineage_integrity_review",
         "invalid_continuation_pending_id": "lineage_integrity_review",
         "invalid_continuation_repository_setup": "lineage_integrity_review",
+        "invalid_continuation_review_input": "lineage_integrity_review",
         "invalid_external_runtime_authority": "coordination_authority_review",
         "invalid_receipt_child_finding": "lineage_integrity_review",
         "invalid_receipt_child_outcome": "lineage_integrity_review",
@@ -641,6 +645,7 @@ REASON_CODE_CONTINUATIONS: Mapping[str, str] = MappingProxyType(
         "lineage_work_transition": "lineage_state_refresh",
         "noncanonical_json": "lineage_integrity_review",
         "observation_selection_session_limit": "lineage_state_refresh",
+        "opaque_item_id_invalid": "lineage_integrity_review",
         "project_dissolved": "lineage_terminal_review",
         "project_member_already_unbound": "lineage_state_refresh",
         "project_member_not_found": "lineage_state_refresh",
@@ -649,6 +654,7 @@ REASON_CODE_CONTINUATIONS: Mapping[str, str] = MappingProxyType(
         "receipt_child_manifest_mismatch": "lineage_integrity_review",
         "receipt_children_not_canonical": "sorted_set_required",
         "receipt_children_schema_version": "lineage_integrity_review",
+        "receipt_semantic_withheld_items_not_canonical": "lineage_integrity_review",
         "runtime_opening_authority": "coordination_authority_review",
         "selector_conflict": "lineage_state_refresh",
         "service_stamp_required": "lineage_service_review",
