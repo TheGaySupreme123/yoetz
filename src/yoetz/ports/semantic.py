@@ -89,6 +89,9 @@ __all__ = [
     "RuntimeAttemptEvidence",
     "ReviewAssessment",
     "ReviewAssessmentSkipped",
+    "ReviewInputManifest",
+    "ReviewInputMissing",
+    "ReviewInputSection",
     "ReviewOmission",
     "ReviewPacket",
     "ReviewerChallenge",
@@ -174,6 +177,41 @@ type ReviewerNextStep = Literal[
     "dispute_with_evidence",
     "state_unresolved_limitation",
 ]
+type ReviewInputSectionName = Literal[
+    "specification",
+    "current_diff",
+    "caller_evidence",
+    "latest_verification",
+    "prior_finding_context",
+]
+type ReviewInputSectionStatus = Literal[
+    "complete",
+    "partial",
+    "title_only",
+    "missing",
+    "withheld",
+    "not_selected",
+]
+type ReviewInputMissingStatus = Literal[
+    "pending",
+    "supplied",
+    "unavailable",
+    "repeated",
+]
+_REVIEW_INPUT_OMISSION_REASONS: Final = frozenset(
+    {
+        "capture_unavailable",
+        "content_unselected",
+        "not_recorded",
+        "not_selected",
+        "redacted_never_send",
+        "task_statement_not_authorized",
+        "task_statement_not_supplied",
+        "task_statement_unavailable",
+        "truncated_payload",
+        "withheld_by_policy",
+    }
+)
 
 _MAX_SAFE_INTEGER: Final = 2**53 - 1
 _MAX_SUBJECT_REFS: Final = 16
@@ -920,6 +958,197 @@ class TargetedExcerptRef:
 
 
 @dataclass(frozen=True, slots=True)
+class ReviewInputSection:
+    """Bounded structural accounting for one review input family.
+
+    This manifest is deliberately metadata-only. It names the source and revision that the
+    frozen case considered, the item ids and refs that survived selection, and bounded omission
+    counts. It never copies statement, diff, test, or finding prose into a status or diagnostic
+    surface (issue #951 / residual #907).
+    """
+
+    name: ReviewInputSectionName
+    status: ReviewInputSectionStatus
+    source_refs: tuple[str, ...] = ()
+    selected_item_ids: tuple[str, ...] = ()
+    omitted_refs: tuple[str, ...] = ()
+    omission_reasons: tuple[str, ...] = ()
+    revision: int | None = None
+    content_digest: str | None = None
+    content_bytes: int = 0
+
+    def __post_init__(self) -> None:
+        if self.name not in {
+            "specification",
+            "current_diff",
+            "caller_evidence",
+            "latest_verification",
+            "prior_finding_context",
+        }:
+            raise _invalid_case()
+        if self.status not in {
+            "complete",
+            "partial",
+            "title_only",
+            "missing",
+            "withheld",
+            "not_selected",
+        }:
+            raise _invalid_case()
+
+        def opaque_refs(value: object, *, maximum: int) -> tuple[str, ...]:
+            if type(value) is not tuple:
+                raise _invalid_case()
+            raw = cast(tuple[object, ...], value)
+            if len(raw) > maximum:
+                raise _invalid_case()
+            values = tuple(_snapshot_opaque_ref(item, error=_invalid_case()) for item in raw)
+            if values != tuple(sorted(set(values), key=_ascii)):
+                raise _invalid_case()
+            return values
+
+        object.__setattr__(self, "source_refs", opaque_refs(self.source_refs, maximum=16))
+        object.__setattr__(
+            self, "selected_item_ids", opaque_refs(self.selected_item_ids, maximum=64)
+        )
+        object.__setattr__(self, "omitted_refs", opaque_refs(self.omitted_refs, maximum=16))
+        if type(self.omission_reasons) is not tuple or len(self.omission_reasons) > 8:
+            raise _invalid_case()
+        reasons = tuple(cast(tuple[object, ...], self.omission_reasons))
+        if any(
+            type(item) is not str or item not in _REVIEW_INPUT_OMISSION_REASONS for item in reasons
+        ):
+            raise _invalid_case()
+        reasons = cast(tuple[str, ...], reasons)
+        if reasons != tuple(sorted(set(reasons), key=_ascii)):
+            raise _invalid_case()
+        object.__setattr__(self, "omission_reasons", reasons)
+        if self.revision is not None and (
+            type(self.revision) is not int or not 0 <= self.revision <= _MAX_SAFE_INTEGER
+        ):
+            raise _invalid_case()
+        if self.content_digest is not None:
+            object.__setattr__(
+                self,
+                "content_digest",
+                _snapshot_digest(self.content_digest, error=_invalid_case()),
+            )
+        if (
+            type(self.content_bytes) is not int
+            or not 0 <= self.content_bytes <= MAX_SEMANTIC_CASE_BYTES
+        ):
+            raise _invalid_case()
+        if (
+            self.status in {"missing", "withheld", "not_selected"}
+            and self.content_digest is not None
+        ):
+            raise _invalid_case()
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewInputMissing:
+    """One bounded missing-input request carried by the per-check manifest."""
+
+    kind: MissingForAssessmentKind
+    target_refs: tuple[str, ...] = ()
+    supplied_refs: tuple[str, ...] = ()
+    status: ReviewInputMissingStatus = "pending"
+
+    def __post_init__(self) -> None:
+        if self.kind not in {
+            "command_identity",
+            "current_diff_for_path",
+            "other",
+            "plan_or_claim_text",
+            "prior_finding_context",
+            "task_statement",
+            "verification_output",
+        }:
+            raise _invalid_case()
+        for field_name, value in (
+            ("target_refs", self.target_refs),
+            ("supplied_refs", self.supplied_refs),
+        ):
+            if type(value) is not tuple or len(value) > MAX_MISSING_TARGET_REFS:
+                raise _invalid_case()
+            refs = tuple(
+                _snapshot_subject_ref(item, public_only=False, error=_invalid_case())
+                for item in cast(tuple[object, ...], value)
+            )
+            if refs != tuple(sorted(set(refs), key=_ascii)):
+                raise _invalid_case()
+            object.__setattr__(self, field_name, refs)
+        if self.status not in {"pending", "supplied", "unavailable", "repeated"}:
+            raise _invalid_case()
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewInputManifest:
+    """The exact bounded input coverage summary for one semantic check.
+
+    The manifest is part of the frozen review packet and therefore its digest. It is safe to
+    project into check/status surfaces because it contains only ids, digests, byte counts and
+    closed status tokens. Content itself remains in the ordinary privacy-selected packet items.
+    """
+
+    schema: Literal["yoetz.review-input-manifest/1"]
+    specification: ReviewInputSection
+    current_diff: ReviewInputSection
+    caller_evidence: ReviewInputSection
+    latest_verification: ReviewInputSection
+    prior_finding_context: ReviewInputSection
+    phase: Literal["composed", "provider_bound"] = "composed"
+    missing_inputs: tuple[ReviewInputMissing, ...] = ()
+    selected_item_count: int = 0
+    selected_excerpt_bytes: int = 0
+    omitted_item_count: int = 0
+
+    def __post_init__(self) -> None:
+        if self.schema != "yoetz.review-input-manifest/1":
+            raise _invalid_case()
+        if self.phase not in {"composed", "provider_bound"}:
+            raise _invalid_case()
+        sections = (
+            self.specification,
+            self.current_diff,
+            self.caller_evidence,
+            self.latest_verification,
+            self.prior_finding_context,
+        )
+        if any(type(item) is not ReviewInputSection for item in sections):
+            raise _invalid_case()
+        if tuple(item.name for item in sections) != (
+            "specification",
+            "current_diff",
+            "caller_evidence",
+            "latest_verification",
+            "prior_finding_context",
+        ):
+            raise _invalid_case()
+        if (
+            type(self.missing_inputs) is not tuple
+            or len(self.missing_inputs) > MAX_MISSING_FOR_ASSESSMENT
+            or any(type(item) is not ReviewInputMissing for item in self.missing_inputs)
+        ):
+            raise _invalid_case()
+        if (
+            type(self.selected_item_count) is not int
+            or not 0 <= self.selected_item_count <= MAX_SEMANTIC_CASE_ITEMS
+        ):
+            raise _invalid_case()
+        if (
+            type(self.selected_excerpt_bytes) is not int
+            or not 0 <= self.selected_excerpt_bytes <= MAX_SEMANTIC_CASE_BYTES
+        ):
+            raise _invalid_case()
+        if (
+            type(self.omitted_item_count) is not int
+            or not 0 <= self.omitted_item_count <= MAX_REVIEW_OMISSIONS
+        ):
+            raise _invalid_case()
+
+
+@dataclass(frozen=True, slots=True)
 class ChangeObservation:
     subject_refs: tuple[str, ...]
     claimed_change: bool
@@ -984,6 +1213,8 @@ class ReviewPacket:
     prior_finding_refs: tuple[str, ...] = ()
     # At most one statement item: the task's current statement, never a plan (issue #908).
     task_statement_item_ids: tuple[str, ...] = ()
+    # Metadata-only coverage for the exact input families considered by this check (#951).
+    input_manifest: ReviewInputManifest | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -991,6 +1222,8 @@ class ReviewPacket:
             "task_statement_item_ids",
             _validated_item_ids(self.task_statement_item_ids, maximum=1),
         )
+        if self.input_manifest is not None and type(self.input_manifest) is not ReviewInputManifest:
+            raise _invalid_case()
         object.__setattr__(
             self, "goal_item_ids", _validated_item_ids(self.goal_item_ids, maximum=4)
         )

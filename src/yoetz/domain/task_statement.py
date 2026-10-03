@@ -17,10 +17,11 @@ the accepted prefix, and every earlier one stays in the ledger history.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Final
+from typing import Final, Literal
 
 from yoetz.domain.events import (
     AcceptedEvent,
@@ -32,8 +33,9 @@ from yoetz.domain.events import (
     SessionResumedPayload,
 )
 from yoetz.domain.privacy import PrivacyPolicy, ReviewSelectionPolicy
-from yoetz.domain.values import EventId, event_id
-from yoetz.protocol.models import DataCategory
+from yoetz.domain.values import EventId, event_id, validate_sha256_digest
+from yoetz.protocol.errors import ProtocolValueError
+from yoetz.protocol.models import MAX_TASK_STATEMENT_BYTES, DataCategory
 
 __all__ = [
     "TASK_STATEMENT_GAPS",
@@ -42,6 +44,7 @@ __all__ = [
     "TASK_STATEMENT_UNAVAILABLE_GAP",
     "TASK_STATEMENT_SECTION",
     "RecordedTaskStatement",
+    "SpecificationPreflight",
     "TaskStatementSource",
     "current_task_statement",
     "may_carry_task_statement",
@@ -49,6 +52,7 @@ __all__ = [
     "review_selection_for_delivery",
     "task_statement_disclosure_text",
     "task_statement_gap_detail",
+    "specification_preflight",
 ]
 
 # The privacy review section and the packet section share one name, so the consent vocabulary and
@@ -160,6 +164,114 @@ class RecordedTaskStatement:
         # Every recorded statement arrives through the agent (``start`` or a plan event). Only a
         # future host-capture path may record anything else, and it will say so explicitly.
         return TaskStatementSource.AGENT_TRANSCRIBED
+
+
+@dataclass(frozen=True, slots=True)
+class SpecificationPreflight:
+    """The service-owned completeness decision before a semantic provider call.
+
+    ``title_only`` is intentionally a distinct state. A task title can identify a task, but it
+    cannot stand in for a complete user specification when the caller requested full-spec review.
+    The digest and byte length are structural commitments; the statement text never appears in
+    this value (issue #951).
+    """
+
+    status: Literal["complete", "title_only", "missing", "withheld"]
+    source: TaskStatementSource | None
+    content_digest: str | None
+    content_bytes: int
+    revision: int | None
+    required: bool
+    actionable: bool
+    gap: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.status not in {"complete", "title_only", "missing", "withheld"}:
+            raise ValueError("specification_preflight_invalid")
+        if self.status == "complete" and self.source is not TaskStatementSource.AGENT_TRANSCRIBED:
+            raise ValueError("specification_preflight_invalid")
+        if self.status == "title_only" and self.source is not TaskStatementSource.TASK_TITLE_ONLY:
+            raise ValueError("specification_preflight_invalid")
+        if self.status in {"missing", "withheld"} and self.source is not None:
+            raise ValueError("specification_preflight_invalid")
+        if self.content_digest is not None:
+            try:
+                validate_sha256_digest(self.content_digest)
+            except (ProtocolValueError, TypeError) as exc:
+                raise ValueError("specification_preflight_invalid") from exc
+        if (
+            type(self.content_bytes) is not int
+            or not 0 <= self.content_bytes <= MAX_TASK_STATEMENT_BYTES
+        ):
+            raise ValueError("specification_preflight_invalid")
+        if self.revision is not None and (type(self.revision) is not int or self.revision < 0):
+            raise ValueError("specification_preflight_invalid")
+        if type(self.required) is not bool or type(self.actionable) is not bool:
+            raise ValueError("specification_preflight_invalid")
+        if self.status == "complete" and self.actionable:
+            raise ValueError("specification_preflight_invalid")
+        if self.status == "withheld" and self.actionable:
+            raise ValueError("specification_preflight_invalid")
+
+    @property
+    def complete(self) -> bool:
+        return self.status == "complete"
+
+
+def specification_preflight(
+    statement: RecordedTaskStatement | None,
+    title: str | None,
+    selection: ReviewSelectionPolicy,
+    *,
+    required: bool,
+    channel_sends_task_description: bool = True,
+) -> SpecificationPreflight:
+    """Return the bounded specification state before substantive semantic dispatch.
+
+    A policy that withholds ``task_description`` is never converted into an agent request to
+    transmit it. When the channel is authorized, a title-only or missing specification is
+    actionable only for a full-spec review; reduced review continues with the explicit status.
+    """
+
+    selected = TASK_STATEMENT_SECTION in selection.sections
+    if not selected or not channel_sends_task_description:
+        return SpecificationPreflight(
+            "withheld", None, None, 0, None, required, False, TASK_STATEMENT_NOT_AUTHORIZED_GAP
+        )
+    if statement is not None:
+        raw = statement.text.encode("utf-8")
+        return SpecificationPreflight(
+            "complete",
+            statement.source,
+            "sha256:" + hashlib.sha256(raw).hexdigest(),
+            len(raw),
+            statement.ingestion_sequence,
+            required,
+            False,
+            None,
+        )
+    if title is not None:
+        raw = title.encode("utf-8")
+        return SpecificationPreflight(
+            "title_only",
+            TaskStatementSource.TASK_TITLE_ONLY,
+            "sha256:" + hashlib.sha256(raw).hexdigest(),
+            len(raw),
+            0,
+            required,
+            required,
+            TASK_STATEMENT_NOT_SUPPLIED_GAP if required else None,
+        )
+    return SpecificationPreflight(
+        "missing",
+        None,
+        None,
+        0,
+        None,
+        required,
+        required,
+        TASK_STATEMENT_NOT_SUPPLIED_GAP if required else None,
+    )
 
 
 def current_task_statement(records: Iterable[LedgerRecord]) -> RecordedTaskStatement | None:

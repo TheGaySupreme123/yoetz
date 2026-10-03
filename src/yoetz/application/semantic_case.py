@@ -110,8 +110,12 @@ from yoetz.ports.semantic import (
     MAX_SEMANTIC_ITEM_SUBJECT_REFS,
     ChangeObservation,
     ExcerptDigestProvenance,
+    MissingForAssessmentKind,
     ReviewAssessment,
     ReviewAssessmentSkipped,
+    ReviewInputManifest,
+    ReviewInputMissing,
+    ReviewInputSection,
     ReviewOmission,
     ReviewPacket,
     SemanticCase,
@@ -132,6 +136,7 @@ from yoetz.protocol.canonical import (
 )
 from yoetz.protocol.coverage import LedgerFreshness, coverage_to_json
 from yoetz.protocol.models import (
+    MAX_REVIEW_OMISSIONS,
     MAX_REVIEW_TEXT_BYTES,
     MAX_REVIEW_TIMELINE_ITEMS,
     MAX_SEMANTIC_CASE_BYTES,
@@ -164,6 +169,7 @@ __all__ = [
     "captured_edit_paths",
     "review_selection_digest",
     "ReviewPacketDisclosure",
+    "review_input_manifest",
     "repair_evidence_refs",
     "SemanticPacketView",
     "semantic_case_packet_view",
@@ -3330,6 +3336,7 @@ def _build_semantic_case_once(
 
     # --- The prior review's missing-item request and what was recorded since (issue #907) ---
     prior_missing_item: SemanticCaseItem | None = None
+    missing_answers: tuple[tuple[str, ...], ...] = ()
     pending_missing = projection.pending_missing_for_assessment
     if pending_missing is not None and "timeline" in sections and selection.max_timeline_items:
         answered = supplied_since(
@@ -3340,6 +3347,7 @@ def _build_semantic_case_once(
             _edit_paths_by_ref(captured_groups),
             workspace_root,
         )
+        missing_answers = answered
         check_ref = str(pending_missing.source_check_event_id)
         prior_missing_item = _content_item(
             item_id="prior-missing-for-assessment",
@@ -3878,6 +3886,21 @@ def _build_semantic_case_once(
                 )
             ),
         )
+    input_manifest = review_input_manifest(
+        frozen_case=frozen_case,
+        review_selection=selection,
+        sections=sections,
+        items=items,
+        omissions=omissions,
+        task_statement_ids=task_statement_ids,
+        task_statement_gaps=task_statement_gaps,
+        recorded_statement=recorded_statement,
+        pending_missing=pending_missing,
+        supplied_missing=missing_answers,
+        prior_finding_refs=prior_finding_refs,
+        check_time_change_selected=check_change_selected,
+        check_time_change_unavailable=check_time_change_unavailable,
+    )
     packet = ReviewPacket(
         task_statement_item_ids=tuple(task_statement_ids),
         goal_item_ids=tuple(goal_ids),
@@ -3892,6 +3915,7 @@ def _build_semantic_case_once(
         omissions=tuple(omissions),
         prior_finding_item_ids=tuple(prior_finding_ids),
         prior_finding_refs=tuple(prior_finding_refs),
+        input_manifest=input_manifest,
     )
 
     # The local case owns the complete frontier. The reviewer needs the dependency
@@ -4138,6 +4162,7 @@ def _digest_provenance_json(provenance: ExcerptDigestProvenance) -> dict[str, Js
 
 
 def _packet_to_json(packet: ReviewPacket) -> dict[str, JsonValue]:
+    manifest = packet.input_manifest
     return cast(
         dict[str, JsonValue],
         {
@@ -4169,6 +4194,37 @@ def _packet_to_json(packet: ReviewPacket) -> dict[str, JsonValue]:
             "obligation_item_ids": list(packet.obligation_item_ids),
             "prior_finding_item_ids": list(packet.prior_finding_item_ids),
             "prior_finding_refs": list(packet.prior_finding_refs),
+            **(
+                {}
+                if manifest is None
+                else {
+                    "review_input_manifest": {
+                        "caller_evidence": _review_input_section_to_json(manifest.caller_evidence),
+                        "current_diff": _review_input_section_to_json(manifest.current_diff),
+                        "latest_verification": _review_input_section_to_json(
+                            manifest.latest_verification
+                        ),
+                        "missing_inputs": [
+                            {
+                                "kind": item.kind,
+                                "status": item.status,
+                                "supplied_refs": list(item.supplied_refs),
+                                "target_refs": list(item.target_refs),
+                            }
+                            for item in manifest.missing_inputs
+                        ],
+                        "omitted_item_count": manifest.omitted_item_count,
+                        "phase": manifest.phase,
+                        "prior_finding_context": _review_input_section_to_json(
+                            manifest.prior_finding_context
+                        ),
+                        "schema": manifest.schema,
+                        "selected_excerpt_bytes": manifest.selected_excerpt_bytes,
+                        "selected_item_count": manifest.selected_item_count,
+                        "specification": _review_input_section_to_json(manifest.specification),
+                    }
+                }
+            ),
             "omissions": [
                 {
                     "category": item.category.value,
@@ -4200,6 +4256,19 @@ def _packet_to_json(packet: ReviewPacket) -> dict[str, JsonValue]:
     )
 
 
+def _review_input_section_to_json(section: ReviewInputSection) -> dict[str, JsonValue]:
+    return {
+        "content_bytes": section.content_bytes,
+        "content_digest": section.content_digest,
+        "item_ids": list(section.selected_item_ids),
+        "omission_reasons": list(section.omission_reasons),
+        "omitted_refs": list(section.omitted_refs),
+        "revision": section.revision,
+        "source_refs": list(section.source_refs),
+        "status": section.status,
+    }
+
+
 def _freshness_json(item: SemanticCaseItem) -> dict[str, JsonValue]:
     """Excerpt freshness marks; absent on every item that has none."""
 
@@ -4209,6 +4278,367 @@ def _freshness_json(item: SemanticCaseItem) -> dict[str, JsonValue]:
     if item.superseded_by:
         body["superseded_by"] = list(item.superseded_by)
     return body
+
+
+def _manifest_digest(items: Sequence[SemanticCaseItem]) -> str | None:
+    """Digest the selected item content without exposing that content in the manifest."""
+
+    if not items:
+        return None
+    return canonical_digest(
+        cast(
+            JsonValue,
+            {
+                "items": [
+                    {
+                        "content_bytes": item.content_bytes,
+                        "content_digest": item.content_digest,
+                        "item_id": item.item_id,
+                    }
+                    for item in items
+                ],
+                "schema": "yoetz.review-input-manifest-content/1",
+            },
+        )
+    )
+
+
+def _manifest_section(
+    name: Literal[
+        "specification",
+        "current_diff",
+        "caller_evidence",
+        "latest_verification",
+        "prior_finding_context",
+    ],
+    *,
+    status: Literal[
+        "complete",
+        "partial",
+        "title_only",
+        "missing",
+        "withheld",
+        "not_selected",
+    ],
+    items: Sequence[SemanticCaseItem] = (),
+    source_refs: Sequence[str] = (),
+    omitted_refs: Sequence[str] = (),
+    omission_reasons: Sequence[str] = (),
+    revision: int | None = None,
+    content_digest: str | None = None,
+    content_bytes: int | None = None,
+) -> ReviewInputSection:
+    selected = tuple(sorted(items, key=lambda item: item.item_id.encode("ascii")))
+    refs = tuple(sorted(set(source_refs), key=str.encode))[:16]
+    omitted = tuple(sorted(set(omitted_refs), key=str.encode))[:16]
+    reasons = tuple(sorted(set(omission_reasons), key=str.encode))
+    return ReviewInputSection(
+        name=name,
+        status=status,
+        source_refs=refs,
+        selected_item_ids=tuple(item.item_id for item in selected),
+        omitted_refs=omitted,
+        omission_reasons=reasons,
+        revision=revision,
+        content_digest=(
+            content_digest if content_digest is not None else _manifest_digest(selected)
+        ),
+        content_bytes=(
+            sum(item.content_bytes for item in selected) if content_bytes is None else content_bytes
+        ),
+    )
+
+
+def review_input_manifest(
+    *,
+    frozen_case: DeterministicCase,
+    review_selection: ReviewSelectionPolicy,
+    sections: frozenset[str],
+    items: Sequence[SemanticCaseItem],
+    omissions: Sequence[ReviewOmission],
+    task_statement_ids: Sequence[str],
+    task_statement_gaps: frozenset[str] | set[str],
+    recorded_statement: object | None,
+    pending_missing: object | None,
+    supplied_missing: Sequence[Sequence[str]] = (),
+    prior_finding_refs: Sequence[str] = (),
+    check_time_change_selected: bool = False,
+    check_time_change_unavailable: bool = False,
+) -> ReviewInputManifest:
+    """Build the bounded per-check input manifest from frozen case material.
+
+    This is a structural view of the case after selection. It intentionally receives already
+    selected ``SemanticCaseItem`` values and omission rows, never a provider body or a live
+    workspace. The statement's digest/length/revision are included even though its prose remains
+    in the separately authorized task-statement item.
+    """
+
+    typed_statement = recorded_statement
+    statement_items = [item for item in items if item.item_id in set(task_statement_ids)]
+    statement_ref: str | None = None
+    statement_revision: int | None = None
+    statement_digest: str | None = None
+    statement_bytes: int | None = None
+    statement_status: Literal[
+        "complete",
+        "partial",
+        "title_only",
+        "missing",
+        "withheld",
+        "not_selected",
+    ]
+    if "task_statement" not in sections:
+        statement_status = "withheld"
+    elif typed_statement is not None and hasattr(typed_statement, "text"):
+        text = cast(str, getattr(typed_statement, "text"))
+        statement_ref = str(getattr(typed_statement, "source_event_id"))
+        statement_revision = cast(int, getattr(typed_statement, "ingestion_sequence"))
+        statement_digest = "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+        statement_bytes = len(text.encode("utf-8"))
+        statement_status = "complete"
+        # A recorded statement can still be clipped while it is rendered into the bounded case
+        # item. Validate the effective row's bytes and digest here, so the composed manifest does
+        # not call a long statement complete merely because its item id survived selection. The
+        # provider-bound projection repeats this check after privacy admission.
+        if not statement_items:
+            statement_status = "partial"
+        else:
+            for item in statement_items:
+                try:
+                    rendered = strict_json_parse(item.content)
+                except ValueError:
+                    statement_status = "partial"
+                    continue
+                if not isinstance(rendered, dict) or type(rendered.get("statement")) is not str:
+                    statement_status = "partial"
+                    continue
+                rendered_bytes = cast(str, rendered["statement"]).encode("utf-8")
+                rendered_digest = "sha256:" + hashlib.sha256(rendered_bytes).hexdigest()
+                if (
+                    rendered_digest != statement_digest
+                    or len(rendered_bytes) != statement_bytes
+                    or rendered.get("elided_bytes") not in {0, None}
+                ):
+                    statement_status = "partial"
+    elif frozen_case.task_title is not None:
+        statement_ref = "task-title"
+        statement_digest = (
+            "sha256:" + hashlib.sha256(frozen_case.task_title.encode("utf-8")).hexdigest()
+        )
+        statement_bytes = len(frozen_case.task_title.encode("utf-8"))
+        statement_status = "title_only"
+    else:
+        statement_status = "missing"
+    statement = _manifest_section(
+        "specification",
+        status=statement_status,
+        items=statement_items,
+        source_refs=() if statement_ref is None else (statement_ref,),
+        omitted_refs=(
+            (statement_ref,)
+            if statement_ref is not None and statement_status in {"withheld", "not_selected"}
+            else ()
+        ),
+        omission_reasons=(
+            tuple(sorted(task_statement_gaps, key=str.encode)) if task_statement_gaps else ()
+        ),
+        revision=statement_revision,
+        content_digest=statement_digest,
+        content_bytes=statement_bytes,
+    )
+
+    excerpt_items = [item for item in items if item.section == "excerpt"]
+    omitted_by_kind: dict[str, list[ReviewOmission]] = {}
+    for omission in omissions:
+        omitted_by_kind.setdefault(omission.source_kind, []).append(omission)
+
+    current_diff = [
+        item
+        for item in excerpt_items
+        if item.source_kind == "diff" or item.item_id.startswith(CHECK_TIME_CHANGE_ITEM_PREFIX)
+    ]
+    diff_omissions = omitted_by_kind.get("diff", [])
+    diff_refs = [item.source_ref for item in current_diff]
+    diff_refs.extend(item.subject_ref for item in diff_omissions)
+    if "targeted_excerpts" not in sections or review_selection.max_excerpts == 0:
+        diff_status: Literal[
+            "complete",
+            "partial",
+            "title_only",
+            "missing",
+            "withheld",
+            "not_selected",
+        ] = "not_selected"
+    elif current_diff and diff_omissions:
+        diff_status = "partial"
+    elif current_diff:
+        diff_status = "complete"
+    elif check_time_change_unavailable:
+        diff_status = "missing"
+    else:
+        diff_status = "missing"
+    diff_revision = max((item.occurred_order for item in current_diff), default=None)
+    current_diff_section = _manifest_section(
+        "current_diff",
+        status=diff_status,
+        items=current_diff,
+        source_refs=diff_refs,
+        omitted_refs=[item.subject_ref for item in diff_omissions],
+        omission_reasons=(
+            [item.reason for item in diff_omissions]
+            + (["capture_unavailable"] if check_time_change_unavailable else [])
+        ),
+        revision=diff_revision,
+    )
+
+    verification = [
+        item
+        for item in excerpt_items
+        if item.source_kind in {"test", "failure", "command"} or item.latest_for == "command"
+    ]
+    verification_omissions = [
+        omission
+        for kind in ("test", "failure", "command")
+        for omission in omitted_by_kind.get(kind, [])
+    ]
+    verification_status: Literal[
+        "complete",
+        "partial",
+        "title_only",
+        "missing",
+        "withheld",
+        "not_selected",
+    ] = (
+        "not_selected"
+        if "targeted_excerpts" not in sections or review_selection.max_excerpts == 0
+        else "partial"
+        if verification and verification_omissions
+        else "complete"
+        if verification
+        else "missing"
+    )
+    latest_verification = _manifest_section(
+        "latest_verification",
+        status=verification_status,
+        items=verification,
+        source_refs=[item.source_ref for item in verification]
+        + [item.subject_ref for item in verification_omissions],
+        omitted_refs=[item.subject_ref for item in verification_omissions],
+        omission_reasons=[item.reason for item in verification_omissions],
+        revision=max((item.occurred_order for item in verification), default=None),
+    )
+
+    caller_evidence = [
+        item
+        for item in excerpt_items
+        if item.source_kind in {"evidence", "repository"}
+        and item not in current_diff
+        and item not in verification
+    ]
+    caller_omissions = [
+        omission
+        for kind in ("evidence", "repository")
+        for omission in omitted_by_kind.get(kind, [])
+    ]
+    caller_status: Literal[
+        "complete",
+        "partial",
+        "title_only",
+        "missing",
+        "withheld",
+        "not_selected",
+    ] = (
+        "not_selected"
+        if "targeted_excerpts" not in sections or review_selection.max_excerpts == 0
+        else "partial"
+        if caller_evidence and caller_omissions
+        else "complete"
+        if caller_evidence
+        else "missing"
+    )
+    caller_section = _manifest_section(
+        "caller_evidence",
+        status=caller_status,
+        items=caller_evidence,
+        source_refs=[item.source_ref for item in caller_evidence]
+        + [item.subject_ref for item in caller_omissions],
+        omitted_refs=[item.subject_ref for item in caller_omissions],
+        omission_reasons=[item.reason for item in caller_omissions],
+        revision=max((item.occurred_order for item in caller_evidence), default=None),
+    )
+
+    prior_items = [
+        item
+        for item in items
+        if item.section == "prior_finding"
+        or item.item_id == "prior-missing-for-assessment"
+        or item.source_ref in set(prior_finding_refs)
+    ]
+    prior_status: Literal[
+        "complete",
+        "partial",
+        "title_only",
+        "missing",
+        "withheld",
+        "not_selected",
+    ] = (
+        "not_selected"
+        if "deterministic_assessments" not in sections
+        else "complete"
+        if prior_items
+        else "missing"
+    )
+    prior_section = _manifest_section(
+        "prior_finding_context",
+        status=prior_status,
+        items=prior_items,
+        source_refs=[item.source_ref for item in prior_items],
+        revision=max((item.occurred_order for item in prior_items), default=None),
+    )
+
+    missing_rows: list[ReviewInputMissing] = []
+    if pending_missing is not None and hasattr(pending_missing, "items"):
+        pending_items = tuple(getattr(pending_missing, "items"))
+        for index, item in enumerate(pending_items[:8]):
+            supplied = tuple(supplied_missing[index]) if index < len(supplied_missing) else ()
+            availability = str(getattr(item, "availability", "agent_suppliable"))
+            if availability != "agent_suppliable":
+                status: Literal["pending", "supplied", "unavailable", "repeated"] = "unavailable"
+            elif supplied:
+                status = "supplied"
+            elif frozen_case.frontier.sequence <= int(getattr(pending_missing, "source_frontier")):
+                status = "repeated"
+            else:
+                status = "pending"
+            missing_rows.append(
+                ReviewInputMissing(
+                    kind=cast(MissingForAssessmentKind, getattr(item, "kind")),
+                    target_refs=tuple(getattr(item, "target_refs")),
+                    supplied_refs=supplied,
+                    status=status,
+                )
+            )
+
+    omitted_item_count = min(
+        MAX_REVIEW_OMISSIONS,
+        len(omissions)
+        + sum(
+            len(section.omitted_refs)
+            for section in (current_diff_section, latest_verification, caller_section)
+        ),
+    )
+    return ReviewInputManifest(
+        schema="yoetz.review-input-manifest/1",
+        specification=statement,
+        current_diff=current_diff_section,
+        caller_evidence=caller_section,
+        latest_verification=latest_verification,
+        prior_finding_context=prior_section,
+        missing_inputs=tuple(missing_rows),
+        selected_item_count=len(items),
+        selected_excerpt_bytes=sum(item.content_bytes for item in excerpt_items),
+        omitted_item_count=omitted_item_count,
+    )
 
 
 def _item_catalog_json(items: Sequence[SemanticCaseItem]) -> list[dict[str, JsonValue]]:
@@ -4476,6 +4906,19 @@ def assemble_filtered_review_packet(
     )
     packet_obj["omissions"] = omissions
 
+    # The builder manifest describes the composed case. Keep a second, provider-bound view after
+    # approval/minimization and envelope filtering so a receipt or provider packet never claims
+    # that an item survived when its content row was withheld or trimmed. This is structural
+    # metadata only; no source prose is copied into either manifest.
+    composed_manifest = packet_obj.get("review_input_manifest")
+    if isinstance(composed_manifest, dict):
+        provider_manifest = _provider_bound_input_manifest(
+            composed_manifest,
+            content_rows,
+            omissions,
+        )
+        packet_obj["provider_input_manifest"] = provider_manifest
+
     # Preserve change_observations / coverage as supplied by the builder envelope.
     if "change_observations" not in packet_obj:
         packet_obj["change_observations"] = cast(JsonValue, [])
@@ -4542,6 +4985,229 @@ def assemble_filtered_review_packet(
         },
     )
     return canonical_encode(cast(JsonValue, document))
+
+
+def _provider_bound_input_manifest(
+    composed: Mapping[str, JsonValue],
+    content_rows: Sequence[Mapping[str, JsonValue]],
+    omissions: Sequence[JsonValue],
+) -> dict[str, JsonValue]:
+    """Project a composed input manifest onto the exact provider-bound rows."""
+
+    carried_by_id = {
+        item_id: row for row in content_rows if type(item_id := row.get("item_id")) is str
+    }
+    omission_rows = [
+        cast(Mapping[str, JsonValue], row) for row in omissions if isinstance(row, Mapping)
+    ]
+    projected: dict[str, JsonValue] = {
+        "phase": "provider_bound",
+        "schema": "yoetz.review-input-manifest/1",
+    }
+    section_names = (
+        "specification",
+        "current_diff",
+        "caller_evidence",
+        "latest_verification",
+        "prior_finding_context",
+    )
+    total_selected = 0
+    total_excerpt_bytes = 0
+    for name in section_names:
+        raw = composed.get(name)
+        if not isinstance(raw, dict):
+            continue
+        section = dict(raw)
+        raw_ids = section.get("item_ids")
+        item_ids = (
+            [
+                item_id
+                for item_id in cast(list[object], raw_ids)
+                if type(item_id) is str and item_id in carried_by_id
+            ]
+            if type(raw_ids) is list
+            else []
+        )
+        original_refs = (
+            {ref for ref in cast(list[object], section.get("source_refs")) if type(ref) is str}
+            if type(section.get("source_refs")) is list
+            else set[str]()
+        )
+        if type(section.get("omitted_refs")) is list:
+            original_refs.update(
+                ref for ref in cast(list[object], section.get("omitted_refs")) if type(ref) is str
+            )
+        section_omissions = [
+            row
+            for row in omission_rows
+            if type(row.get("subject_ref")) is str
+            and cast(str, row["subject_ref"]) in original_refs
+        ]
+        section["item_ids"] = cast(JsonValue, item_ids)
+        selected_bytes = sum(
+            content_bytes
+            for item_id in item_ids
+            for content_bytes in (carried_by_id[item_id].get("content_bytes", 0),)
+            if type(content_bytes) is int
+        )
+        section["content_bytes"] = selected_bytes
+        section_refs = [
+            cast(str, carried_by_id[item_id].get("source_ref"))
+            for item_id in item_ids
+            if type(carried_by_id[item_id].get("source_ref")) is str
+        ]
+        section["source_refs"] = cast(JsonValue, sorted(set(section_refs), key=str.encode)[:16])
+        original_status = section.get("status")
+        rendered_digest: str | None = None
+        if name == "specification" and item_ids:
+            row = carried_by_id[item_ids[0]]
+            try:
+                rendered = strict_json_parse(cast(str, row.get("content", "")).encode("utf-8"))
+            except TypeError, ValueError:
+                rendered = None
+            if isinstance(rendered, dict) and type(rendered.get("statement")) is str:
+                statement = cast(str, rendered["statement"])
+                raw_statement = statement.encode("utf-8")
+                rendered_digest = "sha256:" + hashlib.sha256(raw_statement).hexdigest()
+                section["content_bytes"] = len(raw_statement)
+                if rendered.get("elided_bytes") not in {0, None}:
+                    section["status"] = "partial"
+            else:
+                rendered_digest = cast(str | None, row.get("content_digest"))
+        elif item_ids:
+            rendered_digest = canonical_digest(
+                cast(
+                    JsonValue,
+                    {
+                        "items": [
+                            {
+                                "content_bytes": row.get("content_bytes", 0),
+                                "content_digest": row.get("content_digest", ""),
+                                "item_id": item_id,
+                            }
+                            for item_id in item_ids
+                            for row in (carried_by_id[item_id],)
+                        ],
+                        "schema": "yoetz.review-input-manifest-content/1",
+                    },
+                )
+            )
+        section["content_digest"] = rendered_digest
+        if item_ids:
+            if (
+                type(raw_ids) is list
+                and len(item_ids) < len(raw_ids)
+                and original_status not in {"title_only", "missing", "withheld"}
+            ):
+                section["status"] = "partial"
+            elif (
+                original_status == "complete"
+                and type(section.get("content_digest")) is str
+                and type(raw.get("content_digest")) is str
+                and (
+                    section["content_digest"] != raw["content_digest"]
+                    or (
+                        type(raw.get("content_bytes")) is int
+                        and section["content_bytes"] != raw["content_bytes"]
+                    )
+                )
+            ):
+                # A row can be admitted while its rendered content was clipped or rematerialized.
+                # Keep the provider-bound status partial until the caller can inspect the exact
+                # effective digest and byte length.
+                section["status"] = "partial"
+        elif (
+            type(raw_ids) is list
+            and raw_ids
+            and original_status
+            not in {
+                "title_only",
+                "missing",
+                "withheld",
+            }
+        ):
+            section["status"] = "withheld"
+        elif original_status == "title_only":
+            section["status"] = "withheld"
+        prior_omitted = (
+            [ref for ref in cast(list[object], section.get("omitted_refs")) if type(ref) is str]
+            if type(section.get("omitted_refs")) is list
+            else []
+        )
+        section_omitted_refs = [
+            cast(str, row["subject_ref"])
+            for row in section_omissions
+            if type(row.get("subject_ref")) is str
+        ]
+        section["omitted_refs"] = cast(
+            JsonValue,
+            sorted(set([*prior_omitted, *section_omitted_refs]), key=str.encode)[:16],
+        )
+        prior_reasons = (
+            [
+                reason
+                for reason in cast(list[object], section.get("omission_reasons"))
+                if type(reason) is str
+            ]
+            if type(section.get("omission_reasons")) is list
+            else []
+        )
+        section["omission_reasons"] = cast(
+            JsonValue,
+            sorted(
+                set(
+                    [
+                        *prior_reasons,
+                        *(
+                            cast(str, row["reason"])
+                            for row in section_omissions
+                            if type(row.get("reason")) is str
+                        ),
+                    ]
+                ),
+                key=str.encode,
+            )[:8],
+        )
+        projected[name] = cast(JsonValue, section)
+        total_selected += len(item_ids)
+        total_excerpt_bytes += sum(
+            content_bytes
+            for item_id in item_ids
+            if carried_by_id[item_id].get("section") == "excerpt"
+            for content_bytes in (carried_by_id[item_id].get("content_bytes", 0),)
+            if type(content_bytes) is int
+        )
+    projected["selected_item_count"] = total_selected
+    projected["selected_excerpt_bytes"] = total_excerpt_bytes
+    projected["omitted_item_count"] = min(MAX_REVIEW_OMISSIONS, len(omission_rows))
+    admitted_refs = {
+        cast(str, row["source_ref"]) for row in content_rows if type(row.get("source_ref")) is str
+    }
+    admitted_refs.update(
+        ref
+        for row in content_rows
+        if type(row.get("linked_subject_refs")) is list
+        for ref in cast(list[object], row["linked_subject_refs"])
+        if type(ref) is str
+    )
+    missing_rows: list[JsonValue] = []
+    raw_missing = composed.get("missing_inputs")
+    if type(raw_missing) is list:
+        for raw in cast(list[object], raw_missing):
+            if not isinstance(raw, dict):
+                continue
+            row = dict(cast(dict[str, JsonValue], raw))
+            supplied = [
+                ref
+                for ref in cast(list[object], row.get("supplied_refs", []))
+                if type(ref) is str and ref in admitted_refs
+            ]
+            row["supplied_refs"] = cast(JsonValue, supplied)
+            if row.get("status") == "supplied" and not supplied:
+                row["status"] = "pending"
+            missing_rows.append(cast(JsonValue, row))
+    projected["missing_inputs"] = missing_rows
+    return projected
 
 
 @dataclass(frozen=True, slots=True)
