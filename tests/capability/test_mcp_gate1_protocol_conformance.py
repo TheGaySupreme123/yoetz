@@ -510,7 +510,7 @@ async def test_mcp_read_guidance_returns_full_document_or_reconstructable_pages(
                     break
                 continuation = structured.get("continuation")
                 assert isinstance(continuation, dict)
-                arguments = dict(continuation)
+                arguments = dict(cast(Mapping[str, object], continuation))
     _record_pass(
         tmp_path,
         case_id="MCP-G1-READ-GUIDANCE",

@@ -332,7 +332,7 @@ def test_paged_route_reconstructs_every_document_on_each_host_projection(
                         break
                     continuation = wire.get("continuation")
                     assert isinstance(continuation, dict)
-                    arguments = dict(continuation)
+                    arguments = dict(cast(dict[str, object], continuation))
                 assert assembler.assemble() == resource.text
         finally:
             await bridge.close_bridge_runtime(runtime)
