@@ -875,7 +875,9 @@ def render_human_awaiting_human(result: CheckAwaitingHumanModel) -> str:
     continuation = result.continuation
     if result.state == "awaiting_input":
         heading = "AI-powered review: awaiting_input (review_input_required)"
-        explanation = "This check is paused until the complete review input is supplied. No verdict yet."
+        explanation = (
+            "This check is paused until the complete review input is supplied. No verdict yet."
+        )
     else:
         heading = "AI-powered review: awaiting_human (human_approval_required)"
         explanation = "This check is paused for trusted local privacy authority. No verdict yet."

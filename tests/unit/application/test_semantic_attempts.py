@@ -1206,6 +1206,8 @@ async def test_retryable_withheld_evaluation_replays_after_deadline_terminalizat
     )
     assert second[0:2] == first[0:2]
     assert second[2] is evaluation
+    assert first[2] is not None
+    assert second[2] is not None
     assert second[2].semantic_withheld_item_ids == first[2].semantic_withheld_item_ids
     assert published == [_ATT1]
 

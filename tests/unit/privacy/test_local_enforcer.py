@@ -12,7 +12,10 @@ from yoetz.adapters.privacy.local_enforcer import (
     scan_exact_bytes,
     scan_exact_bytes_with_confidence,
 )
-from yoetz.application.egress import PrivacyCoordinator, _heuristic_only_item_ids
+from yoetz.application.egress import (
+    PrivacyCoordinator,
+    _heuristic_only_item_ids,  # pyright: ignore[reportPrivateUsage]
+)
 from yoetz.domain.privacy import (
     AuthorizationScope,
     AuthorizationScopeKind,
