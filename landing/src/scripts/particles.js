@@ -249,8 +249,10 @@ export function mountParticles(canvas, options = {}) {
           else clock(i, (f - 0.3) / 0.7, 0.36, 0, 0.44, -1.5708 + t * 0.05, -1.5708 + t * 0.35);
         }
         break;
-      case "swarm":
+      case "swarm": {
+        // small robots on a tilted orbit around the human, clear of the copy on the right
         pts = figureSet();
+        const bots = robotSet();
         spec.ox = -0.08;
         for (i = 0; i < N; i++) {
           f = i / N;
@@ -259,10 +261,12 @@ export function mountParticles(canvas, options = {}) {
           else {
             k = Math.floor(((f - 0.4) / 0.6) * 8);
             a = (k / 8) * 6.2832 + t * 0.35;
-            sphere(i, Math.cos(a) * 0.64, 0.06 + Math.sin(t * 0.8 + k) * 0.08, Math.sin(a) * 0.64, 0.09, R[i * 6 + 5] < 0.06 ? 1 : 0);
+            fromSet(i, bots, 0.36, Math.cos(a) * 0.46 - 0.08, Math.sin(a) * 0.4 + 0.04, 0.1, R[i * 6 + 5] < 0.06 ? 1 : 0);
+            tgt[i * 3 + 2] += Math.sin(a) * 0.4;
           }
         }
         break;
+      }
       case "robot": {
         // One scene over three screens: the agent fades (0 to 0.33), FinishUP's check
         // arrives (0.33 to 0.66), the agent comes back greener than it started (0.66 to 1).
@@ -338,8 +342,8 @@ export function mountParticles(canvas, options = {}) {
         pts = wordSet(w);
         spec.yawAmp = 0.12;
         for (i = 0; i < N; i++) {
-          if (R[i * 6 + 5] < 0.03) sphere(i, 0, -0.04, 0, 1.0, 1);
-          else fromSet(i, pts, 0.8, 0, -0.04, 0.14, 0);
+          if (R[i * 6 + 5] < 0.03) sphere(i, 0, -0.16, 0, 1.0, 1);
+          else fromSet(i, pts, 0.8, 0, -0.16, 0.14, 0);
         }
       }
     }
