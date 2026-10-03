@@ -412,7 +412,10 @@ def read_resource_page(
 
     if type(page) is not int or page < 0:
         raise GuidanceResourceError("guidance_page_invalid")
-    if type(page_size) is not int or not _MIN_GUIDANCE_PAGE_SIZE <= page_size <= MAX_GUIDANCE_PAGE_SIZE:
+    if (
+        type(page_size) is not int
+        or not _MIN_GUIDANCE_PAGE_SIZE <= page_size <= MAX_GUIDANCE_PAGE_SIZE
+    ):
         raise GuidanceResourceError("guidance_page_size_invalid")
     resource = _resource_for_uri(uri)
     try:

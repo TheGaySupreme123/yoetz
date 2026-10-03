@@ -1340,9 +1340,12 @@ async def test_status_projection_recovery_is_one_incident_with_bounded_attempts(
     duration_ms = found[1]["duration_ms"]
     assert type(duration_ms) is int and duration_ms >= 0
     assert found[1]["operation_count"] == 2
-    assert lookup_diagnostic_records(
-        request_id="req_00000000-0000-4000-8000-000000000043", root=tmp_path
-    ) == ()
+    assert (
+        lookup_diagnostic_records(
+            request_id="req_00000000-0000-4000-8000-000000000043", root=tmp_path
+        )
+        == ()
+    )
     recovery_records = lookup_diagnostic_records(
         request_id="req_00000000-0000-4000-8000-000000000044", root=tmp_path
     )

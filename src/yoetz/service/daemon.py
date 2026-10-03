@@ -1335,7 +1335,7 @@ class ServiceDaemon:
                         request, exc, phase="handler", reason="request_timeout"
                     ) from exc
                 raise ControlError("request_timeout", retryable=True) from exc
-            except (ControlError, LifecycleError, PublicOperationError):
+            except ControlError, LifecycleError, PublicOperationError:
                 # Deliberate application outcomes carry their own code, retryability and
                 # continuation. Only an untyped exception is a transient projection incident.
                 raise
@@ -1505,9 +1505,7 @@ class ServiceDaemon:
             # envelope (when built), the diagnostic ring, and the ControlError raised to the
             # bridge — no second mint when the agent-facing public error is shaped.
             if reason == "read_projection_failed":
-                raise self._read_projection_failure(
-                    request, exc, phase="projection"
-                ) from exc
+                raise self._read_projection_failure(request, exc, phase="projection") from exc
             correlation_id = record_unexpected_exception_without_raising(
                 exc,
                 component="service.daemon",

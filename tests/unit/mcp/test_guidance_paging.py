@@ -63,7 +63,9 @@ def test_utf8_page_boundaries_never_split_a_scalar() -> None:
     payload = "a🙂b".encode()
     boundaries = _page_boundaries(payload, 4)
     assert boundaries == (0, 1, 5, 6)
-    assert [payload[start:end].decode("utf-8") for start, end in zip(boundaries, boundaries[1:])] == [
+    assert [
+        payload[start:end].decode("utf-8") for start, end in zip(boundaries, boundaries[1:])
+    ] == [
         "a",
         "🙂",
         "b",
@@ -104,7 +106,9 @@ def test_host_assembler_rejects_missing_or_clipped_model_output() -> None:
     with pytest.raises(GuidanceAssemblyError, match="guidance_host_delivery_incomplete"):
         GuidancePageAssembler().add(_wire(page), host_text=_host_text(page)[:-1])
 
-    final = read_resource_page(_URI, page=read_resource_page(_URI, page_size=64).page_count - 1, page_size=64)
+    final = read_resource_page(
+        _URI, page=read_resource_page(_URI, page_size=64).page_count - 1, page_size=64
+    )
     assert final.complete is True
     final_only = GuidancePageAssembler(host_proof_required=False)
     final_only.add(_wire(final))

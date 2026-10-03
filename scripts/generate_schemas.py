@@ -5145,9 +5145,7 @@ def _control_v2_9_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
 _PRIVACY_RECEIPT_PAGE_MAX: Final = 100
 
 
-def _admit_control_error_phase(
-    entry: _RegistryEntry, definitions: dict[str, JsonValue]
-) -> None:
+def _admit_control_error_phase(entry: _RegistryEntry, definitions: dict[str, JsonValue]) -> None:
     """Add the bounded stage token carried by active service read failures (#954)."""
 
     if entry.schema_name != "control-result":
