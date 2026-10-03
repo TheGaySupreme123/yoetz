@@ -137,8 +137,8 @@ export function mountParticles(canvas, options = {}) {
     cache[key] = pts;
     return pts;
   }
-  const wordSet = (w) =>
-    sample("w:" + w, (c, W, H) => {
+  const wordSet = (w, heavy) =>
+    sample((heavy ? "W:" : "w:") + w, (c, W, H) => {
       let size = 200;
       c.font = `600 ${size}px "Geist", system-ui, sans-serif`;
       const m = c.measureText(w).width;
@@ -150,6 +150,12 @@ export function mountParticles(canvas, options = {}) {
       c.textBaseline = "middle";
       c.fillStyle = "#000";
       c.fillText(w, W / 2, H / 2 + 4);
+      if (heavy) {
+        c.strokeStyle = "#000";
+        c.lineWidth = size * 0.07;
+        c.lineJoin = "round";
+        c.strokeText(w, W / 2, H / 2 + 4);
+      }
     });
   const logoSet = () =>
     sample("logo", (c) => {
@@ -310,7 +316,7 @@ export function mountParticles(canvas, options = {}) {
         const stop = Math.min(2, Math.floor(phase * 3));
         const digits = wordSet((scores[Math.min(scores.length - 1, stop)] || "") + "%");
         // the tier word, drawn in dots where the copy leaves room for it
-        const tier = stop === 1 ? wordSet("Local") : stop === 2 ? wordSet("AI-powered") : null;
+        const tier = stop === 1 ? wordSet("Local", true) : stop === 2 ? wordSet("AI-powered", true) : null;
         const tsc = tier ? Math.min(tierN.w / tier.width, tierN.h / 0.42) : 0;
         for (i = 0; i < N; i++) {
           f = i / N;
@@ -395,8 +401,9 @@ export function mountParticles(canvas, options = {}) {
       const y2 = y * ct - z1 * st;
       const z2 = y * st + z1 * ct;
       const sc = F / (F + z2);
-      px[i] = cx + x1 * S * sc + Math.sin(t * 2.2 + i) * jit;
-      py[i] = cy + y2 * S * sc + Math.cos(t * 1.9 + i * 0.7) * jit;
+      const jj = col[i] >= 5 ? 0 : jit;
+      px[i] = cx + x1 * S * sc + Math.sin(t * 2.2 + i) * jj;
+      py[i] = cy + y2 * S * sc + Math.cos(t * 1.9 + i * 0.7) * jj;
       ps[i] = (1.2 + R[i * 6 + 1] * 1.9) * sc * (col[i] >= 5 ? 1.5 : 1);
       const dep = 1 - (Math.max(-1.2, Math.min(1.2, z2)) + 1.2) / 2.4;
       pa[i] = col[i] >= 5 ? 1 : 0.22 + dep * 0.78;
