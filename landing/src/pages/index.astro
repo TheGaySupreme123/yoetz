@@ -89,12 +89,10 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
 
     <main>
       <div class="story" id="story">
-        <div class="stage" aria-hidden="true">
-          <canvas id="particles"></canvas>
-        </div>
-
-        <div class="scenes">
-          <section id="top" class="scene hero" data-scene="hero">
+        <div class="stage">
+          <canvas id="particles" aria-hidden="true"></canvas>
+          <div class="copies">
+          <div class="copy hero on" data-copy="hero">
             <p class="stanza center hero-top">We use agents to</p>
             <div class="hero-bottom">
               <p class="stanza center"><span class="nowrap"><img class="fup-mark" src="/assets/finishup-mark.png" alt="" />FinishUP</span> <span class="accent">makes sure they do it.</span></p>
@@ -103,42 +101,33 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
                 <a class="btn quiet" href={GITHUB} target="_blank" rel="noopener"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.1.79-.25.79-.56v-2c-3.2.7-3.87-1.37-3.87-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.78 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.41-2.69 5.38-5.25 5.67.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z" /></svg> Visit our GitHub</a>
               </div>
             </div>
-          </section>
-
-          <section id="alone" class="scene" data-scene="alone">
+          </div>
+          <div class="copy side" data-copy="alone">
             <p class="stanza copy-right">We used to work alone. <span class="fade">Slowly.</span></p>
-          </section>
-
-          <section class="scene" data-scene="swarm">
+          </div>
+          <div class="copy side" data-copy="swarm">
             <div class="copy-right">
               <p class="stanza">Now agents work. <span class="fade">We manage more.</span></p>
             </div>
-          </section>
-
-          <section id="agents" class="scene" data-scene="robot">
+          </div>
+          <div class="copy side" data-copy="robot1">
             <p class="stanza copy-right">But agents aren't human. <span class="fade">They drift. They forget.</span></p>
-          </section>
-
-          <section class="scene" data-scene="robot">
+          </div>
+          <div class="copy side" data-copy="robot2">
             <p class="stanza copy-right">FinishUP checks what they did.</p>
-          </section>
-
-          <section class="scene" data-scene="robot">
+          </div>
+          <div class="copy side" data-copy="robot3">
             <div class="copy-right">
               <p class="eyebrow done">12 checks passed · 2 left</p>
               <p class="stanza">And makes them finish the work.</p>
             </div>
-          </section>
-
-          <section id="benchmark" class="scene bench" data-scene="sun">
-            <div class="bench-sticky">
+          </div>
+          <div class="copy side" data-copy="bench">
               <div class="copy-right wide">
                 <p class="stanza">{BENCH.model} on <span class="nowrap"><span class="tag"><img src="/assets/openai.svg" alt="" width="22" height="22" />Codex</span>,</span> scored on <span class="nowrap"><span class="tag wordmark">{BENCH.suite}</span><span class="bench-dot" id="bench-dot">.</span></span> <span class="nowrap reveal" id="bench-with">with <img class="fup-mark" src="/assets/finishup-mark.png" alt="" />FinishUP</span><span class="dot-word" aria-label="Local, then AI-powered" role="img"></span></p>
               </div>
-            </div>
-          </section>
-
-          <section id="end" class="scene foot" data-scene="end">
+          </div>
+          <div class="copy foot" data-copy="end">
             <div class="copy-center">
               <h2 class="display" style="font-size: clamp(36px, 5vw, 64px)">All of this<br /><strong>for free.</strong></h2>
               <p class="stanza center sub">Open source, working locally on your computer.</p>
@@ -147,8 +136,10 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
                 <a class="btn quiet" href={GITHUB} target="_blank" rel="noopener"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.1.79-.25.79-.56v-2c-3.2.7-3.87-1.37-3.87-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.78 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.41-2.69 5.38-5.25 5.67.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/></svg> GitHub</a>
               </div>
             </div>
-          </section>
+          </div>
+          </div>
         </div>
+        <div class="spacer" aria-hidden="true"></div>
       </div>
 
     </main>
@@ -194,6 +185,8 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
         const slot = document.getElementById("pc-slot");
         const tiers = Array.from(document.querySelectorAll<HTMLElement>(".dot-word"));
         const benchWith = document.getElementById("bench-with");
+        const copies = Array.from(document.querySelectorAll<HTMLElement>(".copy"));
+        const COPY_AT: [string, number][] = [["hero", 0], ["alone", 1], ["swarm", 2], ["robot1", 3], ["robot2", 4], ["robot3", 5], ["bench", 6], ["end", 9]];
         const benchDot = document.getElementById("bench-dot");
         const update = () => {
           raf = 0;
@@ -229,6 +222,10 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
           }
           void form;
           void phase;
+          // one copy block at a time, cross-fading in place
+          let current = "hero";
+          for (const [name, at] of COPY_AT) if (screens >= at - 0.15) current = name;
+          for (const el of copies) el.classList.toggle("on", el.dataset.copy === current);
           // the benchmark copy stays put; "with FinishUP" appears at the second stop
           if (benchWith) {
             let sunStart = 0;
