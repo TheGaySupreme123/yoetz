@@ -8,8 +8,8 @@ const PALETTE = {
   particle: "#064E3B",
   signal: "#10B981",
   faint: "#8FA39B",
-  silver: "#8A9BA8",
-  gold: "#D09A1B",
+  silver: "#73858F",
+  gold: "#C48A0E",
 };
 
 const HERO_WORDS = ["work", "code", "research", "writing", "reviews"];
@@ -256,12 +256,12 @@ export function mountParticles(canvas, options = {}) {
         spec.ox = -0.08;
         for (i = 0; i < N; i++) {
           f = i / N;
-          if (f < 0.22) fromSet(i, pts, 0.85, 0, 0.1, 0.12, 0);
-          else if (f < 0.4) clock(i, (f - 0.22) / 0.18, 0.66, -0.46, 0.2, -1.5708 + t * 0.5, -1.5708 + t * 5);
+          if (f < 0.3) fromSet(i, pts, 1.05, 0, 0.02, 0.12, 0);
+          else if (f < 0.46) clock(i, (f - 0.3) / 0.16, 0.7, -0.5, 0.18, -1.5708 + t * 0.5, -1.5708 + t * 5);
           else {
-            k = Math.floor(((f - 0.4) / 0.6) * 8);
-            a = (k / 8) * 6.2832 + t * 0.35;
-            fromSet(i, bots, 0.36, Math.cos(a) * 0.46 - 0.08, Math.sin(a) * 0.4 + 0.04, 0.1, R[i * 6 + 5] < 0.06 ? 1 : 0);
+            k = Math.floor(((f - 0.46) / 0.54) * 6);
+            a = (k / 6) * 6.2832 + t * 0.35;
+            fromSet(i, bots, 0.44, Math.cos(a) * 0.52, Math.sin(a) * 0.42 + 0.02, 0.1, R[i * 6 + 5] < 0.06 ? 1 : 0);
             tgt[i * 3 + 2] += Math.sin(a) * 0.4;
           }
         }
@@ -273,18 +273,21 @@ export function mountParticles(canvas, options = {}) {
         pts = robotSet();
         spec.ox = -0.12;
         spec.yawAmp = 0.2;
+        // a little faded on arrival, more so by the first stop, then steadily clearer
+        // through the check, and greener at the end
         const fade = Math.max(0, Math.min(1, phase / 0.33));
         const check = Math.max(0, Math.min(1, (phase - 0.33) / 0.33));
-        const heal = Math.max(0, Math.min(1, (phase - 0.66) / 0.34));
-        const gone = fade * (1 - heal);
+        const heal = Math.max(0, Math.min(1, (phase - 0.33) / 0.67));
+        const green = Math.max(0, Math.min(1, (phase - 0.6) / 0.4));
+        const gone = (0.3 + 0.3 * fade) * (1 - heal);
         for (i = 0; i < N; i++) {
           f = i / N;
           if (f < 0.88) {
             fromSet(i, pts, 2.1, 0, 0.02, 0.14, 0);
             const r5 = R[i * 6 + 5];
-            if (heal > 0 && tgt[i * 3 + 1] > 0.75 - heal * 1.6) tcol[i] = 1;
-            else if (r5 < gone * 0.42) {
-              const drift = (r5 / Math.max(0.001, gone * 0.42)) * 0.3 + 0.1;
+            if (green > 0 && tgt[i * 3 + 1] > 0.75 - green * 1.6) tcol[i] = 1;
+            else if (r5 < gone) {
+              const drift = (r5 / Math.max(0.001, gone)) * 0.3 + 0.1;
               tgt[i * 3] += (R[i * 6 + 2] - 0.5) * drift * gone;
               tgt[i * 3 + 1] -= (0.3 + R[i * 6 + 4] * 0.6) * drift * gone;
               tgt[i * 3 + 2] += (R[i * 6 + 3] - 0.5) * 0.4 * gone;
@@ -302,8 +305,8 @@ export function mountParticles(canvas, options = {}) {
       case "sun": {
         spec.yawAmp = 0.05;
         spec.ox = -0.1;
-        const y0 = 0.38;
-        const sy = 0.42 - phase * 1.0;
+        const y0 = 0.8;
+        const sy = 0.84 - phase * 1.3;
         const stop = Math.min(2, Math.floor(phase * 3));
         const digits = wordSet((scores[Math.min(scores.length - 1, stop)] || "") + "%");
         // the tier word, drawn in dots where the copy leaves room for it
@@ -311,21 +314,21 @@ export function mountParticles(canvas, options = {}) {
         const tsc = tier ? Math.min(tierN.w / tier.width, tierN.h / 0.42) : 0;
         for (i = 0; i < N; i++) {
           f = i / N;
-          if (f < 0.26) {
+          if (f < 0.22) {
             set(i, (R[i * 6] - 0.5) * 2.3, y0 + (R[i * 6 + 1] - 0.5) * 0.03, (R[i * 6 + 2] - 0.5) * 0.5, 0);
             continue;
           }
-          if (f >= 0.82) {
+          if (f >= 0.7) {
             if (tier) fromSet(i, tier, tsc, tierN.x + tierN.w / 2 - (tier.width * tsc) / 2, tierN.y, 0.06, stop === 1 ? 5 : 6);
             else sphere(i, 0, sy, 0, 0.17, 2);
             continue;
           }
-          if (f >= 0.72) {
+          if (f >= 0.6) {
             // the benchmark score, rising with the sun: one figure per stop
-            fromSet(i, digits, 0.6, -0.72, Math.min(sy, 0.2), 0.1, 0);
+            fromSet(i, digits, 0.6, -0.72, Math.min(sy, 0.55), 0.1, 0);
             continue;
           }
-          if (f < 0.46) sphere(i, 0, sy, 0, 0.17, 2);
+          if (f < 0.38) sphere(i, 0, sy, 0, 0.17, 2);
           else {
             a = R[i * 6] * 6.2832;
             const rr = 0.2 + R[i * 6 + 1] * 0.32 * (0.55 + 0.45 * Math.sin(a * 9 + t * 1.5));
@@ -394,9 +397,9 @@ export function mountParticles(canvas, options = {}) {
       const sc = F / (F + z2);
       px[i] = cx + x1 * S * sc + Math.sin(t * 2.2 + i) * jit;
       py[i] = cy + y2 * S * sc + Math.cos(t * 1.9 + i * 0.7) * jit;
-      ps[i] = (1.2 + R[i * 6 + 1] * 1.9) * sc;
+      ps[i] = (1.2 + R[i * 6 + 1] * 1.9) * sc * (col[i] >= 5 ? 1.5 : 1);
       const dep = 1 - (Math.max(-1.2, Math.min(1.2, z2)) + 1.2) / 2.4;
-      pa[i] = 0.22 + dep * 0.78;
+      pa[i] = col[i] >= 5 ? 1 : 0.22 + dep * 0.78;
     }
     const PAL = [PALETTE.particle, PALETTE.signal, sun, sun, PALETTE.faint, PALETTE.silver, PALETTE.gold];
     const AM = [1, 1, 1, 0.5, 0.8, 1, 1];
