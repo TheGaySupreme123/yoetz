@@ -139,19 +139,19 @@ def _check_awaiting_human_payload() -> dict[str, object]:
         "schema_version": "1.0.0",
         "request_id": request_id,
         "ok": True,
-        "state": "awaiting_input",
+        "state": "awaiting_human",
         "task_id": protocol_id("tsk_", 2908),
         "session_id": protocol_id("ses_", 2909),
         "writer_id": protocol_id("wri_", 2910),
         "subject_frontier": frontier,
         "result_frontier": frontier,
-        "semantic_status": "awaiting_input",
-        "semantic_reason": "review_input_required",
+        "semantic_status": "awaiting_human",
+        "semantic_reason": "human_approval_required",
         "continuation": {
-            "kind": "review_input_required",
-            "command": ["yoetz", "publish-work", "--input", "PATH"],
+            "kind": "repository_privacy_setup",
+            "command": ["yoetz", "--privacy"],
             "replay_request_id": request_id,
-            "instruction": "Supply the requested review input, then replay this exact request.",
+            "instruction": "Use the trusted local privacy ceremony, then replay this exact request.",
         },
         "versions": {
             "protocol_version": "0.1",
@@ -1350,7 +1350,7 @@ def test_every_result_optional_non_null_field_has_an_unset_projection_case() -> 
 async def test_legacy_guidance_result_omits_unset_paging_metadata() -> None:
     from yoetz.mcp.server import dispatch_read_guidance
 
-    result = await dispatch_read_guidance({"uri": "yoetz://guidance/workflow.md"})
+    result = await dispatch_read_guidance({"uri": "yoetz://guidance/agent-instructions.md"})
     assert result.isError is False
     assert result.structuredContent is not None
     wire = result.structuredContent

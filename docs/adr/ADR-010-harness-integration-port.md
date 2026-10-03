@@ -335,8 +335,10 @@ route tail and destination disclosure are composed identically for every body. S
 instead of repeating the document; tier 1 and tier 2 bytes and the output schema are unchanged.
 
 **Amendment (2026-10-03, issue #950; residual #918): bounded guidance delivery.** The additive
-`read_guidance` 1.1.0 request/result schemas retain the URI-only full-document request and add a
-UTF-8-safe page route bound to a document URI, source-byte revision/digest, offsets, byte counts,
+`read_guidance` 1.1.0 request/result schemas retain URI-only full-document responses up to 64 KiB
+and automatically select page zero for larger documents. The document/offset bound is 1 MiB;
+individual response-body bounds remain unchanged. The UTF-8-safe page route binds a document URI,
+source-byte revision/digest, offsets, byte counts,
 page count, completion, and an exact continuation. Codex keeps its bounded pointer and reads the
 page body from `structuredContent`; generic, Claude Code, and Cursor page text carries explicit
 begin/end markers. A final `complete` flag records service emission only. The supported consumer

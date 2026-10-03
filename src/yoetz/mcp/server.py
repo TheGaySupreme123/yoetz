@@ -188,6 +188,11 @@ _MAX_CURSOR_ROOT_URI_BYTES: Final = MAX_WORKSPACE_LOCATOR_BYTES * 2
 # closure helper performs the same check after host projection below; this constant remains an
 # inexpensive pre-projection refusal for very large preparations.
 _MAX_CLOSURE_RESULT_BYTES: Final = MAX_JSON_FRAME_BYTES - 65_536
+# ``ReadGuidanceSuccessModel`` caps the unpaged legacy body at 64 KiB. Oversized registered
+# resources must enter the existing bounded page route even when a caller still sends the legacy
+# URI-only request shape; otherwise validation fails before the caller receives continuation
+# metadata to reconstruct the document.
+_MAX_LEGACY_GUIDANCE_DOCUMENT_BYTES: Final = 65_536
 _CLOSURE_PUBLIC_REASON_CODES: Final = MappingProxyType(
     {
         "closure_snapshot_unavailable": "frontier_changed",
@@ -2862,9 +2867,11 @@ async def dispatch_read_guidance(
 ) -> types.CallToolResult:
     """Return one registered guidance document or one digest-bound bounded page.
 
-    The legacy ``{"uri": ...}`` body remains a full-document on-demand read. Supplying any
-    page field selects the bounded route, whose structured metadata lets a host reconstruct and
-    verify the document even when its model-visible channel clips ordinary tool output.
+    The legacy ``{"uri": ...}`` body remains a full-document on-demand read when the document fits
+    the result cap. An oversized registered document automatically starts at page zero; supplying
+    any page field also selects the bounded route, whose structured metadata lets a host
+    reconstruct and verify the document even when its model-visible channel clips ordinary tool
+    output.
     """
 
     try:
@@ -2891,6 +2898,8 @@ async def dispatch_read_guidance(
         value is not None
         for value in (request.page, request.page_size, request.revision, request.digest)
     )
+    if not paged and resource.size > _MAX_LEGACY_GUIDANCE_DOCUMENT_BYTES:
+        paged = True
     if paged:
         page_number = int(request.page or "0")
         page_size = int(request.page_size or str(DEFAULT_GUIDANCE_PAGE_SIZE))
@@ -2995,6 +3004,12 @@ def _guidance_page_error(
     elif reason == "guidance_page_size_too_small":
         message = "Guidance page_size must leave room for one complete UTF-8 character."
         field = "/page_size"
+    elif reason == "guidance_page_count_invalid":
+        message = "Guidance page_size is too small for this document; request a larger page_size."
+        field = "/page_size"
+    elif reason == "guidance_document_too_large":
+        message = "The guidance document exceeds the bounded page route capacity."
+        field = "/uri"
     else:
         message = "The guidance page could not be read. Restart at page 0."
         field = "/page"

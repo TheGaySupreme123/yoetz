@@ -1850,6 +1850,7 @@ type GuidanceResourceUri = Literal[
     "yoetz://guidance/request-templates.md",
 ]
 _MAX_GUIDANCE_DOCUMENT_CHARS: Final = 65_536
+_MAX_GUIDANCE_DOCUMENT_BYTES: Final = 1_048_576
 _MIN_GUIDANCE_PAGE_SIZE: Final = 4
 _MAX_GUIDANCE_PAGE_SIZE: Final = 16_384
 _MAX_GUIDANCE_PAGE_COUNT: Final = 16_384
@@ -1939,10 +1940,10 @@ class ReadGuidanceSuccessModel(_ClosedModel):
     document_id: GuidanceResourceUri | None = None
     revision: Sha256Digest | None = None
     digest: Sha256Digest | None = None
-    total_byte_count: Annotated[int, Field(ge=0, le=_MAX_GUIDANCE_DOCUMENT_CHARS)] | None = None
+    total_byte_count: Annotated[int, Field(ge=0, le=_MAX_GUIDANCE_DOCUMENT_BYTES)] | None = None
     page: CanonicalUInt64Wire | None = None
     page_size: GuidancePageSizeWire | None = None
-    page_offset: Annotated[int, Field(ge=0, le=_MAX_GUIDANCE_DOCUMENT_CHARS)] | None = None
+    page_offset: Annotated[int, Field(ge=0, le=_MAX_GUIDANCE_DOCUMENT_BYTES)] | None = None
     page_byte_count: Annotated[int, Field(ge=0, le=_MAX_GUIDANCE_DOCUMENT_CHARS)] | None = None
     page_count: CanonicalPositiveUInt64Wire | None = None
     complete: bool | None = None
@@ -1984,9 +1985,13 @@ class ReadGuidanceSuccessModel(_ClosedModel):
             if self.revision != self.digest:
                 raise ValueError("guidance_revision_digest_mismatch")
             page = int(self.page)
+            page_size = int(self.page_size)
             page_count = int(self.page_count)
             if page_count < 1 or page_count > _MAX_GUIDANCE_PAGE_COUNT or page >= page_count:
                 raise ValueError("guidance_page_invalid")
+            minimum_page_count = max(1, (self.total_byte_count + page_size - 1) // page_size)
+            if page_count < minimum_page_count:
+                raise ValueError("guidance_page_count_invalid")
             if self.page_byte_count != self.byte_count:
                 raise ValueError("guidance_page_byte_count_mismatch")
             if self.page_offset + self.page_byte_count > self.total_byte_count:

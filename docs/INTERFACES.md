@@ -383,8 +383,10 @@ is identical for every host. This item is revertible: it stays only while Codex 
 additional guidance re-read turns.
 
 The current `read_guidance` input/output route is `1.1.0` and keeps the frozen `1.0.0` schema
-available for older clients. The URI-only request remains the full-document on-demand route. A
-request carrying canonical string `page` and bounded `page_size` selects the page route. Its
+available for older clients. A URI-only request returns a whole document up to 64 KiB; a larger
+document automatically selects page zero with continuation metadata. The document and offset
+bound is 1 MiB, while legacy body and individual-page limits stay unchanged. A request carrying
+canonical string `page` and bounded `page_size` explicitly selects the page route. Its
 success body adds stable `document_id`, source-byte `revision` and `digest`, total and page byte
 counts, page offsets/counts, `complete`, and (until the final page) an exact `continuation` that
 repeats the URI, next page, page size, revision, and digest. Pages never split a UTF-8 scalar.
@@ -394,8 +396,8 @@ emission fact, not proof that the host delivered the page. A consumer must rejec
 missing or duplicate pages, changed revision/digest, byte-count or offset mismatches, and a final
 assembled digest mismatch before exposing the document or claiming guidance is loaded. The
 supported bounded consumer is `GuidancePageAssembler`; a rejected page has a bounded retry path,
-and a revision change restarts at page zero. The full URI-only route remains available when a
-caller explicitly needs the source document.
+and a revision change restarts at page zero. Callers assemble all pages when they need a source
+document larger than the legacy full-response bound.
 
 Protocol reason
 `expected_frontier_required` marks a state-sensitive `publish_work` batch that omitted

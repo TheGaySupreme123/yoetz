@@ -12,7 +12,9 @@ from yoetz.version import read_verified_resource
 
 __all__ = [
     "DEFAULT_GUIDANCE_PAGE_SIZE",
+    "MAX_GUIDANCE_DOCUMENT_BYTES",
     "MAX_GUIDANCE_PAGE_SIZE",
+    "MAX_GUIDANCE_PAGE_COUNT",
     "GUIDANCE_RESOURCES",
     "GuidanceResource",
     "GuidanceResourceAnnotations",
@@ -36,6 +38,9 @@ class GuidanceResourceError(ValueError):
 # even when a caller chooses the smallest page.
 DEFAULT_GUIDANCE_PAGE_SIZE: Final = 4096
 MAX_GUIDANCE_PAGE_SIZE: Final = 16_384
+MAX_GUIDANCE_DOCUMENT_BYTES: Final = 1_048_576
+MAX_GUIDANCE_PAGE_COUNT: Final = 16_384
+_MAX_GUIDANCE_PAGE_BYTES: Final = 65_536
 _MIN_GUIDANCE_PAGE_SIZE: Final = 4
 
 
@@ -205,15 +210,22 @@ class GuidancePageAssembler:
         try:
             page = _canonical_nonnegative_int(wire["page"])
             page_size = _canonical_nonnegative_int(wire["page_size"])
-            offset = _bounded_int(wire["page_offset"])
-            page_byte_count = _bounded_int(wire["page_byte_count"])
-            total_byte_count = _bounded_int(wire["total_byte_count"])
+            offset = _bounded_int(wire["page_offset"], maximum=MAX_GUIDANCE_DOCUMENT_BYTES)
+            page_byte_count = _bounded_int(
+                wire["page_byte_count"], maximum=_MAX_GUIDANCE_PAGE_BYTES
+            )
+            total_byte_count = _bounded_int(
+                wire["total_byte_count"], maximum=MAX_GUIDANCE_DOCUMENT_BYTES
+            )
             page_count = _canonical_positive_int(wire["page_count"])
         except GuidanceAssemblyError:
             raise
         if page_size < _MIN_GUIDANCE_PAGE_SIZE or page_size > MAX_GUIDANCE_PAGE_SIZE:
             raise GuidanceAssemblyError("guidance_page_size_invalid")
-        if page >= page_count or page_count > 16_384:
+        minimum_page_count = max(1, (total_byte_count + page_size - 1) // page_size)
+        if page_count < minimum_page_count or page_count > MAX_GUIDANCE_PAGE_COUNT:
+            raise GuidanceAssemblyError("guidance_page_count_invalid")
+        if page >= page_count:
             raise GuidanceAssemblyError("guidance_page_invalid")
         if page_byte_count != len(text.encode("utf-8")):
             raise GuidanceAssemblyError("guidance_page_byte_count_mismatch")
@@ -327,8 +339,8 @@ def _canonical_positive_int(value: object) -> int:
     return parsed
 
 
-def _bounded_int(value: object) -> int:
-    if type(value) is not int or value < 0 or value > 65_536:
+def _bounded_int(value: object, *, maximum: int) -> int:
+    if type(value) is not int or value < 0 or value > maximum:
         raise GuidanceAssemblyError("guidance_integer_invalid")
     return value
 
@@ -422,6 +434,9 @@ def read_resource_page(
         payload = resource.bytes
     except BaseException:
         raise GuidanceResourceError("guidance_resource_integrity_failed") from None
+    total_byte_count = len(payload)
+    if total_byte_count > MAX_GUIDANCE_DOCUMENT_BYTES:
+        raise GuidanceResourceError("guidance_document_too_large")
     digest = "sha256:" + hashlib.sha256(payload).hexdigest()
     if expected_revision is not None and expected_revision != digest:
         raise GuidanceResourceError("guidance_revision_mismatch")
@@ -429,6 +444,8 @@ def read_resource_page(
         raise GuidanceResourceError("guidance_digest_mismatch")
     boundaries = _page_boundaries(payload, page_size)
     page_count = max(1, len(boundaries) - 1)
+    if page_count > MAX_GUIDANCE_PAGE_COUNT:
+        raise GuidanceResourceError("guidance_page_count_invalid")
     if page >= page_count:
         raise GuidanceResourceError("guidance_page_out_of_range")
     start = boundaries[page]
@@ -441,7 +458,7 @@ def read_resource_page(
         offset=start,
         text=text,
         byte_count=end - start,
-        total_byte_count=len(payload),
+        total_byte_count=total_byte_count,
         page_count=page_count,
         digest=digest,
         revision=digest,

@@ -49,6 +49,7 @@ SCHEMA_NAMESPACE: Final = "https://schemas.yoetz.dev/0.1/"
 _DRAFT_2020_12: Final = "https://json-schema.org/draft/2020-12/schema"
 _SCHEMA_MEDIA_TYPE: Final = "application/schema+json"
 _MAX_OUTPUT_BYTES: Final = 20_000_000
+_MAX_GUIDANCE_DOCUMENT_BYTES: Final = 1_048_576
 
 
 class SchemaGenerationError(Exception):
@@ -4947,11 +4948,19 @@ def _read_guidance_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
                     "page": {"$ref": "#/$defs/canonical_uint"},
                     "page_byte_count": {"maximum": 65536, "minimum": 0, "type": "integer"},
                     "page_count": {"$ref": "#/$defs/canonical_positive_uint"},
-                    "page_offset": {"maximum": 65536, "minimum": 0, "type": "integer"},
+                    "page_offset": {
+                        "maximum": _MAX_GUIDANCE_DOCUMENT_BYTES,
+                        "minimum": 0,
+                        "type": "integer",
+                    },
                     "page_size": {"$ref": "#/$defs/page_size"},
                     "revision": {"$ref": "#/$defs/digest"},
                     "text": {"maxLength": 65536, "minLength": 0, "type": "string"},
-                    "total_byte_count": {"maximum": 65536, "minimum": 0, "type": "integer"},
+                    "total_byte_count": {
+                        "maximum": _MAX_GUIDANCE_DOCUMENT_BYTES,
+                        "minimum": 0,
+                        "type": "integer",
+                    },
                     "uri": {"$ref": "#/$defs/guidance_resource_uri"},
                 },
                 "required": ["byte_count", "media_type", "ok", "text", "uri"],

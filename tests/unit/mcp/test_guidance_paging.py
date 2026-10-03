@@ -21,6 +21,7 @@ from yoetz.mcp.resources import (
 from yoetz.ports.control import McpHostProfile
 
 _URI = "yoetz://guidance/agent-instructions.md"
+_OVERSIZED_URI = "yoetz://guidance/workflow.md"
 
 
 def _wire(page: GuidanceResourcePage) -> dict[str, object]:
@@ -100,6 +101,35 @@ def test_host_assembler_reconstructs_small_pages_and_checks_digest() -> None:
 
     assert assembler.received_pages == tuple(range(len(pages)))
     assert assembler.assemble() == read_resource_page(_URI, page_size=16_384).resource.text
+
+
+def test_host_assembler_reconstructs_the_oversized_real_document() -> None:
+    assembler = GuidancePageAssembler()
+    page_number = 0
+    while True:
+        page = read_resource_page(_OVERSIZED_URI, page=page_number)
+        assembler.add(_wire(page), host_text=_host_text(page))
+        if page.complete:
+            break
+        page_number += 1
+
+    assert page.total_byte_count > 65_536
+    assert assembler.assemble() == page.resource.text
+
+
+def test_page_count_must_cover_document_at_requested_page_size() -> None:
+    page = read_resource_page(_URI, page_size=64)
+    wire = _wire(page)
+    wire["page_count"] = "1"
+    wire["complete"] = True
+    wire.pop("continuation")
+    with pytest.raises(GuidanceAssemblyError, match="guidance_page_count_invalid"):
+        GuidancePageAssembler().add(wire)
+
+
+def test_too_small_page_size_rejects_an_oversized_document_page_count() -> None:
+    with pytest.raises(GuidanceResourceError, match="guidance_page_count_invalid"):
+        read_resource_page(_OVERSIZED_URI, page_size=4)
 
 
 def test_host_assembler_rejects_missing_or_clipped_model_output() -> None:
@@ -199,6 +229,43 @@ def test_dispatch_paged_result_has_bounded_markers_and_stale_recovery() -> None:
             error = cast(dict[str, Any], cast(dict[str, object], stale.structuredContent)["error"])
             assert error["code"] == "INVALID_REQUEST"
             assert "sha256:" + "0" * 64 not in repr(stale.structuredContent)
+        finally:
+            await bridge.close_bridge_runtime(runtime)
+
+    import anyio
+
+    anyio.run(_run)
+
+
+def test_legacy_oversized_dispatch_returns_bounded_first_page_with_continuation() -> None:
+    """A URI-only read of a real oversized resource enters the page contract automatically."""
+
+    async def _run() -> None:
+        runtime = bridge.build_bridge_runtime("policy", host_profile="generic")
+        try:
+            result = await bridge.dispatch_read_guidance({"uri": _OVERSIZED_URI}, runtime)
+            assert result.isError is False
+            wire = cast(dict[str, object], result.structuredContent)
+            assert wire["uri"] == _OVERSIZED_URI
+            assert wire["document_id"] == _OVERSIZED_URI
+            assert wire["page"] == "0"
+            assert wire["page_size"] == str(resource_module.DEFAULT_GUIDANCE_PAGE_SIZE)
+            assert wire["page_offset"] == 0
+            assert wire["complete"] is False
+            assert int(cast(int, wire["total_byte_count"])) > 65_536
+            assert int(cast(str, wire["page_count"])) > 1
+            continuation = cast(dict[str, object], wire["continuation"])
+            assert continuation["uri"] == _OVERSIZED_URI
+            assert continuation["page"] == "1"
+            assert continuation["page_size"] == wire["page_size"]
+            page_text = wire["text"]
+            page_size = wire["page_size"]
+            assert isinstance(page_text, str)
+            assert isinstance(page_size, str)
+            assert len(page_text.encode("utf-8")) <= int(page_size)
+            block = result.content[0]
+            assert isinstance(block, types.TextContent)
+            assert len(block.text.encode("utf-8")) < 1_100_000
         finally:
             await bridge.close_bridge_runtime(runtime)
 
