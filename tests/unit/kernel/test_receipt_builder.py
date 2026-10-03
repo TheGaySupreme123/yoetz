@@ -1280,7 +1280,9 @@ def test_receipt_projects_provider_bound_input_metadata_in_all_formats() -> None
         )
     )
     limitations = next(
-        section for section in receipt.sections if section.key is ReceiptSectionKey.LIMITATIONS_AND_COVERAGE
+        section
+        for section in receipt.sections
+        if section.key is ReceiptSectionKey.LIMITATIONS_AND_COVERAGE
     )
     assert limitations.coverage_note is not None
     assert "phase" not in limitations.coverage_note

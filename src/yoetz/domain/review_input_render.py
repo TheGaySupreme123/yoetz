@@ -189,7 +189,9 @@ def render_review_input_manifest_compact(value: object) -> str:
     # The first line and specification line are the stable high-value part of the manifest.  The
     # MCP summary is bounded; full section detail remains in structured content and receipts.
     specification = next((line for line in lines if line.startswith("- specification:")), "")
-    return lines[0].removesuffix(".") + "; " + specification.removeprefix("- ").removesuffix(".") + "."
+    return (
+        lines[0].removesuffix(".") + "; " + specification.removeprefix("- ").removesuffix(".") + "."
+    )
 
 
 def render_review_input_manifest_compat_line(value: object) -> str:
@@ -248,15 +250,18 @@ def render_missing_for_assessment_lines(
         if kind is None or availability is None:
             continue
         refs = _refs(source.get("target_refs"))
-        target = ", ".join(refs) if include_refs and refs else (
-            f"{len(refs)} target refs" if refs else "no packet ref"
+        target = (
+            ", ".join(refs)
+            if include_refs and refs
+            else (f"{len(refs)} target refs" if refs else "no packet ref")
         )
         lines.append(f"- {kind} ({target}): {availability}")
     return tuple(lines) if len(lines) > 1 else ()
 
 
 def render_review_input_manifest_coverage_note(
-    manifest: object, missing_items: object = (),
+    manifest: object,
+    missing_items: object = (),
 ) -> str | None:
     """Combine manifest and missing-item metadata for an existing receipt coverage note."""
 

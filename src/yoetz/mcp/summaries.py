@@ -709,10 +709,7 @@ def summary_for_check(envelope: object) -> str:
     manifest_clause = render_review_input_manifest_compact(source.get("review_input_manifest"))
     if manifest_clause:
         prefix = _with_room(prefix, manifest_clause + " ")
-    suffix = (
-        f"AI-powered review status/reason: {status}/{reason}; "
-        f"{_frontier_clause(source)}."
-    )
+    suffix = f"AI-powered review status/reason: {status}/{reason}; {_frontier_clause(source)}."
     recovery = continuation_for_semantic_outcome(
         status=status,
         reason=reason,
