@@ -72,6 +72,20 @@ export function mountParticles(canvas, options = {}) {
     pos[i * 3 + 1] = (R[i * 6 + 1] - 0.5) * 3.2;
     pos[i * 3 + 2] = (R[i * 6 + 2] - 0.5) * 3.2;
   }
+  // A faint haze of dots behind everything, drifting slowly, that the shapes seem to
+  // gather from and dissolve back into.
+  const BG = Math.round(N * 0.5);
+  const bg = new Float32Array(BG * 4);
+  for (let i = 0; i < BG; i++) {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; const a = seed / 4294967296;
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; const b = seed / 4294967296;
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; const c = seed / 4294967296;
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; const d = seed / 4294967296;
+    bg[i * 4] = (a - 0.5) * 3.4;
+    bg[i * 4 + 1] = (b - 0.5) * 2.4;
+    bg[i * 4 + 2] = 0.4 + c * 1.2;
+    bg[i * 4 + 3] = d * 6.2832;
+  }
 
   let cache = {};
   const off = document.createElement("canvas");
@@ -419,7 +433,9 @@ export function mountParticles(canvas, options = {}) {
         tcolA.set(tcol);
         const specB = build(tl.b, t, tl.pb);
         const u = tl.u;
-        for (let i = 0; i < N * 3; i++) tgt[i] = tgtA[i] + (tgt[i] - tgtA[i]) * u;
+        // mid-blend the dots fall back into the haze and come forward again
+        const back = Math.sin(Math.PI * u) * 0.7;
+        for (let i = 0; i < N * 3; i++) tgt[i] = tgtA[i] + (tgt[i] - tgtA[i]) * u + (i % 3 === 2 ? back : 0);
         if (u < 0.5) tcol.set(tcolA);
         spec = {
           tilt: spec.tilt + (specB.tilt - spec.tilt) * u,
@@ -470,6 +486,23 @@ export function mountParticles(canvas, options = {}) {
     const AM = [1, 1, 1, 0.5, 0.8, 1, 1];
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cw, ch);
+    // the haze first, behind everything
+    ctx.fillStyle = PALETTE.particle;
+    for (let i = 0; i < BG; i++) {
+      const ph = bg[i * 4 + 3];
+      const x = bg[i * 4] + Math.sin(t * 0.13 + ph) * 0.06;
+      const y = bg[i * 4 + 1] + Math.cos(t * 0.11 + ph * 1.3) * 0.06;
+      const z = bg[i * 4 + 2];
+      const x1 = x * cy0 - z * sy0;
+      const z1 = x * sy0 + z * cy0;
+      const y2 = y * ct - z1 * st;
+      const z2 = y * st + z1 * ct;
+      const sc = F / (F + z2);
+      const dep = 1 - Math.max(0, Math.min(1, (z2 - 0.2) / 1.6));
+      ctx.globalAlpha = 0.05 + dep * 0.16;
+      const s = (0.8 + (ph / 6.2832) * 1.2) * sc;
+      ctx.fillRect(cx + x1 * S * sc, cy + y2 * S * sc, s, s);
+    }
     for (let c = 0; c < PAL.length; c++) {
       ctx.fillStyle = PAL[c];
       const am = AM[c];
