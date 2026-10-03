@@ -49,6 +49,7 @@ img, svg { max-width: 100%; }
   text-wrap: balance;
 }
 .display .accent { color: var(--accent-text); }
+.display strong { font-weight: 600; }
 
 /* ---------- Buttons ---------- */
 .btn {
@@ -309,25 +310,11 @@ img, svg { max-width: 100%; }
 }
 
 /* ---------- Benchmark: tier colours and the logo row ---------- */
-/* Inline tags inside a serif line: a logo chip the height of the x-height */
-.stanza .tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.18em;
-  height: 1em;
-  padding: 0 0.3em;
-  margin: 0 0.04em;
-  border-radius: var(--radius-full);
-  background: var(--surface-card);
-  border: 1px solid var(--border);
-  font: 500 0.4em/1 var(--font-sans);
-  letter-spacing: 0;
-  color: var(--ink);
-  vertical-align: 0.12em;
-}
-.stanza .tag img { width: 1.4em; height: 1.4em; }
-.stanza .tag.wordmark { font-weight: 600; letter-spacing: -0.01em; }
-/* The tier word is drawn in dots by the artwork; this is the room the sentence leaves for it */
+/* Inline tags inside a serif line: the mark sits in the text, no chip */
+.stanza .tag { display: inline-flex; align-items: center; gap: 0.14em; white-space: nowrap; }
+.stanza .tag img { width: 0.8em; height: 0.8em; }
 .stanza .nowrap { white-space: nowrap; }
-.copy-right.wide { max-width: 720px; }
+.copy-right.wide { max-width: 760px; }
+/* The tier word is drawn in dots by the artwork; this is the room the sentence leaves for it */
 .dot-word { display: block; width: 100%; height: 2em; margin-top: 0.1em; }
+.stanza .fup-mark { width: 0.78em; height: 0.78em; vertical-align: -0.04em; margin-right: 0.1em; }

@@ -109,7 +109,7 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
           <section id="top" class="scene hero" data-scene="hero">
             <p class="stanza center hero-top">We use agents to do</p>
             <div class="hero-bottom">
-              <p class="stanza center">FinishUP <span class="accent">makes sure they do it.</span></p>
+              <p class="stanza center"><span class="nowrap"><svg class="fup-mark" viewBox="0 0 240 240" fill="none" aria-hidden="true"><path d="M190 150V190a20 20 0 0 1-20 20H50a20 20 0 0 1-20-20V70a20 20 0 0 1 20-20h70" stroke="#064E3B" stroke-width="36" stroke-linecap="round" stroke-linejoin="round" /><path d="M112 72l38 38 78-80" stroke="#10B981" stroke-width="34" stroke-linecap="round" stroke-linejoin="round" /></svg>FinishUP</span> <span class="accent">makes sure they do it.</span></p>
               <div class="actions">
                 <button class="btn add-agent" type="button" data-prompt={AGENT_PROMPT}>Add to your agent</button>
                 <a class="btn quiet" href="#alone">See the story
@@ -155,20 +155,20 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
           <section id="local" class="scene" data-scene="sun">
             <div class="copy-right wide">
               <p class="eyebrow">Score on {BENCH.suite}</p>
-              <p class="stanza">{BENCH.model} on <span class="nowrap"><span class="tag"><img src="/assets/openai.svg" alt="" width="22" height="22" />Codex</span>,</span> scored on <span class="nowrap"><span class="tag wordmark">{BENCH.suite}</span></span> with FinishUP <span class="dot-word short" aria-label="Local" role="img"></span></p>
+              <p class="stanza">{BENCH.model} on <span class="nowrap"><span class="tag"><img src="/assets/openai.svg" alt="" width="22" height="22" />Codex</span>,</span> scored on <span class="nowrap"><span class="tag wordmark">{BENCH.suite}</span></span> <span class="nowrap">with <svg class="fup-mark" viewBox="0 0 240 240" fill="none" aria-hidden="true"><path d="M190 150V190a20 20 0 0 1-20 20H50a20 20 0 0 1-20-20V70a20 20 0 0 1 20-20h70" stroke="#064E3B" stroke-width="36" stroke-linecap="round" stroke-linejoin="round" /><path d="M112 72l38 38 78-80" stroke="#10B981" stroke-width="34" stroke-linecap="round" stroke-linejoin="round" /></svg>FinishUP</span> <span class="dot-word short" aria-label="Local" role="img"></span></p>
             </div>
           </section>
 
           <section id="ai" class="scene" data-scene="sun">
             <div class="copy-right wide">
               <p class="eyebrow">Score on {BENCH.suite}</p>
-              <p class="stanza">{BENCH.model} on <span class="nowrap"><span class="tag"><img src="/assets/openai.svg" alt="" width="22" height="22" />Codex</span>,</span> scored on <span class="nowrap"><span class="tag wordmark">{BENCH.suite}</span></span> with FinishUP <span class="dot-word long" aria-label="AI-powered" role="img"></span></p>
+              <p class="stanza">{BENCH.model} on <span class="nowrap"><span class="tag"><img src="/assets/openai.svg" alt="" width="22" height="22" />Codex</span>,</span> scored on <span class="nowrap"><span class="tag wordmark">{BENCH.suite}</span></span> <span class="nowrap">with <svg class="fup-mark" viewBox="0 0 240 240" fill="none" aria-hidden="true"><path d="M190 150V190a20 20 0 0 1-20 20H50a20 20 0 0 1-20-20V70a20 20 0 0 1 20-20h70" stroke="#064E3B" stroke-width="36" stroke-linecap="round" stroke-linejoin="round" /><path d="M112 72l38 38 78-80" stroke="#10B981" stroke-width="34" stroke-linecap="round" stroke-linejoin="round" /></svg>FinishUP</span> <span class="dot-word long" aria-label="AI-powered" role="img"></span></p>
             </div>
           </section>
 
           <section id="end" class="scene foot" data-scene="end">
             <div class="copy-center">
-              <h2 class="display" style="font-size: clamp(36px, 5vw, 64px)">All of this for free.</h2>
+              <h2 class="display" style="font-size: clamp(36px, 5vw, 64px)">All of this<br /><strong>for free.</strong></h2>
               <p class="stanza center sub">Open source, working locally on your computer.</p>
               <div class="actions">
                 <button class="btn add-agent" type="button" data-prompt={AGENT_PROMPT}>Add to your agent</button>

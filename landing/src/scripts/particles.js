@@ -8,8 +8,8 @@ const PALETTE = {
   particle: "#064E3B",
   signal: "#10B981",
   faint: "#8FA39B",
-  silver: "#8E9B96",
-  gold: "#B08A2E",
+  silver: "#8A9BA8",
+  gold: "#D09A1B",
 };
 
 const HERO_WORDS = ["work", "code", "research", "writing", "reviews"];
