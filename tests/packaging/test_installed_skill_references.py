@@ -69,7 +69,7 @@ def test_step_zero_stops_on_an_empty_guidance_read() -> None:
     assert "not proof that the host delivered every page" in collapsed
     assert "Print at most one bounded page plus its small metadata record per cell" in collapsed
     assert "`references/<name>.md`" in collapsed
-    assert "Do not call `start` on an empty guidance body" in collapsed
+    assert "Do not call `start` on incomplete guidance" in collapsed
     # #300 trimmed the inlined set to agent-instructions.md. The skill must not tell the agent it
     # already has workflow.md or coverage-and-receipts.md in context — a false pre-delivery claim
     # licenses skipping the fetch, which is strictly worse than the #203 empty read it replaced.

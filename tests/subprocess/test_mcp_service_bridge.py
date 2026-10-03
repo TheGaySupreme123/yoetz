@@ -18,7 +18,7 @@ from pydantic import BaseModel, FileUrl
 
 import yoetz.mcp.server as bridge
 from yoetz.config.models import LoggingConfig
-from yoetz.mcp.resources import read_resource
+from yoetz.mcp.resources import GuidancePageAssembler, read_resource
 from yoetz.observability.diagnostics import append_diagnostic_record, lookup_diagnostic_records
 from yoetz.observability.logging import LogMode, configure_logging
 from yoetz.ports.control import ControlError, WorkspaceLocator
@@ -598,7 +598,7 @@ async def test_generic_host_profile_keeps_bounded_weaker_text(
 
 
 @pytest.mark.anyio
-async def test_read_guidance_returns_full_text_without_the_service_client(
+async def test_read_guidance_reconstructs_oversized_text_without_the_service_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = _FakeClient()
@@ -611,15 +611,31 @@ async def test_read_guidance_returns_full_text_without_the_service_client(
     )
 
     expected = read_resource("yoetz://guidance/workflow.md").decode("utf-8")
-    assert result.isError is False
-    assert result.content
-    block = result.content[0]
-    assert isinstance(block, types.TextContent)
-    assert block.text == expected
-    assert result.structuredContent is not None
-    assert result.structuredContent["ok"] is True
-    assert result.structuredContent["uri"] == "yoetz://guidance/workflow.md"
-    assert result.structuredContent["text"] == expected
+    assembler = GuidancePageAssembler()
+    pages = 0
+    arguments: dict[str, object] = {"uri": "yoetz://guidance/workflow.md"}
+    page_count: int | None = None
+    while True:
+        assert result.isError is False
+        assert result.structuredContent is not None
+        wire = cast(dict[str, object], result.structuredContent)
+        block = result.content[0]
+        assert isinstance(block, types.TextContent)
+        if page_count is None:
+            page_count = int(cast(str, wire["page_count"]))
+            assert page_count > 1
+        assembler.add(wire, host_text=block.text)
+        pages += 1
+        if wire["complete"] is True:
+            break
+        assert pages < page_count
+        continuation = wire.get("continuation")
+        assert isinstance(continuation, dict)
+        arguments = dict(cast(dict[str, object], continuation))
+        result = await bridge.dispatch_read_guidance(arguments, runtime)
+
+    assert pages == page_count
+    assert assembler.assemble() == expected
     assert client.calls == []
     assert runtime._slot.client is None  # pyright: ignore[reportPrivateUsage]
     await bridge.close_bridge_runtime(runtime)
