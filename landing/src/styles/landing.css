@@ -209,12 +209,12 @@ img, svg { max-width: 100%; }
 /* ---------- Hero: copy above and below the changing word ---------- */
 .stanza.center { margin: 0 auto; text-align: center; max-width: 760px; }
 .stanza.sub { font-size: clamp(24px, 2.6vw, 36px); color: var(--ink-muted); }
-.hero-top { position: absolute; left: 16px; right: 16px; top: calc(50% - 140px); transform: translateY(-100%); }
+.hero-top { position: absolute; left: 16px; right: 16px; top: calc(50% - 172px); transform: translateY(-100%); }
 .hero-bottom {
   position: absolute;
   left: 16px;
   right: 16px;
-  top: calc(50% + 96px);
+  top: calc(50% + 64px);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -252,7 +252,7 @@ img, svg { max-width: 100%; }
   inset: 0;
   display: flex;
   align-items: center;
-  padding: var(--space-24) clamp(16px, 6vw, 96px);
+  padding: var(--space-24) clamp(16px, 6vw, 96px) 160px;
   box-sizing: border-box;
   opacity: 0;
   transform: translateY(14px);
