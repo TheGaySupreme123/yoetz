@@ -255,9 +255,10 @@ img, svg { max-width: 100%; }
   padding: var(--space-24) clamp(16px, 6vw, 96px);
   box-sizing: border-box;
   opacity: 0;
-  transition: opacity 0.55s ease;
+  transform: translateY(14px);
+  transition: opacity 0.8s ease, transform 0.8s ease;
 }
-.copy.on { opacity: 1; }
+.copy.on { opacity: 1; transform: none; transition-delay: 0.25s; }
 .copy.on a, .copy.on button { pointer-events: auto; }
 .copy.foot { align-items: flex-end; justify-content: center; }
 .copy.hero { position: absolute; }
