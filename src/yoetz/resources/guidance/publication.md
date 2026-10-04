@@ -1,0 +1,38 @@
+# Publication topic
+
+Read this topic before the first `publish_work` or when deciding whether a transition, result,
+evidence item, obligation, or claim belongs in the ledger. Publish the smallest material,
+state-bound facts needed for another participant to understand and check the work.
+
+Publish a bounded initial plan and its explicit obligations before substantive work. After bounded
+exploration and before the first material edit, publish one `plan_revised` refinement; map
+instruction requirements to testable obligations and carry, supersede, or waive earlier obligations explicitly.
+Then publish material transitions, results, evidence, and a completion claim. Keep one transition together in a small
+batch. `work_closed` closes work; a receipt never does. Every retryable write carries its
+idempotency identity and expected frontier. Reuse exact request and event ids only for the allowed
+same-body recovery path.
+
+Do not publish hidden reasoning or chain-of-thought, full prompts, transcripts, conversation history,
+credentials, secrets, whole files/repositories, or broad unrelated source. A digest is provenance,
+not content inspection. Use bounded excerpts with the directly relevant file, symbol, test, or
+failure; user-controlled titles, paths, prompts, and model output never become structural table or
+error text.
+
+For completion scope, put admissible evidence in `supporting_refs`, partial/failed/unknown results
+in `limitation_refs`, and the named in-scope obligations in `obligation_refs`. Mirror
+`evidence_refs` and `artifact_refs` exactly where the event family requires it. Record every
+requested item attempted on `action_recorded.attempted_items`; it does not belong on a claim.
+
+Do not change an existing test's assertion or expectation, rename it, skip it, or delete it to make
+the implementation pass. Change pre-existing test code only for broken setup, an outdated fixture,
+or an explicitly changed behavior, and record the instruction line and reason. For a justified
+pre-existing test edit, put this exact line in a later decision statement, after the edit action:
+`yoetz:test-change:<action_id>:sha256:<path_digest>`. `<action_id>` is the exact edit action id;
+`<path_digest>` is `sha256:` plus the lowercase SHA-256 of the captured path's UTF-8 spelling. Do
+not rely on free-form prose or repeat the raw path: generic prose does not clear the structural
+edit finding.
+
+Before replacing evidence or a claim, read `status`, cite IDs from your own publication, and link
+the replacement with the prior effective claim. A claim is an assertion, not a conclusion. Read the
+complete event bodies and field ownership in [`publication-policy.md`](publication-policy.md) and
+use [`request-templates.md`](request-templates.md) when schema metadata is missing.

@@ -35,6 +35,7 @@ from yoetz.domain.findings import (
     SemanticFallbackOrigin,
 )
 from yoetz.domain.privacy import PrivacyOutcome, PrivacyReason, ProviderBinding
+from yoetz.domain.receipts import SEMANTIC_PROVIDER_INPUT_MANIFEST_RECOVERY_FAILED_GAP
 from yoetz.ports.ledger import AttemptOutcome, FrozenCase
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectSource
 from yoetz.ports.runtime import TaskRuntime
@@ -321,6 +322,7 @@ async def test_the_selected_attempt_carries_what_its_sent_packet_included(
     assert original.status is SemanticStatus.SUCCEEDED
     assert original.case_included_refs == _DisclosingPrivacy.disclosed
     assert original.semantic_withheld_item_ids == ("excerpt-heuristic",)
+    assert original.provider_input_manifest is None
     assert original.operation_lease is not None
     calls = cast(int, getattr(privacy, "calls"))
     recovered = await evaluator(FrozenCase(frozen.case, original.operation_lease), (), runtime)
@@ -328,6 +330,11 @@ async def test_the_selected_attempt_carries_what_its_sent_packet_included(
     assert recovered.status is SemanticStatus.SUCCEEDED
     assert recovered.case_included_refs == _DisclosingPrivacy.disclosed
     assert recovered.semantic_withheld_item_ids == ("excerpt-heuristic",)
+    assert recovered.provider_input_manifest is None
+    assert (
+        recovered.provider_input_manifest_failure
+        == SEMANTIC_PROVIDER_INPUT_MANIFEST_RECOVERY_FAILED_GAP
+    )
 
 
 @pytest.mark.anyio

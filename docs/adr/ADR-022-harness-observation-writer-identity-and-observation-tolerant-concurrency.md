@@ -691,25 +691,23 @@ A rerun is a new host tool call, so keying "resolved" on the call id left every 
 unresolved. Observation-advice policy `0.1.6` makes `failed_command_unresolved` read the same kernel
 predicate the local packs and the ADR-025 claim invariant read (`kernel/observed_failures.py`): a
 failed command envelope is still reported only while no later post-event of the same *command
-identity* followed it (only the latest run of a command is judged), no later edit post-event that
-stated success followed it (a permission request or decision, a failed or denied edit, and a partial
-or outcome-less edit are not proof the workspace changed), and the same host call did not later
-succeed. A later failure of the same identity is a new condition; it never revives an earlier one.
+identity* followed it (only the latest limiting run of a command is judged), and the same host call
+did not later succeed. A later failure or partial run of the same identity is a new condition; an
+unknown outcome does not certify repair and never revives an earlier one. An edit post-event never
+retires the failed verification.
 Cursor's ordinary shell tool `Shell` is a command tool for this rule.
 
-The edit clause is state-scoped, not causal. Any successful observed edit retires every earlier
-observed failure in the prefix, whatever path it touched, because the failed workspace state is no
-longer the current one; the rule does not relate the edit to the failed command. This is the plain
-form of option (a) that the maintainer chose on #909. Its stricter variant (an edit *and* a later
-passing verification) stays an open question on #909, to revisit if dogfood shows edits outside the
-failing area making real red runs historical. The receipt therefore says a failure "preceded a
-later observed workspace edit", never that the edit fixed it.
+An observed edit changes the workspace state but does not establish that a failed verification was
+covered. A failed run therefore remains live until a later run of the same keyed command succeeds,
+or reruns with another limiting outcome, or the claim explicitly acknowledges it. An unknown
+outcome does not certify repair, and an edit never retires the failure. The receipt keeps the
+failed run as a limitation until one of those bounded resolutions occurs.
 
-This section computes the commitment on hook paths and the legacy spool only. A Codex call that
-reaches the ledger only through the session stream (`CommandExecution`) carries no commitment in
-this change, so it keeps `omitted:structural` and can be retired only by the edit clause, not by a
-later run of the same command. The stream commitment is #910's change; until it lands, Codex
-same-command supersession is active on the hook path only.
+This section computes the commitment on hook paths, the legacy spool, and the session stream. A
+Codex `CommandExecution` carries the same installation-keyed commitment when the local key is
+available, so a later keyed run can supersede it; a row without a commitment keeps
+`omitted:structural` and remains live until explicit acknowledgement. Same-command supersession
+is active wherever the keyed commitment is available.
 
 The command identity is a new structural envelope field, `command_commitment`: an installation-keyed
 `hmac-sha256:` value (domain `yoetz/observation-command-commitment/v1`, the local observation

@@ -1,25 +1,26 @@
 """One shared reading of hook-observed failed runs at a completion claim (#909).
 
 A completion claim must disclose failed work that is still *live* when it is made. For a result
-the harness observed (a hook-observed tool call), two later observed facts make an earlier
+the harness observed (a hook-observed tool call), a later qualifying run can make an earlier
 failure history instead of an omission:
 
 * **Supersession.** A later hook-observed run of the *same command identity* succeeded, or ran
-  again with any other outcome: only the latest run of a command identity is judged. The
+  again with another limiting outcome (failure or partial): only a run with a recorded outcome
+  can replace the earlier disclosure duty. An unknown outcome does not certify repair. The
   identity is the installation-keyed ``hmac-sha256:`` command commitment the hook computes and
   materialization stores as ``omitted:<commitment>`` in the action's ``command`` field; the raw
   command text never reaches the ledger. Any other command, and any unkeyed or structural
   placeholder, supersedes nothing.
-* **State scope.** A later hook-observed workspace edit completed (an edit action whose result
-  states success; a partial or outcome-less edit proves nothing). The failure described a
-  workspace state that no longer exists. Legacy rows
-  without a command identity (``omitted:structural``) reach this rule and never fall back to
-  "every failure is live".
+* **No edit inference.** A workspace edit changes the state being verified, but it does not prove
+  that a failed validation was repaired or passed. A failed run therefore stays live until a
+  later qualifying run of the same keyed command identity (or an explicit claim acknowledgement)
+  resolves its disclosure duty. Legacy rows without a command identity
+  (``omitted:structural``) never fall back to "every failure is live" supersession.
 
 Only service-stamped hook observations take part on either side: a cooperative result keeps its
 exact ADR-025 disclosure duty, and a cooperative "success" or "edit" can never retire a hook
-failure. A superseded or historical failure is not deleted or hidden: the receipt counts it once
-as history, and naming it in ``limitation_refs`` stays accepted.
+failure. A superseded or legacy historical failure is not deleted or hidden: the receipt counts it
+once as history, and naming it in ``limitation_refs`` stays accepted.
 
 The work-integrity and research-evidence packs, the claim-revision replay invariant, the receipt
 builder and the observation-advice rule all read this module, so no two of them can disagree
@@ -61,6 +62,8 @@ __all__ = [
     "observed_failure_states",
     "observed_failure_states_from_records",
     "observed_action_description",
+    "observed_action_is_exploratory",
+    "observed_action_runner_class",
     "observed_action_tool",
     "observed_run_facts",
 ]
@@ -75,6 +78,12 @@ _OBSERVED_RUN_FAMILIES: Final = frozenset({"action_recorded", "result_recorded"}
 # closed form; the results view reads it back only from service-stamped observed actions.
 _TOOL_SUFFIX_RE: Final = re.compile(r" \(tool ([A-Za-z0-9][A-Za-z0-9._:/+-]{0,127})\)\Z", re.ASCII)
 _TOOL_TOKEN_RE: Final = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}\Z", re.ASCII)
+_RUNNER_SUFFIX_RE: Final = re.compile(
+    r" \(runner (exploration|test|build|lint|typecheck|vcs|other|compound)\)\Z", re.ASCII
+)
+_RUNNER_CLASSES: Final = frozenset(
+    {"exploration", "test", "build", "lint", "typecheck", "vcs", "other", "compound"}
+)
 
 
 class ObservedFailureState(str, Enum):  # noqa: UP042 - stable closed token
@@ -91,9 +100,9 @@ class ObservedRun:
     """One hook-observed tool result, reduced to the facts the supersession rule reads.
 
     ``position`` orders runs (ledger ingestion sequence, or envelope order for advice). ``edit``
-    marks an edit tool call; it counts as a workspace change only when the host stated its
-    success. A failed or denied edit changed nothing, and a partial or outcome-less edit is no
-    proof the workspace changed as intended, so retiring a failure on it could hide the failure.
+    marks an edit tool call for callers that need to retain that structural fact. Edits never
+    supersede a failed validation: only a qualifying rerun of the same keyed command identity can
+    establish that the earlier failure has been rerun or passed.
     """
 
     ref: str
@@ -131,19 +140,18 @@ def command_identity(command: object) -> str | None:
 def classify_observed_runs(runs: Iterable[ObservedRun]) -> Mapping[str, ObservedFailureState]:
     """Classify every failed or partial run against the runs that follow it.
 
-    One backward pass. Only the latest run of a command identity can be live: a failure is
-    ``SUPERSEDED`` when a later run with the same identity succeeded, else ``RERUN`` when a later
-    run with the same identity has any other outcome (that later run is the one judged), else
-    ``HISTORICAL`` when a later edit with a stated success followed, else ``LIVE``. A later failure of the same
-    identity is a new failure in its own right; it never revives an earlier superseded one. A run
-    without an identity is retired only by a later edit. The caller bounds ``runs`` to what
-    precedes the point being judged.
+    One backward pass. Only the latest *limiting* run of a command identity can be live: a failure
+    is ``SUPERSEDED`` when a later run with the same identity succeeded, else ``RERUN`` when a
+    later failure or partial run with the same identity follows it (that later run is the one
+    judged), else ``LIVE``. A later failure of the same identity is a new failure in its own
+    right; it never revives an earlier superseded one. Edits or other workspace-state changes do
+    not retire a failure because neither proves that the failed validation was covered. The caller
+    bounds ``runs`` to what precedes the point being judged.
     """
 
     ordered = sorted(runs, key=lambda run: run.position, reverse=True)
     if len({run.position for run in ordered}) != len(ordered):
         raise ValueError("observed_run_invalid")
-    edited_after = False
     passed_after: set[str] = set()
     ran_after: set[str] = set()
     states: dict[str, ObservedFailureState] = {}
@@ -153,13 +161,11 @@ def classify_observed_runs(runs: Iterable[ObservedRun]) -> Mapping[str, Observed
                 states[run.ref] = ObservedFailureState.SUPERSEDED
             elif run.identity is not None and run.identity in ran_after:
                 states[run.ref] = ObservedFailureState.RERUN
-            elif edited_after:
-                states[run.ref] = ObservedFailureState.HISTORICAL
             else:
                 states[run.ref] = ObservedFailureState.LIVE
-        if run.edit and run.outcome is ResultOutcome.SUCCESS:
-            edited_after = True
-        if run.identity is not None:
+        if run.identity is not None and (
+            run.outcome in _FAILED_OUTCOMES or run.outcome is ResultOutcome.SUCCESS
+        ):
             ran_after.add(run.identity)
             if run.outcome is ResultOutcome.SUCCESS:
                 passed_after.add(run.identity)
@@ -273,19 +279,43 @@ def observed_failure_states(
     )
 
 
-def observed_action_description(base: str, tool: str | None) -> str:
-    """Append the structural host tool name to an observed action description, when known."""
+def observed_action_description(
+    base: str, tool: str | None, runner_class: str | None = None
+) -> str:
+    """Append bounded host facts to an observed action description, when known."""
 
-    if tool is None or _TOOL_TOKEN_RE.fullmatch(tool) is None:
-        return base
-    return f"{base} (tool {tool})"
+    result = base
+    if tool is not None and _TOOL_TOKEN_RE.fullmatch(tool) is not None:
+        result = f"{result} (tool {tool})"
+    if runner_class in _RUNNER_CLASSES:
+        result = f"{result} (runner {runner_class})"
+    return result
 
 
 def observed_action_tool(description: str) -> str | None:
     """Read back the tool name ``observed_action_description`` wrote, or ``None``."""
 
-    match = _TOOL_SUFFIX_RE.search(description)
+    # Runner classification is appended after the tool suffix. Strip that bounded suffix before
+    # applying the existing anchored tool parser so adding the class cannot make tool lookup fail.
+    without_runner = _RUNNER_SUFFIX_RE.sub("", description)
+    match = _TOOL_SUFFIX_RE.search(without_runner)
     return None if match is None else match.group(1)
+
+
+def observed_action_runner_class(description: str) -> str | None:
+    """Read the bounded command class derived at the host boundary, or ``None``."""
+
+    match = _RUNNER_SUFFIX_RE.search(description)
+    return None if match is None else match.group(1)
+
+
+def observed_action_is_exploratory(action: ActionRecordedPayload) -> bool:
+    """Return true only for a service-derived command classified as a safe exploration."""
+
+    return (
+        action.action_kind is ActionKind.COMMAND
+        and observed_action_runner_class(action.description) == "exploration"
+    )
 
 
 @dataclass(frozen=True, slots=True)

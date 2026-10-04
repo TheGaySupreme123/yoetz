@@ -12,6 +12,7 @@ post-event supplies a closed success fact.
 
 from __future__ import annotations
 
+import re
 import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -62,6 +63,17 @@ ObservationReasonToken = Literal[
     "untrusted_action",
 ]
 
+RunnerClass = Literal[
+    "exploration",
+    "test",
+    "build",
+    "lint",
+    "typecheck",
+    "vcs",
+    "other",
+    "compound",
+]
+
 ROUTINE_READ_TOOLS: Final = frozenset(
     {
         "glob",
@@ -107,6 +119,8 @@ _FAILURE_STATUSES: Final = {
     "timeout": "failure",
 }
 _PARTIAL_STATUSES: Final = frozenset({"partial", "partially_completed"})
+_SHELL_WRAPPERS: Final = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+_SHELL_COMMAND_FLAG_RE: Final = re.compile(r"^-[a-z]*c[a-z]*$", re.ASCII)
 
 # ``rg --pre`` and related forms invoke an arbitrary preprocessor.  Git's
 # ext-diff/textconv/output paths likewise cross the read-only boundary.
@@ -492,6 +506,142 @@ def _routine_shell_facts(payload: Mapping[str, CanonicalJsonValue]) -> _RoutineF
     return _RoutineFacts(True, "routine_shell")
 
 
+def _runner_class_for_argv(argv: list[str]) -> RunnerClass | None:
+    if not argv:
+        return None
+    if "/" in argv[0] or "\\" in argv[0]:
+        return "other"
+    command = argv[0].rsplit("/", 1)[-1].casefold()
+    if command in _SHELL_WRAPPERS and len(argv) >= 3 and _SHELL_COMMAND_FLAG_RE.fullmatch(argv[1]):
+        return command_runner_class({"command": argv[2]})
+    if command == "rg" and any(
+        argument.partition("=")[0].casefold() in _RG_PRE_OPTIONS
+        or argument.casefold().startswith("--pre")
+        for argument in argv[1:]
+    ):
+        return "other"
+    if command == "find" and any(
+        argument.casefold()
+        in {"-exec", "-execdir", "-delete", "-write", "-fprint", "-fls", "-fprintf", "-ok"}
+        for argument in argv[1:]
+    ):
+        return "other"
+    if command in {"cat", "cut", "find", "grep", "head", "less", "ls", "pwd", "rg", "tail", "wc"}:
+        return "exploration"
+    lowered = {argument.casefold() for argument in argv[1:]}
+    joined = " ".join(argv).casefold()
+    if command in {"git", "hg", "svn"}:
+        return "vcs"
+    if command in {
+        "pytest",
+        "jest",
+        "mocha",
+        "nox",
+        "tox",
+        "vitest",
+        "ava",
+        "cargo",
+        "go",
+        "make",
+        "npm",
+        "pnpm",
+        "yarn",
+        "uv",
+    }:
+        if command in {"cargo", "go", "make", "npm", "pnpm", "yarn", "uv"}:
+            if "test" in lowered or "test" in joined or "pytest" in joined or "vitest" in joined:
+                return "test"
+            if "build" in lowered or "build" in joined:
+                return "build"
+            if "lint" in lowered or "lint" in joined:
+                return "lint"
+            if "typecheck" in joined or "type-check" in joined or "tsc" in joined:
+                return "typecheck"
+            return "other"
+        return "test"
+    if command in {"ruff", "eslint", "flake8", "black", "prettier"} or " lint" in joined:
+        return "lint"
+    if command in {"mypy", "pyright", "tsc", "typecheck", "type-check"} or any(
+        marker in joined for marker in (" typecheck", " type-check", "mypy", "pyright", "tsc")
+    ):
+        return "typecheck"
+    if "build" in joined:
+        return "build"
+    return "other"
+
+
+def _raw_command(payload: Mapping[str, CanonicalJsonValue]) -> str | None:
+    nested = payload.get("tool_input")
+    source: Mapping[str, CanonicalJsonValue] = nested if isinstance(nested, Mapping) else payload
+    raw = source.get("cmd")
+    if type(raw) is not str or not raw:
+        raw = source.get("command")
+    if type(raw) is not str or not raw or len(raw) > _MAX_COMMAND_CHARS:
+        return None
+    return raw
+
+
+def command_runner_class(payload: Mapping[str, CanonicalJsonValue]) -> RunnerClass | None:
+    """Classify only closed command shapes; never inspect command output text.
+
+    The class is a bounded internal hint used to keep known read/exploration failures out of
+    completion accounting. Unknown commands remain ``other`` so they retain their ordinary
+    failure duty. Shell composition is explicitly ``compound`` because an outer exit status does
+    not establish each nested command's outcome (#968).
+    """
+
+    raw = _raw_command(payload)
+    if raw is None:
+        tool = _classification_token(payload.get("tool_name"))
+        if tool is None:
+            return None
+        lowered = tool.casefold()
+        # A native read tool has a closed meaning even without a command string. A shell tool
+        # named ``rg``/``find`` does not: without argv we cannot validate its flags or operands,
+        # so keep it ordinary rather than granting exploration treatment.
+        if lowered in ROUTINE_READ_TOOLS:
+            return "exploration"
+        if lowered in _TEST_TOOL_HINTS or any(
+            token in lowered for token in ("test", "pytest", "vitest")
+        ):
+            return "test"
+        if lowered in _VERIFICATION_TOOL_HINTS or any(
+            token in lowered for token in ("lint", "typecheck", "verify", "check")
+        ):
+            return "typecheck" if "type" in lowered else "lint"
+        return "other"
+    try:
+        argv = shlex.split(raw, posix=True)
+    except ValueError:
+        return "compound"
+    if not argv:
+        return None
+    if any(marker in raw for marker in ("\n", "\r", ";", "&", "|", ">", "<", "`", "$(")):
+        return "compound"
+    return _runner_class_for_argv(argv)
+
+
+def compound_verification_gap_required(payload: Mapping[str, CanonicalJsonValue]) -> bool:
+    """Return whether a compound shell can mask a nested command failure.
+
+    The outer exit code remains authoritative for the shell process. A plain ``&&`` chain with a
+    zero exit proves each command in that chain returned zero, so it needs no extra gap. ``;``,
+    ``||``, pipelines, background jobs, command substitution, and malformed shell text can hide a
+    nested result; those shapes receive the bounded ``compound_outcome_unavailable`` coverage gap.
+    Output text is never inspected.
+    """
+
+    raw = _raw_command(payload)
+    if raw is None or command_runner_class(payload) != "compound":
+        return False
+    try:
+        shlex.split(raw, posix=True)
+    except ValueError:
+        return True
+    without_and = raw.replace("&&", "")
+    return any(marker in without_and for marker in ("\n", "\r", ";", "|", "&", "`", "$("))
+
+
 def _routine_facts(payload: Mapping[str, CanonicalJsonValue]) -> _RoutineFacts:
     tool = _classification_token(payload.get("tool_name"))
     if tool is None:
@@ -641,7 +791,10 @@ __all__ = [
     "READ_ONLY_COMMANDS",
     "ROUTINE_READ_TOOLS",
     "SHELL_TOOLS",
+    "RunnerClass",
     "classify_observation",
+    "compound_verification_gap_required",
+    "command_runner_class",
     "envelope_outcome_state",
     "is_edit_tool_name",
     "is_routine_read_candidate",

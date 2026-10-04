@@ -8,6 +8,7 @@ until the bundle was reopened or the durable row was read directly.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -43,6 +44,7 @@ from yoetz.domain.values import (
 from yoetz.ports.ledger import (
     AppendCommand,
     AppendEntry,
+    CheckCommitResult,
     CheckPhase,
     CheckPolicyExecution,
     FrozenCase,
@@ -123,7 +125,7 @@ async def _commit_check(
     semantic_status: SemanticStatus = SemanticStatus.NOT_REQUESTED,
     semantic_reason: SemanticReason = SemanticReason.DETERMINISTIC_MODE,
     findings: tuple[Finding, ...] = (),
-) -> None:
+) -> CheckCommitResult:
     check_request = uuid_id("req", request_number)
     digest = "sha256:" + f"{request_number:064d}"[-64:]
     frozen = await ledger.freeze_case(
@@ -156,6 +158,45 @@ async def _commit_check(
         check_request,
     )
     assert result.outcome == "committed"
+    return result
+
+
+@pytest.mark.anyio
+async def test_check_totals_survive_reopen_and_idempotent_recovery(tmp_path: Path) -> None:
+    """Recovery must use the frozen totals, never recount post-check work (#971)."""
+
+    records = replay_records("projection-rebuild")[:1]
+    command, objects = command_from_records(records)
+    path = tmp_path / "check-totals.sqlite3"
+    ledger, db = file_sqlite_for(command, objects, path)
+    accepted = await ledger.append_batch(command)
+    committed = await _commit_check(
+        ledger,
+        command,
+        objects,
+        accepted.result_frontier,
+        request_number=91_971,
+        coverage=_checked_coverage(command.entries[0].coverage),
+        verdict=CheckVerdict.INSUFFICIENT_COVERAGE,
+    )
+    assert committed.totals is not None
+    totals = cast(Mapping[str, Mapping[str, str]], committed.totals)
+    assert totals["commands"]["observed"] == "0"
+    assert totals["obligations"]["declared"] == "0"
+    db.close()
+
+    reopened, reopened_db = file_sqlite_for(command, objects, path)
+    replayed = await reopened.freeze_case(
+        command.session_id,
+        command.writer_id,
+        accepted.result_frontier.sequence,
+        uuid_id("req", 91_971),
+        "sha256:" + f"{91_971:064d}",
+    )
+    assert isinstance(replayed, CheckCommitResult)
+    assert replayed.outcome == "replayed"
+    assert replayed.totals == committed.totals
+    reopened_db.close()
 
 
 def _assert_check_aggregate_consistent(row: dict[str, Any], *, has_check: bool) -> None:

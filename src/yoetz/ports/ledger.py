@@ -73,6 +73,7 @@ from yoetz.protocol.models import (
 __all__ = [
     "CheckChecklistItem",
     "CheckFindingChecklist",
+    "CheckOverallNext",
     "AcceptedEventSummary",
     "AppendCommand",
     "AppendEntry",
@@ -739,6 +740,23 @@ ChecklistNext = Literal["decide_at_budget", "request_receipt", "work_open_findin
 _CHECKLIST_NEXT: Final = frozenset({"decide_at_budget", "request_receipt", "work_open_findings"})
 MAX_CHECKLIST_ITEMS: Final = 100
 
+OverallNextAction = Literal[
+    "supply_missing_input",
+    "work_open_findings",
+    "review_recorded_work",
+    "request_receipt",
+]
+OverallNextStatus = Literal["action_required", "ready_with_limitations", "ready"]
+_OVERALL_NEXT_ACTIONS: Final = frozenset(
+    {
+        "supply_missing_input",
+        "work_open_findings",
+        "review_recorded_work",
+        "request_receipt",
+    }
+)
+_OVERALL_NEXT_STATUSES: Final = frozenset({"action_required", "ready_with_limitations", "ready"})
+
 
 @dataclass(frozen=True, slots=True)
 class CheckChecklistItem:
@@ -801,6 +819,55 @@ class CheckFindingChecklist:
 
 
 @dataclass(frozen=True, slots=True)
+class CheckOverallNext:
+    """The authoritative continuation beside the finding-only checklist (#963).
+
+    ``finding_checklist.next`` describes only the finding to-do list.  This projection names the
+    task-level continuation and its safe structural targets.  A coverage-limited result keeps the
+    ordinary receipt endpoint available so an agent can acknowledge the limitation without
+    turning it into a clean review.
+    """
+
+    status: OverallNextStatus
+    action: OverallNextAction
+    target_refs: tuple[str, ...] = ()
+    acknowledged_incomplete_endpoint: Literal["receipt"] | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.status) is not str or self.status not in _OVERALL_NEXT_STATUSES:
+            raise _invalid()
+        if type(self.action) is not str or self.action not in _OVERALL_NEXT_ACTIONS:
+            raise _invalid()
+        if type(self.target_refs) is not tuple or len(self.target_refs) > 64:
+            raise _invalid()
+        if any(
+            type(item) is not str or _IDENTITY_PATTERN.fullmatch(item) is None
+            for item in self.target_refs
+        ):
+            raise _invalid()
+        if self.target_refs != tuple(sorted(set(self.target_refs), key=str.encode)):
+            raise _invalid()
+        if self.acknowledged_incomplete_endpoint not in {None, "receipt"}:
+            raise _invalid()
+        if (
+            self.action
+            in {
+                "supply_missing_input",
+                "work_open_findings",
+                "review_recorded_work",
+            }
+            and self.status != "action_required"
+        ):
+            raise _invalid()
+        if self.action in {"work_open_findings", "review_recorded_work"} and not self.target_refs:
+            raise _invalid()
+        if self.acknowledged_incomplete_endpoint is not None and (
+            self.action != "request_receipt" or self.status != "ready_with_limitations"
+        ):
+            raise _invalid()
+
+
+@dataclass(frozen=True, slots=True)
 class CheckCommitResult:
     outcome: Literal["committed", "replayed"]
     task_id: str
@@ -818,16 +885,22 @@ class CheckCommitResult:
     semantic_provenance: SemanticProvenance | None
     coverage: Coverage
     versions: CheckVersionSlice
+    semantic_conclusion: str | None = None
+    review_summary: str | None = None
+    verified: tuple[JsonObject, ...] = ()
     children: CheckChildrenPreview | None = None
     advisory_notes: tuple[CheckAdvisoryNote, ...] = ()
     # Structural record of what an ``insufficient_packet`` review named as missing (issue #907).
     missing_for_assessment: tuple[MissingForAssessmentItem, ...] = ()
     finding_checklist: CheckFindingChecklist | None = None
+    # Task-level continuation; ``finding_checklist.next`` remains finding-only (issue #963).
+    overall_next: CheckOverallNext | None = None
     # Opaque case item identities withheld by the never-send heuristic. The check result keeps
     # these bounded references so recovery and every presentation surface can name the omitted
     # context without exposing matched bytes.
     semantic_withheld_item_ids: tuple[str, ...] = ()
     review_input_manifest: JsonObject | None = None
+    totals: JsonObject | None = None
 
     def __post_init__(self) -> None:
         if type(self.outcome) is not str or self.outcome not in {"committed", "replayed"}:
@@ -868,6 +941,21 @@ class CheckCommitResult:
             raise _invalid()
         if type(self.coverage) is not Coverage or type(self.versions) is not CheckVersionSlice:
             raise _invalid()
+        if self.semantic_conclusion is not None and (
+            type(self.semantic_conclusion) is not str
+            or self.semantic_conclusion
+            not in {"no_material_discrepancy", "challenges_returned", "insufficient_packet"}
+            or self.semantic_status is not SemanticStatus.SUCCEEDED
+        ):
+            raise _invalid()
+        if self.review_summary is not None and (
+            type(self.review_summary) is not str or not self.review_summary
+        ):
+            raise _invalid()
+        if type(self.verified) is not tuple or len(self.verified) > 64:
+            raise _invalid()
+        if any(type(item) is not JsonObject for item in self.verified):
+            raise _invalid()
         if self.children is not None and type(self.children) is not CheckChildrenPreview:
             raise _invalid()
         if (
@@ -875,6 +963,12 @@ class CheckCommitResult:
             and type(self.finding_checklist) is not CheckFindingChecklist
         ):
             raise _invalid()
+        if self.overall_next is not None and type(self.overall_next) is not CheckOverallNext:
+            raise _invalid()
+        if self.totals is not None:
+            from yoetz.domain.check_totals import validate_check_totals
+
+            object.__setattr__(self, "totals", validate_check_totals(self.totals))
         if (
             type(self.semantic_withheld_item_ids) is not tuple
             or len(self.semantic_withheld_item_ids) > 64
@@ -2104,12 +2198,15 @@ class LedgerPort(Protocol):
         *,
         scope: CheckScopeModel | None = None,
         semantic_conclusion: str | None = None,
+        review_summary: str | None = None,
+        verified: tuple[JsonObject, ...] = (),
         prior_finding_verdicts: tuple[PriorFindingVerdictRecord, ...] = (),
         missing_for_assessment: tuple[MissingForAssessmentItem, ...] = (),
         check_change_files: CheckChangeShownFiles | None = None,
         semantic_included_refs: tuple[str, ...] | None = None,
         semantic_withheld_item_ids: tuple[str, ...] = (),
         review_input_manifest: JsonObject | None = None,
+        totals: JsonObject | None = None,
     ) -> CheckCommitResult: ...
 
     async def fail_check_if_current(

@@ -187,6 +187,8 @@ __all__ = [
     "EvidenceDigestSubject",
     "EvidenceRecordedPayload",
     "FindingRecordedPayload",
+    "FINDING_EVENT_SCHEMA_VERSION",
+    "FINDING_SNIPPET_EVENT_SCHEMA_VERSION",
     "IntegrationKind",
     "LedgerChain",
     "LedgerRecord",
@@ -260,12 +262,16 @@ CLAIM_SCHEMA_VERSION: Final = "1.1.0"
 # 1.3.0 (unreleased on the 0.3 line) also carries the optional per-finding reviewer rulings of
 # issue #905; a check without rulings keeps its earlier 1.3.0 bytes.
 CHECK_EVENT_SCHEMA_VERSION: Final = "1.3.0"
+# 1.4.0 adds the verifying-reviewer summary and per-requirement judgements. Older check records
+# remain byte-identical and decode with these fields absent.
+REVIEW_CHECK_EVENT_SCHEMA_VERSION: Final = "1.4.0"
 SEMANTIC_EVENT_SCHEMA_VERSION: Final = "1.2.0"
 SEMANTIC_EVENT_SCHEMA_VERSIONS: Final = ("1.1.0", SEMANTIC_EVENT_SCHEMA_VERSION)
 # 1.3.0 (unreleased on the 0.3 line) also admits the optional review-dialogue fields of issue #905
 # (the persisted challenge fields and the ``relates_to`` link) on AI-powered findings; a finding
 # without them keeps its earlier 1.3.0 bytes.
 FINDING_EVENT_SCHEMA_VERSION: Final = "1.3.0"
+FINDING_SNIPPET_EVENT_SCHEMA_VERSION: Final = "1.4.0"
 # ``response_recorded`` 1.0.0 is released and frozen. 1.1.0 exists only to admit the terminal
 # ``acknowledged_not_done`` disposition (issue #905); every other disposition keeps 1.0.0 bytes,
 # so the version is a pure function of the payload and old ledgers replay unchanged.
@@ -882,11 +888,14 @@ def _locator_key_kind(schema: EventSchema) -> str:
             and (
                 schema.version in SEMANTIC_EVENT_SCHEMA_VERSIONS
                 or (
-                    schema.name == "check_recorded" and schema.version == CHECK_EVENT_SCHEMA_VERSION
+                    schema.name == "check_recorded"
+                    and schema.version
+                    in {CHECK_EVENT_SCHEMA_VERSION, REVIEW_CHECK_EVENT_SCHEMA_VERSION}
                 )
                 or (
                     schema.name == "finding_recorded"
-                    and schema.version == FINDING_EVENT_SCHEMA_VERSION
+                    and schema.version
+                    in {FINDING_EVENT_SCHEMA_VERSION, FINDING_SNIPPET_EVENT_SCHEMA_VERSION}
                 )
             )
         )
@@ -2628,6 +2637,10 @@ class CheckRecordedPayload:
     projection_version: str
     semantic_provenance: SemanticProvenance | None = None
     semantic_conclusion: str | None = None
+    # Part 2 reviewer output. Prose and cited refs are bounded by the provider/check fence before
+    # publication; JsonObject keeps the event module independent from the provider adapter.
+    review_summary: str | None = None
+    verified: tuple[JsonObject, ...] = ()
     # Admitted reviewer rulings on earlier AI-powered findings, ASCII-ascending by finding id.
     prior_finding_verdicts: tuple[PriorFindingVerdictRecord, ...] = ()
     # What an ``insufficient_packet`` review named as missing, classified by Yoetz (issue #907).
@@ -2645,6 +2658,8 @@ class CheckRecordedPayload:
     semantic_withheld_item_ids: tuple[str, ...] = ()
     # Metadata-only input coverage for the exact check packet (issue #951).
     review_input_manifest: JsonObject | None = None
+    # Frozen-frontier structural totals; absent only on legacy check events.
+    totals: JsonObject | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mode", _exact_enum(self.mode, CheckMode))
@@ -2715,6 +2730,17 @@ class CheckRecordedPayload:
             or status is not SemanticStatus.SUCCEEDED
         ):
             raise ProtocolValueError("invalid_event_value_type")
+        if self.review_summary is not None:
+            object.__setattr__(
+                self,
+                "review_summary",
+                _bounded_text(self.review_summary, MAX_TEXT_BYTES, minimum=1),
+            )
+        if type(self.verified) is not tuple or len(self.verified) > 64:
+            raise ProtocolValueError("invalid_event_value_type")
+        if any(type(item) is not JsonObject for item in self.verified):
+            raise ProtocolValueError("invalid_event_value_type")
+        object.__setattr__(self, "verified", tuple(freeze_json(item) for item in self.verified))
         missing = _tuple(self.missing_for_assessment, 0, MAX_MISSING_FOR_ASSESSMENT)
         if any(type(item) is not MissingForAssessmentItem for item in missing):
             raise ProtocolValueError("invalid_event_value_type")
@@ -2776,6 +2802,10 @@ class CheckRecordedPayload:
             raise ProtocolValueError("invalid_event_value_type")
         if type(self.projection_version) is not str or self.projection_version != "yoetz/0.1.0":
             raise ProtocolValueError("invalid_event_value_type")
+        if self.totals is not None:
+            from yoetz.domain.check_totals import validate_check_totals
+
+            object.__setattr__(self, "totals", validate_check_totals(self.totals))
         verdicts = self.prior_finding_verdicts
         if (
             type(verdicts) is not tuple
@@ -2874,6 +2904,7 @@ PAYLOAD_TYPES: Final[Mapping[EventSchema, type[EventPayload]]] = MappingProxyTyp
         EventSchema("plan_revised", TASK_STATEMENT_PLAN_SCHEMA_VERSION): PlanRevisedPayload,
         EventSchema("finding_recorded", SCHEMA_VERSION): Finding,
         EventSchema("finding_recorded", FINDING_EVENT_SCHEMA_VERSION): Finding,
+        EventSchema("finding_recorded", FINDING_SNIPPET_EVENT_SCHEMA_VERSION): Finding,
         **{
             EventSchema("finding_recorded", version): Finding
             for version in SEMANTIC_EVENT_SCHEMA_VERSIONS
@@ -2883,6 +2914,7 @@ PAYLOAD_TYPES: Final[Mapping[EventSchema, type[EventPayload]]] = MappingProxyTyp
         EventSchema("redaction_recorded", SCHEMA_VERSION): RedactionRecordedPayload,
         EventSchema("check_recorded", SCHEMA_VERSION): CheckRecordedPayload,
         EventSchema("check_recorded", CHECK_EVENT_SCHEMA_VERSION): CheckRecordedPayload,
+        EventSchema("check_recorded", REVIEW_CHECK_EVENT_SCHEMA_VERSION): CheckRecordedPayload,
         **{
             EventSchema("check_recorded", version): CheckRecordedPayload
             for version in SEMANTIC_EVENT_SCHEMA_VERSIONS
@@ -3679,12 +3711,15 @@ _PAYLOAD_SHAPES: Final[Mapping[str, tuple[frozenset[str], frozenset[str]]]] = Ma
                 {
                     "semantic_provenance",
                     "semantic_conclusion",
+                    "review_summary",
+                    "verified",
                     "prior_finding_verdicts",
                     "missing_for_assessment",
                     "check_change_files",
                     "semantic_included_refs",
                     "semantic_withheld_item_ids",
                     "review_input_manifest",
+                    "totals",
                 }
             ),
         ),
@@ -4148,6 +4183,7 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
         )
     if schema.name == "check_recorded":
         provenance_value = _optional(source, "semantic_provenance")
+        verified_value = _optional(source, "verified")
         check = CheckRecordedPayload(
             mode=_enum_from_json(_field(source, "mode"), CheckMode),
             policies=tuple(
@@ -4171,6 +4207,12 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
             engine_version=cast(str, _field(source, "engine_version")),
             projection_version=cast(str, _field(source, "projection_version")),
             semantic_conclusion=cast(str | None, _optional(source, "semantic_conclusion")),
+            review_summary=cast(str | None, _optional(source, "review_summary")),
+            verified=(
+                ()
+                if verified_value is None
+                else tuple(cast(JsonObject, freeze_json(item)) for item in _array(verified_value))
+            ),
             prior_finding_verdicts=_decode_prior_verdicts(
                 _optional(source, "prior_finding_verdicts")
             ),
@@ -4191,6 +4233,11 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
             ),
             review_input_manifest=_review_input_manifest_from_json(
                 _optional(source, "review_input_manifest")
+            ),
+            totals=(
+                None
+                if _optional(source, "totals") is None
+                else cast(JsonObject, freeze_json(_field(source, "totals")))
             ),
             semantic_provenance=(
                 None
@@ -4681,6 +4728,8 @@ def encode_payload(payload: EventPayload) -> JsonValue:
             else semantic_provenance_to_json(value.semantic_provenance),
         )
         _optional_value(result, "semantic_conclusion", value.semantic_conclusion)
+        _optional_value(result, "review_summary", value.review_summary)
+        _optional_tuple(result, "verified", cast(tuple[object, ...], value.verified))
         _optional_tuple(
             result,
             "prior_finding_verdicts",
@@ -4716,6 +4765,7 @@ def encode_payload(payload: EventPayload) -> JsonValue:
             cast(tuple[object, ...], value.semantic_withheld_item_ids),
         )
         _optional_value(result, "review_input_manifest", value.review_input_manifest)
+        _optional_value(result, "totals", value.totals)
         return _json_object(result)
     if payload_type is ReceiptRecordedPayload:
         value = cast(ReceiptRecordedPayload, payload)
@@ -4786,12 +4836,40 @@ def _validate_event_schema_payload(
         if statement is None and schema in _TASK_STATEMENT_REQUIRED_SCHEMAS:
             raise ProtocolValueError("invalid_event_schema")
     if type(payload) is CheckRecordedPayload:
-        if (payload.semantic_conclusion is not None) != (
-            schema.version == CHECK_EVENT_SCHEMA_VERSION
-        ):
+        has_review_output = (
+            payload.review_summary is not None
+            or bool(payload.verified)
+            or payload.totals is not None
+        )
+        expected_check_version = (
+            REVIEW_CHECK_EVENT_SCHEMA_VERSION
+            if has_review_output
+            else CHECK_EVENT_SCHEMA_VERSION
+            if payload.semantic_conclusion is not None
+            else SEMANTIC_EVENT_SCHEMA_VERSION
+        )
+        if schema.version != expected_check_version:
             raise ProtocolValueError("invalid_event_schema")
     if type(payload) is Finding and schema.name == "finding_recorded":
-        if finding_has_dialogue_fields(payload) and schema.version != FINDING_EVENT_SCHEMA_VERSION:
+        has_snippet = payload.challenge is not None and payload.challenge.snippet is not None
+        has_new_kind = payload.kind in {
+            FindingKind.CODE_DEFECT,
+            FindingKind.TASK_REQUIREMENT_UNMET,
+        }
+        if has_snippet or has_new_kind:
+            if schema.version != FINDING_SNIPPET_EVENT_SCHEMA_VERSION:
+                raise ProtocolValueError("invalid_event_schema")
+        elif finding_has_dialogue_fields(payload):
+            if schema.version != FINDING_EVENT_SCHEMA_VERSION:
+                raise ProtocolValueError("invalid_event_schema")
+        elif schema.version not in {
+            SCHEMA_VERSION,
+            *SEMANTIC_EVENT_SCHEMA_VERSIONS,
+            FINDING_EVENT_SCHEMA_VERSION,
+        }:
+            # Ordinary findings written by older ledgers legally use the released 1.0.0 shape,
+            # semantic 1.1/1.2 additions, or the current dialogue-capable 1.3.0 shape. Keep all
+            # of those readable; 1.4.0 is reserved for snippets and the new semantic kinds.
             raise ProtocolValueError("invalid_event_schema")
     if type(payload) is ResponseRecordedPayload:
         if (payload.disposition is ResponseDisposition.ACKNOWLEDGED_NOT_DONE) != (

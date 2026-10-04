@@ -27,6 +27,7 @@ from yoetz.kernel.claims import (
     effective_claim_items,
     result_is_relevant_to_claim,
 )
+from yoetz.kernel.command_attempts import attempted_items_for_obligation
 from yoetz.kernel.deterministic_checks import (
     CALLER_DIGEST_PROVENANCE_GAPS,
     OBSERVED_FAILURE_LIVE_FACT,
@@ -42,6 +43,7 @@ from yoetz.kernel.deterministic_checks import (
 )
 from yoetz.kernel.observed_failures import (
     ObservedFailureState,
+    observed_action_is_exploratory,
     observed_event_ids_from_coverage,
     observed_failure_states,
 )
@@ -250,16 +252,11 @@ def _completion_findings(case: DeterministicCase) -> list[DeterministicAssessmen
 
 
 def _requested_item_findings(case: DeterministicCase) -> list[DeterministicAssessment]:
-    attempted = {
-        item
-        for record in case.projection.actions.values()
-        if record.payload is not None
-        for item in record.payload.attempted_items
-    }
     output: list[DeterministicAssessment] = []
     for obligation_ref in sorted(_active_requested_obligations(case), key=_ascii):
         record = case.projection.obligations[obligation_ref]
         payload = record.payload
+        attempted = attempted_items_for_obligation(case.projection, obligation_ref)
         if payload is None or not any(
             item.value not in attempted for item in payload.requested_items
         ):
@@ -284,8 +281,8 @@ def _failed_work_findings(case: DeterministicCase) -> list[DeterministicAssessme
         claim = claim_record.payload
         if claim is None or claim.claim_kind is not ClaimKind.COMPLETION:
             continue
-        # One shared reading (#909): a hook-observed failure later passed by the same command, or
-        # followed by a completed observed edit, is history the receipt counts, not an omission.
+        # One shared reading (#909): only a later run of the same keyed command can supersede a
+        # hook-observed failure. An edit changes the state under test but proves no covering rerun.
         states = observed_failure_states(
             case.projection, observed, through=claim_record.source_frontier
         )
@@ -298,6 +295,14 @@ def _failed_work_findings(case: DeterministicCase) -> list[DeterministicAssessme
             ):
                 continue
             state = states.get(result_id)
+            action = case.projection.actions.get(record.payload.action_id)
+            if state is not None and action is not None and action.payload is not None:
+                if action.source_event_id in observed and observed_action_is_exploratory(
+                    action.payload
+                ):
+                    # A known read/exploration command is useful context but is not a required
+                    # validation result. Unknown command classes remain limiting.
+                    continue
             if state is not None and state is not ObservedFailureState.LIVE:
                 continue
             observed_facts = [_fact("failed_result_present", result_id)]

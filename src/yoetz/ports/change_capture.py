@@ -35,6 +35,8 @@ __all__ = [
     "ChangeCapturePort",
     "ChangeCaptureUnavailable",
     "CheckChangeCapture",
+    "CheckChangeMetadata",
+    "ChangeMetadataEntry",
     "CheckWorkspaceSource",
     "TaskChangeBase",
     "TaskChangeBaseStorePort",
@@ -169,6 +171,91 @@ class CheckChangeCapture:
             raise _invalid()
 
 
+@dataclass(frozen=True, slots=True)
+class ChangeMetadataEntry:
+    """One changed path used only for local structural accounting.
+
+    The metadata path deliberately carries no bytes or line counts.  Its path is reduced in
+    process and never becomes a provider input or a durable check object.
+    """
+
+    status: str
+    path: str = field(repr=False)
+    untracked: bool = False
+    original_path: str | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.status) is not str
+            or not self.status
+            or len(self.status) > 2
+            or any(ord(char) < 0x20 or ord(char) > 0x7E for char in self.status)
+        ):
+            raise _invalid()
+        if (
+            type(self.path) is not str
+            or not self.path
+            or any(char in self.path for char in "\x00\r\n")
+        ):
+            raise _invalid()
+        if type(self.untracked) is not bool:
+            raise _invalid()
+        if self.original_path is not None and (
+            type(self.original_path) is not str
+            or not self.original_path
+            or any(char in self.original_path for char in "\x00\r\n")
+        ):
+            raise _invalid()
+        if self.original_path is not None and self.status != "R":
+            raise _invalid()
+
+
+@dataclass(frozen=True, slots=True)
+class CheckChangeMetadata:
+    """Bounded path/status facts for local test-edit accounting.
+
+    This is intentionally a separate result from :class:`CheckChangeCapture`: callers can inspect
+    changed paths without invoking the content-returning capture.  ``content_available`` remains
+    false for the metadata path, so skip markers are reported as unknown until a separately
+    authorized semantic capture supplies them.
+    """
+
+    base: ChangeBaseKind
+    entries: tuple[ChangeMetadataEntry, ...]
+    tracked_files: int
+    untracked_files: int
+    omitted_files: int
+    truncated: bool
+    content_available: bool = False
+    base_commit: str = field(default="", repr=False)
+
+    def __post_init__(self) -> None:
+        if self.base not in _BASE_KINDS:
+            raise _invalid()
+        if (
+            type(self.entries) is not tuple
+            or len(self.entries) > _MAX_FILE_COUNT
+            or any(type(item) is not ChangeMetadataEntry for item in self.entries)
+        ):
+            raise _invalid()
+        for count in (self.tracked_files, self.untracked_files, self.omitted_files):
+            if type(count) is not int or not 0 <= count <= _MAX_FILE_COUNT:
+                raise _invalid()
+        if self.omitted_files > self.tracked_files + self.untracked_files:
+            raise _invalid()
+        if type(self.truncated) is not bool or type(self.content_available) is not bool:
+            raise _invalid()
+        if self.content_available:
+            raise _invalid()
+        if self.omitted_files and not self.truncated:
+            raise _invalid()
+        if type(self.base_commit) is not str or (
+            self.base_commit
+            and (len(self.base_commit) not in {40, 64} or _HEX.fullmatch(self.base_commit) is None)
+        ):
+            raise _invalid()
+
+
 class ChangeCapturePort(Protocol):
     """Blocking, read-only Git access for one explicit local workspace directory."""
 
@@ -178,6 +265,10 @@ class ChangeCapturePort(Protocol):
 
     def capture(self, workspace: str, base: TaskChangeBase | None) -> CheckChangeCapture:
         """Render the change from ``base`` (or HEAD when ``None``) to the working tree."""
+        ...
+
+    def capture_metadata(self, workspace: str, base: TaskChangeBase | None) -> CheckChangeMetadata:
+        """Return bounded changed-path facts without reading or returning file content."""
         ...
 
 

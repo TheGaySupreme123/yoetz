@@ -11,7 +11,10 @@ from pydantic import BaseModel
 
 from yoetz.domain.findings import FINDING_KIND_TRAITS, FindingKind
 from yoetz.domain.receipts import check_time_change_gap_sentence
-from yoetz.domain.review_input_render import render_review_input_manifest_compact
+from yoetz.domain.review_input_render import (
+    has_agent_suppliable_missing,
+    render_review_input_manifest_compact,
+)
 from yoetz.mcp.errors import VALIDATION_REASON_TOKENS
 from yoetz.protocol.canonical import JsonValue, ensure_canonical_value
 from yoetz.protocol.errors import PublicErrorCode, normalize_safe_details
@@ -26,6 +29,7 @@ from yoetz.protocol.recovery import (
 
 __all__ = [
     "render_safe_compact_summary",
+    "render_check_reviewer_output",
     "summary_for_check",
     "summary_for_closure_prepare",
     "summary_for_public_error",
@@ -35,6 +39,29 @@ __all__ = [
 ]
 
 _MAX_SUMMARY_BYTES: Final = 512
+_MAX_REVIEW_OUTPUT_BYTES: Final = 12_288
+_REVIEW_VERDICTS: Final = frozenset({"supported", "not_supported", "not_assessable"})
+_REVIEW_KINDS: Final = frozenset(
+    {
+        "action_without_result",
+        "claim_without_admissible_evidence",
+        "completion_with_open_obligations",
+        "contradictory_claims_unresolved",
+        "coordination_overlap",
+        "diff_does_not_match_account",
+        "evidence_does_not_support_claim",
+        "failed_work_omitted",
+        "ledger_stale_or_incomplete",
+        "material_limitation_omitted",
+        "questionable_finding_rejection",
+        "requested_item_never_attempted",
+        "result_without_action",
+        "stale_evidence_for_changed_state",
+        "weak_or_stale_response",
+        "code_defect",
+        "task_requirement_unmet",
+    }
+)
 # A validation location pointer as ``yoetz.mcp.errors`` builds it: at most eight frozen
 # presentation-schema segments or bounded indexes. Re-gated here so a list member that is not that
 # exact shape is never rendered, whatever put it on the envelope.
@@ -45,6 +72,7 @@ _MAX_NAMED_VALIDATION_LOCATIONS: Final = 2
 _SAFE_TOKEN: Final = re.compile(r"^[A-Za-z0-9_+.-]{1,128}$", re.ASCII)
 _GAP_CODE: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$", re.ASCII)
 _READINESS_ITEM: Final = re.compile(r"^(?:unclassified_gap:)?[a-z][a-z0-9_]{0,127}$", re.ASCII)
+_MISSING_REF: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$", re.ASCII)
 # Closed shape for the frozen field and family tokens the repair clause may carry (issue #266).
 _FIELD_NAME: Final = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
 _SAFE_COUNT: Final = re.compile(r"^(?:0|[1-9][0-9]{0,18})$", re.ASCII)
@@ -199,7 +227,13 @@ def _checklist_clause(rows: object, budget: object, next_step: object | None) ->
     return clause
 
 
-def _checklist_counts_clause(counts: object, budget: object, next_step: object) -> str:
+def _checklist_counts_clause(
+    counts: object,
+    budget: object,
+    next_step: object,
+    *,
+    input_action_required: bool = False,
+) -> str:
     """The check's to-do counts, taken from its whole-list ``counts`` object (issue #905)."""
 
     if not isinstance(counts, Mapping):
@@ -230,8 +264,80 @@ def _checklist_counts_clause(counts: object, budget: object, next_step: object) 
         + f", rejection accepted {values['rejection_accepted']}; "
     )
     if type(next_step) is str and next_step in _CHECKLIST_NEXT:
-        clause += f"next: {next_step}; "
+        label = "finding checklist next" if input_action_required else "next"
+        clause += f"{label}: {next_step}; "
     return clause
+
+
+def _overall_next_clause(source: Mapping[str, JsonValue], *, byte_budget: int) -> str:
+    """Render the structured task continuation before the finding-only checklist (#963)."""
+
+    raw = source.get("overall_next")
+    if not isinstance(raw, Mapping) or byte_budget <= 0:
+        return ""
+    next_source = cast(Mapping[str, JsonValue], raw)
+    action = next_source.get("action")
+    status = next_source.get("status")
+    if action not in {
+        "supply_missing_input",
+        "work_open_findings",
+        "review_recorded_work",
+        "request_receipt",
+    }:
+        return ""
+    if status not in {"action_required", "ready_with_limitations", "ready"}:
+        return ""
+    raw_refs = next_source.get("target_refs")
+    refs = (
+        tuple(
+            value
+            for value in cast(Sequence[JsonValue], raw_refs)
+            if type(value) is str and _MISSING_REF.fullmatch(value) is not None
+        )
+        if isinstance(raw_refs, (list, tuple))
+        else ()
+    )
+    if action in {"work_open_findings", "review_recorded_work"} and not refs:
+        return ""
+    if action == "request_receipt" and refs:
+        return ""
+    endpoint = next_source.get("acknowledged_incomplete_endpoint")
+    endpoint_clause = "; acknowledged incomplete endpoint: receipt" if endpoint == "receipt" else ""
+    disclosure_clause = (
+        "; disclose limitation at: receipt"
+        if status == "ready_with_limitations" and endpoint == "receipt"
+        else ""
+    )
+    # ``summary_for_check`` reserves room for its fixed status/frontier/recovery tail.  Keep the
+    # action and status inside that reduced budget, and spend the remaining bytes on target refs;
+    # a long 64-ref list must never make the authoritative continuation disappear altogether.
+    available = max(0, byte_budget - _OPTIONAL_CLAUSE_RESERVE)
+    fixed = f"overall next: {action}; status: {status}{endpoint_clause}{disclosure_clause}"
+    if len(fixed.encode("ascii")) > available:
+        return fixed + "; "
+    if not refs:
+        return fixed + "; "
+    target_prefix = "; targets: "
+    candidate = fixed + target_prefix
+    shown: list[str] = []
+    for ref in refs:
+        separator = "" if not shown else ","
+        trial = candidate + separator + ref + "; "
+        if len(trial.encode("ascii")) > available:
+            break
+        shown.append(ref)
+        candidate = candidate + separator + ref
+    omitted = len(refs) - len(shown)
+    if omitted:
+        marker = f",...(+{omitted})" if shown else f"...(+{omitted})"
+        while shown and len((candidate + marker + "; ").encode("ascii")) > available:
+            shown.pop()
+            candidate = fixed + target_prefix + ",".join(shown)
+            marker = f",...(+{len(refs) - len(shown)})" if shown else f"...(+{len(refs)})"
+        if len((candidate + marker + "; ").encode("ascii")) <= available:
+            return candidate + marker + "; "
+        return fixed + "; "
+    return candidate + "; "
 
 
 # Room the fixed identity, frontier and recovery clauses still need after an optional clause.
@@ -305,12 +411,24 @@ def _missing_items_clause(source: Mapping[str, JsonValue], *, byte_budget: int) 
     for item in cast(Sequence[JsonValue], raw):
         if not isinstance(item, Mapping):
             continue
-        kind = cast(Mapping[str, JsonValue], item).get("kind")
-        availability = cast(Mapping[str, JsonValue], item).get("availability")
+        item_source = cast(Mapping[str, JsonValue], item)
+        kind = item_source.get("kind")
+        availability = item_source.get("availability")
         if kind not in _MISSING_KINDS or availability not in _MISSING_AVAILABILITIES:
             continue
         suppliable += availability == "agent_suppliable"
-        tokens.append(f"{kind}={availability}")
+        refs = item_source.get("target_refs")
+        safe_refs = (
+            tuple(
+                value
+                for value in cast(Sequence[JsonValue], refs)
+                if type(value) is str and _MISSING_REF.fullmatch(value) is not None
+            )
+            if isinstance(refs, (list, tuple))
+            else ()
+        )
+        target = f"[{','.join(safe_refs)}]" if safe_refs else ""
+        tokens.append(f"{kind}={availability}{target}")
     if not tokens:
         return ""
     return _bounded_list_clause(
@@ -459,6 +577,129 @@ def _bounded(summary: str) -> str:
     if len(encoded) > _MAX_SUMMARY_BYTES:
         raise ValueError("summary_too_large")
     return summary
+
+
+def _review_text(value: object) -> str | None:
+    """Return one already privacy-projected review field, or a fixed omission marker."""
+
+    if type(value) is str and value:
+        return value
+    if isinstance(value, Mapping):
+        source = cast(Mapping[str, JsonValue], value)
+        if source.get("omitted") is True and source.get("category") == "finding_summary":
+            return "[review text omitted by privacy policy]"
+    return None
+
+
+def _review_refs(value: object) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(
+        item
+        for item in cast(Sequence[JsonValue], value)
+        if type(item) is str and _MISSING_REF.fullmatch(item) is not None
+    )[:16]
+
+
+def _clip_review_text(value: str, budget: int) -> str:
+    if budget <= 0:
+        return ""
+    encoded = value.encode("utf-8")
+    if len(encoded) <= budget:
+        return value
+    suffix = "…".encode()
+    if budget <= len(suffix):
+        return suffix[:budget].decode("utf-8", errors="ignore")
+    return encoded[: budget - len(suffix)].decode("utf-8", errors="ignore") + "…"
+
+
+def render_check_reviewer_output(envelope: object) -> str:
+    """Render authorized reviewer prose after the structural MCP summary.
+
+    ``render_safe_compact_summary`` stays structural and bounded to its historical 512-byte
+    contract. This separate section carries only the privacy-projected Part 2 fields, with fixed
+    labels and a larger overall bound so a successful review is visible to text-only hosts.
+    """
+
+    source = _mapping(envelope)
+    lines: list[str] = []
+    summary = _review_text(source.get("review_summary"))
+    if summary is not None:
+        lines.append("Reviewer summary: " + summary)
+
+    raw_verified = source.get("verified")
+    verified = (
+        cast(Sequence[JsonValue], raw_verified) if isinstance(raw_verified, (list, tuple)) else ()
+    )
+    if verified:
+        lines.append("Verified judgements:")
+        for raw in verified:
+            if not isinstance(raw, Mapping):
+                continue
+            item = cast(Mapping[str, JsonValue], raw)
+            verdict = item.get("verdict")
+            if verdict not in _REVIEW_VERDICTS:
+                continue
+            requirement = _review_text(item.get("requirement_or_claim"))
+            if requirement is None:
+                requirement = "[requirement omitted by privacy policy]"
+            refs = _review_refs(item.get("cited_refs"))
+            ref_clause = f"; refs: {', '.join(refs)}" if refs else ""
+            lines.append(f"- {verdict}: {requirement}{ref_clause}")
+            snippet = _review_text(item.get("snippet"))
+            if snippet is not None:
+                lines.append("  Supporting snippet: " + snippet)
+
+    raw_findings = source.get("findings")
+    findings = (
+        cast(Sequence[JsonValue], raw_findings) if isinstance(raw_findings, (list, tuple)) else ()
+    )
+    challenge_rows: list[tuple[str, Mapping[str, JsonValue]]] = []
+    for raw in findings:
+        if not isinstance(raw, Mapping):
+            continue
+        finding = cast(Mapping[str, JsonValue], raw)
+        challenge = finding.get("challenge")
+        if isinstance(challenge, Mapping):
+            challenge_rows.append(
+                (cast(str, finding.get("kind", "")), cast(Mapping[str, JsonValue], challenge))
+            )
+    if challenge_rows:
+        lines.append("Reviewer challenges:")
+        for kind, challenge in challenge_rows:
+            if kind not in _REVIEW_KINDS:
+                kind = "review finding"
+            discrepancy = _review_text(challenge.get("discrepancy"))
+            if discrepancy is not None:
+                lines.append(f"- {kind}: {discrepancy}")
+            snippet = _review_text(challenge.get("snippet"))
+            if snippet is not None:
+                lines.append("  Supporting snippet: " + snippet)
+
+    if not lines:
+        return ""
+    lines.insert(0, "AI-powered reviewer output (advisory; model-derived; not independent proof):")
+    rendered: list[str] = []
+    used = 0
+    truncation_notice = "Reviewer output truncated at the local text budget."
+    total_bytes = sum(len(line.encode("utf-8")) for line in lines) + max(len(lines) - 1, 0)
+    budget = _MAX_REVIEW_OUTPUT_BYTES
+    if total_bytes > budget:
+        budget -= len(truncation_notice.encode("utf-8")) + 1
+    for line in lines:
+        separator = 1 if rendered else 0
+        remaining = budget - used - separator
+        clipped = _clip_review_text(line, remaining)
+        if not clipped:
+            break
+        rendered.append(clipped)
+        used += separator + len(clipped.encode("utf-8"))
+        if len(clipped) < len(line):
+            break
+    result = "\n".join(rendered)
+    if total_bytes > _MAX_REVIEW_OUTPUT_BYTES and result:
+        result += "\n" + truncation_notice
+    return result
 
 
 def _repair_clause(error: Mapping[str, JsonValue]) -> str:
@@ -703,7 +944,17 @@ def summary_for_check(envelope: object) -> str:
     suppressed = _safe_count(source.get("suppressed_count"))
     status = _safe_token(source.get("semantic_status"))
     reason = _safe_token(source.get("semantic_reason"))
-    if status == "not_requested":
+    scoped_local_verdict = (
+        verdict == "no_issue_detected"
+        and status == "not_requested"
+        and reason == "deterministic_mode"
+    )
+    if scoped_local_verdict:
+        prefix = (
+            "No issue detected within deterministic coverage; AI-powered review was not requested; "
+            f"findings returned: {findings}; suppressed: {suppressed}; "
+        )
+    elif status == "not_requested":
         prefix = (
             f"AI-powered review not requested; local-only check verdict: {verdict}; "
             f"findings returned: {findings}; suppressed: {suppressed}; "
@@ -722,6 +973,17 @@ def summary_for_check(envelope: object) -> str:
     notes = source.get("advisory_notes")
     if isinstance(notes, (list, tuple)) and notes:
         prefix += f"project advice (non-verdict): {len(notes)}; "
+    input_action_required = has_agent_suppliable_missing(source.get("missing_for_assessment"))
+    overall_clause = _overall_next_clause(
+        source, byte_budget=_MAX_SUMMARY_BYTES - len(prefix.encode("ascii"))
+    )
+    if overall_clause:
+        prefix += overall_clause
+    elif input_action_required:
+        # Keep the input continuation ahead of the optional checklist and manifest clauses. A
+        # large finding list must never consume the bounded summary budget and leave only the
+        # finding-only ``request_receipt`` token (#963).
+        prefix = _with_room(prefix, "overall next: supply_missing_input before ordinary receipt; ")
     checklist = source.get("finding_checklist")
     if isinstance(checklist, Mapping):
         checklist_source = cast(Mapping[str, JsonValue], checklist)
@@ -731,6 +993,7 @@ def summary_for_check(envelope: object) -> str:
                 checklist_source.get("counts"),
                 checklist_source.get("attempt_budget"),
                 checklist_source.get("next"),
+                input_action_required=input_action_required or bool(overall_clause),
             ),
         )
     manifest_clause = render_review_input_manifest_compact(source.get("review_input_manifest"))
@@ -833,6 +1096,27 @@ def _compact_status_fields(source: Mapping[str, JsonValue], view: str) -> tuple[
     )
 
 
+def _compact_test_edit_clause(source: Mapping[str, JsonValue], view: str) -> str:
+    """Render the compact status' bounded latest-check test-edit counters."""
+
+    if view != "compact":
+        return ""
+    item = _first_page_item(source)
+    if item is None or not isinstance(item.get("latest_check_test_edits"), Mapping):
+        return ""
+    edits = cast(Mapping[str, JsonValue], item["latest_check_test_edits"])
+    availability = _safe_token(edits.get("read_availability"))
+    return (
+        f"test edits {availability}: "
+        f"{_safe_count(edits.get('modified'))} modified, "
+        f"{_safe_count(edits.get('renamed'))} renamed, "
+        f"{_safe_count(edits.get('deleted'))} deleted, "
+        f"{_safe_count(edits.get('skipped'))} skipped, "
+        f"{_safe_count(edits.get('unjustified'))} unjustified, "
+        f"{_safe_count(edits.get('unknown'))} unknown; "
+    )
+
+
 def summary_for_status(envelope: object) -> str:
     source = _mapping(envelope)
     view = _safe_token(source.get("view"))
@@ -856,6 +1140,7 @@ def summary_for_status(envelope: object) -> str:
         f"Status view: {view}; {_frontier_clause(source)}; freshness: {freshness}; "
         f"open obligations: {obligations}; "
     )
+    prefix = _with_room(prefix, _compact_test_edit_clause(source, view))
     if view == "evidence":
         prefix += _evidence_channel_clause(source)
     if view == "operation":

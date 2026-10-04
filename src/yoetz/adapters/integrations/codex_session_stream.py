@@ -53,6 +53,8 @@ from yoetz.domain.observation_selection import (
     ObservationClassification,
     ObservationContentRole,
     classify_observation,
+    command_runner_class,
+    compound_verification_gap_required,
 )
 from yoetz.domain.values import JsonObject, JsonValue, Timestamp, timestamp_from_datetime
 from yoetz.ports.importer import ImportLineStatus
@@ -1166,6 +1168,20 @@ def structural_from_stream_record(
             normalized = normalize_observed_command(body.get("command"))
             if normalized is not None:
                 fields["command_commitment"] = observed_command_commitment(key_material, normalized)
+        if item_type == "CommandExecution":
+            command_payload = JsonObject(
+                {
+                    "tool_name": tool or "shell",
+                    "command": body.get("command"),
+                }
+            )
+            runner = command_runner_class(command_payload)
+            if runner is not None:
+                fields["runner_class"] = runner
+                if compound_verification_gap_required(command_payload):
+                    # Preserve the host's outer result. The bounded gap records that a
+                    # masking-capable composition does not expose each nested outcome (#968).
+                    gaps.add(ObservationGapCode.COMPOUND_OUTCOME_UNAVAILABLE.value)
         if item_type != "SubAgentActivity":
             call_id = _token(body.get("id")) or _token(body.get("call_id"))
             if call_id is not None:

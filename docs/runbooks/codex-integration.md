@@ -1710,23 +1710,25 @@ activation, and native host dogfood remain separate evidence.
 ### Observation limitation findings and closure rechecks (issue #911)
 
 Codex sessions carry the standing `unpaired_event` gap from start to finish (hook actions outnumber
-results; the cause is issue #917), so builds up to `0.3@dda53ae2` recorded the advisory finding
+results; the cause is issue #917). Older builds recorded the advisory finding
 `fnd_8a9389b5-…` in every Codex session and delivered it through `PostToolUse` `additionalContext`.
 Decision for this host: supported, same rule as every host. The rule is service-side and
 host-neutral: an observation-authored, non-actionable finding (the "Observation coverage is
 incomplete or stale" advisory, including rows written by earlier builds) never counts in
 `unanswered_finding_count` or `findings_unanswered`, and acknowledging it once is optional and never
 supersedes a recorded check. It stays in `status view=findings` and on the receipt as a disclosed
-limitation and does not become resolvable. The hook `refresh_observation` clause asks the agent to
-wait only while `yoetz observe status` reports lag or a drain backlog. The shared guidance and this
-host's skill give the closure order: answer unanswered findings before the final check (the current
-status frontier is a valid `finding_frontier`), answer only the findings that check returns that are
-still unanswered, then `receipt`, then `work_closed`; no recheck follows those answers,
-`work_closed`, or an `insufficient_packet` review without a new repair, while a recorded repair
-still gets its re-check. Which conditions raise the advisory, and how the sticky `unpaired_event`
-gap surfaces, are owned by issue #917. Verification: shared-path regressions cover the ledger rule
-on the memory and SQLite backends; a live Codex dogfood transcript on macOS, Linux and WSL 2 is not
-yet recorded. That gap is owned by issue #911.
+limitation and does not become resolvable. `refresh_observation` is an operator continuation: it
+remains in structured observation advice and `yoetz observe status` for real recoverable causes
+such as source lag, a stale cursor, a drain backlog, service unavailability, or a locked vault,
+but is never copied into Codex hook context. Hook context is reserved for work advice. The shared
+guidance and this host's skill give the closure order: answer unanswered findings before the final
+check (the current status frontier is a valid `finding_frontier`), answer only the findings that
+check returns that are still unanswered, then `receipt`, then `work_closed`; no recheck follows
+those answers, `work_closed`, or an `insufficient_packet` review without a new repair, while a
+recorded repair still gets its re-check. Which conditions raise the advisory, and how the sticky
+`unpaired_event` gap surfaces, are owned by issue #917. Verification: shared-path regressions cover
+the ledger rule on the memory and SQLite backends; a live Codex dogfood transcript on macOS, Linux
+and WSL 2 is not yet recorded. That gap is owned by issue #911.
 
 ### Closure readiness and standing limitations (#913)
 

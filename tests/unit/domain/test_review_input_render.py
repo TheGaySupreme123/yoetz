@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from yoetz.domain.review_input_render import (
+    has_agent_suppliable_missing,
     render_missing_for_assessment_lines,
+    render_missing_for_assessment_next,
     render_review_input_manifest_compact,
     render_review_input_manifest_compat_line,
     render_review_input_manifest_coverage_note,
@@ -106,4 +108,23 @@ def test_missing_renderer_preserves_refs_for_cli_and_mcp_surfaces() -> None:
         "Missing for assessment (the reviewer could not assess the packet):",
         "- current_diff_for_path (evd_00000000-0000-4000-8000-000000000004): "
         "structurally_unavailable_on_this_host",
+    )
+
+
+def test_missing_renderer_prioritizes_agent_suppliable_input_over_a_receipt() -> None:
+    items = [
+        {
+            "kind": "verification_output",
+            "target_refs": ["res_00000000-0000-4000-8000-000000000002"],
+            "availability": "agent_suppliable",
+        }
+    ]
+
+    assert has_agent_suppliable_missing(items)
+    assert render_missing_for_assessment_next(items) == (
+        "Overall next: supply or repair the named agent-suppliable review input "
+        "before requesting an ordinary receipt."
+    )
+    assert render_missing_for_assessment_lines(items)[-1] == render_missing_for_assessment_next(
+        items
     )

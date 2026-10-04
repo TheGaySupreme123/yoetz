@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import json
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -241,7 +243,7 @@ def test_minimization_is_deterministic_and_cannot_include_forbidden_item() -> No
     assert first.forbidden_findings == ()
 
 
-def test_heuristic_only_item_is_withheld_without_blocking_clean_item() -> None:
+def test_heuristic_only_item_is_span_redacted_without_blocking_clean_item() -> None:
     candidate = CandidateContext(
         request_id=_REQUEST,
         channel=None,
@@ -276,11 +278,13 @@ def test_heuristic_only_item_is_withheld_without_blocking_clean_item() -> None:
 
     decision = _decision(classified)
     minimized = enforcer.minimize_and_scan(classified, decision)
-    assert minimized.included_item_ids == ("clean",)
-    assert minimized.heuristic_item_ids == ("heuristic",)
+    assert minimized.included_item_ids == ("clean", "heuristic")
+    assert minimized.heuristic_item_ids == ()
     assert minimized.forbidden_findings == ()
     assert minimized.heuristic_findings == ()
+    assert minimized.redacted_span_count == 1
     assert b"bounded-but-suspicious-value" not in minimized.prepared_bytes
+    assert base64.b64encode(b"auth_token: '[REDACTED]'") in minimized.prepared_bytes
 
 
 def test_mixed_case_keeps_concrete_credentials_as_whole_case_findings() -> None:
@@ -367,6 +371,7 @@ def test_semantic_heuristic_omission_keeps_review_packet_reference_closure() -> 
                     "occurred_order": 2,
                 },
             ],
+            "question_set": ["auth_token: envelope-suspicious-value"],
             "review_packet": {
                 "targeted_excerpts": [
                     {"excerpt_item_id": "clean", "source_kind": "evidence"},
@@ -405,7 +410,8 @@ def test_semantic_heuristic_omission_keeps_review_packet_reference_closure() -> 
                 DataCategory.EVIDENCE_EXCERPT,
                 _scope(),
                 "/case/excerpt/heuristic",
-                b"auth_token: 'bounded-but-suspicious-value'",
+                b'{"event_id":"evt_10000000-0000-4000-8000-000000000011",'
+                b'"payload":{"auth_token":"bounded secret words"}}',
             ),
         ),
     )
@@ -430,20 +436,169 @@ def test_semantic_heuristic_omission_keeps_review_packet_reference_closure() -> 
             source_ref = row.get("source_ref")
             if type(source_ref) is str:
                 source_refs.append(source_ref)
-    assert set(source_refs) == {clean_ref}
+    assert set(source_refs) == {clean_ref, withheld_ref}
     review_packet = packet["review_packet"]
     assert isinstance(review_packet, dict)
     omissions = review_packet["omissions"]
     assert isinstance(omissions, list)
-    assert any(
-        isinstance(row, dict)
-        and row.get("subject_ref") == withheld_ref
-        and row.get("reason") == "never_send_heuristic"
-        for row in omissions
+    assert not any(
+        isinstance(row, dict) and row.get("subject_ref") == withheld_ref for row in omissions
     )
     targeted = review_packet["targeted_excerpts"]
     assert isinstance(targeted, list)
-    assert all(isinstance(row, dict) and row.get("excerpt_item_id") == "clean" for row in targeted)
+    targeted_ids: list[str] = []
+    for row in targeted:
+        if isinstance(row, dict) and type(item_id := row.get("excerpt_item_id")) is str:
+            targeted_ids.append(item_id)
+    assert set(targeted_ids) == {"clean", "heuristic"}
+    redacted_targeted = [
+        row
+        for row in targeted
+        if isinstance(row, dict) and row.get("excerpt_item_id") == "heuristic"
+    ]
+    assert redacted_targeted[0].get("content_visibility") == "redacted_never_send"
+    assert b"bounded secret words" not in minimized.prepared_bytes
+    assert minimized.heuristic_findings == ()
+    heuristic_rows = [
+        row for row in rows if isinstance(row, dict) and row.get("item_id") == "heuristic"
+    ]
+    assert len(heuristic_rows) == 1
+    content = heuristic_rows[0].get("content")
+    assert type(content) is str
+    assert json.loads(content) == {
+        "event_id": "evt_10000000-0000-4000-8000-000000000011",
+        "payload": {"auth_token": "[REDACTED]"},
+    }
+    assert packet["question_set"] == ["auth_token: [REDACTED]"]
+
+
+def test_malformed_semantic_envelope_cannot_dispatch_empty_fallback() -> None:
+    candidate = CandidateContext(
+        request_id=_REQUEST,
+        channel=EgressChannel.LLM_INFERENCE,
+        local_sink=None,
+        purpose="semantic-review",
+        scope=_scope(),
+        subject_digest=_DIGEST,
+        provider_binding=None,
+        items=(
+            CandidateContextItem(
+                "review-packet",
+                DataCategory.BOUNDED_STRUCTURAL_METADATA,
+                _scope(),
+                "/case/review-packet",
+                b"not a review packet",
+            ),
+            CandidateContextItem(
+                "clean",
+                DataCategory.FINDING_SUMMARY,
+                _scope(),
+                "/case/summary",
+                b"bounded finding",
+            ),
+        ),
+    )
+    enforcer = LocalPrivacyEnforcer()
+    classified = enforcer.classify(candidate, _effective())
+    minimized = enforcer.minimize_and_scan(
+        classified,
+        PrivacyDecision(
+            ("clean", "review-packet"),
+            (),
+            PrivacyOutcome.COMPLETED,
+            None,
+        ),
+    )
+
+    assert minimized.included_item_ids == ()
+    assert json.loads(minimized.prepared_bytes) == {
+        "items": [],
+        "omissions": [],
+        "schema": "yoetz.review-packet-case/2",
+    }
+
+
+def test_non_targeted_redaction_is_bound_in_provider_manifest() -> None:
+    from yoetz.application.semantic_case import (
+        assemble_filtered_review_packet,
+        review_packet_disclosure_result,
+    )
+    from yoetz.protocol.canonical import strict_json_parse
+
+    source_ref = "evd_10000000-0000-4000-8000-000000000014"
+
+    def section(*, item_ids: list[str], source_refs: list[str]) -> dict[str, object]:
+        return {
+            "content_bytes": 1,
+            "content_digest": _DIGEST,
+            "item_ids": item_ids,
+            "omission_reasons": [],
+            "omitted_refs": [],
+            "revision": 1,
+            "source_refs": source_refs,
+            "status": "complete",
+        }
+
+    envelope: dict[str, object] = {
+        "case_digest": _DIGEST,
+        "case_id": "cas_10000000-0000-4000-8000-000000000015",
+        "dependency_digest": _DIGEST,
+        "frontier_refs": [source_ref],
+        "item_catalog": [
+            {
+                "category": "evidence_excerpt",
+                "content_bytes": 25,
+                "item_id": "redacted",
+                "section": "excerpt",
+                "source_kind": "evidence",
+                "source_ref": source_ref,
+                "linked_subject_refs": [source_ref],
+                "occurred_order": 0,
+            }
+        ],
+        "local_check_refs": [],
+        "review_packet": {
+            "review_input_manifest": {
+                "caller_evidence": section(item_ids=["redacted"], source_refs=[source_ref]),
+                "current_diff": section(item_ids=[], source_refs=[]),
+                "latest_verification": section(item_ids=[], source_refs=[]),
+                "missing_inputs": [],
+                "omitted_item_count": 0,
+                "phase": "composed",
+                "prior_finding_context": section(item_ids=[], source_refs=[]),
+                "schema": "yoetz.review-input-manifest/1",
+                "selected_excerpt_bytes": 25,
+                "selected_item_count": 1,
+                "specification": section(item_ids=[], source_refs=[]),
+            },
+            "targeted_excerpts": [],
+            "omissions": [],
+        },
+        "schema": "yoetz.review-packet-case/2",
+    }
+    prepared = assemble_filtered_review_packet(
+        envelope,
+        content_by_id={"redacted": b'auth_token: "[REDACTED]"'},
+        included_item_ids={"redacted"},
+        redacted_item_ids={"redacted"},
+    )
+    packet = strict_json_parse(prepared)
+    assert isinstance(packet, dict)
+    rows = packet["items"]
+    assert isinstance(rows, list)
+    assert isinstance(rows[0], dict)
+    assert rows[0]["transformations"] == [
+        {
+            "after_bytes": 24,
+            "before_bytes": 25,
+            "kind": "redacted",
+            "reason": "sensitive_redacted",
+        }
+    ]
+    result = review_packet_disclosure_result(prepared)
+    assert result.failure is None
+    assert result.disclosure is not None
+    assert result.disclosure.provider_input_manifest is not None
 
 
 class _Provenance:

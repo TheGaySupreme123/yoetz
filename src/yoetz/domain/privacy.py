@@ -1999,6 +1999,13 @@ class DisclosureProposal:
     # ``legacy`` would misleadingly name a scanner registry that was never observed.
     scanner_registry_version: str = "unknown"
     scanner_profile_digest: str = "sha256:" + "0" * 64
+    # The minimized case identities are retained separately from their content digests.  A digest
+    # is evidence about bytes, not an opaque case-item identity, and substituting one for the
+    # other during resume loses the exact replacement/withheld-item binding.
+    included_item_ids: tuple[str, ...] = ()
+    # Proposal admission is route-bound.  Missing identity is an unreadable legacy proposal, not
+    # permission to resume it against whichever route happens to be active now.
+    route_identity_digest: str | None = None
 
     def __post_init__(self) -> None:
         validate_id(IdKind.PRIVACY_PROPOSAL, self.privacy_proposal_id)
@@ -2039,6 +2046,16 @@ class DisclosureProposal:
             _text(item_id, _OPAQUE)
         _text(self.scanner_registry_version, _VERSION)
         validate_sha256_digest(self.scanner_profile_digest)
+        if type(self.included_item_ids) is not tuple or self.included_item_ids != tuple(
+            sorted(set(self.included_item_ids), key=str.encode)
+        ):
+            raise _invalid()
+        if len(self.included_item_ids) > 4096:
+            raise _invalid()
+        for item_id in self.included_item_ids:
+            _text(item_id, _OPAQUE)
+        if self.route_identity_digest is not None:
+            validate_sha256_digest(self.route_identity_digest)
 
 
 type PrivacyAuditSubject = (
@@ -2130,6 +2147,7 @@ class ApprovedOutboundCase:
     policy_digest: str
     case_digest: str
     withheld_item_ids: tuple[str, ...] = ()
+    redacted_span_count: int = 0
 
     def __post_init__(self) -> None:
         validate_id(IdKind.OUTBOUND_CASE, self.case_id)
@@ -2160,6 +2178,7 @@ class ApprovedOutboundCase:
         object.__setattr__(self, "withheld_item_ids", _sorted_text(self.withheld_item_ids))
         if len(self.withheld_item_ids) > MAX_WITHHELD_ITEM_IDS:
             raise _invalid()
+        _nonnegative(self.redacted_span_count)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2180,6 +2199,7 @@ class ApprovedLocalDisclosureCase:
     policy_digest: str
     case_digest: str
     withheld_item_ids: tuple[str, ...] = ()
+    redacted_span_count: int = 0
 
     def __post_init__(self) -> None:
         validate_id(IdKind.OUTBOUND_CASE, self.case_id)
@@ -2210,6 +2230,7 @@ class ApprovedLocalDisclosureCase:
         object.__setattr__(self, "withheld_item_ids", _sorted_text(self.withheld_item_ids))
         if len(self.withheld_item_ids) > MAX_WITHHELD_ITEM_IDS:
             raise _invalid()
+        _nonnegative(self.redacted_span_count)
 
 
 type ApprovedProviderCase = ApprovedOutboundCase | ApprovedLocalDisclosureCase

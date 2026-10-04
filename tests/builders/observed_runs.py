@@ -36,6 +36,7 @@ from yoetz.domain.events import (
 )
 from yoetz.domain.findings import FindingKind
 from yoetz.domain.observation import normalize_observed_command, observed_command_commitment
+from yoetz.domain.observation_selection import command_runner_class
 from yoetz.domain.receipts import (
     PolicyVersionEntry,
     ReceiptSectionKey,
@@ -49,6 +50,7 @@ from yoetz.domain.values import (
     EventId,
     Frontier,
     ResultId,
+    SubjectStateRef,
     action_id,
     actor_id,
     claim_id,
@@ -239,6 +241,7 @@ class ObservedLedger:
         observed: bool = True,
         raw_command: str | None = None,
         tool: str | None = None,
+        subject_state: SubjectStateRef | None = None,
     ) -> ResultId:
         """Record one tool call as the coordinator materializes it: action, then result."""
 
@@ -253,6 +256,16 @@ class ObservedLedger:
             )
         else:
             recorded = None
+        default_tool = (
+            tool
+            if tool is not None
+            else "exec_command"
+            if kind is ActionKind.COMMAND
+            else "apply_patch"
+        )
+        runner_class = command_runner_class(
+            {"tool_name": default_tool, "command": command}  # type: ignore[dict-item]
+        )
         self._append(
             _ACTION,
             ActionRecordedPayload(
@@ -260,13 +273,11 @@ class ObservedLedger:
                 kind,
                 observed_action_description(
                     f"Observed {kind.value} via Codex hook",
-                    tool
-                    if tool is not None
-                    else "exec_command"
-                    if kind is ActionKind.COMMAND
-                    else "apply_patch",
+                    default_tool,
+                    runner_class,
                 ),
                 command=recorded,
+                subject_state=subject_state,
             ),
             observed=observed,
         )
@@ -279,6 +290,7 @@ class ObservedLedger:
                 outcome,
                 exit_status=exit_status,
                 summary=f"Observed result status={outcome.value}",
+                subject_state=subject_state,
             ),
             observed=observed,
             # The coordinator marks an outcome-less observed result with the one standing gap.
@@ -296,10 +308,15 @@ class ObservedLedger:
     def passes(self, command: str | None) -> ResultId:
         return self.run(command, ResultOutcome.SUCCESS, exit_status=0)
 
-    def edit(self, outcome: ResultOutcome = ResultOutcome.SUCCESS) -> ResultId:
+    def edit(
+        self,
+        outcome: ResultOutcome = ResultOutcome.SUCCESS,
+        *,
+        subject_state: SubjectStateRef | None = None,
+    ) -> ResultId:
         """An observed apply_patch/edit capture; Codex states its exit code (#883)."""
 
-        return self.run(None, outcome, kind=ActionKind.EDIT)
+        return self.run(None, outcome, kind=ActionKind.EDIT, subject_state=subject_state)
 
     def claim(
         self,

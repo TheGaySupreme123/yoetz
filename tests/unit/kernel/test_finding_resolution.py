@@ -616,6 +616,13 @@ def test_snapshot_rejects_a_null_resolution_key() -> None:
         "unpaired_event",
         "semantic_case_content_over_item_limit",
         "semantic_case_finding_refs_over_limit",
+        "semantic_missing_non_convergent",
+        "semantic_provider_input_manifest_missing",
+        "semantic_provider_input_manifest_invalid",
+        "semantic_provider_input_manifest_parse_failed",
+        "semantic_provider_input_manifest_mismatch",
+        "semantic_provider_input_manifest_recovery_failed",
+        "semantic_review_snippet_invalid",
     ],
 )
 def test_resolution_explains_only_disqualifying_semantic_gaps(gap: str) -> None:

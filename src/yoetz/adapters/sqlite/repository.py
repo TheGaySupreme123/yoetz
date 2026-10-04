@@ -1048,8 +1048,12 @@ class SqliteLedger:
                                     f"{item.policy_id}/{item.policy_version}" for item in executions
                                 ),
                             ),
+                            semantic_conclusion=check_payload.semantic_conclusion,
+                            review_summary=check_payload.review_summary,
+                            verified=check_payload.verified,
                             missing_for_assessment=check_payload.missing_for_assessment,
                             review_input_manifest=check_payload.review_input_manifest,
+                            totals=check_payload.totals,
                         )
                 else:
                     check_error = self._stored_check_error(cast(bytes, result_canonical))
@@ -2755,12 +2759,15 @@ class SqliteLedger:
         *,
         scope: CheckScopeModel | None = None,
         semantic_conclusion: str | None = None,
+        review_summary: str | None = None,
+        verified: tuple[JsonObject, ...] = (),
         prior_finding_verdicts: tuple[PriorFindingVerdictRecord, ...] = (),
         missing_for_assessment: tuple[MissingForAssessmentItem, ...] = (),
         check_change_files: CheckChangeShownFiles | None = None,
         semantic_included_refs: tuple[str, ...] | None = None,
         semantic_withheld_item_ids: tuple[str, ...] = (),
         review_input_manifest: JsonObject | None = None,
+        totals: JsonObject | None = None,
     ) -> CheckCommitResult:
         await self._ensure_recovered()
         async with self._lock:
@@ -2787,12 +2794,15 @@ class SqliteLedger:
                     request_id,
                     scope=scope,
                     semantic_conclusion=semantic_conclusion,
+                    review_summary=review_summary,
+                    verified=verified,
                     missing_for_assessment=missing_for_assessment,
                     prior_finding_verdicts=prior_finding_verdicts,
                     check_change_files=check_change_files,
                     semantic_included_refs=semantic_included_refs,
                     semantic_withheld_item_ids=semantic_withheld_item_ids,
                     review_input_manifest=review_input_manifest,
+                    totals=totals,
                 )
             except PublicOperationError:
                 # The memory oracle terminalizes a frontier conflict before raising it. Preserve

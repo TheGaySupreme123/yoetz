@@ -42,6 +42,7 @@ from yoetz.ports.semantic import (
     SemanticResultSuccess,
     SemanticResultTimeout,
     SemanticResultUnavailable,
+    VerifiedReviewItem,
 )
 from yoetz.protocol.canonical import (
     JsonValue,
@@ -51,6 +52,7 @@ from yoetz.protocol.canonical import (
 )
 from yoetz.protocol.models import (
     MAX_PRIOR_FINDING_VERDICTS,
+    MAX_PROVIDER_REVIEW_TEXT_CHARS,
     MAX_REVIEW_CHALLENGES,
     ProviderChallengeModel,
     ProviderJudgmentChallengesModel,
@@ -60,6 +62,7 @@ from yoetz.protocol.models import (
     ProviderJudgmentNoDiscrepancyModel,
     ProviderMissingItemModel,
     ProviderPriorFindingVerdictModel,
+    ProviderVerifiedItemModel,
     SemanticStatus,
 )
 
@@ -392,6 +395,7 @@ _REVIEW_TEXT_FIELDS: Final = frozenset(
         "alternative_interpretation",
         "message_to_main_agent",
         "uncertainty",
+        "snippet",
         "reason",
     }
 )
@@ -642,6 +646,12 @@ FINDING_KIND_GLOSSARY: Final[dict[str, str]] = {
     "weak_or_stale_response": (
         "the answer given is thin or out of date relative to what the packet supports"
     ),
+    "code_defect": (
+        "a concrete defect in the code shown in the packet prevents the requested behavior"
+    ),
+    "task_requirement_unmet": (
+        "a requirement stated in the packet is not satisfied by the work shown"
+    ),
 }
 
 CHALLENGE_FIELD_GLOSSARY: Final[dict[str, str]] = {
@@ -677,6 +687,28 @@ CHALLENGE_FIELD_GLOSSARY: Final[dict[str, str]] = {
     "uncertainty": (
         "What you could not determine from the packet and what would settle it. Say so plainly "
         "rather than hedging the challenge itself."
+    ),
+    "snippet": (
+        "One exact short quote copied verbatim from a provider-bound packet item that supports "
+        "this challenge; never invent or paraphrase it."
+    ),
+}
+
+VERIFIED_FIELD_GLOSSARY: Final[dict[str, str]] = {
+    "requirement_or_claim": (
+        "The requirement or claim being assessed, stated as a short packet-grounded label."
+    ),
+    "verdict": (
+        "supported: the packet supports it; not_supported: the packet contradicts or lacks it; "
+        "not_assessable: the packet does not carry enough material to judge."
+    ),
+    "cited_refs": (
+        "The packet refs supporting this judgement, each from citable_refs; never cite an "
+        "items[].item_id."
+    ),
+    "snippet": (
+        "One exact short quote copied verbatim from a provider-bound packet item; required for "
+        "supported or not_supported and absent for not_assessable."
     ),
 }
 
@@ -789,8 +821,88 @@ def _apply_reviewer_glossary(schema: dict[str, JsonValue]) -> dict[str, JsonValu
     ):
         raise RuntimeError("provider_judgment_schema_invalid")
     _gloss_properties(definitions, "ProviderChallenge", CHALLENGE_FIELD_GLOSSARY)
+    _gloss_properties(definitions, "ProviderVerifiedItem", VERIFIED_FIELD_GLOSSARY)
     _gloss_properties(definitions, "ProviderPriorFindingVerdict", VERDICT_FIELD_GLOSSARY)
     _gloss_properties(definitions, "ProviderMissingItem", MISSING_ITEM_FIELD_GLOSSARY)
+    return schema
+
+
+def _apply_part2_requirements(schema: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """Apply the required Part 2 fields for provider-judgment 1.2.0.
+
+    The durable decoder keeps the 1.1.0 model readable for recovery. Active provider traffic is
+    sent the additive 1.2.0 contract: every branch carries a summary and verification array, every
+    challenge carries a non-null quote, and supported/not-supported verification rows carry one.
+    """
+
+    definitions = cast(dict[str, JsonValue], schema.get("$defs"))
+    if type(definitions) is not dict:
+        raise RuntimeError("provider_judgment_schema_invalid")
+
+    def require(definition_name: str, fields: tuple[str, ...]) -> None:
+        definition_raw = definitions.get(definition_name)
+        if type(definition_raw) is not dict:
+            raise RuntimeError("provider_judgment_schema_invalid")
+        definition = cast(dict[str, JsonValue], definition_raw)
+        required_raw = definition.get("required")
+        if type(required_raw) is not list:
+            raise RuntimeError("provider_judgment_schema_invalid")
+        required = cast(list[JsonValue], required_raw)
+        for field in fields:
+            if field not in required:
+                required.append(cast(JsonValue, field))
+        required.sort(key=lambda item: str(item).encode("ascii"))
+
+    challenge_raw = definitions.get("ProviderChallenge")
+    verified_raw = definitions.get("ProviderVerifiedItem")
+    if type(challenge_raw) is not dict or type(verified_raw) is not dict:
+        raise RuntimeError("provider_judgment_schema_invalid")
+    challenge = cast(dict[str, JsonValue], challenge_raw)
+    verified = cast(dict[str, JsonValue], verified_raw)
+    challenge_properties_raw = challenge.get("properties")
+    verified_properties_raw = verified.get("properties")
+    if type(challenge_properties_raw) is not dict or type(verified_properties_raw) is not dict:
+        raise RuntimeError("provider_judgment_schema_invalid")
+    challenge_properties = cast(dict[str, JsonValue], challenge_properties_raw)
+    verified_properties = cast(dict[str, JsonValue], verified_properties_raw)
+    strict_text: JsonValue = {
+        "maxLength": MAX_PROVIDER_REVIEW_TEXT_CHARS,
+        "minLength": 1,
+        "type": "string",
+    }
+    challenge_properties["snippet"] = strict_text
+    verified_properties["snippet"] = strict_text
+    require("ProviderChallenge", ("snippet",))
+    for branch_name in (
+        "ProviderJudgmentNoDiscrepancy",
+        "ProviderJudgmentChallenges",
+        "ProviderJudgmentInsufficient",
+    ):
+        require(branch_name, ("review_summary", "verified"))
+    verified_all_of_raw = verified.get("allOf")
+    if type(verified_all_of_raw) is not list:
+        verified_all_of: list[JsonValue] = []
+        verified["allOf"] = verified_all_of
+    else:
+        verified_all_of = cast(list[JsonValue], verified_all_of_raw)
+    verified_all_of.extend(
+        [
+            {
+                "if": {
+                    "properties": {"verdict": {"const": "not_assessable"}},
+                    "required": ["verdict"],
+                },
+                "then": {"not": {"required": ["snippet"]}},
+            },
+            {
+                "if": {
+                    "properties": {"verdict": {"enum": ["supported", "not_supported"]}},
+                    "required": ["verdict"],
+                },
+                "then": {"required": ["snippet"]},
+            },
+        ]
+    )
     return schema
 
 
@@ -813,7 +925,7 @@ def build_judgment_json_schema() -> dict[str, JsonValue]:
     cleaned = _strip_schema_titles(_sort_schema_lists(_rename_schema_defs(raw)))
     if type(cleaned) is not dict:
         raise RuntimeError("provider_judgment_schema_invalid")
-    return _apply_reviewer_glossary(cast(dict[str, JsonValue], cleaned))
+    return _apply_part2_requirements(_apply_reviewer_glossary(cast(dict[str, JsonValue], cleaned)))
 
 
 JUDGMENT_JSON_SCHEMA: Final[dict[str, JsonValue]] = build_judgment_json_schema()
@@ -1089,6 +1201,16 @@ def _challenge_from_model(challenge: ProviderChallengeModel) -> ReviewerChalleng
         challenge.message_to_main_agent,
         challenge.requested_next_step,
         challenge.uncertainty,
+        challenge.snippet,
+    )
+
+
+def _verified_from_model(item: ProviderVerifiedItemModel) -> VerifiedReviewItem:
+    return VerifiedReviewItem(
+        item.requirement_or_claim,
+        item.verdict,
+        item.cited_refs,
+        item.snippet,
     )
 
 
@@ -1096,7 +1218,47 @@ def _missing_item_from_model(item: ProviderMissingItemModel) -> MissingForAssess
     return MissingForAssessment(item.kind, item.target_refs, item.reason)
 
 
-def normalize_judgment(parsed: JsonValue) -> SemanticJudgment:
+def _require_part2_fields(body: JsonValue) -> None:
+    """Require the versioned Part 2 evidence fields on an active provider response.
+
+    The Pydantic models retain defaults so old durable responses and small evaluator doubles can
+    still be decoded.  Active provider traffic uses this separate gate: otherwise those defaults
+    would make a new response without a summary or supporting snippets look like a successful
+    Part 2 review.
+    """
+
+    if type(body) is not dict:
+        raise JudgmentValidationError("shape_invalid")
+    source = cast(dict[str, JsonValue], body)
+    summary = source.get("review_summary")
+    if type(summary) is not str or not summary:
+        raise JudgmentValidationError("text_bounds")
+    verified = source.get("verified")
+    if type(verified) is not list:
+        raise JudgmentValidationError("shape_invalid")
+    challenges = source.get("reviewer_challenges")
+    if type(challenges) is not list:
+        raise JudgmentValidationError("shape_invalid")
+    for row in cast(list[JsonValue], challenges):
+        if type(row) is not dict:
+            raise JudgmentValidationError("shape_invalid")
+        snippet = cast(dict[str, JsonValue], row).get("snippet")
+        if type(snippet) is not str or not snippet:
+            raise JudgmentValidationError("text_bounds")
+    for row in cast(list[JsonValue], verified):
+        if type(row) is not dict:
+            raise JudgmentValidationError("shape_invalid")
+        verified_row = cast(dict[str, JsonValue], row)
+        verdict = verified_row.get("verdict")
+        snippet = verified_row.get("snippet")
+        if verdict == "not_assessable":
+            if snippet is not None:
+                raise JudgmentValidationError("shape_invalid")
+        elif type(snippet) is not str or not snippet:
+            raise JudgmentValidationError("text_bounds")
+
+
+def normalize_judgment(parsed: JsonValue, *, require_part2: bool = False) -> SemanticJudgment:
     """Validate a parsed judgment against the single provider judgment contract.
 
     Validation runs through :data:`ProviderJudgmentModel`, which
@@ -1118,12 +1280,25 @@ def normalize_judgment(parsed: JsonValue) -> SemanticJudgment:
     kept, dropped = _separate_prior_verdicts(body)
     unnamed = False
     if type(body) is dict:
+        body_object = cast(dict[str, JsonValue], body)
+        if require_part2 and body_object.get("conclusion") in {
+            "no_material_discrepancy",
+            "challenges_returned",
+            "insufficient_packet",
+        }:
+            _require_part2_fields(body_object)
         fields: dict[str, JsonValue] = {
-            **cast(dict[str, JsonValue], body),
+            **body_object,
             "prior_finding_verdicts": kept,
         }
+        # Backward-read provider replies from the pre-Part-2 contract. New provider schemas
+        # advertise these fields; old prompt-only/local doubles remain readable with an explicit
+        # bounded summary and no invented requirement judgement.
+        if not require_part2:
+            fields.setdefault("review_summary", "No review summary recorded.")
+            fields.setdefault("verified", [])
         named = fields.get("missing_for_assessment")
-        if named is None or named == []:
+        if not require_part2 and (named is None or named == []):
             # Backward read, like the rulings above (issue #907): a local model or prompt-only
             # host may answer in the 1.0.0 shape. An empty list beside another conclusion is the
             # absent list. An ``insufficient_packet`` that names nothing keeps its conclusion and
@@ -1157,12 +1332,15 @@ def normalize_judgment(parsed: JsonValue) -> SemanticJudgment:
         if type(model) is ProviderJudgmentInsufficientModel
         else ()
     )
+    verified = tuple(_verified_from_model(item) for item in model.verified)
     return SemanticJudgment(
-        "insufficient_packet" if unnamed else model.conclusion,
-        challenges,
-        verdicts,
-        dropped,
+        conclusion="insufficient_packet" if unnamed else model.conclusion,
+        challenges=challenges,
+        prior_finding_verdicts=verdicts,
+        prior_finding_verdicts_dropped=dropped,
         missing_for_assessment=missing,
+        review_summary=model.review_summary,
+        verified=verified,
     )
 
 
@@ -1304,7 +1482,7 @@ def normalize_response(
         )
     try:
         parsed = strict_json_parse(raw_bytes)
-        judgment = normalize_judgment(parsed)
+        judgment = normalize_judgment(parsed, require_part2=True)
     except ValueError, TypeError, LookupError:
         return SemanticResultInvalid(
             _provenance(

@@ -8,6 +8,7 @@ from yoetz.domain.observation_selection import (
     OBSERVATION_CLASSIFICATION_VERSION,
     ObservationContentRole,
     classify_observation,
+    command_runner_class,
     is_routine_read_candidate,
 )
 from yoetz.protocol.canonical import JsonValue
@@ -151,3 +152,20 @@ def test_json_result_outcome_is_bounded_and_closed() -> None:
     assert success.proven_routine_success is True
     assert unknown.proven_routine_success is False
     assert "unknown" in unknown.reason_tokens
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("rg -n observation src", "exploration"),
+        ("rg --pre ./prepare term src", "other"),
+        ("find src -exec pytest {} +", "other"),
+        ("pytest tests/unit && ruff check src", "compound"),
+        ("pytest tests/unit", "test"),
+    ],
+)
+def test_command_runner_class_is_closed_and_conservative(command: str, expected: str) -> None:
+    assert (
+        command_runner_class({"tool_name": "exec_command", "tool_input": {"cmd": command}})
+        == expected
+    )

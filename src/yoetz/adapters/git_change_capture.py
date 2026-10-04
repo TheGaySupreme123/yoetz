@@ -32,7 +32,7 @@ import subprocess
 import time
 import zlib
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final, Literal
 
@@ -47,7 +47,9 @@ from yoetz.ports.change_capture import (
     MAX_CHECK_CHANGE_TEXT_BYTES,
     ChangeBaseKind,
     ChangeCaptureUnavailable,
+    ChangeMetadataEntry,
     CheckChangeCapture,
+    CheckChangeMetadata,
     TaskChangeBase,
 )
 from yoetz.ports.subject_state import LocalWorkspaceHandle
@@ -210,6 +212,8 @@ class _TrackedRead:
     # Working copies and loose objects (with their fan-out directories), keyed by root-relative
     # path, taken before Git read any content and compared again after the whole capture.
     identities: dict[bytes, _Identity | None]
+    # Metadata capture uses a name-status query; content capture keeps the raw query.
+    arguments: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -283,48 +287,105 @@ def _decode(text: bytes) -> bytes:
 
 
 def _section_path(section: bytes) -> bytes | None:
-    """Return the path of one ``diff --git a/P b/P`` section header written with ``--no-renames``."""
+    """Return the destination path of one ``diff --git`` section.
+
+    Git leaves ordinary spaces unquoted, so the header alone cannot be split at the last
+    `` b/``: a path such as ``tests/foo b/test.js`` contains the same byte sequence. Prefer the
+    exact ``+++``/``---`` operand and use an equal-operand header candidate for binary sections.
+    """
 
     line = section.split(b"\n", 1)[0]
     rest = line[len(_DIFF_SECTION) :]
-    if rest.startswith(b'"'):
-        # Quoted headers keep both sides quoted; decode the first quoted operand.
+
+    def operand(token: bytes, prefix: bytes) -> bytes | None:
+        if token == b"/dev/null":
+            return None
+        if token.startswith(prefix):
+            return token[len(prefix) :]
+        if not token.startswith(b'"') or not token.endswith(b'"'):
+            return None
+        raw = token[1:-1]
         out = bytearray()
-        index = 1
-        escapes = {ord("a"): 7, ord("b"): 8, ord("t"): 9, ord("n"): 10}
-        escapes.update({ord("v"): 11, ord("f"): 12, ord("r"): 13})
-        while index < len(rest):
-            byte = rest[index]
-            if byte == ord('"'):
-                value = bytes(out)
-                return value[2:] if value.startswith(b"a/") else None
-            if byte == ord("\\") and index + 1 < len(rest):
-                following = rest[index + 1]
-                if following in escapes:
-                    out.append(escapes[following])
-                    index += 2
-                    continue
-                if 0x30 <= following <= 0x37 and index + 3 < len(rest):
-                    out.append(int(rest[index + 1 : index + 4], 8) & 0xFF)
-                    index += 4
-                    continue
+        index = 0
+        while index < len(raw):
+            byte = raw[index]
+            if byte != ord("\\"):
+                out.append(byte)
+                index += 1
+                continue
+            if index + 1 >= len(raw):
+                return None
+            following = raw[index + 1]
+            escapes = {ord("a"): 7, ord("b"): 8, ord("t"): 9, ord("n"): 10}
+            escapes.update({ord("v"): 11, ord("f"): 12, ord("r"): 13})
+            if following in escapes:
+                out.append(escapes[following])
+                index += 2
+            elif 0x30 <= following <= 0x37 and index + 3 < len(raw):
+                out.append(int(raw[index + 1 : index + 4], 8) & 0xFF)
+                index += 4
+            else:
                 out.append(following)
                 index += 2
-                continue
-            out.append(byte)
+        if not out.startswith(prefix) or len(out) == len(prefix):
+            return None
+        return bytes(out[len(prefix) :])
+
+    for diff_line in section.split(b"\n")[1:]:
+        if diff_line.startswith(b"+++ "):
+            token = diff_line[4:].split(b"\t", 1)[0]
+            path = operand(token, b"b/")
+            if path is not None:
+                return path
+        elif diff_line.startswith(b"--- "):
+            token = diff_line[4:].split(b"\t", 1)[0]
+            path = operand(token, b"a/")
+            if path is not None and b"+++ /dev/null" in section:
+                return path
+
+    if rest.startswith(b'"'):
+        tokens: list[bytes] = []
+        index = 0
+        while len(tokens) < 2 and index < len(rest):
+            if rest[index] != ord('"'):
+                return None
+            start = index
             index += 1
-        return None
-    # Unquoted: ``a/P b/P`` with the same P on both sides.
+            escaped = False
+            while index < len(rest):
+                byte = rest[index]
+                index += 1
+                if escaped:
+                    escaped = False
+                elif byte == ord("\\"):
+                    escaped = True
+                elif byte == ord('"'):
+                    break
+            else:
+                return None
+            tokens.append(rest[start:index])
+            while index < len(rest) and rest[index] == ord(" "):
+                index += 1
+        if len(tokens) != 2:
+            return None
+        return operand(tokens[1], b"b/")
+    # Unquoted: ``a/P b/Q``. Find a candidate whose decoded operands are equal, which distinguishes
+    # the separator from `` b/`` inside an ordinary path.
     if not rest.startswith(b"a/"):
         return None
-    body = rest[2:]
-    if len(body) < 3 or (len(body) - 3) % 2:
-        return None
-    half = (len(body) - 3) // 2
-    left, middle, right = body[:half], body[half : half + 3], body[half + 3 :]
-    if middle != b" b/" or left != right:
-        return None
-    return left
+    candidates: list[tuple[bytes, bytes]] = []
+    start = 0
+    while True:
+        separator = rest.find(b" b/", start)
+        if separator < 0:
+            break
+        source, destination = rest[:separator], rest[separator + 1 :]
+        if source.startswith(b"a/") and destination.startswith(b"b/"):
+            source_path, destination_path = source[2:], destination[2:]
+            if source_path == destination_path:
+                candidates.append((source_path, destination_path))
+        start = separator + 1
+    return candidates[-1][1] if candidates else None
 
 
 class GitChangeCaptureAdapter:
@@ -371,6 +432,94 @@ class GitChangeCaptureAdapter:
                 if _expired(assembly):
                     break
         raise ChangeCaptureUnavailable("changed_during_capture")
+
+    def capture_metadata(self, workspace: str, base: TaskChangeBase | None) -> CheckChangeMetadata:
+        """Return changed-path facts without reading file or blob content.
+
+        Structural test-edit accounting needs the changed paths, while ADR-031 content capture is
+        authorized only by a semantic review recipe.  Keep this path on Git's raw/name metadata
+        commands and never call the content-rendering capture or its redaction pipeline.
+        """
+
+        started = time.monotonic()
+        deadline = started + self._deadline_seconds
+        assembly = started + self._deadline_seconds * _ASSEMBLY_SHARE
+        pinned = self._open(workspace, assembly)
+        self._refuse_unsafe_config(pinned, assembly)
+        object_format = self._object_format(pinned, assembly)
+        for _ in range(_CAPTURE_ATTEMPTS):
+            try:
+                packs = self._refuse_unsafe_object_store(pinned)
+                return self._capture_metadata_once(
+                    pinned, object_format, base, assembly, deadline, packs
+                )
+            except _ChangedDuringCapture:
+                if _expired(assembly):
+                    break
+        raise ChangeCaptureUnavailable("changed_during_capture")
+
+    def _capture_metadata_once(
+        self,
+        pinned: _Workspace,
+        object_format: Literal["sha1", "sha256"],
+        base: TaskChangeBase | None,
+        assembly: float,
+        deadline: float,
+        packs: tuple[tuple[bytes, _Identity], ...],
+    ) -> CheckChangeMetadata:
+        head = self._rev(pinned, "HEAD^{commit}", assembly)
+        if (
+            base is not None
+            and base.object_format == object_format
+            and self._rev(pinned, base.commit + "^{tree}", assembly) is not None
+        ):
+            base_kind, base_id = base.origin, base.commit
+        elif head is not None:
+            base_kind, base_id = "head", head
+        else:
+            base_kind, base_id = "empty", _EMPTY_TREES[object_format]
+
+        tracked_raw, tracked_entries, tracked_identities, tracked_arguments = (
+            self._tracked_metadata(pinned, base_id, assembly)
+        )
+        index = _path_identity(pinned.descriptor, b".git/index")
+        untracked = self._untracked_metadata(pinned, assembly)
+        tracked = _TrackedRead(tracked_raw, [], tracked_identities, tracked_arguments)
+        self._verify_stable(
+            pinned,
+            base_id,
+            tracked,
+            untracked,
+            head,
+            index,
+            packs,
+            deadline,
+        )
+        metadata_paths = tuple(sorted(untracked.identities, key=bytes))
+        entries = tuple(
+            [
+                ChangeMetadataEntry(
+                    entry.status,
+                    entry.path,
+                    original_path=entry.original_path,
+                )
+                for entry in tracked_entries
+            ]
+            + [
+                ChangeMetadataEntry("A", os.fsdecode(path), untracked=True)
+                for path in metadata_paths
+            ]
+        )
+        omitted = untracked.total - len(metadata_paths)
+        return CheckChangeMetadata(
+            base=base_kind,
+            entries=entries,
+            tracked_files=len(tracked_entries),
+            untracked_files=untracked.total,
+            omitted_files=omitted,
+            truncated=omitted > 0 or untracked.listing_truncated,
+            base_commit=base_id,
+        )
 
     def _capture_once(
         self,
@@ -670,6 +819,89 @@ class GitChangeCaptureAdapter:
     def _raw_arguments(base_id: str) -> tuple[str, ...]:
         return ("diff", "--raw", "-z", "--no-abbrev", *_DIFF_OPTIONS, base_id, "--")
 
+    def _tracked_metadata(
+        self,
+        pinned: _Workspace,
+        base_id: str,
+        deadline: float,
+    ) -> tuple[
+        bytes,
+        list[ChangeMetadataEntry],
+        dict[bytes, _Identity | None],
+        tuple[str, ...],
+    ]:
+        """Read name/status metadata without numstat, patch or blob reads."""
+
+        arguments = self._metadata_arguments(base_id)
+        try:
+            _, raw = self._git(pinned, arguments, deadline=deadline, limit=_LIST_LIMIT)
+        except ValueError:
+            raise ChangeCaptureUnavailable("unsupported_repository") from None
+        fields = _nul_fields(raw)
+        entries: list[ChangeMetadataEntry] = []
+        paths: list[bytes] = []
+        index = 0
+        while index < len(fields):
+            status = fields[index].decode("ascii", errors="replace")
+            index += 1
+            if status.startswith(("R", "C")):
+                if index + 1 >= len(fields):
+                    raise ChangeCaptureUnavailable("git_failed")
+                old, new = fields[index], fields[index + 1]
+                index += 2
+                if not _safe_relative(old) or not _safe_relative(new):
+                    raise ChangeCaptureUnavailable("unsafe_root")
+                paths.extend((old, new))
+                entries.append(
+                    ChangeMetadataEntry(
+                        status[:1],
+                        os.fsdecode(new),
+                        original_path=os.fsdecode(old) if status.startswith("R") else None,
+                    )
+                )
+                continue
+            if index >= len(fields):
+                raise ChangeCaptureUnavailable("git_failed")
+            path = fields[index]
+            index += 1
+            if not _safe_relative(path):
+                raise ChangeCaptureUnavailable("unsafe_root")
+            paths.append(path)
+            entries.append(ChangeMetadataEntry(status[:1], os.fsdecode(path)))
+        identities = {path: _path_identity(pinned.descriptor, path) for path in paths}
+        return raw, entries, identities, arguments
+
+    @staticmethod
+    def _metadata_arguments(base_id: str) -> tuple[str, ...]:
+        options = tuple(option for option in _DIFF_OPTIONS if option != "--no-renames")
+        return ("diff", "--name-status", "-z", "--find-renames=100%", *options, base_id, "--")
+
+    def _untracked_metadata(self, pinned: _Workspace, deadline: float) -> _UntrackedRead:
+        """List untracked paths and stat them without opening their files."""
+
+        excludes = self._repository_excludes_file(pinned, deadline)
+        if excludes is None:
+            excludes = _global_excludes_file(deadline)
+        config = ("-c", f"core.excludesFile={excludes}") if excludes is not None else ()
+        listing, listing_truncated = self._untracked_listing(pinned, config, deadline)
+        paths = sorted(_nul_fields(listing))
+        identities: dict[bytes, _Identity | None] = {}
+        for index, path in enumerate(paths):
+            if index >= _MAX_UNTRACKED_FILES:
+                break
+            if path.endswith(b"/") or not _safe_relative(path):
+                if not _safe_relative(path):
+                    raise ChangeCaptureUnavailable("unsafe_root")
+            identities[path] = _path_identity(pinned.descriptor, path)
+        return _UntrackedRead(
+            len(paths),
+            [],
+            listing_truncated,
+            listing,
+            config,
+            identities,
+        )
+
     def _tracked_sections(
         self,
         pinned: _Workspace,
@@ -690,6 +922,11 @@ class GitChangeCaptureAdapter:
         # times change when an object appears or disappears in it). The working-copy identity is
         # also the no-link fence.
         entries = _raw_entries(raw)
+        rename_pairs = self._rename_pairs(pinned, base_id, deadline)
+        if rename_pairs:
+            entries, rename_targets = _fold_rename_pairs(entries, rename_pairs)
+        else:
+            rename_targets = {}
         identities: dict[bytes, _Identity | None] = {}
         for entry in entries:
             identities[entry.path] = _path_identity(pinned.descriptor, entry.path)
@@ -731,6 +968,11 @@ class GitChangeCaptureAdapter:
                 section.omitted = "not_regular_file"
                 section.added = section.deleted = "-"
             sections.append(section)
+        if rename_targets:
+            sections = [
+                replace(section, status="R") if section.path in rename_targets else section
+                for section in sections
+            ]
         read = _TrackedRead(raw, sections, identities)
         if not sections:
             return read
@@ -765,6 +1007,49 @@ class GitChangeCaptureAdapter:
             self._per_file_diffs(pinned, base_id, sections, deadline)
         self._verify_section_objects(pinned, object_format, entries, sections, identities, deadline)
         return read
+
+    def _rename_pairs(
+        self, pinned: _Workspace, base_id: str, deadline: float
+    ) -> tuple[tuple[bytes, bytes], ...]:
+        """Read rename identity separately from the bounded no-renames content diff.
+
+        Content capture keeps ``--no-renames`` for stable per-file sections.  This small metadata
+        query lets the structural header distinguish a true Git rename from an unrelated delete
+        plus add without inferring that relation from path names or bytes.
+        """
+
+        options = tuple(option for option in _DIFF_OPTIONS if option != "--no-renames")
+        try:
+            _, raw = self._git(
+                pinned,
+                ("diff", "--name-status", "-z", "--find-renames=50%", *options, base_id, "--"),
+                deadline=deadline,
+                limit=_LIST_LIMIT,
+            )
+        except ValueError:
+            return ()
+        except ChangeCaptureUnavailable as exc:
+            if exc.reason in {"git_failed", "unsupported_repository"}:
+                return ()
+            raise
+        fields = _nul_fields(raw)
+        pairs: list[tuple[bytes, bytes]] = []
+        index = 0
+        while index < len(fields):
+            status = fields[index]
+            index += 1
+            if not status.startswith(b"R"):
+                if index >= len(fields):
+                    break
+                index += 1
+                continue
+            if index + 1 >= len(fields):
+                raise ChangeCaptureUnavailable("git_failed")
+            old, new = fields[index], fields[index + 1]
+            index += 2
+            if _safe_relative(old) and _safe_relative(new):
+                pairs.append((old, new))
+        return tuple(pairs)
 
     def _per_file_diffs(
         self, pinned: _Workspace, base_id: str, sections: list[_Section], deadline: float
@@ -999,9 +1284,8 @@ class GitChangeCaptureAdapter:
         if self._refuse_unsafe_object_store(pinned) != packs:
             raise _ChangedDuringCapture
         try:
-            _, raw = self._git(
-                pinned, self._raw_arguments(base_id), deadline=deadline, limit=_LIST_LIMIT
-            )
+            arguments = tracked.arguments or self._raw_arguments(base_id)
+            _, raw = self._git(pinned, arguments, deadline=deadline, limit=_LIST_LIMIT)
         except ValueError:
             raise _ChangedDuringCapture from None
         if raw != tracked.raw:
@@ -1420,6 +1704,42 @@ def _raw_entries(raw: bytes) -> list[_RawEntry]:
             raise ChangeCaptureUnavailable("unsafe_root")
         entries.append(_RawEntry(status[:1] or "M", path, src_mode, dst_mode, src_oid, dst_oid))
     return entries
+
+
+def _fold_rename_pairs(
+    entries: list[_RawEntry], pairs: tuple[tuple[bytes, bytes], ...]
+) -> tuple[list[_RawEntry], dict[bytes, bytes]]:
+    """Fold Git's rename metadata into the no-renames raw entries."""
+
+    by_path = {entry.path: entry for entry in entries}
+    replacements: dict[bytes, _RawEntry] = {}
+    renamed: dict[bytes, bytes] = {}
+    for old, new in pairs:
+        source = by_path.get(old)
+        target = by_path.get(new)
+        if source is None or target is None or old == new:
+            continue
+        replacements[new] = _RawEntry(
+            "R",
+            new,
+            source.src_mode,
+            target.dst_mode,
+            source.src_oid,
+            target.dst_oid,
+        )
+        renamed[new] = old
+    if not replacements:
+        return entries, {}
+    folded: list[_RawEntry] = []
+    old_paths = set(renamed.values())
+    for entry in entries:
+        if entry.path in renamed:
+            folded.append(replacements[entry.path])
+        elif entry.path in old_paths:
+            continue
+        else:
+            folded.append(entry)
+    return folded, renamed
 
 
 def _verify_same_root(pinned: _Workspace) -> None:

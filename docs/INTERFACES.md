@@ -399,6 +399,16 @@ supported bounded consumer is `GuidancePageAssembler`; a rejected page has a bou
 and a revision change restarts at page zero. Callers assemble all pages when they need a source
 document larger than the legacy full-response bound.
 
+The five legacy document URIs remain the stable `resources/list` entries. `read_guidance` also
+accepts exact registered focused topic URIs and heading topics: a topic is the document URI plus a
+lowercase hyphen heading anchor (for example, `yoetz://guidance/workflow.md#start-and-resume`;
+repeated headings use a numeric suffix). The service resolves that anchor to the complete Markdown
+section, keeps the anchored URI in `document_id` and every continuation, and bounds the section
+before paging. Runtime admission uses the closed topic catalog while the advertised schema uses a
+compact URI pattern so the full heading catalog is not repeated in every host tool declaration. A
+parent document remains available for fallback and full archival reads; a topic read is the normal
+continuation when one procedure is named.
+
 Protocol reason
 `expected_frontier_required` marks a state-sensitive `publish_work` batch that omitted
 `expected_frontier`. It names that field and is retryable because validation wrote no durable
@@ -831,10 +841,11 @@ research-evidence `material_limitation_omitted`, observation-advice `failed_comm
 the receipt builder all read. `ObservedFailureState` is exactly `live`, `superseded`, `rerun`, or
 `historical`. `classify_observed_runs(runs)` takes `ObservedRun(ref, position, outcome, identity,
 edit)` values and, for each failed or partial run, returns `superseded` when a later run with the
-same identity succeeded, else `rerun` when a later run with the same identity has any other outcome
-(only the latest run of a command identity can be `live`), else `historical` when a later edit whose
-outcome is a stated `success` followed, else `live`. A run without an identity is retired only by a
-later edit. `observed_failure_states(projection, observed_event_ids, through=frontier)` applies it
+same identity succeeded, else `rerun` when a later run with the same identity has a limiting
+failure or partial outcome (only the latest limiting run of a command identity can be `live`), else
+`live`. An unknown outcome does not certify repair. Edits never retire a failed verification, and a
+run without an identity remains live. Explicit acknowledgement discloses that failure without
+making it green. `observed_failure_states(projection, observed_event_ids, through=frontier)` applies it
 to the readable results recorded no later than `through` whose source events are service-stamped
 hook observations (`is_observed_run_record`: observation-coordinator authorship on the
 `hook_observed` channel; in a frozen case, `hook_observed` in the ref's coverage channels). A
@@ -846,13 +857,12 @@ into replay. A `live` observed failure's `failed_work_omitted` adds the `observe
 naming its result and action and a sentence pointing at `status view=results`; research-evidence's
 copy of the same (claim, result) omission is dropped when work integrity reported it
 (`_collapse_failed_work_overlap`), so one omitted failure is one finding. The receipt's limitations
-section names superseded, rerun, historical, and `limitation_refs`-disclosed observed failures once,
-bounded to ten ids per clause. The edit clause is state-scoped, not causal: any successful
-observed edit retires every earlier observed failure regardless of the paths it touched (option (a)
-on #909), and the receipt says only that the failure preceded a later observed workspace edit.
-Known limit: an edit the harness sees only as a shell command (a heredoc written through
-`exec_command` or `Bash`) is a command, not an observed edit, so a failure followed only by such
-edits stays `live` unless the same command is rerun.
+section names superseded, rerun, legacy historical, and `limitation_refs`-disclosed observed
+failures once, bounded to ten ids per clause. An observed edit changes the state under test but is
+not a covering verification, so a failure followed only by an edit stays `live` until the same
+command is rerun or the claim explicitly acknowledges it. An edit the harness sees only as a
+shell command (a heredoc written through `exec_command` or `Bash`) is a command, not an observed
+edit, and follows the same rule.
 
 `reason` MAY be omitted for `acknowledged` and MUST be non-empty for `provenance_disputed`,
 `rejected`, or `waived`.
@@ -1212,7 +1222,7 @@ the readable effective current plan declares zero obligations, exactly one appli
 Both force `coverage_incomplete`, `insufficient_coverage`, and an insufficient-coverage receipt.
 The typed declaration records the participant's scope decision but never purchases a clean verdict.
 
-Four further codes describe a review that did run but could not deliver everything it produced:
+Five further codes describe a review that did run but could not deliver everything it produced:
 
 - `semantic_review_context_withheld` — the review ran without categories its own profile selected;
 - `semantic_challenges_rejected` — the reviewer returned challenges and post-validation dropped at
@@ -1221,6 +1231,9 @@ Four further codes describe a review that did run but could not deliver everythi
   `citable_refs` resolves to that finding's subjects whether it is one of this check's local
   findings or a readable recorded finding inside the frozen fence, so a re-raise that names the
   earlier finding it concerns is not dropped (issue #905);
+- `semantic_review_snippet_invalid` — a reviewer challenge or verification quote could not be
+  proved against the exact safe provider-bound text, including after response recovery without the
+  ephemeral text index. The affected row is dropped while the remaining review stays visible;
 - `semantic_case_content_over_item_limit` — recorded text the publish-side prose bound accepted
   (`MAX_TEXT_BYTES`, 8192) exceeded what one case item carries (`MAX_REVIEW_TEXT_BYTES`, 4096), so
   the case shortened it or replaced the payload with a `yoetz.bounded-content-omission/1` marker.
@@ -1911,7 +1924,7 @@ unprovable. For local rows the tolerated set is the AI-powered review absence/we
 (`semantic_review_not_requested|semantic_review_not_configured|
 semantic_relevance_review_not_run|optional_semantic_review_blocked_by_policy|
 optional_semantic_review_registration_drift|
-semantic_review_context_withheld|semantic_challenges_rejected|
+semantic_review_context_withheld|semantic_challenges_rejected|semantic_review_snippet_invalid|
 semantic_missing_agent_suppliable|semantic_missing_structurally_unavailable|
 semantic_missing_already_supplied|semantic_missing_items_rejected|
 semantic_case_content_over_item_limit|semantic_case_finding_refs_over_limit|
@@ -3537,25 +3550,33 @@ revokes affected authorizations/transports. The never-send set is non-overridabl
 path.
 
 The scanner keeps concrete credential findings separate from low-confidence assignment heuristics.
-An item with only a heuristic match is omitted from the prepared review packet and may be followed
-by a safe review of the remaining items; its bounded opaque item identity is reported with the
-closed reason `never_send_heuristic` and coverage carries the content loss. A concrete credential,
-mixed finding, scanner saturation or failure, stale policy/scanner manifest, and any final rendered
-body match remain whole-case no-dispatch refusals. The final-body backstop scans heuristics too, so
-an omission construction failure cannot turn into disclosure. Recovery persists the omission
-identities with the exact proposal; a corrected check supplies a new prepared case. No matched
-bytes, caller prose, raw exception, or detector output enters a structural notice or receipt.
-The check result and CLI/TUI rendering expose each withheld identity with that closed reason; MCP,
-hook-relayed, and receipt projections use the same bounded fields. Privacy receipts mark the
-secret-scan stage as `candidate`, `prepared_case`, or `rendered_body` when that scan actually ran.
-`not_run` is explicit and carries its closed reason; a clean `passed` value is never used as a
-placeholder for a scan that did not execute.
+When the sink policy permits it, an item with only a heuristic match carries its surrounding bytes
+with the matched span replaced by `[REDACTED]`; its original digest, transformed digest, scanner
+profile, and bounded redaction count remain distinct. Structured JSON/history content keeps its
+syntax while the value span is replaced. Provider-bound content rows mark that transform with the
+existing `redacted`/`sensitive_redacted` transformation vocabulary so recovery can validate the
+exact transformed manifest even when the item was not a targeted excerpt. An ambiguous or
+untransformable heuristic remains
+withheld, and a safe review of clean siblings may continue with an explicit coverage class. A
+concrete credential, mixed finding, scanner saturation or failure, stale policy/scanner manifest,
+and any final rendered body match remain whole-case no-dispatch refusals. The final-body backstop
+scans heuristics too, so a transformation failure cannot turn into disclosure. Recovery persists
+the transformation/withholding identity with the exact proposal; a corrected check supplies a new
+prepared case. No matched bytes, caller prose, raw exception, or detector output enters a
+structural notice or receipt.
+The check result and CLI/TUI rendering expose bounded transformation or withholding facts; MCP,
+hook-relayed, and receipt projections use the same fields. Privacy receipts mark the secret-scan
+stage as `candidate`, `prepared_case`, or `rendered_body` when that scan actually ran. `not_run` is
+explicit and carries its closed reason; a clean `passed` value is never used as a placeholder for a
+scan that did not execute.
 Only unquoted parser/member/call/enum expressions with source syntax evidence are excluded: a
 `const`/`let`/`var` declaration for a token call or member call, an explicit member assignment
-such as `parser.token = Token.EOF`, or a lower-case object property such as `token:
-Token.ConstKeyword`. Bare dotted assignments such as `TOKEN=opaque.value`, call-shaped values such
-as `password=functionName()`, and quoted lookalikes remain withheld. This precision rule does not
-add an opt-out and does not change capture-time redaction.
+such as `parser.token = Token.EOF`, a lower-case object property such as `token:
+Token.ConstKeyword`, or a lower-case Python `token = node.token` assignment inside a valid
+function. Bare dotted assignments such as `TOKEN=opaque.value` or `token=opaque.value`,
+call-shaped values such as `password=functionName()`, quoted lookalikes, mixed-language text, and
+malformed source remain withheld. This precision rule does not add an opt-out and does not change
+capture-time redaction.
 
 `PreDispatchAuditDecision` is structural-only and terminal; it permits no prepared bytes,
 authorization, or dispatch. A v0.1 content-bearing `DisclosureProposal` has one owning `task_id` and
@@ -6433,6 +6454,13 @@ Pending child annotations do not block. These current advisory facts never refre
 open a child bundle, change a recorded check, or strengthen a receipt. Reading readiness records
 nothing, creates no verdict or IDs, and never strengthens coverage.
 
+When the latest persisted check has test-edit totals, the compact singleton may also carry
+`latest_check_test_edits`. This path-free structural summary includes the checked frontier,
+`read_availability` (`available`, `unknown`, or `unavailable`), `examined`, `baseline_known`, and
+the modified, renamed, deleted, skipped, unjustified, and unknown counts. `unavailable` means no
+admitted capture was available; `unknown` means the capture or baseline was incomplete. It never
+includes a repository path or captured content.
+
 Every projection view reports one coverage definition in the status envelope (ADR-032, issue
 #913): `coverage` and `gaps` are the task coverage the compact view reports — the applicable
 check folded over the newest record, plus projection and completion-scope gaps — not the newest
@@ -7469,6 +7497,24 @@ output of a command identity) or `superseded_by` (the source refs of the newer e
 marks describe recording order only; they never claim what the working tree now contains.
 `review_packet` keeps its `outbound-case` 1.1.0 shape; `schemas/privacy/` is unchanged.
 
+The successful provider path records only the `provider_bound` `review_input_manifest`. A
+`composed` manifest is the pre-admission selection and must not be rendered as provider evidence.
+If a provider call succeeds but that exact manifest cannot be retained, the check keeps the
+provider result and records one closed provenance gap: `semantic_provider_input_manifest_missing`,
+`semantic_provider_input_manifest_invalid`, `semantic_provider_input_manifest_parse_failed`,
+`semantic_provider_input_manifest_mismatch`, or
+`semantic_provider_input_manifest_recovery_failed`. These codes describe evidence loss; they do
+not turn a successful provider call into a provider failure or a clean complete review. Durable
+response recovery carries the same bounded reason, and an older response without the field is
+read as an unproven provider binding.
+
+Reviewer snippets are fenced against the exact safe text rows in that provider-bound packet after
+privacy transformation and budget selection. The text index is ephemeral and is never placed in a
+check result, receipt, or durable response. If a response is recovered without that index, a
+snippet-bearing challenge or verification row is dropped and disclosed as
+`semantic_review_snippet_invalid`; the review summary and any rows whose evidence remains
+provable are retained.
+
 Excerpt selection stays inside the approved count and byte budget. Reserved room comes first: the
 current diff, then the latest output per identified verification command (with the last failure
 beside a later pass, and the reserved run's exact command when the selection carries command
@@ -7504,7 +7550,9 @@ discloses `semantic_missing_items_rejected`. A malformed item still rejects the 
 fence trims targets to the packet's `citable_refs`, as it trims a ruling's cited refs, dropping an
 item left with none (`semantic_missing_items_rejected`), and drops an item whose earlier request was
 answered by material recorded since unless the reviewer cites that material
-(`semantic_missing_already_supplied`). "Answered" is judged per named target: a repeat is dropped
+(`semantic_missing_already_supplied`). If the same target is named again without related agent
+publication, the item remains actionable and adds `semantic_missing_non_convergent`; a genuinely
+new target is evaluated independently. "Answered" is judged per named target: a repeat is dropped
 only when the earlier request named every one of its targets and each has new agent-published
 material directly tied to it. For an action, result or evidence target that is a result of the named
 action or of another run of the same command (text compared with whitespace collapsed; a hook run's
@@ -7770,7 +7818,40 @@ owner's `verification.finding_attempt_budget` (`yoetz-config` `1.3.0`, integer 1
 round count at which an open item asks for a decision. It never throttles `check` and never
 changes state.
 
-Wire (all additive, unreleased versions changed in place):
+Check `1.4.0` preserves the earlier checklist and adds frozen-work `totals` to every newly
+completed check, including insufficient-coverage and failed required-review results. Legacy
+events without totals remain readable; an awaiting-input or awaiting-human continuation is not
+a completed check and has no claimed accounting result. Counters are canonical unsigned strings
+under closed keys for effective-plan obligations, obligation-scoped requested-item attempts,
+service-observed commands, evidence strength, and returned/suppressed findings. The current
+finding-disposition counts remain in `finding_checklist`, distinguished from frozen-work totals.
+Failed exploration stays in historical command counts. A later qualifying run of the same keyed
+command identity can retire a failure; unrelated edits and unknown reruns cannot. A disclosed test
+failure remains live until rerun green. An attempted item or linked evidence record is an assertion
+or link, not a claim that the requirement was verified. Totals survive event replay and operation
+recovery without recounting newer work, and carry no command text, paths, or caller-defined keys.
+
+The totals field `obligations.scope_known` is a canonical `"0"`/`"1"` availability flag. It is
+`"1"` when the current plan declaration is readable (including a readable empty or absent plan)
+and `"0"` when that scope is redacted, malformed, or otherwise unavailable. When it is `"0"`,
+the obligation and obligation-scoped requested-item counters are unavailable rather than observed
+zeroes, the receipt says so, and the scoped deterministic verdict is ineligible. The
+`test_edits.examined` and
+`test_edits.baseline_known` totals are the same binary availability shape; all other totals remain
+canonical unsigned counters.
+
+A check whose effective mode is deterministic-only can say **no issue detected within
+deterministic coverage** when its complete candidate set, active obligations, requested items and
+relevant observed failures permit it. An omitted mode resolves through the configured verification
+policy; a disabled semantic policy therefore uses this same deterministic-only route, while an
+optional or required semantic route does not. The absence of AI-powered review remains in coverage
+and the receipt; no open/unreadable obligation, unattempted item, unknown command outcome, relevant
+live failure, actionable finding (even suppressed), or material coverage gap can earn this scoped
+verdict.
+[ADR-032](adr/ADR-032-closure-readiness-checklist-and-material-dependency-coverage.md) owns the
+closed standing-limit allowlist and the unchanged receipt honesty boundary.
+
+Wire (the earlier checklist fields remain available in their original versions):
 
 - `check-result` `1.3.0` success: optional `finding_checklist` `{attempt_budget, counts, items[],
   next}`. `attempt_budget` is a canonical string `1`–`50`; each item is `{finding_id, todo_state,
@@ -7796,6 +7877,18 @@ Wire (all additive, unreleased versions changed in place):
   item, and is read from the adapter-owned projection at the result frontier, never from a status
   page or a replay; any failure reading it omits the list and records a
   `finding_checklist_read` diagnostic instead of failing the committed check.
+- `missing_for_assessment` is the authoritative input continuation when it contains an
+  `agent_suppliable` item: supply or repair the named target before requesting an ordinary receipt.
+  The additive `overall_next` projection carries the task-level `status`, `action`, and bounded
+  `target_refs`; its `action` is `supply_missing_input` for those targets (the refs may be empty
+  when the reviewer named a global input), `work_open_findings` for open findings,
+  `review_recorded_work` for open obligations or undisclosed live failures, or `request_receipt`
+  when no agent action remains. The finding checklist's `next` remains finding-only and is labeled
+  that way beside this continuation. When only standing or structurally unavailable limits remain,
+  `overall_next.status` is
+  `ready_with_limitations` and `acknowledged_incomplete_endpoint: receipt` keeps the supported
+  coverage-limited receipt path explicit. A `structurally_unavailable_on_this_host` item remains
+  a disclosed limitation; it does not become an impossible-to-do action.
 - Stable identity: a challenge whose kind matches a recorded AI-powered finding, whose subject
   set is exactly that finding's (the receipt's issue key), and none of whose subjects was recorded
   after that finding (the evidence fingerprint) is a restatement. A narrower or wider challenge is

@@ -11,9 +11,11 @@ import pytest
 
 import yoetz.adapters.git_change_capture as capture_module
 from yoetz.adapters.git_change_capture import GitChangeCaptureAdapter
+from yoetz.kernel.test_edit_visibility import preexisting_test_edits
 from yoetz.ports.change_capture import (
     ChangeCaptureUnavailable,
     CheckChangeCapture,
+    CheckChangeMetadata,
     TaskChangeBase,
     decode_check_change,
     decode_task_change_base,
@@ -127,6 +129,98 @@ def test_script_rewrite_without_any_edit_tool_is_captured_against_the_task_base(
     assert "diff --git a/notes.md b/notes.md" in text and "+follow-up" in text
     assert "  M selectors.ts (+1 -1)" in text
     assert "  A notes.md (+1 -0) untracked" in text
+
+
+def test_real_capture_reduces_a_preexisting_test_edit_to_structural_counts(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    tests_dir = repository / "tests"
+    tests_dir.mkdir()
+    test_file = tests_dir / "test_existing.py"
+    test_file.write_text("def test_existing():\n    assert 1 == 1\n", encoding="utf-8")
+    _git(repository, "add", "--", "tests/test_existing.py")
+    _commit(repository, "add existing test")
+    adapter = GitChangeCaptureAdapter()
+    base = adapter.read_task_base(os.fspath(repository))
+    test_file.write_text("def test_existing():\n    assert 1 == 2\n", encoding="utf-8")
+
+    capture = adapter.capture(os.fspath(repository), base)
+    facts = preexisting_test_edits(capture)
+
+    assert facts.modified == 1
+    assert facts.renamed == facts.deleted == facts.skipped == 0
+    assert facts.gaps == ("preexisting_test_modified",)
+
+
+def test_metadata_capture_lists_test_paths_without_reading_file_content(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    tests_dir = repository / "tests"
+    tests_dir.mkdir()
+    test_file = tests_dir / "test_existing.py"
+    test_file.write_text("def test_existing():\n    assert 1 == 1\n", encoding="utf-8")
+    _git(repository, "add", "--", "tests/test_existing.py")
+    _commit(repository, "add existing test")
+    adapter = GitChangeCaptureAdapter()
+    base = adapter.read_task_base(os.fspath(repository))
+    test_file.write_text("SECRET_METADATA_CANARY\n", encoding="utf-8")
+
+    metadata = adapter.capture_metadata(os.fspath(repository), base)
+
+    assert type(metadata) is CheckChangeMetadata
+    assert metadata.base == "task_start"
+    assert [(entry.status, entry.path) for entry in metadata.entries] == [
+        ("M", "tests/test_existing.py")
+    ]
+    assert "SECRET_METADATA_CANARY" not in repr(metadata)
+
+
+def test_real_capture_handles_a_test_path_containing_git_header_delimiter_bytes(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    test_file = repository / "tests" / "foo b"
+    test_file.mkdir(parents=True)
+    test_file = test_file / "test.js"
+    test_file.write_text("it('works', fn)\n", encoding="utf-8")
+    _git(repository, "add", "--", "tests/foo b/test.js")
+    _commit(repository, "add existing js test")
+    adapter = GitChangeCaptureAdapter()
+    base = adapter.read_task_base(os.fspath(repository))
+    test_file.write_text("it.skip('works', fn)\n", encoding="utf-8")
+
+    capture = adapter.capture(os.fspath(repository), base)
+    facts = preexisting_test_edits(capture)
+
+    assert "  M tests/foo b/test.js" in _text(capture)
+    assert facts.modified == 1
+    assert facts.skipped == 1
+
+
+def test_real_capture_marks_a_git_rename_for_structural_test_accounting(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    tests_dir = repository / "tests"
+    tests_dir.mkdir()
+    old_file = tests_dir / "test_existing.py"
+    old_file.write_text("def test_existing():\n    assert 1 == 1\n", encoding="utf-8")
+    _git(repository, "add", "--", "tests/test_existing.py")
+    _commit(repository, "add existing test")
+    adapter = GitChangeCaptureAdapter()
+    base = adapter.read_task_base(os.fspath(repository))
+    _git(repository, "mv", "--", "tests/test_existing.py", "tests/test_renamed.py")
+
+    capture = adapter.capture(os.fspath(repository), base)
+    facts = preexisting_test_edits(capture)
+    metadata = adapter.capture_metadata(os.fspath(repository), base)
+
+    assert "  R tests/test_renamed.py" in _text(capture)
+    assert facts.renamed == 1
+    assert facts.modified == facts.deleted == facts.skipped == 0
+    assert [(entry.status, entry.original_path, entry.path) for entry in metadata.entries] == [
+        ("R", "tests/test_existing.py", "tests/test_renamed.py")
+    ]
 
 
 def test_without_a_recorded_base_the_change_is_against_head_and_says_so(tmp_path: Path) -> None:

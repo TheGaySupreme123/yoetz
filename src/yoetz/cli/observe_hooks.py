@@ -42,7 +42,6 @@ from yoetz.adapters.integrations.observation_local import (
     ObservationOutboxRow,
     ObservationStoreLockEvent,
     ObservationStoreLockTimeout,
-    UnpairedScopeNotice,
     observation_store_lock_deadline,
     observation_store_lock_scope,
     self_observation_deliverable,
@@ -104,7 +103,10 @@ from yoetz.domain.observation_selection import (
 )
 from yoetz.domain.observation_selection import (
     ObservationClassification,
+    RunnerClass,
     classify_observation,
+    command_runner_class,
+    compound_verification_gap_required,
     is_edit_tool_name,
     is_routine_read_candidate,
 )
@@ -271,6 +273,7 @@ _SESSION_START_SOURCES: Final = frozenset({"startup", "resume", "clear", "compac
 _STRUCTURAL_ALLOW: Final = frozenset(
     {
         "tool_name",
+        "runner_class",
         "exit_status",
         "correlation_id",
         "result_status",
@@ -772,7 +775,7 @@ def _attach_command_commitment(
 
     Those normalizers forward only their structural dict to the common path, so the raw
     ``tool_input`` never leaves this process. Failing to read the installation key only omits the
-    identity: the failure then falls back to the state-scoped supersession rule.
+    identity: the failure remains live until an exact covering rerun or explicit acknowledgement.
     """
 
     if not _is_command_tool(payload.get("tool_name")):
@@ -946,6 +949,9 @@ def _extract_structural(
     # summary construction revalidates the persisted envelope after process restart.
     if selected.proven_routine_success:
         fields["success"] = True
+    runner = command_runner_class(payload)
+    if runner is not None and tool_name is not None:
+        fields["runner_class"] = runner
     # Permission outcome aliases commonly seen in host payloads.
     decision = _token_or_none(payload.get("decision"))
     if decision is not None and "permission_decision" not in fields:
@@ -1410,6 +1416,16 @@ def map_hook_payload_to_envelope(
         source=source,
         host_outcome=host_outcome,
     )
+    gaps = set(gap_codes)
+    if event_name in {
+        "PostToolUse",
+        "postToolUse",
+        "PostToolUseFailure",
+        "postToolUseFailure",
+    } and (compound_verification_gap_required(payload)):
+        # Preserve the host's outer exit fact. The bounded gap records that a masking-capable
+        # shell composition does not expose every nested command outcome (#968).
+        gaps.add(ObservationGapCode.COMPOUND_OUTCOME_UNAVAILABLE.value)
     if "event_ordinal" not in structural:
         structural = JsonObject({**structural, "event_ordinal": event_ordinal})
     command_commitment = command_commitment_for_payload(payload, key_material)
@@ -1432,7 +1448,7 @@ def map_hook_payload_to_envelope(
         receipt_time=_now(),
         structural_payload=structural,
         content_object_refs=(),
-        gap_codes=gap_codes,
+        gap_codes=tuple(sorted(gaps, key=str.encode)),
     )
 
 
@@ -2135,18 +2151,6 @@ def _cached_recommendation_context(*, _state: Path | None) -> str:
             "start a fresh session afterwards. Fully restart the host only if activation requires it."
         )
     return text[:_MAX_ADVICE_CONTEXT]
-
-
-def _unpaired_notice_context(notice: UnpairedScopeNotice) -> str:
-    """Name one new orphan scope once, as a standing limitation that needs nothing (#917)."""
-
-    return (
-        "Yoetz notice (no response needed): pairing was lost for at least one tool call "
-        f"in this session (source {notice.source}, generation {notice.source_generation}). "
-        "It stays disclosed as the standing unpaired_event coverage limitation on status, "
-        "check coverage and the receipt. It is not a finding; do not respond, recheck or "
-        "wait for it to clear."
-    )
 
 
 async def _try_service_ingest(
@@ -3622,6 +3626,7 @@ def handle_observe(
     _ingress_gap: str | None = None,
     _include_admission_notice: bool = True,
     _pass_timing: HookPassTiming | None = None,
+    _derived_runner_class: RunnerClass | None = None,
 ) -> int:
     """Bounded observation ingress for Codex lifecycle hooks. Always exits 0.
 
@@ -4216,6 +4221,13 @@ def handle_observe(
                 classification=classification,
                 host_outcome=codex_outcome,
             )
+            if _derived_runner_class is not None:
+                envelope = replace(
+                    envelope,
+                    structural_payload=JsonObject(
+                        {**envelope.structural_payload, "runner_class": _derived_runner_class}
+                    ),
+                )
             if not selected_focused and envelope.structural_payload.get("action") == "routine_read":
                 envelope = replace(
                     envelope,
@@ -4968,7 +4980,6 @@ def handle_observe(
         # a blocked host pipe delays advice, never observation ingest or outbox work.
         # Commit remains after emit, so a failed write never suppresses a later delivery.
         pending_delivery: AdviceDelivery | None = None
-        pending_unpaired_notice: UnpairedScopeNotice | None = None
         delivery_session_id: str | None = None
         # stop_hook_active is the host loop guard: a prior Stop already
         # continued this turn. Blocking again would loop; leave advice for a
@@ -5019,20 +5030,6 @@ def handle_observe(
                         :_MAX_ADVICE_CONTEXT
                     ]
                     pending_delivery = delivery
-                if resolved_event == "PostToolUse":
-                    # One informational notice per new orphan scope; it waits for
-                    # a pass with room rather than being truncated (#917).
-                    unpaired_notice = store.peek_unpaired_notice(
-                        workspace_commitment, session_commitment
-                    )
-                    if unpaired_notice is not None:
-                        notice_text = _unpaired_notice_context(unpaired_notice)
-                        if len(additional) + 1 + len(notice_text) <= _MAX_ADVICE_CONTEXT:
-                            additional = " ".join(
-                                part for part in (additional, notice_text) if part
-                            )
-                            pending_unpaired_notice = unpaired_notice
-
             # Release recommendations are read from one bounded local cache only.
             # Existing task/receipt advice keeps its place first on this shared context
             # channel; the recommendation follows it only when both fit the bound, so an
@@ -5093,11 +5090,6 @@ def handle_observe(
                         pending_delivery.delivery_identity,
                         yoetz_session_id=delivery_session_id,
                         session_commitment=session_commitment,
-                    )
-            if emitted and host_consumable and pending_unpaired_notice is not None:
-                with contextlib.suppress(BaseException):
-                    store.commit_unpaired_notice_delivery(
-                        workspace_commitment, pending_unpaired_notice.lane
                     )
         # Advice selection, the lease, the stdout write itself and the delivery
         # commits sit past the 'drain' window; a blocked host pipe or a
@@ -6189,6 +6181,11 @@ def _handle_claude_observe(
                 child_attribution_gap = True
         if ordinary_profile and raw_event in {"PreToolUse", "PostToolUse", "PostToolUseFailure"}:
             _attach_command_commitment(structural, payload, _state=_state)
+        derived_runner_class = (
+            command_runner_class(payload)
+            if ordinary_profile and raw_event in {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
+            else None
+        )
         result = handle_observe(
             event_name=event_map[raw_event],
             stdin_bytes=canonical_encode(structural),
@@ -6207,6 +6204,7 @@ def _handle_claude_observe(
                 CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID if ordinary_profile else None
             ),
             _content_payload=payload if ordinary_profile else None,
+            _derived_runner_class=derived_runner_class,
             _pass_timing=_pass_timing,
         )
         if denied_output is not None:
@@ -6662,6 +6660,11 @@ def _handle_cursor_observe(
                     event_map[raw_event],
                     _state=_state,
                 )
+        derived_runner_class = (
+            command_runner_class(payload)
+            if ordinary_profile and raw_event in {"preToolUse", "postToolUse", "postToolUseFailure"}
+            else None
+        )
         return handle_observe(
             event_name=event_map[raw_event],
             stdin_bytes=canonical_encode(structural),
@@ -6678,6 +6681,7 @@ def _handle_cursor_observe(
                 CURSOR_ORDINARY_OBSERVATION_PROFILE_ID if ordinary_profile else None
             ),
             _content_payload=None if content_omitted or not ordinary_profile else payload,
+            _derived_runner_class=derived_runner_class,
             _ingress_gap=(
                 ObservationGapCode.PAYLOAD_CONTENT_OMITTED.value if content_omitted else None
             ),

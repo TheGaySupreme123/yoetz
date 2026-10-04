@@ -42,6 +42,7 @@ from yoetz.domain.receipts import (
     SEMANTIC_MISSING_AGENT_SUPPLIABLE_GAP,
     SEMANTIC_MISSING_ALREADY_SUPPLIED_GAP,
     SEMANTIC_MISSING_ITEMS_REJECTED_GAP,
+    SEMANTIC_MISSING_NON_CONVERGENT_GAP,
     SEMANTIC_MISSING_UNAVAILABLE_GAP,
 )
 from yoetz.domain.values import EventId
@@ -850,10 +851,20 @@ def review_missing_for_assessment(
             gaps.add(SEMANTIC_MISSING_ITEMS_REJECTED_GAP)
             if not refs:
                 continue
-        if pending is not None and any(
-            prior.kind == entry.kind and _answered(prior, per_target, refs)
-            for prior, per_target in zip(pending.items, answered, strict=True)
-        ):
+        matching_prior = (
+            ()
+            if pending is None
+            else tuple(
+                (prior, prior_answers)
+                for prior, prior_answers in zip(pending.items, answered, strict=True)
+                if prior.kind == entry.kind
+                and (
+                    (not refs and not prior.target_refs)
+                    or (bool(refs) and set(refs) <= set(prior.target_refs))
+                )
+            )
+        )
+        if any(_answered(prior, prior_answers, refs) for prior, prior_answers in matching_prior):
             gaps.add(SEMANTIC_MISSING_ALREADY_SUPPLIED_GAP)
             continue
         availability = (
@@ -861,6 +872,12 @@ def review_missing_for_assessment(
             if entry.kind in unsuppliable_kinds or set(refs) & redacted
             else AGENT_SUPPLIABLE
         )
+        if matching_prior and availability == AGENT_SUPPLIABLE:
+            # The reviewer named only an earlier target set and no directly related publication
+            # answered it.  Keep the item actionable, but disclose that another identical check
+            # will not converge by itself; a genuinely new target is intentionally excluded by
+            # the subset test above.
+            gaps.add(SEMANTIC_MISSING_NON_CONVERGENT_GAP)
         key = (entry.kind, refs)
         if kept.get(key) != STRUCTURALLY_UNAVAILABLE:
             kept[key] = availability

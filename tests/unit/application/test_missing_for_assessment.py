@@ -290,6 +290,26 @@ def test_an_output_free_result_never_answers_a_request_for_verification_output()
     review = review_missing_for_assessment(case, (), judgment, unsuppliable_kinds=frozenset())
     assert [item.kind for item in review.items] == ["verification_output"]
     assert "semantic_missing_already_supplied" not in review.gaps
+    assert "semantic_missing_non_convergent" in review.gaps
+
+    # A genuinely new target remains an ordinary actionable request; the non-convergence marker
+    # only applies when the reviewer repeats the same target set without a related publication.
+    new_target = review_missing_for_assessment(
+        _pending(
+            case,
+            MissingForAssessmentItem("verification_output", (str(act(62)),), "agent_suppliable"),
+        ),
+        (),
+        SemanticJudgment(
+            "insufficient_packet",
+            (),
+            missing_for_assessment=(
+                MissingForAssessment("verification_output", (str(res(63)),), "new target"),
+            ),
+        ),
+        unsuppliable_kinds=frozenset(),
+    )
+    assert "semantic_missing_non_convergent" not in new_target.gaps
 
     # A result that carries its output does answer it.
     answered = _requested_case({res(63): record(bare, 63), res(64): record(summarized, 64)})

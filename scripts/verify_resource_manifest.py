@@ -141,11 +141,58 @@ _CODEX_SKILL_MEMBERS: Final = (
         "guidance/request-templates.md",
     ),
     ("references/workflow.md", "shared_guidance", "guidance", "guidance/workflow.md"),
+    ("references/startup.md", "shared_guidance", "guidance", "guidance/startup.md"),
+    ("references/recovery.md", "shared_guidance", "guidance", "guidance/recovery.md"),
+    ("references/publication.md", "shared_guidance", "guidance", "guidance/publication.md"),
+    ("references/review.md", "shared_guidance", "guidance", "guidance/review.md"),
+    ("references/receipt.md", "shared_guidance", "guidance", "guidance/receipt.md"),
+    ("references/delegation.md", "shared_guidance", "guidance", "guidance/delegation.md"),
+    ("references/consent.md", "shared_guidance", "guidance", "guidance/consent.md"),
+    ("references/page-delivery.md", "shared_guidance", "guidance", "guidance/page-delivery.md"),
 )
 
 # The reviewed, explicit v0.1 inventory across 6 canonical source roots. Every entry
 # is deliberately listed here; nothing is discovered by scanning the repository.
 _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
+    (
+        "fixtures/canonical/check-totals-1.4.0.case.json",
+        "canonical_vector",
+        "application/json",
+        True,
+    ),
+    ("guidance/startup.md", "guidance", "text/markdown", True),
+    ("guidance/recovery.md", "guidance", "text/markdown", True),
+    ("guidance/publication.md", "guidance", "text/markdown", True),
+    ("guidance/review.md", "guidance", "text/markdown", True),
+    ("guidance/receipt.md", "guidance", "text/markdown", True),
+    ("guidance/delegation.md", "guidance", "text/markdown", True),
+    ("guidance/consent.md", "guidance", "text/markdown", True),
+    ("guidance/page-delivery.md", "guidance", "text/markdown", True),
+    (
+        "schemas/events/check-recorded-1.4.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/events/finding-recorded-1.4.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    ("schemas/findings/finding-1.4.0.schema.json", "json_schema", "application/schema+json", True),
+    (
+        "schemas/findings/provider-judgment-1.2.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/operations/check-result-1.4.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
     (
         "fixtures/canonical/check-conclusion-1.3.0.case.json",
         "canonical_vector",

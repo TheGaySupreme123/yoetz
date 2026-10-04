@@ -95,6 +95,8 @@ __all__ = [
     "ReviewOmission",
     "ReviewPacket",
     "ReviewerChallenge",
+    "VerifiedReviewItem",
+    "VerifiedReviewVerdict",
     "SemanticCase",
     "SemanticCaseItem",
     "SemanticEvaluatorPort",
@@ -1545,6 +1547,10 @@ class ReviewerChallenge:
     message_to_main_agent: str
     requested_next_step: ReviewerNextStep
     uncertainty: str
+    # Exact supporting quote from the packet. The provider contract requires this; the domain
+    # keeps it separate from the structural challenge fields so older persisted findings can
+    # still decode without one.
+    snippet: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.finding_kind) is not FindingKind:
@@ -1579,6 +1585,64 @@ class ReviewerChallenge:
         )
         if type(self.requested_next_step) is not str or self.requested_next_step not in _NEXT_STEPS:
             raise _invalid_judgment()
+        if self.snippet is not None:
+            object.__setattr__(
+                self,
+                "snippet",
+                _snapshot_text(
+                    self.snippet, maximum_bytes=MAX_REVIEW_TEXT_BYTES, error=_invalid_judgment()
+                ),
+            )
+
+
+type VerifiedReviewVerdict = Literal["supported", "not_supported", "not_assessable"]
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedReviewItem:
+    """One per-requirement or per-claim reviewer judgement (issue #906 Part 2)."""
+
+    requirement_or_claim: str
+    verdict: VerifiedReviewVerdict
+    cited_refs: tuple[str, ...]
+    snippet: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "requirement_or_claim",
+            _snapshot_text(
+                self.requirement_or_claim,
+                maximum_bytes=MAX_REVIEW_TEXT_BYTES,
+                error=_invalid_judgment(),
+            ),
+        )
+        if self.verdict not in {"supported", "not_supported", "not_assessable"}:
+            raise _invalid_judgment()
+        object.__setattr__(
+            self,
+            "cited_refs",
+            _validated_ref_tuple(
+                self.cited_refs,
+                minimum=1,
+                maximum=_MAX_SUBJECT_REFS,
+                public_only=False,
+                error=_invalid_judgment(),
+                canonicalize=True,
+            ),
+        )
+        if self.verdict == "not_assessable" and self.snippet is not None:
+            raise _invalid_judgment()
+        if self.verdict != "not_assessable" and self.snippet is None:
+            raise _invalid_judgment()
+        if self.snippet is not None:
+            object.__setattr__(
+                self,
+                "snippet",
+                _snapshot_text(
+                    self.snippet, maximum_bytes=MAX_REVIEW_TEXT_BYTES, error=_invalid_judgment()
+                ),
+            )
 
 
 type PriorFindingVerdictKind = Literal[
@@ -1669,9 +1733,28 @@ class SemanticJudgment:
     # recorded before issue #907 decodes with none, so the domain value admits an empty tuple;
     # the provider schema is what requires at least one.
     missing_for_assessment: tuple[MissingForAssessment, ...] = ()
+    # Part 2 is additive for old evaluator doubles and imported ledgers. New provider responses
+    # must supply this field; legacy local scripts retain the explicit bounded fallback text.
+    review_summary: str = "No review summary recorded."
+    verified: tuple[VerifiedReviewItem, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.conclusion) is not str or self.conclusion not in _CONCLUSIONS:
+            raise _invalid_judgment()
+        object.__setattr__(
+            self,
+            "review_summary",
+            _snapshot_text(
+                self.review_summary,
+                maximum_bytes=MAX_REVIEW_TEXT_BYTES,
+                error=_invalid_judgment(),
+            ),
+        )
+        if (
+            type(self.verified) is not tuple
+            or len(self.verified) > MAX_REVIEW_ASSESSMENTS
+            or any(type(item) is not VerifiedReviewItem for item in self.verified)
+        ):
             raise _invalid_judgment()
         if type(self.challenges) is not tuple or len(self.challenges) > MAX_REVIEW_CHALLENGES:
             raise _invalid_judgment()

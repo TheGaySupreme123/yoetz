@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 
 import pytest
@@ -71,7 +72,11 @@ def _provenance() -> SemanticProvenance:
     )
 
 
-def _challenge(*refs: str, summary: str = "Evidence gap") -> ReviewerChallenge:
+def _challenge(
+    *refs: str,
+    summary: str = "Evidence gap",
+    snippet: str | None = None,
+) -> ReviewerChallenge:
     return ReviewerChallenge(
         FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE,
         summary,
@@ -81,7 +86,68 @@ def _challenge(*refs: str, summary: str = "Evidence gap") -> ReviewerChallenge:
         "Main agent: provide evidence for the claim.",
         "provide_evidence",
         "The missing material may exist outside the case.",
+        snippet,
     )
+
+
+def test_reviewer_snippets_use_exact_provider_bound_text() -> None:
+    case = make_case(extra_refs=(clm(1),))
+    judgment = SemanticJudgment(
+        "challenges_returned",
+        (_challenge(str(clm(1)), snippet="sent-safe-row"),),
+    )
+    accepted = validate_semantic_judgment(
+        case,
+        (),
+        judgment,
+        _provenance(),
+        expected_frontier=case.frontier,
+        citable_refs=frozenset({str(clm(1))}),
+        provider_input_text_by_ref={str(clm(1)): ("sent-safe-row",)},
+    )
+    assert accepted.challenges_rejected == 0
+    assert accepted.challenges_returned == 1
+
+    partial_case = make_case(extra_refs=(clm(1), clm(2)))
+    partial_provider_text = validate_semantic_judgment(
+        partial_case,
+        (),
+        SemanticJudgment(
+            "challenges_returned",
+            (_challenge(str(clm(1)), str(clm(2)), snippet="sent-safe-row"),),
+        ),
+        _provenance(),
+        expected_frontier=partial_case.frontier,
+        citable_refs=frozenset({str(clm(1)), str(clm(2))}),
+        provider_input_text_by_ref={str(clm(1)): ("sent-safe-row",)},
+    )
+    assert partial_provider_text.challenges_rejected == 1
+    assert partial_provider_text.candidates == ()
+
+    rejected = validate_semantic_judgment(
+        case,
+        (),
+        judgment,
+        _provenance(),
+        expected_frontier=case.frontier,
+        citable_refs=frozenset({str(clm(1))}),
+        provider_input_text_by_ref={str(clm(1)): ("different-provider-row",)},
+    )
+    assert rejected.challenges_rejected == 1
+    assert rejected.candidates == ()
+
+    recovered_without_text = validate_semantic_judgment(
+        case,
+        (),
+        judgment,
+        _provenance(),
+        expected_frontier=case.frontier,
+        citable_refs=frozenset({str(clm(1))}),
+        provider_input_text_by_ref=None,
+    )
+    assert recovered_without_text.challenges_rejected == 1
+    assert recovered_without_text.snippets_rejected == 1
+    assert recovered_without_text.candidates == ()
 
 
 def test_semantic_judgment_accepts_only_frozen_refs_and_derives_policy() -> None:
@@ -452,10 +518,23 @@ def test_rulings_without_cited_material_or_a_rejection_to_accept_are_unassessabl
 _FOREIGN = "evd_99999999-9999-4999-8999-999999999999"
 
 
-def _review(judgment: SemanticJudgment, **fence: frozenset[str]) -> SemanticJudgmentReview:
+def _review(
+    judgment: SemanticJudgment,
+    *,
+    prior_finding_refs: frozenset[str] | None = None,
+    citable_refs: frozenset[str] | None = None,
+    provider_input_text_by_ref: Mapping[str, tuple[str, ...]] | None = None,
+) -> SemanticJudgmentReview:
     case = _dialogue_case()
     return validate_semantic_judgment(
-        case, (), judgment, _provenance(), expected_frontier=case.frontier, **fence
+        case,
+        (),
+        judgment,
+        _provenance(),
+        expected_frontier=case.frontier,
+        prior_finding_refs=prior_finding_refs,
+        citable_refs=citable_refs,
+        provider_input_text_by_ref=provider_input_text_by_ref,
     )
 
 
@@ -553,6 +632,24 @@ def test_rulings_are_fenced_to_the_packet_the_reviewer_was_shown() -> None:
         (str(fnd(2)), "unassessable", (str(obl(2)),)),
     ]
     assert review.verdicts_unsupported == 2
+
+
+def test_prior_rulings_are_fenced_to_exact_provider_bound_refs() -> None:
+    """A composed citable ref cannot support a ruling after privacy drops its provider row."""
+
+    review = _review(
+        SemanticJudgment(
+            "no_material_discrepancy",
+            (),
+            (_verdict(1, "fixed", str(res(2))),),
+        ),
+        prior_finding_refs=frozenset({str(fnd(1))}),
+        citable_refs=frozenset({str(fnd(1)), str(res(2))}),
+        provider_input_text_by_ref={str(obl(1)): ("a different provider-bound row",)},
+    )
+
+    assert _rulings(review) == [(str(fnd(1)), "unassessable", ())]
+    assert review.verdicts_unsupported == 1
 
 
 def test_a_fixed_ruling_on_a_finding_the_same_review_re_raises_is_unassessable() -> None:

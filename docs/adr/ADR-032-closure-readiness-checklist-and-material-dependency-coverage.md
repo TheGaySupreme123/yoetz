@@ -2,8 +2,9 @@
 
 **Status:** Proposed for [issue #913](https://github.com/TheGaySupreme123/yoetz/issues/913). The
 maintainer acknowledged the design-gated scope on 2026-09-30 and adopted option 2 of the issue (the
-agent-actionable / standing / acknowledged split with `ready_with_limitations`); option 3 (a scoped
-"clean local rules" outcome) stays a documented option only and is not decided here. Decisions 1–5
+agent-actionable / standing / acknowledged split with `ready_with_limitations`). The scoped local
+verdict in the amendment below is the narrow deterministic-only exception described by issue #971;
+it does not change the receipt conclusion or suppress coverage. Decisions 1–5
 are implemented. Decisions 6 and 7 are recorded here as the direction the issue recommends; the
 single status coverage definition of decision 7 is implemented, and the rest of 6 and 7 is tracked
 on the issue.
@@ -13,7 +14,7 @@ on the issue.
 `src/yoetz/tui/`, the status-result 1.4.0 schema, and the shipped guidance and skills.
 **Relates to:** ADR-019 (declared completion scope), ADR-020 (typed evidence digest provenance),
 ADR-027 (task lineage), ADR-030 (typed recovery directives), and issues #904, #905, #910, #911,
-#912, #917.
+#912, #917, #971.
 
 ## Context
 
@@ -147,3 +148,22 @@ issue.
 - **Guidance that tells agents to ignore `coverage_gaps_declared`.** The product must classify, not
   the prompt.
 - **An open-ended heuristic.** A closed table can be reviewed per host and tested for completeness.
+
+## Amendment — bounded deterministic-only scoped verdict (2026-10-04, #971)
+
+The earlier option-3 rejection applies to treating standing coverage as permission to call the
+whole task clean. Issue #971 adopts a narrower result for a check whose effective mode is
+`deterministic_only` (including an omitted mode resolved by a disabled verification policy):
+`no_issue_detected` may describe the deterministic rules within that check's recorded scope when
+the frozen totals show no open or unreadable obligation, no unattempted requested item, no unknown
+or relevant live observed failure, and no actionable finding, including one that the public finding
+cap would suppress. The internal ranking state is `scoped_complete`; it does not add a wire verdict
+token.
+
+The allowlist is closed to `semantic_review_not_requested`, plan-drift advisory codes, and the
+informational pre-existing-test-edit codes. Any other gap, an actionable finding, or a blocking
+total keeps the ordinary `insufficient_coverage` or `action_required` result. Every gap remains in
+the check coverage, status and receipt. The receipt therefore continues to say that AI-powered
+review did not run and retains its coverage-bounded conclusion; a scoped local verdict never means
+that the work is correct or that a provider reviewed it. Non-deterministic modes retain the prior
+completeness rules.

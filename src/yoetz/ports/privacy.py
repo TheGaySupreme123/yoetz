@@ -489,6 +489,9 @@ class MinimizedDisclosure:
     # Heuristic findings that survive into the prepared bytes are a fail-closed backstop failure,
     # not safe omissions. They are kept apart from concrete ``forbidden_findings`` for this check.
     heuristic_findings: tuple[ForbiddenDataKind, ...] = ()
+    # Number of low-confidence spans replaced in the prepared bytes.  The count is structural;
+    # matched bytes and source prose never cross this boundary.
+    redacted_span_count: int = 0
 
     def __post_init__(self) -> None:
         if (
@@ -520,6 +523,8 @@ class MinimizedDisclosure:
             if values != tuple(sorted(set(values), key=lambda value: value.value.encode())):
                 raise _invalid()
         if set(self.forbidden_findings) & set(self.heuristic_findings):
+            raise _invalid()
+        if type(self.redacted_span_count) is not int or self.redacted_span_count < 0:
             raise _invalid()
         if type(self.transformation_summary) is not tuple:
             raise _invalid()
@@ -1103,6 +1108,8 @@ class PrivacyAuditPort(Protocol):
 
 
 class PrivacyClassifierPort(Protocol):
+    def scanner_identity(self) -> tuple[str, str]: ...
+
     def classify(
         self, candidate: CandidateContext, policy: EffectivePrivacyPolicy
     ) -> ClassifiedContext: ...

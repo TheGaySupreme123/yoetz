@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 import pytest
 
+import yoetz.observability.privacy as privacy_module
 from yoetz.observability.privacy import (
     PRIVACY_REQUEST_BODY_DOMAIN,
     SESSION_HASH_DOMAIN,
@@ -21,6 +22,7 @@ from yoetz.observability.privacy import (
     privacy_request_commitment,
     redact_diagnostic_record,
     redact_diagnostic_value,
+    redact_heuristic_spans,
     scan_for_sensitive_content,
     session_id_hash,
 )
@@ -179,6 +181,101 @@ def test_assignment_heuristic_preserves_source_expressions_but_withholds_quoted_
     quoted = scan_for_sensitive_content(b"TOKEN='nextToken(parser)'")
     assert len(quoted) == 1
     assert quoted[0].confidence is ScanConfidence.HEURISTIC
+
+
+def test_python_attribute_assignment_uses_syntax_proof_only() -> None:
+    assert scan_for_sensitive_content(b"def parse(node):\n    token = node.token\n") == ()
+    malformed = scan_for_sensitive_content(b"token = node.token\nnot valid python ???")
+    assert len(malformed) == 1
+    assert malformed[0].confidence is ScanConfidence.HEURISTIC
+
+
+def test_python_precision_does_not_exempt_generic_dotted_or_literal_values() -> None:
+    for source in (
+        b"TOKEN=opaque.value",
+        b"token = 'node.token'",
+        b"+token = node.token",
+        b"token = getToken()",
+    ):
+        findings = scan_for_sensitive_content(source)
+        assert len(findings) == 1
+        assert findings[0].confidence is ScanConfidence.HEURISTIC
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        b"const token = parser.token;",  # JavaScript/TypeScript member without a safe enum proof
+        b"var token = parser.token",  # Go-like declaration
+        b"let token = parser.token;",  # Rust-like binding
+        b"Token token = parser.token;",  # Java-like declaration
+        b"token = node.token",  # Python without an enclosing function
+        b"TOKEN=opaque.value",  # configuration/prose
+        b'{"token":"node.token"}',  # quoted structured history
+    ],
+)
+def test_unproven_cross_language_member_assignments_stay_heuristic(source: bytes) -> None:
+    findings = scan_for_sensitive_content(source)
+    assert len(findings) == 1
+    assert findings[0].confidence is ScanConfidence.HEURISTIC
+
+
+def test_high_confidence_controls_remain_high_across_source_contexts() -> None:
+    for source in (
+        b"def parse(node):\n    token = node.token\n    value = 'ghp_abcdefghijklmnopqrstuvwxyz123456'\n",
+        b"const token = '-----BEGIN PRIVATE KEY-----';",
+    ):
+        findings = scan_for_sensitive_content(source)
+        assert findings
+        assert any(finding.confidence is ScanConfidence.HIGH for finding in findings)
+
+
+def test_python_context_parse_failure_stays_heuristic(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_parse(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise RecursionError("bounded parser failure")
+
+    monkeypatch.setattr(privacy_module.ast, "parse", fail_parse)
+    findings = scan_for_sensitive_content(b"def parse(node):\n    token = node.token\n")
+    assert len(findings) == 1
+    assert findings[0].confidence is ScanConfidence.HEURISTIC
+
+
+def test_heuristic_json_assignment_redaction_keeps_structured_payload_valid() -> None:
+    secret = b"bounded-but-suspicious-value"
+    payload = (
+        b'{"event_id":"evt_1","payload":{"auth_token":"'
+        + secret
+        + b'","config":"TOKEN=opaque.value"}}'
+    )
+    redacted, count = redact_heuristic_spans(payload)
+    assert count == 2
+    assert secret not in redacted
+    assert json.loads(redacted) == {
+        "event_id": "evt_1",
+        "payload": {
+            "auth_token": "[REDACTED]",
+            "config": "[REDACTED]",
+        },
+    }
+    assert scan_for_sensitive_content(redacted) == ()
+
+
+@pytest.mark.parametrize("value", ["bounded secret words", 'bounded\\"value'])
+def test_quoted_assignment_redaction_consumes_complete_json_string(value: str) -> None:
+    payload = json.dumps({"auth_token": value}, separators=(",", ":")).encode("utf-8")
+
+    redacted, count = redact_heuristic_spans(payload)
+    assert count == 1
+    assert value.encode("utf-8") not in redacted
+    assert json.loads(redacted) == {"auth_token": "[REDACTED]"}
+    assert scan_for_sensitive_content(redacted) == ()
+
+    persisted = prepare_persisted_plaintext(payload)
+    assert persisted.persist is True
+    assert persisted.content == redacted
+    assert value.encode("utf-8") not in persisted.content
+    assert json.loads(persisted.content) == {"auth_token": "[REDACTED]"}
 
 
 @pytest.mark.parametrize(

@@ -71,6 +71,7 @@ from yoetz.kernel.finding_resolution import (
 from yoetz.kernel.observed_failures import (
     ObservedFailureState,
     is_observed_run_record,
+    observed_action_is_exploratory,
     observed_failure_states_from_records,
 )
 from yoetz.kernel.plan_scope import current_plan_scope
@@ -836,9 +837,9 @@ def _apply_claim(
                 "supporting_refs_must_exclude_limitations",
                 event.event_id,
             )
-        # A hook-observed failure that a later passing run of the same command superseded, or
-        # that a completed observed edit made historical, is no longer required (#909). It stays
-        # nameable below, and the receipt counts it as history.
+        # A hook-observed failure that a later run of the same command superseded is no longer
+        # required (#909). An edit alone changes the state under test without proving a covering
+        # rerun, so it remains live and nameable below.
         observed_states = observed_failure_states_from_records(
             results,
             actions,
@@ -852,6 +853,12 @@ def _apply_claim(
             and record.payload.outcome in _TYPED_LIMITING_OUTCOMES
             and observed_states.get(result_id_value, ObservedFailureState.LIVE)
             is ObservedFailureState.LIVE
+            and not (
+                (action := actions.get(record.payload.action_id)) is not None
+                and action.payload is not None
+                and action.source_event_id in observed_event_ids
+                and observed_action_is_exploratory(action.payload)
+            )
             and _result_is_relevant_to_claim(
                 payload,
                 record,

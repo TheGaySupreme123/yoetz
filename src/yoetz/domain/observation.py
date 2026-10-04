@@ -73,6 +73,7 @@ __all__ = [
     "ObservationCursor",
     "ObservationEnvelope",
     "ObservationGapCode",
+    "MATERIAL_OBSERVATION_GAPS",
     "ObservationIngestDisposition",
     "ObservationIngestRequest",
     "ObservationIngestResult",
@@ -256,6 +257,7 @@ def validate_observation_protection_reference(value: object) -> str:
 _STRUCTURAL_KEYS: Final = frozenset(
     {
         "tool_name",
+        "runner_class",
         "action",
         "exit_status",
         "correlation_id",
@@ -332,7 +334,11 @@ _STRUCTURAL_TOKEN_KEYS: Final = frozenset(
         "selection_writer_id",
         "selection_authority_generation",
         "protection_reference",
+        "runner_class",
     }
+)
+_RUNNER_CLASSES: Final = frozenset(
+    {"exploration", "test", "build", "lint", "typecheck", "vcs", "other", "compound"}
 )
 
 _PROSE_KEYS: Final = frozenset(
@@ -478,7 +484,24 @@ class ObservationGapCode(str, Enum):  # noqa: UP042 - exact durable wire enum
     SELECTION_ROUTE_CHANGED = "selection_route_changed"
     POLICY_UNTRUSTED = "policy_untrusted"
     VERIFICATION_STALE = "verification_stale"
+    COMPOUND_OUTCOME_UNAVAILABLE = "compound_outcome_unavailable"
     NETWORK_CHECK_UNSUPPORTED = "network_check_unsupported"
+
+
+# Gap codes that describe a currently unhealthy observation path.  Other gap codes remain
+# visible coverage limitations, but do not by themselves turn a healthy, draining observation
+# session into ``degraded``.  Keep this in the observation domain so the local fallback store,
+# the SQLite store, and the lifecycle policy use the same classification (#974).
+MATERIAL_OBSERVATION_GAPS: Final[frozenset[str]] = frozenset(
+    {
+        ObservationGapCode.SERVICE_UNAVAILABLE.value,
+        ObservationGapCode.VAULT_LOCKED.value,
+        ObservationGapCode.UNSUPPORTED_EVENT.value,
+        ObservationGapCode.UNSUPPORTED_FORMAT.value,
+        ObservationGapCode.SOURCE_LAG.value,
+        ObservationGapCode.CURSOR_STALE.value,
+    }
+)
 
 
 class ObservationContentKind(str, Enum):  # noqa: UP042 - exact durable wire enum
@@ -822,6 +845,8 @@ def _structural_payload(value: object) -> JsonObject:
             raise _invalid("unknown_payload_field")
         if key in _STRUCTURAL_TOKEN_KEYS:
             _token(item)
+        if key == "runner_class" and item not in _RUNNER_CLASSES:
+            raise _invalid("invalid_event_value_type")
         if key == "protection_reference":
             validate_observation_protection_reference(item)
         if key == "command_commitment":

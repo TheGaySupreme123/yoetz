@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from yoetz.cli.render import render_human_check
+from yoetz.mcp.server import _result_text  # pyright: ignore[reportPrivateUsage]
 from yoetz.mcp.summaries import render_safe_compact_summary
 from yoetz.protocol.models import (
     CheckMissingItemModel,
@@ -76,18 +77,26 @@ def test_check_cli_and_mcp_share_bounded_manifest_and_missing_projection() -> No
     assert "Missing for assessment" in cli
     assert "agent_suppliable" in cli
 
-    mcp = render_safe_compact_summary(
-        {
-            "ok": True,
-            "verdict": "insufficient_coverage",
-            "findings": [],
-            "suppressed_count": "0",
-            "semantic_status": "succeeded",
-            "semantic_reason": "semantic_completed",
-            "review_input_manifest": manifest,
-            "result_frontier": {"sequence": "7", "head_digest": _DIGEST},
-        }
-    )
+    wire: dict[str, object] = {
+        "ok": True,
+        "verdict": "insufficient_coverage",
+        "findings": [],
+        "suppressed_count": "0",
+        "semantic_status": "succeeded",
+        "semantic_reason": "semantic_completed",
+        "review_input_manifest": manifest,
+        "missing_for_assessment": [
+            {
+                "kind": "verification_output",
+                "target_refs": ["res_00000000-0000-4000-8000-000000000002"],
+                "availability": "agent_suppliable",
+            }
+        ],
+        "result_frontier": {"sequence": "7", "head_digest": _DIGEST},
+    }
+    mcp = _result_text(wire)
     assert "Review input manifest: provider_bound" in mcp
     assert "specification: withheld" in mcp
-    assert len(mcp.encode("ascii")) <= 512
+    assert "overall next: supply_missing_input" in mcp
+    assert "res_00000000-0000-4000-8000-000000000002" in mcp
+    assert len(render_safe_compact_summary(wire).encode("ascii")) <= 512

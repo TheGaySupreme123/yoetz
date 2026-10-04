@@ -140,7 +140,7 @@ _ID_DOMAIN: Final = b"yoetz/observation-materialize-id/v1\x00"
 _FILE_TOOLS: Final = frozenset(
     {
         # A Codex rollout ``FileChange`` item is the patch a hooked or stream-only call applied
-        # (#910); it belongs to the edit family so a stream-only edit can retire a failure (#909).
+        # (#910); it belongs to the edit family, but an edit alone never retires a failure (#909).
         "file_change",
         "apply_patch",
         "edit",
@@ -1006,7 +1006,9 @@ def materialize_observation_envelope(
             _observation_host_label(envelope.source) if pairing_mode == "paired" else "Codex hook"
         )
         description = observed_action_description(
-            f"Observed pending {action_kind.value} via {host}", tool
+            f"Observed pending {action_kind.value} via {host}",
+            tool,
+            cast(str | None, structural.get("runner_class")),
         )
         command = None
         if action_kind is ActionKind.COMMAND:
@@ -1167,6 +1169,7 @@ def materialize_observation_envelope(
                             f"{_observation_host_label(envelope.source)}"
                         ),
                         tool,
+                        cast(str | None, structural.get("runner_class")),
                     ),
                     command=command,
                 ),

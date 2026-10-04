@@ -178,6 +178,34 @@ def test_requested_item_never_attempted_and_exact_attempt_nontrigger() -> None:
     assert FindingKind.REQUESTED_ITEM_NEVER_ATTEMPTED not in _kinds(attempted)
 
 
+def test_identical_requested_items_require_obligation_scoped_attempt() -> None:
+    first = _open_obligation(1, requested="shared-check")
+    second = _open_obligation(2, requested="shared-check")
+    plan = PlanPublishedPayload(1, "Plan", (obl(1), obl(2)))
+    scoped = ActionRecordedPayload(
+        action_id=act(1),
+        action_kind=ActionKind.EDIT,
+        description="Attempt only the first obligation.",
+        obligation_refs=(obl(1),),
+        attempted_items=("shared-check",),
+    )
+    case = make_case(
+        plans={1: plan_record(plan, 1)},
+        obligations={
+            obl(1): obligation_record(first, 2),
+            obl(2): obligation_record(second, 3),
+        },
+        actions={act(1): record(scoped, 4)},
+    )
+
+    findings = [
+        assessment
+        for assessment in run_deterministic_policies(case, WORK_INTEGRITY_POLICY_PACK).assessments
+        if assessment.candidate.kind is FindingKind.REQUESTED_ITEM_NEVER_ATTEMPTED
+    ]
+    assert [assessment.candidate.subject_refs for assessment in findings] == [(obl(2),)]
+
+
 def test_requested_item_on_carried_revision_uses_effective_plan_scope() -> None:
     obligation = _open_obligation(2, requested="item-2")
     initial = PlanPublishedPayload(1, "Initial plan", ())

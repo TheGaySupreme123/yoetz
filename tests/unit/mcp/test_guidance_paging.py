@@ -19,6 +19,7 @@ from yoetz.mcp.resources import (
     read_resource_page,
 )
 from yoetz.ports.control import McpHostProfile
+from yoetz.protocol.models import ReadGuidanceRequestModel
 
 _URI = "yoetz://guidance/agent-instructions.md"
 _OVERSIZED_URI = "yoetz://guidance/workflow.md"
@@ -283,6 +284,46 @@ def test_legacy_oversized_dispatch_returns_bounded_first_page_with_continuation(
 def test_hostile_page_sizes_fail_closed() -> None:
     with pytest.raises(GuidanceResourceError, match="guidance_page_size_invalid"):
         read_resource_page(_URI, page_size=3)
+
+
+@pytest.mark.parametrize("page_size", ("4", "16384"))
+def test_request_accepts_the_inclusive_guidance_page_size_bounds(page_size: str) -> None:
+    request = ReadGuidanceRequestModel.model_validate(
+        {"uri": _URI, "page": "0", "page_size": page_size}
+    )
+    assert request.page_size == page_size
+
+
+@pytest.mark.parametrize("page_size", ("3", "16385", "016384"))
+def test_request_rejects_noncanonical_or_out_of_range_guidance_page_sizes(
+    page_size: str,
+) -> None:
+    with pytest.raises(ValueError, match="guidance_page_size_invalid|canonical"):
+        ReadGuidanceRequestModel.model_validate({"uri": _URI, "page": "0", "page_size": page_size})
+
+
+def test_dispatch_rejects_oversized_page_size_with_a_field_local_retry() -> None:
+    async def _run() -> None:
+        runtime = bridge.build_bridge_runtime("policy", host_profile="generic")
+        try:
+            result = await bridge.dispatch_read_guidance(
+                {"uri": _URI, "page": "0", "page_size": "16385"}, runtime
+            )
+            assert result.isError is True
+            error = cast(dict[str, Any], cast(dict[str, object], result.structuredContent)["error"])
+            assert error["code"] == "INVALID_REQUEST"
+            assert "page_size" in error["message"]
+            assert "16384" in error["message"]
+            assert "4096" in error["message"]
+            details = cast(dict[str, object], error["safe_details"])
+            assert "/page_size" in cast(list[object], details["fields"])
+            assert "guidance_page_size_invalid" in cast(list[object], details["reasons"])
+        finally:
+            await bridge.close_bridge_runtime(runtime)
+
+    import anyio
+
+    anyio.run(_run)
 
 
 @pytest.mark.parametrize("host", ("codex", "generic", "claude", "cursor"))

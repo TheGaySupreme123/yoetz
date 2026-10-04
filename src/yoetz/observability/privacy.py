@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
@@ -28,6 +29,7 @@ __all__ = [
     "privacy_request_commitment",
     "redact_diagnostic_record",
     "redact_diagnostic_value",
+    "redact_heuristic_spans",
     "redact_sensitive_content",
     "scan_for_sensitive_content",
     "scan_finding_is_heuristic",
@@ -77,6 +79,14 @@ _CREDENTIAL_PATTERNS: Final = (
     re.compile(rb"(?<![A-Z0-9])AKIA[A-Z0-9]{16}(?![A-Z0-9])"),
 )
 _URI_PASSWORD = re.compile(rb"[A-Za-z][A-Za-z0-9+.-]{0,31}://[^\s/:@]{1,128}:[^\s/@]{1,256}@")
+# Assignment values are bounded but may be quoted JSON/Python strings.  Keep the complete quoted
+# span, including whitespace and escaped quotes, so redaction cannot leave a suffix behind or
+# remove the closing quote and corrupt an otherwise valid structured payload.
+_ASSIGNMENT_VALUE = (
+    rb"(?:\"(?:\\.|[^\"\\\r\n]){1,512}\""
+    rb"|'(?:\\.|[^'\\\r\n]){1,512}'"
+    rb"|[^\s,'\";}{]{1,512})"
+)
 # Compound names such as AWS_SECRET_ACCESS_KEY and AZURE_CLIENT_SECRET keep the
 # secret token as one underscore/hyphen component, not the entire identifier.
 _SECRET_ASSIGNMENT = re.compile(
@@ -84,7 +94,7 @@ _SECRET_ASSIGNMENT = re.compile(
     rb"(?:[A-Za-z][A-Za-z0-9]{0,63}[_-])*"
     rb"(?:api[_-]?key|access[_-]?token|auth[_-]?token|password|passwd|private[_-]?key|secret)"
     rb"(?:[_-][A-Za-z][A-Za-z0-9]{0,63})*"
-    rb"['\"]?\s*[:=]\s*['\"]?[^\s,'\";}{]{1,512}"
+    rb"['\"]?\s*[:=]\s*" + _ASSIGNMENT_VALUE
 )
 # `*_TOKEN` only as the final identifier component. The value must contain a
 # non-digit and be at least eight bytes so MAX_TOKEN=4096 and TOKEN_COUNT=12
@@ -92,7 +102,10 @@ _SECRET_ASSIGNMENT = re.compile(
 _TOKEN_ASSIGNMENT = re.compile(
     rb"(?i)(?:^|[^A-Za-z0-9_])['\"]?"
     rb"(?:[A-Za-z][A-Za-z0-9]{0,63}[_-])*token"
-    rb"['\"]?\s*[:=]\s*['\"]?(?=[^\s,'\";}{]{0,511}[A-Za-z_/=+-])[^\s,'\";}{]{8,512}"
+    rb"['\"]?\s*[:=]\s*(?="
+    rb"(?:\"(?:\\.|[^\"\\\r\n]){1,512}\""
+    rb"|'(?:\\.|[^'\\\r\n]){1,512}'"
+    rb"|[^\s,'\";}{]{0,511}[A-Za-z_/=+-]))" + _ASSIGNMENT_VALUE
 )
 # Assignment heuristics remain conservative: ordinary parser/member/call expressions should not
 # turn a whole review into a credential refusal, but a bare dotted value is ambiguous without
@@ -360,7 +373,88 @@ def _append_finding(
         findings.append(ScanFinding(kind, start, end, severity, confidence))
 
 
-def _assignment_value_is_code(match: re.Match[bytes], *, preceding: bytes = b"") -> bool:
+def _python_attribute_assignment_spans(data: bytes) -> tuple[tuple[int, int], ...]:
+    """Return spans proven to be Python ``token = object.member`` assignments.
+
+    The assignment scanner sees bytes from prose, structured history, diffs, and source files.
+    Syntactically valid Python is necessary but insufficient: the assignment must sit inside a
+    real function scope and the RHS must be the matching ``.token`` member. Calls, generic
+    dotted values, literals, uppercase configuration names, mixed-language text, and malformed
+    source remain heuristic findings.
+    """
+
+    if len(data) > _SCAN_CHUNK_BYTES:
+        return ()
+    try:
+        source = data.decode("utf-8")
+        tree = ast.parse(source, mode="exec")
+    except RecursionError, UnicodeDecodeError, SyntaxError, ValueError:
+        return ()
+    lines = source.splitlines(keepends=True)
+    line_offsets: list[int] = []
+    offset = 0
+    for line in lines:
+        line_offsets.append(offset)
+        offset += len(line.encode("utf-8"))
+
+    def node_span(node: ast.AST) -> tuple[int, int] | None:
+        lineno = getattr(node, "lineno", None)
+        col_offset = getattr(node, "col_offset", None)
+        end_lineno = getattr(node, "end_lineno", None)
+        end_col_offset = getattr(node, "end_col_offset", None)
+        if not all(
+            type(value) is int for value in (lineno, col_offset, end_lineno, end_col_offset)
+        ):
+            return None
+        assert isinstance(lineno, int)
+        assert isinstance(col_offset, int)
+        assert isinstance(end_lineno, int)
+        assert isinstance(end_col_offset, int)
+        if not 1 <= lineno <= len(line_offsets) or not 1 <= end_lineno <= len(line_offsets):
+            return None
+        start = line_offsets[lineno - 1] + col_offset
+        end = line_offsets[end_lineno - 1] + end_col_offset
+        return (start, end) if 0 <= start < end <= len(data) else None
+
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+
+    def has_enclosing_scope(node: ast.AST) -> bool:
+        current = parents.get(node)
+        while current is not None:
+            if isinstance(current, (ast.AsyncFunctionDef, ast.FunctionDef)):
+                return True
+            current = parents.get(current)
+        return False
+
+    spans: list[tuple[int, int]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Attribute):
+            continue
+        if (
+            not has_enclosing_scope(node)
+            or not isinstance(node.value.value, ast.Name)
+            or node.value.attr != "token"
+            or not all(
+                isinstance(target, ast.Name) and target.id == "token" for target in node.targets
+            )
+        ):
+            continue
+        span = node_span(node)
+        if span is not None:
+            spans.append(span)
+    return tuple(sorted(set(spans)))
+
+
+def _assignment_value_is_code(
+    match: re.Match[bytes],
+    *,
+    preceding: bytes = b"",
+    absolute_start: int | None = None,
+    python_attribute_spans: tuple[tuple[int, int], ...] = (),
+) -> bool:
     """Recognize source expressions only when the assignment syntax proves source context."""
 
     raw = match.group(0)
@@ -368,6 +462,15 @@ def _assignment_value_is_code(match: re.Match[bytes], *, preceding: bytes = b"")
     if separator is None:
         return False
     value = raw[separator.end() :]
+    # This is Yoetz's own bounded replacement marker. It carries no secret bytes, so allowing the
+    # scanner to classify the marker as a fresh assignment would make every structured redaction
+    # fail its final scan. Only the exact marker is exempt; any suffix remains heuristic.
+    if value.startswith((b"'", b'"')):
+        marker_value = value[1:-1] if value.endswith(value[:1]) else value[1:]
+    else:
+        marker_value = value
+    if marker_value == b"[REDACTED]":
+        return True
     # Quoted values are literals even when their text resembles source code. Keep them in the
     # heuristic class so a value such as ``TOKEN='nextToken(parser)'`` is still withheld.
     if value.startswith((b"'", b'"')):
@@ -382,6 +485,14 @@ def _assignment_value_is_code(match: re.Match[bytes], *, preceding: bytes = b"")
     lhs_name = lhs.rsplit(b".", 1)[-1].strip()
     if _TOKEN_LIKE_ASSIGNMENT_NAME.fullmatch(lhs_name) is None:
         return False
+    if absolute_start is not None:
+        absolute_end = absolute_start + len(raw)
+        for start, end in python_attribute_spans:
+            if absolute_end > end or absolute_start > start:
+                continue
+            prefix = raw[: start - absolute_start]
+            if not prefix.strip(b" \t\r\n"):
+                return True
     source_context = (preceding[-512:] + raw[: separator.start()])[-1024:]
     declared = _SOURCE_DECLARATION.search(source_context) is not None
     if _CODE_LIKE_CALL_VALUE.fullmatch(value) is not None:
@@ -432,6 +543,7 @@ def scan_for_sensitive_content(
 
     findings: list[ScanFinding] = []
     seen: set[tuple[str, int, int]] = set()
+    python_attribute_spans = _python_attribute_assignment_spans(data)
 
     for canary in canaries:
         for chunk_start, chunk in _scan_chunks(data):
@@ -494,6 +606,8 @@ def scan_for_sensitive_content(
                 if _assignment_value_is_code(
                     match,
                     preceding=data[max(0, absolute_start - 1024) : absolute_start],
+                    absolute_start=absolute_start,
+                    python_attribute_spans=python_attribute_spans,
                 ):
                     continue
                 _append_finding(
@@ -539,7 +653,21 @@ def _replace_sensitive_spans(data: bytes, findings: tuple[ScanFinding, ...]) -> 
         if finding.start_offset < cursor:
             continue
         pieces.append(data[cursor : finding.start_offset])
-        pieces.append(b"[REDACTED]")
+        raw = data[finding.start_offset : finding.end_offset]
+        separator = re.search(rb"[:=]\s*", raw)
+        prefix = b"" if separator is None else raw[: separator.start()].lower()
+        if separator is not None and (
+            finding.confidence is ScanConfidence.HEURISTIC
+            or re.search(rb"(?:token|secret|password|passwd|api|key|auth)", prefix)
+        ):
+            value = raw[separator.end() :]
+            opening_quote = value[:1] if value.startswith((b"'", b'"')) else b""
+            closing_quote = (
+                opening_quote if opening_quote and value.endswith(opening_quote) else b""
+            )
+            pieces.append(raw[: separator.end()] + opening_quote + b"[REDACTED]" + closing_quote)
+        else:
+            pieces.append(b"[REDACTED]")
         cursor = finding.end_offset
     pieces.append(data[cursor:])
     return b"".join(pieces)
@@ -613,6 +741,26 @@ def redact_sensitive_content(data: bytes) -> tuple[bytes, bool]:
     if not findings:
         return data, False
     return _replace_sensitive_spans(data, findings), True
+
+
+def redact_heuristic_spans(data: bytes) -> tuple[bytes, int]:
+    """Replace only low-confidence assignment spans and return the bounded span count.
+
+    Heuristic findings are never evidence that a byte is safe to disclose.  This helper is for
+    sinks that have already established that the candidate contains no high-confidence finding:
+    it preserves the surrounding item while ensuring the suspicious span cannot reach a local or
+    external disclosure sink.  Callers still run the ordinary final-body scan afterwards.
+    """
+
+    if type(data) is not bytes:
+        raise TypeError("redaction_data_not_bytes")
+    findings = scan_for_sensitive_content(data)
+    heuristic = tuple(
+        finding for finding in findings if finding.confidence is ScanConfidence.HEURISTIC
+    )
+    if not heuristic:
+        return data, 0
+    return _replace_sensitive_spans(data, heuristic), len(heuristic)
 
 
 def _safe_mac(handle: MacKeyHandle, domain: bytes, message: bytes) -> str:

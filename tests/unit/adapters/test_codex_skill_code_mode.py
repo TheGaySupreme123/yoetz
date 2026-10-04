@@ -26,10 +26,8 @@ from yoetz.mcp import server as bridge
 from yoetz.protocol.schemas import load_schema_catalog, schema_document_for
 
 _REPO_ROOT: Final = Path(__file__).resolve().parents[3]
-_SKILL: Final = _REPO_ROOT / "skills" / "codex" / "yoetz" / "SKILL.md"
-_PACKAGED_SKILL: Final = (
-    _REPO_ROOT / "src" / "yoetz" / "resources" / "skills" / "codex" / "yoetz" / "SKILL.md"
-)
+_SKILL: Final = _REPO_ROOT / "guidance" / "startup.md"
+_PACKAGED_SKILL: Final = _REPO_ROOT / "src" / "yoetz" / "resources" / "guidance" / "startup.md"
 _NODE: Final = shutil.which("node")
 _SAMPLES: Final = 10_000
 # Every id prefix the section tells the agent to mint with the helper.
@@ -42,8 +40,8 @@ needs_node = pytest.mark.skipif(_NODE is None, reason="node is a contributor-onl
 def _section() -> str:
     text = _SKILL.read_text(encoding="utf-8")
     start = text.index("\n## Code mode\n")
-    end = text.index("\n## ", start + 1)
-    return text[start:end]
+    end = text.find("\n## ", start + 1)
+    return text[start:] if end < 0 else text[start:end]
 
 
 def _blocks() -> list[str]:

@@ -67,6 +67,10 @@ from yoetz.domain.receipts import (
     SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
     SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
     SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
+    SEMANTIC_PROVIDER_INPUT_MANIFEST_INVALID_GAP,
+    SEMANTIC_PROVIDER_INPUT_MANIFEST_MISMATCH_GAP,
+    SEMANTIC_PROVIDER_INPUT_MANIFEST_MISSING_GAP,
+    SEMANTIC_PROVIDER_INPUT_MANIFEST_PARSE_FAILED_GAP,
     check_time_change_unavailable_reason_gap,
 )
 from yoetz.domain.task_statement import (
@@ -171,6 +175,7 @@ __all__ = [
     "captured_edit_paths",
     "review_selection_digest",
     "ReviewPacketDisclosure",
+    "ReviewPacketDisclosureResult",
     "review_input_manifest",
     "review_input_manifest_to_json",
     "repair_evidence_refs",
@@ -178,6 +183,7 @@ __all__ = [
     "semantic_case_packet_view",
     "review_packet_content_refs",
     "review_packet_disclosure",
+    "review_packet_disclosure_result",
     "sent_ledger_refs",
     "semantic_case_to_candidate_context",
     "semantic_case_to_prepared_payload",
@@ -4747,6 +4753,7 @@ def assemble_filtered_review_packet(
     content_by_id: Mapping[str, bytes],
     included_item_ids: frozenset[str] | set[str],
     withheld_item_ids: frozenset[str] | set[str] = frozenset(),
+    redacted_item_ids: frozenset[str] | set[str] = frozenset(),
 ) -> bytes:
     """Assemble ``yoetz.review-packet-case/2`` from a builder envelope + approved content.
 
@@ -4757,6 +4764,7 @@ def assemble_filtered_review_packet(
 
     included = set(included_item_ids)
     withheld = set(withheld_item_ids)
+    redacted = set(redacted_item_ids)
     frontier_raw = envelope.get("frontier_refs")
     local_raw = envelope.get("local_check_refs")
     frontier_refs: set[str] = (
@@ -4823,6 +4831,25 @@ def assemble_filtered_review_packet(
                         "section": section if type(section) is str else "timeline",
                         "source_kind": source_kind if type(source_kind) is str else "task",
                         "source_ref": source_ref if type(source_ref) is str else item_id,
+                        **(
+                            {
+                                "transformations": [
+                                    {
+                                        "after_bytes": len(plaintext),
+                                        "before_bytes": (
+                                            meta.get("content_bytes")
+                                            if type(meta.get("content_bytes")) is int
+                                            and cast(int, meta["content_bytes"]) >= 0
+                                            else len(plaintext)
+                                        ),
+                                        "kind": "redacted",
+                                        "reason": "sensitive_redacted",
+                                    }
+                                ]
+                            }
+                            if item_id in redacted
+                            else {}
+                        ),
                         **({"latest_for": latest_for} if type(latest_for) is str else {}),
                         **({"superseded_by": cast(JsonValue, superseded)} if superseded else {}),
                         # Only the fixed section label the builder catalogued, never caller text.
@@ -4894,15 +4921,18 @@ def assemble_filtered_review_packet(
 
     excerpts_raw = packet_obj.get("targeted_excerpts")
     if type(excerpts_raw) is list:
-        packet_obj["targeted_excerpts"] = cast(
-            JsonValue,
-            [
-                row
-                for row in cast(list[object], excerpts_raw)
-                if isinstance(row, dict)
-                and cast(dict[str, object], row).get("excerpt_item_id") in carried
-            ],
-        )
+        targeted: list[JsonValue] = []
+        for raw in cast(list[object], excerpts_raw):
+            if not isinstance(raw, dict):
+                continue
+            row = dict(cast(dict[str, JsonValue], cast(dict[object, object], raw)))
+            item_id = row.get("excerpt_item_id")
+            if type(item_id) is not str or item_id not in carried:
+                continue
+            if item_id in redacted:
+                row["content_visibility"] = "redacted_never_send"
+            targeted.append(cast(JsonValue, row))
+        packet_obj["targeted_excerpts"] = targeted
     else:
         packet_obj["targeted_excerpts"] = cast(JsonValue, [])
 
@@ -4965,6 +4995,7 @@ def assemble_filtered_review_packet(
             composed_manifest,
             content_rows,
             omissions,
+            redacted_item_ids=redacted,
         )
         packet_obj["provider_input_manifest"] = provider_manifest
 
@@ -5040,6 +5071,8 @@ def _provider_bound_input_manifest(
     composed: Mapping[str, JsonValue],
     content_rows: Sequence[Mapping[str, JsonValue]],
     omissions: Sequence[JsonValue],
+    *,
+    redacted_item_ids: frozenset[str] | set[str] = frozenset(),
 ) -> dict[str, JsonValue]:
     """Project a composed input manifest onto the exact provider-bound rows."""
 
@@ -5141,6 +5174,8 @@ def _provider_bound_input_manifest(
                 )
             )
         section["content_digest"] = rendered_digest
+        if any(item_id in redacted_item_ids for item_id in item_ids):
+            section["status"] = "partial"
         if item_ids:
             if (
                 type(raw_ids) is list
@@ -5200,21 +5235,14 @@ def _provider_bound_input_manifest(
             if type(section.get("omission_reasons")) is list
             else []
         )
+        omission_reasons: set[str] = set(prior_reasons)
+        if any(item_id in redacted_item_ids for item_id in item_ids):
+            omission_reasons.add("redacted_never_send")
+        omission_reasons.update(
+            cast(str, row["reason"]) for row in section_omissions if type(row.get("reason")) is str
+        )
         section["omission_reasons"] = cast(
-            JsonValue,
-            sorted(
-                set(
-                    [
-                        *prior_reasons,
-                        *(
-                            cast(str, row["reason"])
-                            for row in section_omissions
-                            if type(row.get("reason")) is str
-                        ),
-                    ]
-                ),
-                key=str.encode,
-            )[:8],
+            JsonValue, sorted(omission_reasons, key=lambda value: value.encode())[:8]
         )
         projected[name] = cast(JsonValue, section)
         total_excerpt_bytes += sum(
@@ -5464,22 +5492,61 @@ class ReviewPacketDisclosure:
     # minimization.  This is kept separate from the composed manifest so a receipt cannot
     # accidentally report pre-admission selection as provider delivery.
     provider_input_manifest: JsonObject | None = None
+    # Ephemeral safe text view of the exact provider-bound rows.  It is used only while fencing
+    # reviewer quotes and is never serialized into a check result or response object.  A source
+    # ref may have more than one row, so retain all exact row texts rather than choosing one.
+    provider_input_text_by_ref: Mapping[str, tuple[str, ...]] = MappingProxyType({})
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewPacketDisclosureResult:
+    """Disclosure plus a closed reason when provider-bound metadata was not retained."""
+
+    disclosure: ReviewPacketDisclosure | None
+    failure: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.failure not in {
+            None,
+            SEMANTIC_PROVIDER_INPUT_MANIFEST_MISSING_GAP,
+            SEMANTIC_PROVIDER_INPUT_MANIFEST_INVALID_GAP,
+            SEMANTIC_PROVIDER_INPUT_MANIFEST_PARSE_FAILED_GAP,
+            SEMANTIC_PROVIDER_INPUT_MANIFEST_MISMATCH_GAP,
+        }:
+            raise ValueError("review_packet_disclosure_failure_invalid")
+        if self.failure is None and self.disclosure is None:
+            raise ValueError("review_packet_disclosure_result_invalid")
 
 
 def review_packet_disclosure(prepared: bytes) -> ReviewPacketDisclosure | None:
+    """Read a sent packet, preserving the historical ``None`` compatibility result."""
+
+    result = review_packet_disclosure_result(prepared)
+    # Keep the pre-#965 helper's fail-closed contract for existing callers.  The egress mapper
+    # uses ``review_packet_disclosure_result`` when it needs the bounded provenance reason.
+    return (
+        result.disclosure
+        if result.failure in {None, SEMANTIC_PROVIDER_INPUT_MANIFEST_MISSING_GAP}
+        else None
+    )
+
+
+def review_packet_disclosure_result(prepared: bytes) -> ReviewPacketDisclosureResult:
     """Read what the sent review packet carried, after envelope bounding and minimization.
 
     A mention in another item's content, a typed link (other than the combined parts of a carried
     evidence excerpt), the citable-reference list, or an omission row never counts as carried.
-    ``None`` means the document is not a readable review packet, so nothing may be claimed.
+    ``disclosure`` is ``None`` when the document is not a readable review packet.  A readable
+    packet with a missing or invalid provider-bound manifest keeps its carried-reference
+    projection but returns a closed ``failure`` so callers cannot substitute the composed case.
     """
 
     try:
         document = strict_json_parse(prepared)
     except ValueError:
-        return None
+        return ReviewPacketDisclosureResult(None, SEMANTIC_PROVIDER_INPUT_MANIFEST_PARSE_FAILED_GAP)
     if not isinstance(document, dict) or document.get("schema") != _PACKET_SCHEMA:
-        return None
+        return ReviewPacketDisclosureResult(None, SEMANTIC_PROVIDER_INPUT_MANIFEST_INVALID_GAP)
     frontier_raw = document.get("frontier_refs")
     items_raw = document.get("items")
     packet_raw = document.get("review_packet")
@@ -5488,18 +5555,18 @@ def review_packet_disclosure(prepared: bytes) -> ReviewPacketDisclosure | None:
         or type(items_raw) is not list
         or not isinstance(packet_raw, dict)
     ):
-        return None
+        return ReviewPacketDisclosureResult(None, SEMANTIC_PROVIDER_INPUT_MANIFEST_MISSING_GAP)
     frontier = {ref for ref in cast(list[JsonValue], frontier_raw) if type(ref) is str}
     provider_present = "provider_input_manifest" in packet_raw
     provider_raw = packet_raw.get("provider_input_manifest")
-    if provider_present and not isinstance(provider_raw, dict):
-        return None
     omissions_raw = packet_raw.get("omissions", [])
-    if type(omissions_raw) is not list:
-        return None
+    structural_failure = (
+        SEMANTIC_PROVIDER_INPUT_MANIFEST_INVALID_GAP if type(omissions_raw) is not list else None
+    )
+    omission_rows = omissions_raw if type(omissions_raw) is list else []
     omitted: set[str] = set()
     withheld: set[str] = set()
-    for row in cast(list[JsonValue], omissions_raw):
+    for row in cast(list[JsonValue], omission_rows):
         if not isinstance(row, dict) or type(subject := row.get("subject_ref")) is not str:
             continue
         omitted.add(subject)
@@ -5508,9 +5575,32 @@ def review_packet_disclosure(prepared: bytes) -> ReviewPacketDisclosure | None:
     carried: set[str] = set()
     payload_events: set[str] = set()
     finding_rows: set[str] = set()
+    redacted_item_ids: set[str] = set()
+    provider_text_by_ref: dict[str, list[str]] = {}
     for row in cast(list[JsonValue], items_raw):
         if not isinstance(row, dict) or type(source := row.get("source_ref")) is not str:
             continue
+        item_id = row.get("item_id")
+        transformations = row.get("transformations")
+        if type(item_id) is str and type(transformations) is list:
+            for transformation in cast(list[object], transformations):
+                if not isinstance(transformation, dict):
+                    continue
+                typed_transformation = cast(Mapping[str, object], transformation)
+                if (
+                    typed_transformation.get("kind") == "redacted"
+                    and typed_transformation.get("reason") == "sensitive_redacted"
+                ):
+                    redacted_item_ids.add(item_id)
+                    break
+        content = row.get("content")
+        if type(content) is str:
+            provider_text_by_ref.setdefault(source, []).append(content)
+            linked_for_text = row.get("linked_subject_refs")
+            if type(linked_for_text) is list:
+                for linked_ref in cast(list[JsonValue], linked_for_text):
+                    if type(linked_ref) is str:
+                        provider_text_by_ref.setdefault(linked_ref, []).append(content)
         if row.get("section") == "prior_finding":
             # An earlier finding counts as sent only through its structural row, which names its
             # subjects, the requested step and the agent's answer (issue #947); its prose rows
@@ -5540,51 +5630,96 @@ def review_packet_disclosure(prepared: bytes) -> ReviewPacketDisclosure | None:
             )
     kept = frozenset(((carried & frontier) - omitted) | ((finding_rows & frontier) - withheld))
     provider_manifest: JsonObject | None = None
+    failure: str | None = structural_failure or (
+        SEMANTIC_PROVIDER_INPUT_MANIFEST_MISSING_GAP if not provider_present else None
+    )
     if provider_present:
-        if _decode_review_input_manifest(provider_raw, expected_phase="provider_bound") is None:
-            return None
-        try:
-            frozen_provider = freeze_json(cast(JsonValue, provider_raw))
-        except TypeError, ValueError:
-            return None
-        if type(frozen_provider) is not JsonObject:
-            return None
-        if (
-            frozen_provider.get("schema") != "yoetz.review-input-manifest/1"
-            or frozen_provider.get("phase") != "provider_bound"
-        ):
-            return None
-        composed_raw = packet_raw.get("review_input_manifest")
-        if _decode_review_input_manifest(composed_raw, expected_phase="composed") is None:
-            return None
-        content_rows: list[Mapping[str, JsonValue]] = []
-        content_item_ids: set[str] = set()
-        for row in cast(list[JsonValue], items_raw):
-            if not isinstance(row, dict) or type(row.get("item_id")) is not str:
-                return None
-            item_id = cast(str, row["item_id"])
-            if item_id in content_item_ids:
-                return None
-            content_item_ids.add(item_id)
-            content_rows.append(cast(Mapping[str, JsonValue], row))
-        expected = _provider_bound_input_manifest(
-            cast(Mapping[str, JsonValue], composed_raw),
-            content_rows,
-            cast(list[JsonValue], omissions_raw),
-        )
-        try:
-            frozen_expected = freeze_json(cast(JsonValue, expected))
-        except TypeError, ValueError:
-            return None
-        if type(frozen_expected) is not JsonObject or frozen_expected != frozen_provider:
-            return None
-        provider_manifest = frozen_provider
-    return ReviewPacketDisclosure(
+        if not isinstance(provider_raw, dict):
+            failure = SEMANTIC_PROVIDER_INPUT_MANIFEST_INVALID_GAP
+        elif _decode_review_input_manifest(provider_raw, expected_phase="provider_bound") is None:
+            failure = SEMANTIC_PROVIDER_INPUT_MANIFEST_INVALID_GAP
+        else:
+            try:
+                frozen_provider = freeze_json(cast(JsonValue, provider_raw))
+            except TypeError, ValueError:
+                failure = SEMANTIC_PROVIDER_INPUT_MANIFEST_INVALID_GAP
+            else:
+                if type(frozen_provider) is not JsonObject:
+                    failure = SEMANTIC_PROVIDER_INPUT_MANIFEST_INVALID_GAP
+                elif (
+                    frozen_provider.get("schema") != "yoetz.review-input-manifest/1"
+                    or frozen_provider.get("phase") != "provider_bound"
+                ):
+                    failure = SEMANTIC_PROVIDER_INPUT_MANIFEST_INVALID_GAP
+                else:
+                    composed_raw = packet_raw.get("review_input_manifest")
+                    if (
+                        _decode_review_input_manifest(composed_raw, expected_phase="composed")
+                        is None
+                    ):
+                        failure = SEMANTIC_PROVIDER_INPUT_MANIFEST_INVALID_GAP
+                    else:
+                        content_rows: list[Mapping[str, JsonValue]] = []
+                        content_item_ids: set[str] = set()
+                        for row in cast(list[JsonValue], items_raw):
+                            if not isinstance(row, dict) or type(row.get("item_id")) is not str:
+                                failure = SEMANTIC_PROVIDER_INPUT_MANIFEST_INVALID_GAP
+                                break
+                            item_id = cast(str, row["item_id"])
+                            if item_id in content_item_ids:
+                                failure = SEMANTIC_PROVIDER_INPUT_MANIFEST_INVALID_GAP
+                                break
+                            content_item_ids.add(item_id)
+                            content_rows.append(cast(Mapping[str, JsonValue], row))
+                        if failure is None:
+                            targeted_raw = packet_raw.get("targeted_excerpts")
+                            if type(targeted_raw) is list:
+                                for raw_row in cast(list[object], targeted_raw):
+                                    if not isinstance(raw_row, dict):
+                                        continue
+                                    row = cast(
+                                        Mapping[str, JsonValue],
+                                        cast(dict[str, JsonValue], raw_row),
+                                    )
+                                    item_id = row.get("excerpt_item_id")
+                                    if (
+                                        row.get("content_visibility") == "redacted_never_send"
+                                        and type(item_id) is str
+                                    ):
+                                        redacted_item_ids.add(item_id)
+                            expected = _provider_bound_input_manifest(
+                                cast(Mapping[str, JsonValue], composed_raw),
+                                content_rows,
+                                cast(list[JsonValue], omission_rows),
+                                redacted_item_ids=redacted_item_ids,
+                            )
+                            try:
+                                frozen_expected = freeze_json(cast(JsonValue, expected))
+                            except TypeError, ValueError:
+                                failure = SEMANTIC_PROVIDER_INPUT_MANIFEST_MISMATCH_GAP
+                            else:
+                                if (
+                                    type(frozen_expected) is not JsonObject
+                                    or frozen_expected != frozen_provider
+                                ):
+                                    failure = SEMANTIC_PROVIDER_INPUT_MANIFEST_MISMATCH_GAP
+                                else:
+                                    provider_manifest = frozen_provider
+    disclosure = ReviewPacketDisclosure(
         carried=kept,
         withheld=frozenset(withheld & frontier),
         payload_events=frozenset(payload_events) & kept,
         provider_input_manifest=provider_manifest,
+        provider_input_text_by_ref=MappingProxyType(
+            {
+                ref: tuple(texts)
+                for ref, texts in sorted(
+                    provider_text_by_ref.items(), key=lambda item: item[0].encode()
+                )
+            }
+        ),
     )
+    return ReviewPacketDisclosureResult(disclosure, failure)
 
 
 def _history_item_carries_payload(event_ref: str, content: JsonValue | None) -> bool:

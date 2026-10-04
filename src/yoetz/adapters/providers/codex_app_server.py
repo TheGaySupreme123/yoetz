@@ -2144,7 +2144,7 @@ class CodexAppServerEvaluator:
                     raise ValueError("codex_app_server_output_oversize")
                 raw_bytes = raw.encode("utf-8")
                 final_output_sha256 = _sha256_bytes(raw_bytes)
-                judgment = normalize_judgment(strict_json_parse(raw_bytes))
+                judgment = normalize_judgment(strict_json_parse(raw_bytes), require_part2=True)
                 break
             else:
                 raise ValueError("codex_app_server_event_limit")

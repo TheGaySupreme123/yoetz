@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Final, Literal, Protocol, cast
+from typing import Any, Final, Literal, Protocol, cast
 
 from yoetz.application.ledger_snapshot import projection_for_records, trusted_projection_at
 from yoetz.application.missing_for_assessment import (
@@ -17,8 +17,11 @@ from yoetz.domain.coordination import CoordinationError, CoordinationErrorCode
 from yoetz.domain.events import (
     MAX_SEMANTIC_INCLUDED_REFS,
     SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP,
+    ActionKind,
     CheckChangeShownFiles,
+    ClaimKind,
     LedgerRecord,
+    ObligationStatus,
 )
 from yoetz.domain.findings import (
     FINDING_KIND_TRAITS,
@@ -38,20 +41,27 @@ from yoetz.domain.findings import (
 )
 from yoetz.domain.receipts import (
     CHECK_TIME_CHANGE_GAPS,
+    CHECK_TIME_CHANGE_UNAVAILABLE_GAP,
     COMPLETION_SCOPE_DECLARED_NONE_GAP,
     COMPLETION_SCOPE_UNDECLARED_GAP,
     OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
     OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP,
+    PREEXISTING_TEST_BASELINE_UNKNOWN_GAP,
+    PREEXISTING_TEST_INFORMATIONAL_GAPS,
     SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
     SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
     SEMANTIC_CHALLENGES_REJECTED_GAP,
     SEMANTIC_PACKET_INSUFFICIENT_GAP,
     SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
     SEMANTIC_PRIOR_VERDICTS_UNSUPPORTED_GAP,
+    SEMANTIC_PROVIDER_INPUT_MANIFEST_FAILURES,
+    SEMANTIC_PROVIDER_INPUT_MANIFEST_MISSING_GAP,
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
     SEMANTIC_RESTATEMENTS_SUPPRESSED_GAP,
     SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
+    SEMANTIC_REVIEW_SNIPPET_INVALID_GAP,
+    check_time_change_unavailable_reason_gap,
     semantic_coverage_gap_code,
 )
 from yoetz.domain.task_statement import TASK_STATEMENT_GAPS, SpecificationPreflight
@@ -73,16 +83,25 @@ from yoetz.domain.values import (
     obligation_id,
     result_id,
 )
+from yoetz.kernel.check_totals import build_check_totals
+from yoetz.kernel.claims import (
+    claim_discloses_result,
+    completion_claim_present,
+    effective_claim_items,
+    result_is_relevant_to_claim,
+)
 from yoetz.kernel.deterministic_checks import (
     DETERMINISTIC_TEXT_CONTRACT_DIGEST,
     DeterministicAssessment,
     DeterministicCase,
     FindingBasisRef,
+    build_test_edit_integrity_assessment,
     case_coverage,
     finding_basis_from_json,
     finding_basis_to_json,
     render_deterministic_finding_text,
 )
+from yoetz.kernel.deterministic_scope import deterministic_scope_is_clean
 from yoetz.kernel.finding_resolution import (
     SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS,
     SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP,
@@ -95,6 +114,14 @@ from yoetz.kernel.finding_todo import (
     todo_counts,
 )
 from yoetz.kernel.lineage import LineageEvaluation, evaluate_recorded_lineage
+from yoetz.kernel.observed_failures import (
+    ObservedFailureState,
+    observed_action_is_exploratory,
+    observed_event_ids_from_coverage,
+    observed_failure_states,
+)
+from yoetz.kernel.plan_drift import PLAN_DRIFT_GAPS
+from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.policies.research_evidence import research_evidence_findings
 from yoetz.kernel.policies.response_support import (
     RESEARCH_REJECTION_PRESENT_FACT,
@@ -104,10 +131,12 @@ from yoetz.kernel.policies.work_integrity import work_integrity_findings
 from yoetz.kernel.projections import PROJECTION_VERSION, ProjectionState
 from yoetz.kernel.ranking import CheckCompleteness, RankingContext, rank_findings
 from yoetz.kernel.receipt_capacity import current_receipt_findings
+from yoetz.kernel.test_edit_visibility import PreExistingTestEdits, preexisting_test_edits
 from yoetz.observability.logging import (
     record_bounded_counts_without_raising,
     record_unexpected_exception_without_raising,
 )
+from yoetz.ports.change_capture import current_check_workspace_source
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.control import McpHostProfile
 from yoetz.ports.diagnostics import RuntimeCapability
@@ -122,6 +151,7 @@ from yoetz.ports.ledger import (
     CheckChildrenPreview,
     CheckCommitResult,
     CheckFindingChecklist,
+    CheckOverallNext,
     CheckPhase,
     CheckPolicyExecution,
     CheckVersionSlice,
@@ -135,7 +165,13 @@ from yoetz.ports.ledger import (
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource
 from yoetz.ports.observation import ObservationStoreLockTimeout
 from yoetz.ports.runtime import BundleRuntimePort, RouteAccess, RouteCommand, TaskRuntime
-from yoetz.ports.semantic import ReviewerChallenge, ReviewInputManifest, SemanticJudgment
+from yoetz.ports.semantic import (
+    ReviewerChallenge,
+    ReviewInputManifest,
+    SemanticJudgment,
+    VerifiedReviewItem,
+)
+from yoetz.ports.start_catalog import TaskRoute
 from yoetz.protocol.canonical import (
     JsonValue,
     canonical_digest,
@@ -165,6 +201,7 @@ __all__ = [
     "SEMANTIC_CASE_CONTENT_GAPS",
     "SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM",
     "SEMANTIC_REJECTED_REF_OUTSIDE_CASE",
+    "SEMANTIC_REJECTED_SNIPPET",
     "SEMANTIC_REJECTED_SUBJECTS_OVER_LIMIT",
     "Application",
     "CheckScope",
@@ -173,6 +210,7 @@ __all__ = [
     "SemanticJudgmentReview",
     "allocate_findings",
     "build_finding_checklist",
+    "build_overall_next",
     "carried_semantic_attempt_gaps",
     "case_coverage",
     "check_awaiting_human_json",
@@ -218,6 +256,7 @@ _WORK_KINDS = frozenset(
 
 SEMANTIC_REJECTED_REF_OUTSIDE_CASE: Final = "ref_outside_case"
 SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM: Final = "hidden_source_claim"
+SEMANTIC_REJECTED_SNIPPET: Final = "snippet_invalid"
 SEMANTIC_REJECTED_SUBJECTS_OVER_LIMIT: Final = "subject_refs_over_limit"
 # The closed packet content gaps a semantic evaluation may carry into check coverage. Each is
 # classified for finding resolution in ``kernel/finding_resolution.py`` (issue #904); adding one
@@ -230,6 +269,12 @@ SEMANTIC_CASE_CONTENT_GAPS: Final = frozenset(
         "content_unselected",
         "content_redacted",
         SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
+        "preexisting_test_baseline_unknown",
+        "preexisting_test_modified",
+        "preexisting_test_renamed",
+        "preexisting_test_deleted",
+        "preexisting_test_skipped",
+        "preexisting_test_edit_unjustified",
     }
 )
 # Every packet gap an evaluation may report: the content gaps above plus the codes whose resolution
@@ -286,6 +331,12 @@ class SemanticJudgmentReview:
     # Rulings set aside without the unsupported gap: on a final item, or contradicted by the same
     # review's restatement (issue #905). A diagnostic count only.
     verdicts_set_aside: int = 0
+    # Part 2 reviewer output that survived packet/ref/snippet validation. These are retained on the
+    # check result as advisory judgements; they never upgrade a deterministic verdict by
+    # themselves.
+    review_summary: str = "No review summary recorded."
+    verified: tuple[VerifiedReviewItem, ...] = ()
+    snippets_rejected: int = 0
 
     def __post_init__(self) -> None:
         if (
@@ -300,6 +351,14 @@ class SemanticJudgmentReview:
         if type(self.restatements_suppressed) is not int or self.restatements_suppressed < 0:
             raise _invalid("semantic_judgment_review_invalid")
         if type(self.verdicts_set_aside) is not int or self.verdicts_set_aside < 0:
+            raise _invalid("semantic_judgment_review_invalid")
+        if type(self.review_summary) is not str or not self.review_summary:
+            raise _invalid("semantic_judgment_review_invalid")
+        if type(self.verified) is not tuple or any(
+            type(item) is not VerifiedReviewItem for item in self.verified
+        ):
+            raise _invalid("semantic_judgment_review_invalid")
+        if type(self.snippets_rejected) is not int or self.snippets_rejected < 0:
             raise _invalid("semantic_judgment_review_invalid")
         if any(
             reason not in _SEMANTIC_REJECTION_REASONS or type(count) is not int or count < 1
@@ -324,6 +383,7 @@ _SEMANTIC_REJECTION_REASONS: Final = frozenset(
     {
         SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM,
         SEMANTIC_REJECTED_REF_OUTSIDE_CASE,
+        SEMANTIC_REJECTED_SNIPPET,
         SEMANTIC_REJECTED_SUBJECTS_OVER_LIMIT,
     }
 )
@@ -341,10 +401,21 @@ def _projected_finding_json(finding: Finding) -> JsonValue:
     ``semantic_provenance`` immediately below, which the same result already emits that way.
     """
 
-    encoded = finding_to_json(finding)
-    if "provenance" in encoded:
-        return encoded
-    return {**dict(encoded.items()), "provenance": None}
+    encoded = dict(finding_to_json(finding).items())
+    if finding.challenge is not None:
+        challenge = finding.challenge
+        encoded["challenge"] = JsonObject(
+            {
+                "alternative_interpretation": challenge.alternative_interpretation,
+                "discrepancy": challenge.discrepancy,
+                "requested_next_step": challenge.requested_next_step,
+                "uncertainty": challenge.uncertainty,
+                **({} if challenge.snippet is None else {"snippet": challenge.snippet}),
+            }
+        )
+    if "provenance" not in encoded:
+        encoded["provenance"] = None
+    return JsonObject(encoded)
 
 
 def check_awaiting_human_json(result: CheckAwaitingHuman) -> dict[str, JsonValue]:
@@ -474,6 +545,11 @@ def check_internal_json(result: CheckCommitResult) -> dict[str, JsonValue]:
         ),
         "semantic_status": result.semantic_status.value,
         "semantic_reason": result.semantic_reason.value,
+        **(
+            {}
+            if result.semantic_conclusion is None
+            else {"semantic_conclusion": result.semantic_conclusion}
+        ),
         "semantic_provenance": (
             None
             if result.semantic_provenance is None
@@ -503,6 +579,14 @@ def check_internal_json(result: CheckCommitResult) -> dict[str, JsonValue]:
             "projection_version": result.versions.projection_version,
             "policy_packs": result.versions.policy_packs,
         },
+        **(
+            {}
+            if result.semantic_status is not SemanticStatus.SUCCEEDED
+            else {
+                "review_summary": (result.review_summary or "No review summary recorded."),
+                "verified": tuple(dict(item.items()) for item in result.verified),
+            }
+        ),
         **({} if result.children is None else {"children": children_json(result.children)}),
         **(
             {}
@@ -530,9 +614,15 @@ def check_internal_json(result: CheckCommitResult) -> dict[str, JsonValue]:
         ),
         **(
             {}
+            if result.overall_next is None
+            else {"overall_next": _overall_next_json(result.overall_next)}
+        ),
+        **(
+            {}
             if result.review_input_manifest is None
             else {"review_input_manifest": dict(result.review_input_manifest.items())}
         ),
+        **({} if result.totals is None else {"totals": result.totals}),
     }
 
 
@@ -557,6 +647,23 @@ def _checklist_json(checklist: CheckFindingChecklist) -> JsonValue:
         ),
         "next": checklist.next,
     }
+
+
+def _overall_next_json(next_step: CheckOverallNext) -> JsonObject:
+    return JsonObject(
+        {
+            "action": next_step.action,
+            "status": next_step.status,
+            "target_refs": next_step.target_refs,
+            **(
+                {}
+                if next_step.acknowledged_incomplete_endpoint is None
+                else {
+                    "acknowledged_incomplete_endpoint": (next_step.acknowledged_incomplete_endpoint)
+                }
+            ),
+        }
+    )
 
 
 def _lineage_preview(
@@ -1097,8 +1204,172 @@ def build_finding_checklist(
     )
 
 
+def build_overall_next(
+    result: CheckCommitResult,
+    checklist: CheckFindingChecklist | None,
+    projection: ProjectionState | None = None,
+    coverage_by_ref: Mapping[FindingBasisRef, Coverage] | None = None,
+) -> CheckOverallNext | None:
+    """Derive the task continuation without letting the finding list speak for the task (#963)."""
+
+    if checklist is None:
+        # Without the projection that supplies finding counts, claiming readiness would be
+        # fabricated. The structured continuation is therefore omitted and the caller keeps the
+        # existing coverage/result fields.
+        return None
+    actionable_missing = tuple(
+        item for item in result.missing_for_assessment if item.availability == "agent_suppliable"
+    )
+    if actionable_missing:
+        return CheckOverallNext(
+            status="action_required",
+            action="supply_missing_input",
+            # A global missing input is actionable even when the reviewer could not attach a
+            # subject id.  The empty target list is the honest representation of that request.
+            target_refs=_bounded_overall_refs(
+                ref for item in actionable_missing for ref in item.target_refs
+            ),
+        )
+    open_refs = _bounded_overall_refs(
+        item.finding_id for item in checklist.items if item.todo_state == "open"
+    )
+    if open_refs:
+        return CheckOverallNext(
+            status="action_required",
+            action="work_open_findings",
+            target_refs=open_refs,
+        )
+    recorded_work_refs, disclosed_live_failure = _recorded_work_refs(
+        result, projection, coverage_by_ref
+    )
+    if recorded_work_refs:
+        return CheckOverallNext(
+            status="action_required",
+            action="review_recorded_work",
+            target_refs=recorded_work_refs,
+        )
+    if disclosed_live_failure or result.missing_for_assessment or result.coverage.known_gaps:
+        return CheckOverallNext(
+            status="ready_with_limitations",
+            action="request_receipt",
+            acknowledged_incomplete_endpoint="receipt",
+        )
+    return CheckOverallNext(status="ready", action="request_receipt")
+
+
+def _bounded_overall_refs(values: Iterable[object]) -> tuple[str, ...]:
+    """Canonicalize task-level continuation references at the public 64-item bound."""
+
+    refs = {value for value in values if type(value) is str and value and len(value) <= 128}
+    return tuple(sorted(refs, key=str.encode)[:64])
+
+
+def _overall_total_count(result: CheckCommitResult, group: str, key: str) -> int:
+    totals = result.totals
+    if not isinstance(totals, Mapping):
+        return 0
+    values = totals.get(group)
+    if not isinstance(values, Mapping):
+        return 0
+    value = values.get(key)
+    if type(value) is int and value >= 0:
+        return value
+    if type(value) is str and value.isascii() and value.isdecimal():
+        return int(value)
+    return 0
+
+
+def _result_is_disclosed_for_completion(projection: ProjectionState, result_ref: object) -> bool:
+    if type(result_ref) is not str:
+        return False
+    try:
+        result_key = result_id(result_ref)
+    except ValueError:
+        return False
+    for _, claim_record in effective_claim_items(projection):
+        claim = claim_record.payload
+        if (
+            claim is not None
+            and claim.claim_kind is ClaimKind.COMPLETION
+            and result_is_relevant_to_claim(projection, claim_record, result_key)
+            and claim_discloses_result(claim, result_key)
+        ):
+            return True
+    return False
+
+
+def _recorded_work_refs(
+    result: CheckCommitResult,
+    projection: ProjectionState | None,
+    coverage_by_ref: Mapping[FindingBasisRef, Coverage] | None = None,
+) -> tuple[tuple[str, ...], bool]:
+    """Find open effective work that a coverage-limited result still requires.
+
+    The frozen totals establish whether a live observed failure exists.  The trusted case
+    coverage and projection then identify the exact currently-live observed result ids. Completion
+    claim disclosure is consulted before a continuation is emitted: an explicitly disclosed live
+    failure can proceed to its limited receipt rather than forcing an endless rerun. The second
+    return value preserves that disclosed-live limitation for the coverage-limited status.
+    """
+
+    if projection is None:
+        return (), False
+    refs: set[str] = set()
+    scope = current_plan_scope(projection.plans, projection.coverage_gaps)
+    if scope.readable and scope.effective_obligation_refs is not None:
+        for obligation_ref in scope.effective_obligation_refs:
+            record = projection.obligations.get(obligation_ref)
+            if record is not None and record.payload is not None:
+                if record.payload.status is ObligationStatus.OPEN:
+                    refs.add(str(obligation_ref))
+
+    if _overall_total_count(result, "commands", "live_failed") <= 0:
+        return _bounded_overall_refs(refs), False
+
+    if coverage_by_ref is None:
+        return _bounded_overall_refs(refs), False
+    try:
+        observed = observed_event_ids_from_coverage(coverage_by_ref)
+        states = observed_failure_states(projection, observed, through=projection.frontier)
+    except TypeError, ValueError:
+        return _bounded_overall_refs(refs), False
+    active_obligations: frozenset[ObligationId] = (
+        frozenset(scope.effective_obligation_refs or ()) if scope.readable else frozenset()
+    )
+    disclosed_live_failure = False
+    for result_ref, state in sorted(states.items(), key=lambda item: str(item[0]).encode()):
+        if state is not ObservedFailureState.LIVE:
+            continue
+        record = projection.results.get(result_ref)
+        payload = None if record is None else record.payload
+        if payload is None:
+            continue
+        action = projection.actions.get(payload.action_id)
+        if action is None or action.payload is None:
+            continue
+        action_payload = action.payload
+        if action_payload.action_kind is not ActionKind.COMMAND:
+            continue
+        if observed_action_is_exploratory(action_payload):
+            continue
+        if action_payload.obligation_refs and not active_obligations.intersection(
+            action_payload.obligation_refs
+        ):
+            continue
+        if _result_is_disclosed_for_completion(projection, result_ref):
+            disclosed_live_failure = True
+            continue
+        refs.add(str(result_ref))
+        refs.add(str(payload.action_id))
+    return _bounded_overall_refs(refs), disclosed_live_failure
+
+
 async def _attach_finding_checklist(
-    app: Application, runtime: TaskRuntime, result: CheckCommitResult
+    app: Application,
+    runtime: TaskRuntime,
+    result: CheckCommitResult,
+    *,
+    coverage_by_ref: Mapping[FindingBasisRef, Coverage] | None = None,
 ) -> CheckCommitResult:
     """Attach the task's findings as a to-do list after this check (issue #905).
 
@@ -1124,6 +1395,12 @@ async def _attach_finding_checklist(
         if projection is None:
             return result
         checklist = build_finding_checklist(projection, attempt_budget=budget)
+        overall_next = build_overall_next(result, checklist, projection, coverage_by_ref)
+        return replace(
+            result,
+            finding_checklist=checklist,
+            overall_next=overall_next,
+        )
     except Exception as exc:
         record_unexpected_exception_without_raising(
             exc,
@@ -1131,7 +1408,6 @@ async def _attach_finding_checklist(
             operation="finding_checklist_read",
         )
         return result
-    return replace(result, finding_checklist=checklist)
 
 
 async def _attach_current_project_advisory_notes(
@@ -1238,6 +1514,12 @@ class FinalSemanticEvaluation:
     # Provider-bound manifest reconstructed from the exact minimized packet.  It is intentionally
     # separate from the composed manifest so the final check receipt can report what was sent.
     provider_input_manifest: JsonObject | None = None
+    # Closed provenance reason for a successful provider call whose exact provider-bound input
+    # manifest could not be retained/restored.  A composed manifest is never a substitute.
+    provider_input_manifest_failure: str | None = None
+    # Ephemeral exact provider-bound row text used to validate reviewer snippets. It is omitted
+    # from durable/public result objects; recovery without it rejects unverifiable quotes.
+    provider_input_text_by_ref: Mapping[str, tuple[str, ...]] | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -1306,6 +1588,26 @@ class FinalSemanticEvaluation:
             and type(self.provider_input_manifest) is not JsonObject
         ):
             raise _invalid("provider_input_manifest_invalid")
+        if self.provider_input_manifest_failure is not None and (
+            self.provider_input_manifest_failure not in SEMANTIC_PROVIDER_INPUT_MANIFEST_FAILURES
+        ):
+            raise _invalid("provider_input_manifest_failure_invalid")
+        if (
+            self.provider_input_manifest is not None
+            and self.provider_input_manifest_failure is not None
+        ):
+            raise _invalid("provider_input_manifest_failure_invalid")
+        if self.provider_input_text_by_ref is not None and not isinstance(
+            cast(object, self.provider_input_text_by_ref), Mapping
+        ):
+            raise _invalid("provider_input_text_invalid")
+        if self.provider_input_text_by_ref is not None and any(
+            type(ref) is not str
+            or type(texts) is not tuple
+            or any(type(text) is not str for text in texts)
+            for ref, texts in self.provider_input_text_by_ref.items()
+        ):
+            raise _invalid("provider_input_text_invalid")
 
 
 # Gaps that record an AI-powered review the task actually attempted and did not get. They are the
@@ -2163,6 +2465,111 @@ def _resolve_challenge_refs(
     )
 
 
+def _packet_text_for_refs(
+    refs: tuple[str, ...],
+    provider_input_text_by_ref: Mapping[str, tuple[str, ...]] | None,
+) -> tuple[str, ...]:
+    """Return text from the exact provider-bound rows supporting *refs*.
+
+    A source ref alone proves only that a ledger row exists. Snippet admission needs the exact
+    post-selection, post-privacy text the provider received; when that ephemeral view is absent,
+    no quote can be proved from the frozen case alone.
+    """
+
+    if provider_input_text_by_ref is None:
+        return ()
+    return tuple(text for ref in refs for text in provider_input_text_by_ref.get(ref, ()))
+
+
+def _validate_reviewer_snippets(
+    judgment: SemanticJudgment,
+    *,
+    citable_refs: frozenset[str] | None,
+    provider_input_text_by_ref: Mapping[str, tuple[str, ...]] | None,
+) -> tuple[SemanticJudgment, int]:
+    """Drop reviewer quotes that are not exact packet substrings.
+
+    The provider may still provide useful challenges/judgements beside one malformed quote. A
+    bad quote therefore loses only that entry and leaves a bounded diagnostic for the check/receipt
+    coverage path (issue #906 Part 2).
+    """
+
+    # A recovered response from before the exact provider-bound text index existed has no proof
+    # for a newly added quote. Keep legacy judgments without snippets readable, but drop any
+    # snippet-bearing item because a source ref alone cannot prove provider delivery.
+    if (
+        provider_input_text_by_ref is None
+        and not any(challenge.snippet is not None for challenge in judgment.challenges)
+        and not any(item.snippet is not None for item in judgment.verified)
+    ):
+        return judgment, 0
+
+    if citable_refs is not None:
+        # A snippet-bearing judgement must name refs that survived the exact provider-bound
+        # packet. The citable list is the composed-case fence; intersecting it with the ephemeral
+        # text index prevents one sent row from laundering a second, omitted ref in the same cite.
+        allowed = (
+            citable_refs
+            if provider_input_text_by_ref is None
+            else citable_refs & frozenset(provider_input_text_by_ref)
+        )
+    elif provider_input_text_by_ref is None:
+        allowed = frozenset[str]()
+    else:
+        allowed = frozenset(provider_input_text_by_ref)
+    rejected = 0
+    challenges: list[ReviewerChallenge] = []
+    for challenge in judgment.challenges:
+        cited = tuple(ref for ref in challenge.cited_refs if ref in allowed)
+        if len(cited) != len(challenge.cited_refs) or (
+            challenge.snippet is not None
+            and not any(
+                challenge.snippet in text
+                for text in _packet_text_for_refs(cited, provider_input_text_by_ref)
+            )
+        ):
+            rejected += 1
+            continue
+        challenges.append(challenge)
+
+    verified: list[VerifiedReviewItem] = []
+    for item in judgment.verified:
+        cited = tuple(ref for ref in item.cited_refs if ref in allowed)
+        valid = len(cited) == len(item.cited_refs)
+        if valid and item.snippet is not None:
+            valid = any(
+                item.snippet in text
+                for text in _packet_text_for_refs(cited, provider_input_text_by_ref)
+            )
+        if not valid:
+            rejected += 1
+            continue
+        verified.append(item)
+
+    if (
+        rejected == 0
+        and tuple(challenges) == judgment.challenges
+        and tuple(verified) == judgment.verified
+    ):
+        return judgment, 0
+    if judgment.conclusion == "challenges_returned" and not challenges:
+        # The domain coupling requires at least one challenge for that conclusion. Preserve the
+        # response as a bounded "no admitted challenge" review so one malformed quote does not
+        # turn the whole provider response into an invalid check; the caller records the snippet
+        # gap from ``rejected`` and retains the provider's original conclusion separately.
+        return replace(
+            judgment,
+            conclusion="no_material_discrepancy",
+            challenges=(),
+            verified=tuple(verified),
+        ), rejected
+    return replace(
+        judgment,
+        challenges=tuple(challenges),
+        verified=tuple(verified),
+    ), rejected
+
+
 # A finding names at most 64 subjects. Several cited findings can union past that; such a
 # challenge is dropped and counted rather than failing the whole check on the finding bound.
 _MAX_CHALLENGE_SUBJECT_REFS: Final = 64
@@ -2371,6 +2778,7 @@ def validate_semantic_judgment(
     capture_baseline_gaps: frozenset[str] = frozenset(),
     prior_finding_refs: frozenset[str] | None = None,
     citable_refs: frozenset[str] | None = None,
+    provider_input_text_by_ref: Mapping[str, tuple[str, ...]] | None = None,
 ) -> SemanticJudgmentReview:
     """Fence AI-powered challenges to the exact frozen refs, coverage, and final provenance.
 
@@ -2405,17 +2813,39 @@ def validate_semantic_judgment(
         or provenance.reason is not SemanticReason.SEMANTIC_COMPLETED
     ):
         raise _rejected("semantic_judgment_invalid")
+    if provider_input_text_by_ref is not None:
+        # The composed case can advertise refs whose rows were later withheld by privacy or
+        # minimization. Once the exact provider-bound text index is available, prior rulings and
+        # missing-input requests use that narrower fence too; otherwise a ``fixed`` ruling could
+        # cite a result the provider never saw and close a finding on unreviewed material.
+        provider_refs = frozenset(provider_input_text_by_ref)
+        if citable_refs is not None:
+            citable_refs &= provider_refs
+        if prior_finding_refs is not None:
+            prior_finding_refs &= provider_refs
+    returned_challenges = len(judgment.challenges)
+    judgment, snippets_rejected = _validate_reviewer_snippets(
+        judgment,
+        citable_refs=citable_refs,
+        provider_input_text_by_ref=provider_input_text_by_ref,
+    )
     admitted, verdicts_unsupported, verdicts_set_aside = _admit_prior_verdicts(
         case, judgment, prior_finding_refs=prior_finding_refs, citable_refs=citable_refs
     )
     if judgment.conclusion != "challenges_returned":
+        rejected_by_reason = (
+            ((SEMANTIC_REJECTED_SNIPPET, snippets_rejected),) if snippets_rejected else ()
+        )
         return SemanticJudgmentReview(
             (),
-            0,
-            (),
+            returned_challenges,
+            rejected_by_reason,
             _sorted_verdicts(admitted),
             verdicts_unsupported,
             verdicts_set_aside=verdicts_set_aside,
+            review_summary=judgment.review_summary,
+            verified=judgment.verified,
+            snippets_rejected=snippets_rejected,
         )
     coverage = case_coverage(case, semantic=True)
     if not capture_baseline_gaps <= SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS:
@@ -2434,6 +2864,8 @@ def validate_semantic_judgment(
         )
     candidates: list[CandidateFinding] = []
     rejections: dict[str, int] = {}
+    if snippets_rejected:
+        rejections[SEMANTIC_REJECTED_SNIPPET] = snippets_rejected
     restatements = 0
     for challenge in judgment.challenges:
         resolution = _resolve_challenge_refs(case, deterministic, challenge)
@@ -2494,6 +2926,7 @@ def validate_semantic_judgment(
                     alternative_interpretation=challenge.alternative_interpretation,
                     requested_next_step=challenge.requested_next_step,
                     uncertainty=challenge.uncertainty,
+                    snippet=challenge.snippet,
                 ),
                 resolution.related_finding_ids,
             )
@@ -2507,12 +2940,15 @@ def validate_semantic_judgment(
             verdicts_unsupported += 1
     return SemanticJudgmentReview(
         tuple(candidates),
-        len(judgment.challenges),
+        returned_challenges,
         tuple(sorted(rejections.items(), key=lambda item: item[0].encode("ascii"))),
         _sorted_verdicts(admitted),
         verdicts_unsupported,
         restatements,
         verdicts_set_aside,
+        judgment.review_summary,
+        judgment.verified,
+        snippets_rejected,
     )
 
 
@@ -2873,6 +3309,12 @@ async def execute_check_commit(
     an isolated root.
     """
 
+    # The public facade resolves this before entering the commit pipeline. Keep the internal
+    # entrypoint equally honest for recovery/tests that call it directly: an omitted mode follows
+    # the configured policy, so a disabled semantic route produces NOT_REQUESTED rather than an
+    # unavailable semantic attempt. Optional/required routes retain their effective modes.
+    if request.mode is None:
+        request = request.model_copy(update={"mode": app.verification_policy.default_check_mode})
     if route_profile not in {"policy", "strict"}:
         raise TypeError("check_route_profile_invalid")
     scope = normalize_check_scope(request)
@@ -2989,6 +3431,104 @@ async def execute_check_commit(
             frozen.case.frontier,
             base_coverage=case_coverage(frozen.case),
         )
+        # Every check mode gets the same local, privacy-fenced test-edit accounting. Semantic
+        # composition may retain a separate encrypted copy for provider review; this reduction
+        # stays local so structural findings and totals do not depend on reviewer selection.
+        deterministic_test_edit_gaps: tuple[str, ...] = ()
+        deterministic_test_edit_support_refs: tuple[EventId, ...] = ()
+        deterministic_test_edit_facts: PreExistingTestEdits | None = None
+        change_capture = getattr(app, "change_capture", None)
+        start_catalog = getattr(app, "start_catalog", None)
+        recorded_edit = any(
+            record.payload is not None and record.payload.action_kind is ActionKind.EDIT
+            for record in frozen.case.projection.actions.values()
+        )
+        if change_capture is not None:
+            source = current_check_workspace_source()
+            route: TaskRoute | None = None
+            resolve_route = getattr(start_catalog, "resolve_route", None)
+            if callable(resolve_route):
+                try:
+                    route = await cast(Callable[[str], Awaitable[TaskRoute | None]], resolve_route)(
+                        request.session_id
+                    )
+                except Exception:
+                    route = None
+            if (
+                source is not None
+                and route is not None
+                and route.repository_privacy_commitment is not None
+            ):
+                # Import lazily: check-time capture composes the semantic-case module, which
+                # imports this coordinator for its pure scope/policy helpers.
+                from yoetz.application.check_change import capture_structural_check_change
+
+                capture, unavailable_reason = await capture_structural_check_change(
+                    runtime=runtime,
+                    source=source,
+                    route_repository_commitment=route.repository_privacy_commitment,
+                    port=change_capture,
+                    clock=app.clock,
+                    request_id=request.request_id,
+                )
+                if capture is not None:
+                    test_edit_facts = preexisting_test_edits(capture, frozen.case.projection)
+                    deterministic_test_edit_facts = (
+                        test_edit_facts if test_edit_facts.baseline_known else None
+                    )
+                    deterministic_test_edit_gaps = test_edit_facts.gaps
+                    deterministic_test_edit_support_refs = (
+                        test_edit_facts.unjustified_action_event_ids
+                    )
+                    if (
+                        "preexisting_test_edit_unjustified" in deterministic_test_edit_gaps
+                        and not deterministic_test_edit_support_refs
+                    ):
+                        deterministic_test_edit_support_refs = tuple(
+                            sorted(
+                                {
+                                    row.source_event_id
+                                    for row in frozen.case.projection.actions.values()
+                                    if row.payload is not None
+                                },
+                                key=str.encode,
+                            )[:1]
+                        )
+                        if not deterministic_test_edit_support_refs and frozen.case.history:
+                            deterministic_test_edit_support_refs = (
+                                frozen.case.history[-1].event_id,
+                            )
+                else:
+                    # A structural port without metadata-only support, or a metadata read that
+                    # failed, must remain visible as unknown.  In particular, never fall back to
+                    # its content-returning ``capture`` method just to make this accounting green.
+                    # Leave totals unexamined: ``baseline_known=False`` with a synthetic facts
+                    # object would incorrectly serialize ``examined=1`` and zero edit counts.
+                    deterministic_test_edit_gaps = (PREEXISTING_TEST_BASELINE_UNKNOWN_GAP,)
+                    if (
+                        unavailable_reason is not None
+                        and unavailable_reason != "metadata_unavailable"
+                    ):
+                        deterministic_test_edit_gaps = tuple(
+                            sorted(
+                                {
+                                    *deterministic_test_edit_gaps,
+                                    CHECK_TIME_CHANGE_UNAVAILABLE_GAP,
+                                    check_time_change_unavailable_reason_gap(unavailable_reason),
+                                },
+                                key=str.encode,
+                            )
+                        )
+            elif recorded_edit:
+                deterministic_test_edit_gaps = (
+                    PREEXISTING_TEST_BASELINE_UNKNOWN_GAP,
+                    CHECK_TIME_CHANGE_UNAVAILABLE_GAP,
+                )
+        elif recorded_edit:
+            deterministic_test_edit_gaps = (
+                PREEXISTING_TEST_BASELINE_UNKNOWN_GAP,
+                CHECK_TIME_CHANGE_UNAVAILABLE_GAP,
+            )
         if frozen.lease.phase is CheckPhase.RESERVED:
             assessments, executions = run_deterministic_policies(frozen.case, scope, packs)
             assessments = assessments + await _coordination_assessments_for_frozen_case(
@@ -2998,6 +3538,16 @@ async def execute_check_commit(
                 scope,
                 packs,
             )
+            if deterministic_test_edit_support_refs and completion_claim_present(
+                frozen.case.projection
+            ):
+                assessments = assessments + (
+                    build_test_edit_integrity_assessment(
+                        frozen.case,
+                        deterministic_test_edit_support_refs,
+                        deterministic_test_edit_support_refs,
+                    ),
+                )
             deterministic = allocate_findings(
                 app.ids,
                 tuple(item.candidate for item in assessments),
@@ -3042,6 +3592,16 @@ async def execute_check_commit(
                     scope,
                     packs,
                 )
+                if deterministic_test_edit_support_refs and completion_claim_present(
+                    frozen.case.projection
+                ):
+                    assessments = assessments + (
+                        build_test_edit_integrity_assessment(
+                            frozen.case,
+                            deterministic_test_edit_support_refs,
+                            deterministic_test_edit_support_refs,
+                        ),
+                    )
                 deterministic = allocate_findings(
                     app.ids,
                     tuple(item.candidate for item in assessments),
@@ -3142,6 +3702,7 @@ async def execute_check_commit(
                     capture_baseline_gaps=semantic_capture_baseline_gaps(semantic_result),
                     prior_finding_refs=semantic_result.case_prior_finding_refs,
                     citable_refs=semantic_result.case_citable_refs,
+                    provider_input_text_by_ref=semantic_result.provider_input_text_by_ref,
                 )
             except SemanticJudgmentRejected as exc:
                 # The reviewer's answer is unusable, so the check has no AI-powered review result — but the
@@ -3166,6 +3727,7 @@ async def execute_check_commit(
         }
         semantic_gap = semantic_coverage_gap_code(semantic_result.status, semantic_result.reason)
         declared_gaps: set[str] = set() if semantic_gap is None else {semantic_gap}
+        declared_gaps.update(deterministic_test_edit_gaps)
         missing = _EMPTY_MISSING_ITEMS
         if (
             semantic_result.status is SemanticStatus.SUCCEEDED
@@ -3210,6 +3772,17 @@ async def execute_check_commit(
             # content loss. Keep the established content_redacted gap visible on every public
             # result so CLI, MCP, hooks, and receipts share one coverage vocabulary.
             declared_gaps.add("content_redacted")
+        if (
+            semantic_result.status is SemanticStatus.SUCCEEDED
+            and semantic_result.provider_input_manifest is None
+        ):
+            # A composed manifest describes pre-admission selection and cannot stand in for the
+            # exact bytes that crossed the provider boundary (#965).  Keep the success result and
+            # disclose the bounded provenance loss instead.
+            declared_gaps.add(
+                semantic_result.provider_input_manifest_failure
+                or SEMANTIC_PROVIDER_INPUT_MANIFEST_MISSING_GAP
+            )
         # A challenge the fence dropped is material the reviewer raised and the check does not
         # carry. Saying so is what keeps a dropped challenge from reading as one never made.
         if review.challenges_rejected:
@@ -3217,6 +3790,8 @@ async def execute_check_commit(
         # A per-finding ruling the fence dropped or reduced: disclosed, never read as agreement.
         if review.verdicts_unsupported:
             declared_gaps.add(SEMANTIC_PRIOR_VERDICTS_UNSUPPORTED_GAP)
+        if review.snippets_rejected:
+            declared_gaps.add(SEMANTIC_REVIEW_SNIPPET_INVALID_GAP)
         # A restated finding was suppressed rather than minted twice: disclosed, never silent.
         if review.restatements_suppressed:
             declared_gaps.add(SEMANTIC_RESTATEMENTS_SUPPRESSED_GAP)
@@ -3246,6 +3821,23 @@ async def execute_check_commit(
                 ledger_freshness=freshness,
                 known_gaps=tuple(sorted(gaps, key=str.encode)),
             )
+        # Build the scope gate from the same frozen case and every candidate before the public
+        # finding cap.  This keeps suppressed actionable findings, unattempted requested items,
+        # open obligations and relevant live failures from being hidden by a short result list.
+        candidate_findings = deterministic + semantic
+        scoped_local_clean = (
+            request.mode == "deterministic_only"
+            and not policy_failed
+            and deterministic_scope_is_clean(
+                coverage=coverage,
+                totals=build_check_totals(
+                    frozen.case,
+                    candidate_findings,
+                    test_edits=deterministic_test_edit_facts,
+                ),
+                findings=candidate_findings,
+            )
+        )
         completion_scope_incomplete = bool(
             {COMPLETION_SCOPE_DECLARED_NONE_GAP, COMPLETION_SCOPE_UNDECLARED_GAP}
             & set(coverage.known_gaps)
@@ -3257,7 +3849,11 @@ async def execute_check_commit(
             completeness = CheckCompleteness.COVERAGE_INCOMPLETE
         elif policy_failed or (request.mode == "semantic_required" and semantic_failed):
             completeness = CheckCompleteness.REQUIRED_INCOMPLETE
-        elif coverage.known_gaps or semantic_failed:
+        elif scoped_local_clean:
+            completeness = CheckCompleteness.SCOPED_COMPLETE
+        elif (
+            set(coverage.known_gaps) - PLAN_DRIFT_GAPS - PREEXISTING_TEST_INFORMATIONAL_GAPS
+        ) or semantic_failed:
             completeness = CheckCompleteness.COVERAGE_INCOMPLETE
         else:
             completeness = CheckCompleteness.COMPLETE
@@ -3295,11 +3891,70 @@ async def execute_check_commit(
         from yoetz.application.semantic_case import review_input_manifest_to_json
 
         recorded_manifest: JsonObject | None = semantic_result.provider_input_manifest
-        if recorded_manifest is None and semantic_result.review_input_manifest is not None:
+        if (
+            recorded_manifest is None
+            and semantic_result.status is not SemanticStatus.SUCCEEDED
+            and semantic_result.review_input_manifest is not None
+        ):
             recorded_manifest = cast(
                 JsonObject,
                 freeze_json(review_input_manifest_to_json(semantic_result.review_input_manifest)),
             )
+        commit_kwargs: dict[str, Any] = {
+            "scope": CheckScopeModel(
+                claim_ids=scope.claim_ids, obligation_ids=scope.obligation_ids
+            ),
+            "semantic_conclusion": semantic_conclusion,
+            "review_summary": (
+                review.review_summary
+                if semantic_result.status is SemanticStatus.SUCCEEDED
+                else None
+            ),
+            "verified": (
+                tuple(
+                    JsonObject(
+                        {
+                            "requirement_or_claim": item.requirement_or_claim,
+                            "verdict": item.verdict,
+                            "cited_refs": item.cited_refs,
+                            **({} if item.snippet is None else {"snippet": item.snippet}),
+                        }
+                    )
+                    for item in review.verified
+                )
+                if semantic_result.status is SemanticStatus.SUCCEEDED
+                else ()
+            ),
+            # Recorded only beside a conclusion: resolution reads it from completed reviews only.
+            "check_change_files": (
+                None if semantic_conclusion is None else semantic_result.check_change_files
+            ),
+            "prior_finding_verdicts": (
+                review.verdicts if semantic_result.status is SemanticStatus.SUCCEEDED else ()
+            ),
+            "missing_for_assessment": missing.items,
+            "semantic_included_refs": semantic_included_refs(semantic_result),
+            "semantic_withheld_item_ids": semantic_result.semantic_withheld_item_ids,
+            "review_input_manifest": recorded_manifest,
+            "totals": build_check_totals(
+                frozen.case,
+                candidate_findings,
+                ranked.suppressed_count,
+                deterministic_test_edit_facts,
+            ),
+        }
+        commit_parameters: Mapping[str, inspect.Parameter] = {}
+        try:
+            commit_parameters = inspect.signature(runtime.ledger.commit_check_if_current).parameters
+        except TypeError, ValueError:
+            commit_parameters = {}
+        if commit_parameters and not any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in commit_parameters.values()
+        ):
+            commit_kwargs = {
+                key: value for key, value in commit_kwargs.items() if key in commit_parameters
+            }
         committed = await runtime.ledger.commit_check_if_current(
             frozen,
             ranked,
@@ -3308,23 +3963,16 @@ async def execute_check_commit(
             semantic_result.reason,
             semantic_result.provenance,
             request.request_id,
-            scope=CheckScopeModel(claim_ids=scope.claim_ids, obligation_ids=scope.obligation_ids),
-            semantic_conclusion=semantic_conclusion,
-            # Recorded only beside a conclusion: resolution reads it from completed reviews only.
-            check_change_files=(
-                None if semantic_conclusion is None else semantic_result.check_change_files
-            ),
-            prior_finding_verdicts=(
-                review.verdicts if semantic_result.status is SemanticStatus.SUCCEEDED else ()
-            ),
-            missing_for_assessment=missing.items,
-            semantic_included_refs=semantic_included_refs(semantic_result),
-            semantic_withheld_item_ids=semantic_result.semantic_withheld_item_ids,
-            review_input_manifest=recorded_manifest,
+            **commit_kwargs,
         )
         preview = _lineage_preview(lineage_evaluation, frozen.case.frontier)
         projected = committed if preview is None else replace(committed, children=preview)
-        projected = await _attach_finding_checklist(app, runtime, projected)
+        projected = await _attach_finding_checklist(
+            app,
+            runtime,
+            projected,
+            coverage_by_ref=frozen.case.coverage_by_ref,
+        )
         # Advice is deliberately attached after the deterministic commit.  It is current
         # projection context, never part of the frozen check event or its verdict calculation.
         return await _attach_current_project_advisory_notes(app, runtime.task_id, projected)

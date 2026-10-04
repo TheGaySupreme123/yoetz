@@ -37,6 +37,7 @@ from yoetz.ports.change_capture import (
     ChangeCapturePort,
     ChangeCaptureUnavailable,
     CheckChangeCapture,
+    CheckChangeMetadata,
     CheckWorkspaceSource,
     TaskChangeBase,
     decode_check_change,
@@ -51,6 +52,7 @@ from yoetz.protocol.canonical import JsonValue
 
 __all__ = [
     "CheckChangeOutcome",
+    "capture_structural_check_change",
     "capture_check_time_change",
     "check_change_shown_files",
     "check_time_change_selected",
@@ -64,6 +66,7 @@ _MAX_REDACTION_PASSES: Final = 64
 # no stored change_capture object (canonical JSON, starting with ``{``) can begin with.
 _SHOWN_FILE_DOMAIN: Final = b"yoetz/check-change-shown-file/v1\x00"
 _SHOWN_VIEW_DOMAIN: Final = b"yoetz/check-change-shown-view/v1\x00"
+_STRUCTURAL_METADATA_UNAVAILABLE: Final = "metadata_unavailable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -364,6 +367,54 @@ async def capture_check_time_change(
             request_id=request_id,
         )
     return CheckChangeOutcome(unavailable=True, reason="capture_failed")
+
+
+async def capture_structural_check_change(
+    *,
+    runtime: TaskRuntime,
+    source: CheckWorkspaceSource,
+    route_repository_commitment: str,
+    port: ChangeCapturePort,
+    clock: ClockPort,
+    request_id: str,
+) -> tuple[CheckChangeMetadata | None, str | None]:
+    """Capture path/status facts for local structural accounting without reading file content.
+
+    A port that only implements the content-returning ``capture`` method is deliberately treated
+    as unavailable.  Structural accounting must never turn that method into an implicit content
+    authorization; the semantic path owns the separate full capture when its recipe selects it.
+    """
+
+    if type(source) is not CheckWorkspaceSource:
+        raise TypeError("check_workspace_source_invalid")
+    if not hmac.compare_digest(
+        source.repository_commitment.encode("ascii"),
+        route_repository_commitment.encode("ascii"),
+    ):
+        return None, "repository_mismatch"
+    metadata_capture = getattr(port, "capture_metadata", None)
+    if not callable(metadata_capture):
+        # Older/embedded ports have no metadata-only seam.  The caller records an explicit
+        # structural unknown rather than falling back to the content-returning capture.
+        return None, _STRUCTURAL_METADATA_UNAVAILABLE
+    base = await _load_task_base(runtime, request_id)
+    if base is None:
+        base = await _pin_first_check_base(runtime, port, source.workspace, clock, request_id)
+    try:
+        capture = await asyncio.to_thread(metadata_capture, source.workspace, base)
+        if type(capture) is not CheckChangeMetadata:
+            raise TypeError("check_change_metadata_invalid")
+    except ChangeCaptureUnavailable as exc:
+        return None, exc.reason
+    except Exception as exc:
+        record_unexpected_exception_without_raising(
+            exc,
+            component=_COMPONENT,
+            operation="check_time_change_structural_capture_failed",
+            request_id=request_id,
+        )
+        return None, "capture_failed"
+    return capture, None
 
 
 async def recover_check_time_change(runtime: TaskRuntime, binding: object) -> CheckChangeOutcome:

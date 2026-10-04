@@ -37,6 +37,15 @@ def test_human_summary_is_weaker_than_structured_output() -> None:
                     "open_obligation_count": "2",
                     "unanswered_finding_count": "4",
                     "receipt_blocking_finding_count": "3",
+                    "latest_check_test_edits": {
+                        "read_availability": "available",
+                        "modified": "1",
+                        "renamed": "0",
+                        "deleted": "0",
+                        "skipped": "0",
+                        "unjustified": "0",
+                        "unknown": "0",
+                    },
                     "open_obligations": [
                         {
                             "obligation_id": "obl_00000000-0000-4000-8000-000000000001",
@@ -52,7 +61,8 @@ def test_human_summary_is_weaker_than_structured_output() -> None:
     status_summary = render_safe_compact_summary(status)
     assert status_summary == (
         "Status view: compact; frontier: 9; freshness: stale_after_material_change; open "
-        "obligations: 2; obligation IDs: obl_00000000-0000-4000-8000-000000000001; "
+        "obligations: 2; test edits available: 1 modified, 0 renamed, 0 deleted, 0 skipped, "
+        "0 unjustified, 0 unknown; obligation IDs: obl_00000000-0000-4000-8000-000000000001; "
         "unanswered findings: 4; receipt-blocking findings: 3; "
         "reported gaps: 2."
     )
@@ -70,7 +80,8 @@ def test_human_summary_is_weaker_than_structured_output() -> None:
     }
     assert render_safe_compact_summary(status) == (
         "Status view: compact; frontier: 9; freshness: stale_after_material_change; open "
-        "obligations: 2; obligation IDs: obl_00000000-0000-4000-8000-000000000001; "
+        "obligations: 2; test edits available: 1 modified, 0 renamed, 0 deleted, 0 skipped, "
+        "0 unjustified, 0 unknown; obligation IDs: obl_00000000-0000-4000-8000-000000000001; "
         "unanswered findings: 0; receipt-blocking findings: 3; "
         "reported gaps: 2."
     )

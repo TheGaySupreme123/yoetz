@@ -28,7 +28,7 @@ import apsw
 import pytest
 
 from builders.ledger_adapters import FixedClock, FixedIds, MemoryObjects, ownership_fence
-from builders.observed_runs import ObservedLedger, omissions, omitted_results
+from builders.observed_runs import ObservedLedger, omissions, omitted_results, receipt_limitations
 from yoetz.adapters.integrations.codex_lifecycle import LifecycleMapping
 from yoetz.adapters.integrations.observation_admission import build_routine_read_summary
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
@@ -954,8 +954,8 @@ async def test_still_running_hook_result_is_completed_from_the_rollout(replay: _
 
 
 @pytest.mark.anyio
-async def test_stream_only_patch_item_is_an_edit_that_retires_a_failure(replay: _Replay) -> None:
-    """A rollout ``FileChange`` is an edit (#910), so #909's edit rule applies without hooks."""
+async def test_stream_only_patch_item_does_not_retire_a_failure(replay: _Replay) -> None:
+    """A rollout ``FileChange`` is an edit, but #909 still requires a covering rerun."""
 
     _session_start(replay)
     replay.append(
@@ -989,8 +989,14 @@ async def test_stream_only_patch_item_is_an_edit_that_retires_a_failure(replay: 
     ]
     assert kinds == [ActionKind.COMMAND, ActionKind.EDIT]
     ledger = _claim_ledger(replay)
-    ledger.claim(versioned=True)
+    failed_result = next(
+        cast(ResultRecordedPayload, row.payload).result_id
+        for row in replay.rows("result_recorded")
+        if cast(ResultRecordedPayload, row.payload).outcome is ResultOutcome.FAILURE
+    )
+    ledger.claim(versioned=True, limitations=(failed_result,))
     assert omissions(ledger) == ()
+    assert "hook-observed failing" in receipt_limitations(ledger)
 
 
 @pytest.mark.anyio

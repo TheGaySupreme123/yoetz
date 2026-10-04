@@ -581,6 +581,14 @@ Provider-return, mapping and persistence faults remain distinct. Diagnostics can
 eligibility, durable-response recovery, cancellation or lease fencing. See `docs/INTERFACES.md` for
 the public reason, coverage and owner diagnostic lookup contracts.
 
+**Provider-bound review-input provenance (#965).** A successful provider attempt may be rendered as
+complete only when the exact post-admission `provider_bound` input manifest is retained with the
+attempt response. The composed pre-admission manifest is never a fallback proof. If retention or
+recovery loses that identity, the provider result and provenance remain intact while the check
+records one closed coverage reason (`missing`, `invalid`, `parse_failed`, `mismatch`, or
+`recovery_failed`); the receipt stays coverage-bounded. This preserves the distinction between a
+provider that ran and evidence of what it received, including after serialized response recovery.
+
 
 ### Long external Codex reviews (2026-09-16, #496 / #746)
 
@@ -1330,7 +1338,9 @@ result supplies verification output only when it carries output), classifies eac
 optional `missing_for_assessment` field of the unreleased `check_recorded` 1.3.0 (extended in place,
 only beside `insufficient_packet`) and shows the prior request with `supplied_since` refs to the
 next reviewer; an `insufficient_packet` that recorded no item leaves that request standing. Items
-are check limitations with their own coverage gaps; `semantic_packet_insufficient` is unchanged and
+are check limitations with their own coverage gaps. A repeated target with no related agent
+publication remains actionable and adds `semantic_missing_non_convergent`; a new target is tracked
+separately. `semantic_packet_insufficient` is unchanged and
 the outcome still blocks absence proof. Command identity for captured output waits on #910, an exact
 check-time diff on #883, and the task-statement section on #908.
 

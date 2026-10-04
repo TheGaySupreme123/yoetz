@@ -720,29 +720,38 @@ into the unreleased privacy-policy wire 1.2.0 (the #908 version), so one re-appr
 
 The never-send floor remains absolute for concrete credentials, private-key markers, canaries, and
 scanner uncertainty. The assignment detectors for names such as `token` and `secret` are a lower
-confidence class because ordinary parser and authentication source uses those names. A heuristic
-only match therefore withholds the affected case item and records its bounded opaque item identity
-and the closed reason `never_send_heuristic`; the remaining prepared case may continue through the
-same policy, authorization, final-body scan, and receipt path. No matched bytes, source prose, or
-raw detector output is exposed in the notice or receipt.
+confidence class because ordinary parser and authentication source uses those names. When a sink
+policy permits a bounded transform, a heuristic-only span is replaced with `[REDACTED]` inside its
+own item; the clean item identity and surrounding evidence remain available through the same
+policy, authorization, final-body scan, and receipt path. The receipt records the redaction count
+and original item digest separately from the transformed provider bytes. No matched bytes, source
+prose, or raw detector output is exposed in the notice or receipt.
 
-This is an omission rule, not an opt-out. A concrete credential in the same item or any mixed case
-still blocks the whole case before provider construction. A heuristic that survives minimization,
-a scanner finding-capacity/saturation condition, a scanner profile mismatch, a stale policy or
-route, or a final rendered-body match fails closed. The final-body scan continues to include the
-heuristic class as a backstop. A corrected check builds a new prepared case and may include safe
-replacement content; it never reuses the withheld bytes or silently carries the old omission as
-approved content. The exact omission identity is persisted with a resumable proposal so recovery
-reports the same coverage limitation without reconstructing plaintext.
+This behavior is identified by the `observability-sensitive-content-v3` scanner profile and its
+recorded profile digest. Proposals persist that identity with their prepared bytes, so a resumed
+outcome cannot present an older prepared case as if it had the new transform semantics; a new
+evaluation uses the current profile.
+
+This is a minimum-span transform, not an opt-out. A concrete credential in the same item or any
+mixed case still blocks the whole case before provider construction. An ambiguous or untransformable
+heuristic, a scanner finding-capacity/saturation condition, a scanner profile mismatch, a stale
+policy or route, or a final rendered-body match fails closed. The final-body scan continues to
+include the heuristic class as a backstop. A corrected check builds a new prepared case and may
+include a directly targeted safe replacement; it never reuses prohibited bytes or silently carries
+an old proposal into approved content. JSON/history items are redacted at their value span so the
+structured payload remains parseable, while the original digest remains bound to the transformed
+item. Recovery reports the bounded transformation or withholding identity without reconstructing
+plaintext.
 The public check result, CLI/TUI, MCP, hook-relayed response, and receipt projections carry the
-same bounded withheld identity and `never_send_heuristic` reason. A receipt's secret scan records
-`candidate`, `prepared_case`, or `rendered_body` only when that stage ran; `not_run` carries a
-closed reason and cannot be represented as a clean passed scan.
+same bounded class/reason. A receipt's secret scan records `candidate`, `prepared_case`, or
+`rendered_body` only when that stage ran; `not_run` carries a closed reason and cannot be represented
+as a clean passed scan.
 
 The detector precision rule ignores only unquoted source expressions with syntax evidence: a
 `const`/`let`/`var` declaration for a token call or member call, an explicit member assignment
-such as `parser.token = Token.EOF`, or a lower-case object property such as `token:
-Token.ConstKeyword`. Bare dotted assignments such as `TOKEN=opaque.value`, call-shaped values such
-as `password=functionName()`, and quoted lookalikes remain heuristic matches. Capture-time
-redaction and the owner-controlled privacy policy are unchanged. The deferred heuristic opt-out
-and in-place masking design remain out of scope.
+such as `parser.token = Token.EOF`, a lower-case object property such as `token:
+Token.ConstKeyword`, or a lower-case Python `token = node.token` assignment inside a valid
+function. Bare dotted assignments such as `TOKEN=opaque.value` or `token=opaque.value`, call-shaped
+values such as `password=functionName()`, quoted lookalikes, mixed-language text, and malformed
+source remain heuristic matches. Capture-time redaction and the owner-controlled privacy policy are
+unchanged. The deferred heuristic opt-out remains out of scope.

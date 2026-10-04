@@ -39,6 +39,7 @@ from yoetz.kernel.deterministic_checks import (
 )
 from yoetz.kernel.observed_failures import (
     ObservedFailureState,
+    observed_action_is_exploratory,
     observed_event_ids_from_coverage,
     observed_failure_states,
 )
@@ -270,15 +271,28 @@ def _limiting_refs(
     if claim_record.payload is None:
         return ()
     limitations: set[FindingBasisRef] = set()
+    observed = observed_event_ids_from_coverage(case.coverage_by_ref)
     # The same reading work integrity applies (#909): an observed failure that a later passing run
-    # of its command superseded, or that a completed observed edit made historical, no longer
-    # limits this claim. The receipt still counts it as history.
+    # of its command superseded no longer limits this claim. A completed edit alone does not prove
+    # a covering rerun, so the failed result remains a limitation until it is rerun or disclosed.
     observed_states = observed_failure_states(
         case.projection,
-        observed_event_ids_from_coverage(case.coverage_by_ref),
+        observed,
         through=claim_record.source_frontier,
     )
     for result_id, record in case.projection.results.items():
+        action = (
+            None
+            if record.payload is None
+            else case.projection.actions.get(record.payload.action_id)
+        )
+        if (
+            action is not None
+            and action.payload is not None
+            and action.source_event_id in observed
+            and observed_action_is_exploratory(action.payload)
+        ):
+            continue
         if (
             record.payload is not None
             and record.payload.outcome

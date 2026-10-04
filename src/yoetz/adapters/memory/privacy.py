@@ -680,12 +680,14 @@ class MemoryPrivacyAudit:
             "schema": "yoetz.disclosure-proposal/1",
             "scope": _json(request.scope),
             "source_item_digests": list(request.minimized.source_item_digests),
+            "included_item_ids": list(request.minimized.included_item_ids),
             "transformation_summary": [
                 list(item) for item in request.minimized.transformation_summary
             ],
             "withheld_item_ids": list(request.minimized.withheld_item_ids),
             "scanner_registry_version": request.minimized.scanner_registry_version,
             "scanner_profile_digest": request.minimized.scanner_profile_digest,
+            "route_identity_digest": route,
         }
         body = canonical_encode(value)
         commitment = _mac(self._key, _PROPOSAL_DOMAIN, body)
@@ -722,6 +724,8 @@ class MemoryPrivacyAudit:
             request.minimized.withheld_item_ids,
             request.minimized.scanner_registry_version,
             request.minimized.scanner_profile_digest,
+            request.minimized.included_item_ids,
+            route,
         )
         lookup = _mac(self._key, _LOOKUP_DOMAIN, canonical_encode(_json(proposal)))
         reservation = PrivacyAuditReservation(
@@ -850,6 +854,14 @@ class MemoryPrivacyAudit:
         async with self._lock:
             row = self._state.audit.get(proposal_id)
             if row is None or type(row.subject) is not DisclosureProposal:
+                return None
+            # Resume is valid only for the route that authenticated the proposal.  A stale or
+            # legacy subject is unreadable; the coordinator must not reinterpret it under a new
+            # active route.
+            if (
+                row.subject.route_identity_digest is None
+                or self._state.routes.get(row.subject.task_id) != row.subject.route_identity_digest
+            ):
                 return None
             return row.subject
 

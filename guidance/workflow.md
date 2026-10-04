@@ -26,6 +26,10 @@ If startup remains blocked without an applicable recovery path, ask the user for
 guidance; do not invent a substitute workflow. Continuing without a ledger task is permitted
 only by the bounded optional-service fallback in startup failure precedence.
 
+For a focused read, use the small `startup.md`, `recovery.md`, or `delegation.md` topic through
+`read_guidance`; this complete document remains the fallback for the full decision table and
+capacity procedure.
+
 Hook mapping, plugin registration, and SessionStart context are cues, not a substitute for that
 call and not proof that the current plan is in force. Trivial questions or edits still skip Yoetz.
 See [startup failure precedence](coverage-and-receipts.md#startup-failure-precedence) for the exact
@@ -186,6 +190,12 @@ never blocks the receipt, needs no response or recheck, and is disclosed on the 
 no `refresh_observation` MCP tool or CLI command.
 
 ## Completion
+
+Final prose is scope-first: state what recorded evidence and checks covered, what was not verified or
+remained limited, the checked frontier, AI-powered review status/reason, and material coverage gaps
+before reporting actionable-unresolved, unanswered, or resolved-history counts. Never headline a bare
+“no findings”, “zero actionable findings”, “clean”, or “verified” result; an empty finding set is
+bounded by the evidence and review scope that ran. Keep the final answer no stronger than the receipt.
 
 Read `status` and `closure_readiness` before closing. Resolve remediable open obligations and
 publish the completion claim with its evidence; that claim is an assertion, not a conclusion.
@@ -581,6 +591,16 @@ item is suppliable, the reviewer named none (`semantic_missing_items_rejected`),
 `semantic_missing_already_supplied` says it repeated a request after you published material for it,
 report the named limitation instead. Hook-captured tool output never counts as supplied. A named
 item is a check limitation, never a finding.
+
+When `missing_for_assessment` contains an `agent_suppliable` item, supplying or repairing that
+item is the overall next action before requesting an ordinary receipt. The structured
+`overall_next` projection names that action and its bounded target refs (which may be empty for a
+global input); `finding_checklist.next` remains a finding-only continuation and does not override
+it. When open obligations or undisclosed live failures remain, its action is
+`review_recorded_work` with bounded obligation/result/action ids. When only standing or
+`structurally_unavailable_on_this_host` limits remain, `overall_next` reports
+`ready_with_limitations` and the receipt endpoint remains available for acknowledging the
+limitation. Such an item stays a disclosed limitation rather than an impossible to-do.
 
 Before choosing to leave a remediable finding as an unresolved limitation, attempt one specific,
 authorized resolution: publish the relevant bounded diff or test/failure excerpt, run the

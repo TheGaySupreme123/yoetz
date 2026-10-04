@@ -596,11 +596,12 @@ workspace-relative `path`, so the newest applied write of each path is reserved 
 diff and older writes are marked `superseded_by`. Edits that reach Yoetz only through
 `afterFileEdit` are not captured in this profile, so their paths get no reserved slot; agent
 evidence and generic `postToolUse` output compete by recency. Verification output is reserved
-per command only when the agent records the action, result and output; generic captured output
-has no command identity until #910. The named-missing-item check result, gaps and guidance are
-the same as on Codex and Claude Code. Gap owner: #883 (check-time diff) and #910.
+per command when its output can be linked to a recorded action and keyed command identity.
+Unpaired or unidentified generic output stays explicitly unverified. The named-missing-item
+check result, gaps and guidance are the same as on Codex and Claude Code; the check-time diff
+provides the current repository view when its capture is available.
 
-The ordinary `postToolUse` path emits queued advice through the documented
+The ordinary `postToolUse` path emits queued work advice through the documented
 [`additional_context` output](https://cursor.com/docs/hooks#posttooluse), including when a
 command's exit is unknown or nonzero. Advice is marked delivered only after successful stdout
 emission. `postToolUseFailure` has no consumable output, so its advice remains pending for a later
@@ -613,9 +614,10 @@ output behavior, and automatic Stop follow-up messages remain disabled. Hook suc
 substitutes for an explicit command/test exit fact.
 
 **Failure supersession (#909).** On the ordinary profile a later `Shell` run of the same command
-(only the latest run is judged; a `postToolUse` with `exitCode: 0` clears it), or a later edit tool
-call that reported success (an outcome-less edit does not), retires an earlier failed run before a
-completion claim; the receipt names it once as history. `Shell` failures also reach
+(only the latest limiting run is judged; a `postToolUse` with `exitCode: 0` clears an earlier
+failure) can supersede an earlier failed run before a completion claim. A later failure or partial
+rerun leaves the latest run live, and an unknown outcome or edit never retires the failed
+verification. The receipt keeps unresolved runs disclosed as limitations. `Shell` failures also reach
 `failed_command_unresolved` advice. The hook computes an installation-keyed `command_commitment`
 from `tool_input.command` on `preToolUse`, `postToolUse`, and `postToolUseFailure`, then discards
 the text. Decision: supported on the ordinary profile. **Gap:** a shell `postToolUse` without
@@ -1372,15 +1374,17 @@ activation, and native host dogfood remain separate evidence.
 
 ### Observation limitation findings and closure rechecks (issue #911)
 
-Cursor's paired ordinary profile can yield `unpaired_event`, lag, or drain gaps and deliver the
-advisory through `postToolUse` `additionalContext`; the post-only structural profile already
-resolves historical `unpaired_event`. Decision for this host: supported, same rule as every host.
+Cursor's paired ordinary profile can yield `unpaired_event`, lag, or drain gaps. The post-only
+structural profile already resolves historical `unpaired_event`. Decision for this host: supported,
+same rule as every host.
 The rule is service-side and host-neutral: an observation-authored, non-actionable finding (the
 "Observation coverage is incomplete or stale" advisory, including rows written by earlier builds)
 never counts in `unanswered_finding_count` or `findings_unanswered`, and acknowledging it once is
 optional and never supersedes a recorded check. It stays in `status view=findings` and on the
-receipt as a disclosed limitation and does not become resolvable. The hook `refresh_observation`
-clause asks the agent to wait only while `yoetz observe status` reports lag or a drain backlog. The
+receipt as a disclosed limitation and does not become resolvable. `refresh_observation` remains
+available in operator status and structured advice for recoverable source lag, stale cursors, drain
+backlogs, service unavailability, and locked vaults, but it never enters Cursor `postToolUse`
+`additional_context`. Hook context carries work advice only. The
 shared guidance and this host's skill give the closure order: answer unanswered findings before the
 final check (the current status frontier is a valid `finding_frontier`), answer only the findings
 that check returns that are still unanswered, then `receipt`, then `work_closed`; no recheck follows

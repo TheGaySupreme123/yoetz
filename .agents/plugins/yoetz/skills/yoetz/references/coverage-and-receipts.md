@@ -1,5 +1,9 @@
 # Coverage and receipts
 
+Use the small `review.md` or `receipt.md` topic through `read_guidance` for a focused check or
+closure decision. This complete document remains authoritative for the full coverage vector,
+finding rules, recovery, and receipt fields.
+
 ## Coverage is a vector
 
 Coverage has six independent dimensions. Do not collapse them into a score or let strength in one compensate for weakness in another:
@@ -193,8 +197,9 @@ Checks and receipts use only effective claims for current conclusions; supersede
 past findings remain visible as history. A result limits a claim only when it existed by that claim
 and its action overlaps the claim's declared obligation scope; unscoped records remain
 conservatively task-wide. A hook-observed failure is history, not a limitation, once a later
-observed run of the same command passed or a later observed edit reported success before the
-claim; only the latest run of a command is judged. The receipt names such history once. `status`
+observed run of the same command passed before the claim. A later failed or partial rerun replaces
+the earlier failure's disclosure duty with its own; unknown reruns and edits retire nothing.
+The receipt names the earlier history once. `status`
 with `view=results` shows each observed run's tool, occurrence, keyed command identity, and exit
 status, never command text, so a still-red run can be named in `limitation_refs`.
 
@@ -257,6 +262,7 @@ after a native host run.
 - `unavailable` and `timeout` are retried inside a job for a transport-unavailable, provider-timeout, or rate-limited reason. By the time you see one, that job already spent its own attempt budget.
 - `invalid` with reason `response_content_invalid` (an incomplete or overlong provider answer) may spend exactly one in-job repair retry — same frozen case, same job, one final check event, fresh attempt identity — when the profile has retry budget and deadline left. A recorded `response_content_invalid` therefore means that repair was already spent or not admitted; do not spend a second job on it.
 - `refused`, `failed`, and every other `invalid` reason (`response_schema_invalid`, `semantic_judgment_rejected`) are not retried inside the job at all, so a fresh request is a fresh gamble rather than a continuation. Their first answer is already terminal: for optional review, fall back to `deterministic_only` immediately rather than spending a second job to confirm. For required review, report the requirement as unmet and do not downgrade it.
+- `blocked_forbidden_data/never_send_detected` and `classification_uncertain` stop before provider dispatch at the privacy boundary. Never resend the blocked case or reuse its proposal. When a bounded span replacement is safe, publish a new targeted item and run one new `semantic_required` check; Yoetz admits and rescans that replacement through the prepared and rendered-body gates. If no safe replacement exists, report the required review as unmet. A local-only check does not satisfy `semantic_required`.
 
 For optional review with `unavailable` and `timeout`, when a second job in one session again returns no judgment, stop requesting AI-powered review: run `deterministic_only` and say in the final answer that AI-powered review was requested and did not run, naming the recorded `semantic_status` and `semantic_reason`. That fallback applies to nothing else: a review that returned `insufficient_packet` did run, so never follow it with a `deterministic_only` check (see [Missing review content](#missing-review-content-and-concrete-repair-attempts)). A terminal reason such as `retry_budget_exhausted` describes the retry outcome, not the initiating cause; do not present it as a diagnosis. Likewise `coordinator_failure` names a fault inside yoetz itself, not in the work under review or in the provider: it is not retryable inside the job and is never a diagnosis of the work. That fallback check carries the earlier attempt's gap forward next to `semantic_review_not_requested`, so the receipt still shows the environment refused rather than that you never asked.
 
@@ -276,13 +282,20 @@ repair is to add it or to drop `scope` entirely.
 
 ## Receipt format
 
+Receipt prose is scope-first. The opening summary names the recorded evidence and checks that were
+in scope, what was not verified or remained limited, the checked frontier, AI-powered review
+status/reason, and material coverage gaps. Finding counts follow that scope statement. Never lead
+with a bare “no findings”, “zero actionable findings”, “clean”, or “verified” claim: an empty finding
+set is meaningful only within the evidence and review scope that actually ran.
+
 Default agent-context policy can project verification output (findings, obligations, receipt sections) so `json`, `markdown`, and `text` receipts work for the requesting agent. `json` carries the structured receipt in `document`. `markdown` and `text` keep `document` null by format and project those same sections in `human_text` (bodies, items, coverage notes, limitations, finding counts, and coverage-limitation findings that do not by themselves select `unresolved_findings_remain`). If that projection exceeds the wire bound, `human_text` carries an explicit truncation marker. Under a deliberately stricter owner policy, digest-bound `json` may fail closed with `PRIVACY_AUTHORITY_REQUIRED` (`receipt_json_projection_blocked`); re-request `markdown` or `text`, or widen agent-context policy from a local terminal. The durable receipt is still recorded when projection is blocked. If a human format cannot project the sections, the result names the omission rather than returning `document: null` with no pointer and only a compact count.
 
 ## Receipt fields and wording
 
 Read the receipt's frontier, verdict, coverage vector, finding disposition, evidence provenance, freshness, suppressed counts, and limitations together. Derived Markdown is a human view of the same structured record. Only a current recorded check can bound final wording. Receipts are frontier-bound: they do not upgrade caller-asserted event timestamps into service-checked event time.
 
-Permitted: “Yoetz found no local-check issue in the cooperatively published record at the stated frontier; artifact observation remained published-only.”
+Permitted: “Within the cooperatively published record at frontier 12, no local-check issue was
+returned. The provider review was not requested and artifact observation remained published-only.”
 
 Forbidden: “Yoetz proved the implementation is complete and correct.”
 
@@ -627,6 +640,16 @@ item is suppliable, the reviewer named none (`semantic_missing_items_rejected`),
 report the named limitation instead. Hook-captured tool output never counts as supplied. A named
 item is a check limitation, never a finding.
 
+When `missing_for_assessment` contains an `agent_suppliable` item, supplying or repairing that
+item is the overall next action before requesting an ordinary receipt. The structured
+`overall_next` projection names that action and its bounded target refs (which may be empty for a
+global input); `finding_checklist.next` remains a finding-only continuation and does not override
+it. When open obligations or undisclosed live failures remain, its action is
+`review_recorded_work` with bounded obligation/result/action ids. When only standing or
+`structurally_unavailable_on_this_host` limits remain, `overall_next` reports
+`ready_with_limitations` and the receipt endpoint remains available for acknowledging the
+limitation. Such an item stays a disclosed limitation rather than an impossible to-do.
+
 Before choosing to leave a remediable finding as an unresolved limitation, attempt one specific,
 authorized resolution: publish the relevant bounded diff or test/failure excerpt, run the
 relevant test/doctest/lint check, or repair the named defect. Select the target from the actual
@@ -654,4 +677,4 @@ attempt; any other kind, even one citing only a check, and a finding naming any 
 response, or work record, or restating a finding about the work, still does. After repairing a
 finding, run at least one re-review in the same mode before the receipt.
 
-Findings form a to-do list that ends. Each finding is `open` or in a final state: `verified_resolved` (a later qualifying check proved it absent), `acknowledged_not_done` (you said, with a required non-empty reason, that you will not do it), or `rejection_accepted` (you rejected an AI-powered finding with a reason and a later review withdrew it). A final item is never re-reviewed and cannot change again; `respond` records nothing on it and answers `finding_terminal`, so do not retry. New evidence about the same problem comes back as a new finding. `acknowledged_not_done` stays receipt-blocking in its own receipt section and never reads as clean. The check result's `finding_checklist` and `status` with `view: "findings"` show each item's state and its review rounds against the owner's budget (default 5), for example `[ ] F-3 open (2/5)`, plus one `next` token: `work_open_findings`, `decide_at_budget`, or `request_receipt`. At the budget, stop repeating the same repair: repair with new evidence, or respond `acknowledged_not_done` with the reason. Checks are never throttled and nothing is closed or acknowledged for you.
+Findings form a to-do list that ends. Each finding is `open` or in a final state: `verified_resolved` (a later qualifying check proved it absent), `acknowledged_not_done` (you said, with a required non-empty reason, that you will not do it), or `rejection_accepted` (you rejected an AI-powered finding with a reason and a later review withdrew it). A final item is never re-reviewed and cannot change again; `respond` records nothing on it and answers `finding_terminal`, so do not retry. New evidence about the same problem comes back as a new finding. `acknowledged_not_done` stays receipt-blocking in its own receipt section and never reads as clean. The check result's `finding_checklist` and `status` with `view: "findings"` show each item's state and its review rounds against the owner's budget (default 5), for example `[ ] F-3 open (2/5)`, plus one `next` token: `work_open_findings`, `decide_at_budget`, or `request_receipt`. This token is a finding-only continuation; when an agent-suppliable review input is also listed, follow the overall input continuation first. At the budget, stop repeating the same repair: repair with new evidence, or respond `acknowledged_not_done` with the reason. Checks are never throttled and nothing is closed or acknowledged for you.

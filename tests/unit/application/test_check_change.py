@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
 from yoetz.adapters.privacy.local_enforcer import scan_exact_bytes
 from yoetz.application import check_change as check_change_module
-from yoetz.ports.change_capture import ChangeCaptureUnavailable, CheckChangeCapture
+from yoetz.ports.change_capture import (
+    ChangeCaptureUnavailable,
+    CheckChangeCapture,
+    CheckWorkspaceSource,
+)
 
 _redacted = getattr(check_change_module, "_redacted")
 
@@ -76,3 +81,24 @@ async def test_unavailable_reason_is_frozen_in_the_binding_and_recovered() -> No
         await recover_check_time_change(cast(Any, None), {**binding, "reason": "free text"})
     with pytest.raises(ValueError):
         CheckChangeOutcome(unavailable=False, reason="git_failed")
+
+
+@pytest.mark.anyio
+async def test_structural_capture_does_not_fallback_to_legacy_content_port() -> None:
+    from yoetz.application.check_change import capture_structural_check_change
+
+    class LegacyPort:
+        def capture(self, workspace: str, base: object) -> CheckChangeCapture:
+            raise AssertionError("legacy content capture must not be called")
+
+    source = CheckWorkspaceSource("/workspace", "hmac-sha256:" + "a" * 64)
+    result = await capture_structural_check_change(
+        runtime=cast(Any, SimpleNamespace(ledger=SimpleNamespace())),
+        source=source,
+        route_repository_commitment=source.repository_commitment,
+        port=cast(Any, LegacyPort()),
+        clock=cast(Any, None),
+        request_id="req_30000000-0000-4000-8000-000000000001",
+    )
+
+    assert result == (None, "metadata_unavailable")

@@ -54,6 +54,12 @@ from yoetz.protocol.coverage import (
     PublicationChannel,
 )
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode
+from yoetz.protocol.guidance_uris import (
+    ALL_GUIDANCE_URIS as _ALL_GUIDANCE_URIS,
+)
+from yoetz.protocol.guidance_uris import (
+    REGISTERED_GUIDANCE_URIS as _REGISTERED_GUIDANCE_URIS,
+)
 from yoetz.protocol.ids import IdKind, validate_actor_id, validate_id
 
 __all__ = [
@@ -141,6 +147,8 @@ __all__ = [
     "CheckChildPreviewItemModel",
     "CheckChildrenPreviewModel",
     "CheckAdvisoryNoteModel",
+    "CheckFindingChallengeModel",
+    "CheckVerifiedItemModel",
     "CheckMissingItemModel",
     "SemanticWithheldItemModel",
     "StatusLineageChildModel",
@@ -167,6 +175,7 @@ __all__ = [
     "MAX_PRIOR_FINDING_VERDICTS",
     "PriorFindingVerdictWire",
     "ProviderChallengeModel",
+    "ProviderVerifiedItemModel",
     "ProviderJudgmentChallengesModel",
     "ProviderJudgmentEnvelopeModel",
     "ProviderJudgmentInsufficientModel",
@@ -1041,6 +1050,8 @@ type FindingKindWire = Literal[
     "result_without_action",
     "stale_evidence_for_changed_state",
     "weak_or_stale_response",
+    "code_defect",
+    "task_requirement_unmet",
 ]
 
 type ProviderFindingKindWire = Literal[
@@ -1058,6 +1069,8 @@ type ProviderFindingKindWire = Literal[
     "result_without_action",
     "stale_evidence_for_changed_state",
     "weak_or_stale_response",
+    "code_defect",
+    "task_requirement_unmet",
 ]
 
 type SafeDetailPrimitive = (
@@ -1289,6 +1302,8 @@ _CHILD_FINDING_TRAITS: Final[Mapping[str, tuple[int, bool]]] = MappingProxyType(
         "material_limitation_omitted": (1, True),
         "questionable_finding_rejection": (2, True),
         "coordination_overlap": (2, True),
+        "code_defect": (1, True),
+        "task_requirement_unmet": (1, True),
     }
 )
 
@@ -1313,6 +1328,8 @@ class ChildFindingSnapshotModel(_ClosedModel):
         "result_without_action",
         "stale_evidence_for_changed_state",
         "weak_or_stale_response",
+        "code_defect",
+        "task_requirement_unmet",
     ]
     origin: Literal["deterministic", "semantic_model_derived"]
     priority: Annotated[int, Field(ge=1, le=3)]
@@ -1835,20 +1852,18 @@ class ReceiptRequestModel(PublicRequestModel):
         return self
 
 
-REGISTERED_GUIDANCE_URIS: Final[tuple[str, ...]] = (
-    "yoetz://guidance/agent-instructions.md",
-    "yoetz://guidance/workflow.md",
-    "yoetz://guidance/publication-policy.md",
-    "yoetz://guidance/coverage-and-receipts.md",
-    "yoetz://guidance/request-templates.md",
-)
-type GuidanceResourceUri = Literal[
-    "yoetz://guidance/agent-instructions.md",
-    "yoetz://guidance/workflow.md",
-    "yoetz://guidance/publication-policy.md",
-    "yoetz://guidance/coverage-and-receipts.md",
-    "yoetz://guidance/request-templates.md",
-]
+REGISTERED_GUIDANCE_URIS: Final[tuple[str, ...]] = _REGISTERED_GUIDANCE_URIS
+
+
+def _guidance_resource_uri(value: object) -> str:
+    """Admit only catalogued full-document or bounded-section guidance URIs."""
+
+    if type(value) is not str or value not in _ALL_GUIDANCE_URIS:
+        raise ValueError("guidance_resource_uri_unregistered")
+    return value
+
+
+GuidanceResourceUri = Annotated[str, BeforeValidator(_guidance_resource_uri)]
 _MAX_GUIDANCE_DOCUMENT_CHARS: Final = 65_536
 _MAX_GUIDANCE_DOCUMENT_BYTES: Final = 1_048_576
 _MIN_GUIDANCE_PAGE_SIZE: Final = 4
@@ -1899,7 +1914,13 @@ class ReadGuidanceRequestModel(_ClosedModel):
     # page field opts into the bounded route; ``page`` defaults to zero and ``page_size`` to the
     # service's bounded default at the MCP edge.
     page: CanonicalUInt64Wire | None = None
-    page_size: GuidancePageSizeWire | None = None
+    page_size: GuidancePageSizeWire | None = Field(
+        default=None,
+        description=(
+            "Canonical UTF-8 byte budget for one page; use 4096 by default, with a permitted "
+            "range of 4 through 16384 inclusive."
+        ),
+    )
     revision: Sha256Digest | None = None
     digest: Sha256Digest | None = None
 
@@ -2136,6 +2157,7 @@ type ReviewerNextStepWire = Literal[
     "dispute_with_evidence",
     "state_unresolved_limitation",
 ]
+type VerifiedVerdictWire = Literal["supported", "not_supported", "not_assessable"]
 type MissingForAssessmentKindWire = Literal[
     "command_identity",
     "current_diff_for_path",
@@ -2169,6 +2191,9 @@ class ProviderChallengeModel(_ClosedModel):
     message_to_main_agent: ProviderReviewTextWire
     requested_next_step: ReviewerNextStepWire
     uncertainty: ProviderReviewTextWire
+    # One verbatim quote supporting the challenge. The check fence validates that it is an
+    # exact substring of a packet item linked to one of cited_refs (issue #906 Part 2).
+    snippet: ProviderReviewTextWire | None = None
 
     @model_validator(mode="after")
     def _validate_challenge_invariants(self) -> ProviderChallengeModel:
@@ -2181,6 +2206,31 @@ class ProviderChallengeModel(_ClosedModel):
             "uncertainty",
         ):
             _require_review_text_utf8_bytes(getattr(self, field_name))
+        return self
+
+
+class ProviderVerifiedItemModel(_ClosedModel):
+    """One requirement/claim judgement returned by the verifying reviewer (issue #906)."""
+
+    requirement_or_claim: ProviderReviewTextWire
+    verdict: VerifiedVerdictWire
+    cited_refs: Annotated[
+        tuple[SubjectIdWire, ...],
+        Field(min_length=1, max_length=16, json_schema_extra={"uniqueItems": True}),
+    ]
+    # A supported/not-supported judgement must quote what the reviewer saw. A not-assessable
+    # row may omit the quote because its purpose is to name the missing coverage honestly.
+    snippet: ProviderReviewTextWire | None = None
+
+    @model_validator(mode="after")
+    def _validate_verified_item(self) -> ProviderVerifiedItemModel:
+        _require_unique(self.cited_refs, limit=16)
+        if self.verdict == "not_assessable" and self.snippet is not None:
+            raise ValueError("verified_snippet_invalid")
+        if self.verdict != "not_assessable" and self.snippet is None:
+            raise ValueError("verified_snippet_required")
+        if self.snippet is not None:
+            _require_review_text_utf8_bytes(self.snippet)
         return self
 
 
@@ -2227,6 +2277,8 @@ PriorFindingVerdictsWire = Annotated[
 
 class ProviderJudgmentNoDiscrepancyModel(_ClosedModel):
     conclusion: Literal["no_material_discrepancy"]
+    review_summary: ProviderReviewTextWire = "No review summary recorded."
+    verified: Annotated[tuple[ProviderVerifiedItemModel, ...], Field(max_length=64)] = ()
     reviewer_challenges: Annotated[
         tuple[ProviderChallengeModel, ...], Field(min_length=0, max_length=0)
     ]
@@ -2235,6 +2287,8 @@ class ProviderJudgmentNoDiscrepancyModel(_ClosedModel):
 
 class ProviderJudgmentChallengesModel(_ClosedModel):
     conclusion: Literal["challenges_returned"]
+    review_summary: ProviderReviewTextWire = "No review summary recorded."
+    verified: Annotated[tuple[ProviderVerifiedItemModel, ...], Field(max_length=64)] = ()
     reviewer_challenges: Annotated[
         tuple[ProviderChallengeModel, ...],
         Field(min_length=1, max_length=MAX_REVIEW_CHALLENGES),
@@ -2267,6 +2321,8 @@ class ProviderMissingItemModel(_ClosedModel):
 
 class ProviderJudgmentInsufficientModel(_ClosedModel):
     conclusion: Literal["insufficient_packet"]
+    review_summary: ProviderReviewTextWire = "No review summary recorded."
+    verified: Annotated[tuple[ProviderVerifiedItemModel, ...], Field(max_length=64)] = ()
     reviewer_challenges: Annotated[
         tuple[ProviderChallengeModel, ...], Field(min_length=0, max_length=0)
     ]
@@ -2510,6 +2566,7 @@ _PUBLISH_SUMMARY_CATEGORY: Final[Mapping[tuple[str, str], DataCategory]] = Mappi
         ("finding_recorded", "1.1.0"): DataCategory.FINDING_SUMMARY,
         ("finding_recorded", "1.2.0"): DataCategory.FINDING_SUMMARY,
         ("finding_recorded", "1.3.0"): DataCategory.FINDING_SUMMARY,
+        ("finding_recorded", "1.4.0"): DataCategory.FINDING_SUMMARY,
     }
 )
 _PUBLISH_FIXED_SUMMARY: Final[Mapping[tuple[str, str], str]] = MappingProxyType(
@@ -2522,6 +2579,7 @@ _PUBLISH_FIXED_SUMMARY: Final[Mapping[tuple[str, str], str]] = MappingProxyType(
         ("check_recorded", "1.1.0"): "check_recorded",
         ("check_recorded", "1.2.0"): "check_recorded",
         ("check_recorded", "1.3.0"): "check_recorded",
+        ("check_recorded", "1.4.0"): "check_recorded",
         ("receipt_recorded", "1.0.0"): "receipt_recorded",
         ("coordination_context_recorded", "1.0.0"): "coordination_context_recorded",
         ("coordination_obligation_declared", "1.0.0"): "coordination_obligation_declared",
@@ -2816,7 +2874,34 @@ class CheckPolicyExecutionModel(_ClosedModel):
         return self
 
 
+class CheckFindingChallengeModel(_ClosedModel):
+    """Privacy-projectable dialogue retained with an AI-powered finding."""
+
+    discrepancy: String1To8192 | OmittedContentModel
+    alternative_interpretation: String1To8192 | OmittedContentModel
+    requested_next_step: ReviewerNextStepWire
+    uncertainty: String1To8192 | OmittedContentModel
+    snippet: String1To8192 | OmittedContentModel | None = None
+
+    @model_validator(mode="after")
+    def _validate_challenge_content(self) -> CheckFindingChallengeModel:
+        for value in (
+            self.discrepancy,
+            self.alternative_interpretation,
+            self.uncertainty,
+            self.snippet,
+        ):
+            if (
+                isinstance(value, OmittedContentModel)
+                and value.category is not DataCategory.FINDING_SUMMARY
+            ):
+                raise ValueError("challenge_omission_category_invalid")
+        return self
+
+
 class CheckProjectedFindingModel(_ClosedModel):
+    optional_non_null_fields = frozenset({"challenge"})
+
     finding_id: FindingIdWire
     kind: Literal[
         "action_without_result",
@@ -2834,6 +2919,8 @@ class CheckProjectedFindingModel(_ClosedModel):
         "result_without_action",
         "stale_evidence_for_changed_state",
         "weak_or_stale_response",
+        "code_defect",
+        "task_requirement_unmet",
     ]
     origin: Literal["deterministic", "semantic_model_derived"]
     priority: Annotated[int, Field(ge=1, le=3)]
@@ -2845,6 +2932,7 @@ class CheckProjectedFindingModel(_ClosedModel):
     subject_frontier: FrontierModel
     coverage: CoverageModel
     provenance: JsonValue | None
+    challenge: CheckFindingChallengeModel | None = None
 
     @model_validator(mode="after")
     def _validate_projected_finding(self) -> CheckProjectedFindingModel:
@@ -2862,6 +2950,34 @@ class CheckProjectedFindingModel(_ClosedModel):
             raise ValueError("deterministic_finding_provenance_invalid")
         if self.origin == "semantic_model_derived" and self.provenance is None:
             raise ValueError("semantic_finding_provenance_missing")
+        return self
+
+
+class CheckVerifiedItemModel(_ClosedModel):
+    """One privacy-projectable requirement or claim judgement from the reviewer."""
+
+    optional_non_null_fields = frozenset({"requirement_or_claim", "snippet"})
+
+    requirement_or_claim: String1To8192 | OmittedContentModel
+    verdict: Literal["supported", "not_supported", "not_assessable"]
+    cited_refs: tuple[SubjectIdWire, ...]
+    snippet: String1To8192 | OmittedContentModel | None = None
+
+    @model_validator(mode="after")
+    def _validate_verified_item(self) -> CheckVerifiedItemModel:
+        if len(self.cited_refs) < 1 or len(self.cited_refs) > 16:
+            raise ValueError("verified_cited_refs_invalid")
+        _require_unique(self.cited_refs, limit=16)
+        for value in (self.requirement_or_claim, self.snippet):
+            if (
+                isinstance(value, OmittedContentModel)
+                and value.category is not DataCategory.FINDING_SUMMARY
+            ):
+                raise ValueError("verified_content_omission_category_invalid")
+        if self.verdict == "not_assessable" and self.snippet is not None:
+            raise ValueError("verified_snippet_invalid")
+        if self.verdict != "not_assessable" and self.snippet is None:
+            raise ValueError("verified_snippet_missing")
         return self
 
 
@@ -3178,6 +3294,97 @@ class CheckFindingChecklistModel(_ClosedModel):
         return self
 
 
+class CheckOverallNextModel(_ClosedModel):
+    """Task-level continuation beside the finding-only checklist (issue #963)."""
+
+    status: Literal["action_required", "ready_with_limitations", "ready"]
+    action: Literal[
+        "supply_missing_input",
+        "work_open_findings",
+        "review_recorded_work",
+        "request_receipt",
+    ]
+    target_refs: tuple[SubjectIdWire, ...] = Field(max_length=64)
+    acknowledged_incomplete_endpoint: Literal["receipt"] | None = None
+
+    @model_validator(mode="after")
+    def _validate_overall_next(self) -> CheckOverallNextModel:
+        _require_unique(self.target_refs, limit=64)
+        if self.action in {"supply_missing_input", "work_open_findings", "review_recorded_work"}:
+            if self.status != "action_required":
+                raise ValueError("check_overall_next_action_invalid")
+            if (
+                self.action in {"work_open_findings", "review_recorded_work"}
+                and not self.target_refs
+            ):
+                raise ValueError("check_overall_next_targets_invalid")
+        elif self.target_refs:
+            raise ValueError("check_overall_next_targets_invalid")
+        if self.acknowledged_incomplete_endpoint is not None and (
+            self.action != "request_receipt" or self.status != "ready_with_limitations"
+        ):
+            raise ValueError("check_overall_next_endpoint_invalid")
+        return self
+
+
+class CheckObligationTotalsModel(_ClosedModel):
+    declared: CanonicalUInt64Wire
+    resolved: CanonicalUInt64Wire
+    open: CanonicalUInt64Wire
+    unreadable: CanonicalUInt64Wire
+    with_evidence: CanonicalUInt64Wire
+    scope_known: Literal["0", "1"]
+
+
+class CheckRequestedItemTotalsModel(_ClosedModel):
+    attempted: CanonicalUInt64Wire
+    unattempted: CanonicalUInt64Wire
+
+
+class CheckCommandTotalsModel(_ClosedModel):
+    observed: CanonicalUInt64Wire
+    failed: CanonicalUInt64Wire
+    unknown: CanonicalUInt64Wire
+    live_failed: CanonicalUInt64Wire
+    retired_by_rerun: CanonicalUInt64Wire
+    disclosed_not_rerun_green: CanonicalUInt64Wire
+
+
+class CheckEvidenceTotalsModel(_ClosedModel):
+    mutable_reference: CanonicalUInt64Wire
+    metadata_only: CanonicalUInt64Wire
+    content_digest: CanonicalUInt64Wire
+    immutable_snapshot: CanonicalUInt64Wire
+    independently_reproduced: CanonicalUInt64Wire
+
+
+class CheckFindingTotalsModel(_ClosedModel):
+    returned: CanonicalUInt64Wire
+    actionable_returned: CanonicalUInt64Wire
+    coverage_only_returned: CanonicalUInt64Wire
+    suppressed: CanonicalUInt64Wire
+
+
+class CheckTestEditTotalsModel(_ClosedModel):
+    examined: Literal["0", "1"]
+    baseline_known: Literal["0", "1"]
+    modified: CanonicalUInt64Wire
+    renamed: CanonicalUInt64Wire
+    deleted: CanonicalUInt64Wire
+    skipped: CanonicalUInt64Wire
+    unjustified: CanonicalUInt64Wire
+    unknown: CanonicalUInt64Wire
+
+
+class CheckTotalsModel(_ClosedModel):
+    obligations: CheckObligationTotalsModel
+    requested_items: CheckRequestedItemTotalsModel
+    commands: CheckCommandTotalsModel
+    evidence: CheckEvidenceTotalsModel
+    findings: CheckFindingTotalsModel
+    test_edits: CheckTestEditTotalsModel
+
+
 class CheckSuccessModel(_ClosedModel):
     optional_non_null_fields = frozenset(
         {
@@ -3185,8 +3392,13 @@ class CheckSuccessModel(_ClosedModel):
             "advisory_notes",
             "missing_for_assessment",
             "finding_checklist",
+            "overall_next",
             "semantic_withheld_items",
             "review_input_manifest",
+            "semantic_conclusion",
+            "review_summary",
+            "verified",
+            "totals",
         }
     )
 
@@ -3209,12 +3421,22 @@ class CheckSuccessModel(_ClosedModel):
     semantic_status: SemanticStatusWire
     semantic_reason: SemanticReasonWire
     semantic_provenance: JsonValue | None = None
+    # The provider's closed conclusion and Part 2 verification output are present on successful
+    # AI-powered reviews. They remain optional on legacy/local-only results so old ledgers retain
+    # their readable fallback behavior.
+    semantic_conclusion: (
+        Literal["no_material_discrepancy", "challenges_returned", "insufficient_packet"] | None
+    ) = None
+    review_summary: String1To8192 | OmittedContentModel | None = None
+    verified: tuple[CheckVerifiedItemModel, ...] = ()
     children: CheckChildrenPreviewModel | None = None
     advisory_notes: tuple[CheckAdvisoryNoteModel, ...] = ()
     missing_for_assessment: tuple[CheckMissingItemModel, ...] = ()
     finding_checklist: CheckFindingChecklistModel | None = None
+    overall_next: CheckOverallNextModel | None = None
     semantic_withheld_items: tuple[SemanticWithheldItemModel, ...] = ()
     review_input_manifest: ReviewInputManifestModel | None = None
+    totals: CheckTotalsModel | None = None
     coverage: CoverageModel
     versions: CheckVersionSliceModel
     privacy_projection: PrivacyProjectionModel
@@ -3263,6 +3485,11 @@ class CheckSuccessModel(_ClosedModel):
             provenance_status,
             provenance_reason,
         )
+        if isinstance(self.review_summary, OmittedContentModel):
+            if self.review_summary.category is not DataCategory.FINDING_SUMMARY:
+                raise ValueError("review_summary_omission_category_invalid")
+        if len(self.verified) > 64:
+            raise ValueError("verified_item_count_invalid")
         _validate_model_against_schema(self, "check-result")
         return self
 
@@ -3490,6 +3717,34 @@ class StatusCompactFindingModel(_ClosedModel):
         return self
 
 
+class StatusLatestCheckTestEditsModel(_ClosedModel):
+    """Structural test-edit counters from the latest persisted check."""
+
+    checked_frontier: FrontierModel
+    read_availability: Literal["available", "unavailable", "unknown"]
+    examined: Literal["0", "1"]
+    baseline_known: Literal["0", "1"]
+    modified: CanonicalUInt64Wire
+    renamed: CanonicalUInt64Wire
+    deleted: CanonicalUInt64Wire
+    skipped: CanonicalUInt64Wire
+    unjustified: CanonicalUInt64Wire
+    unknown: CanonicalUInt64Wire
+
+    @model_validator(mode="after")
+    def _validate_test_edit_availability(self) -> StatusLatestCheckTestEditsModel:
+        expected = (
+            "unavailable"
+            if self.examined == "0"
+            else "unknown"
+            if self.baseline_known == "0" or self.unknown != "0"
+            else "available"
+        )
+        if self.read_availability != expected:
+            raise ValueError("status_test_edit_availability_mismatch")
+        return self
+
+
 class StatusCompactObligationModel(_ClosedModel):
     optional_non_null_fields = frozenset({"acceptance_criteria"})
 
@@ -3510,6 +3765,8 @@ class StatusCompactObligationModel(_ClosedModel):
 
 
 class StatusCompactItemModel(_ClosedModel):
+    optional_non_null_fields = frozenset({"latest_check_test_edits"})
+
     task_id: TaskIdWire
     session_id: SessionIdWire
     task_title: String1To8192 | OmittedContentModel
@@ -3531,6 +3788,7 @@ class StatusCompactItemModel(_ClosedModel):
     freshness: FreshnessWire
     coverage: CoverageModel
     gaps: tuple[CodeWire, ...]
+    latest_check_test_edits: StatusLatestCheckTestEditsModel | None = None
 
     @model_validator(mode="after")
     def _validate_compact_item(self) -> StatusCompactItemModel:
@@ -3657,7 +3915,9 @@ FindingTodoStateLiteral = Literal[
 
 class StatusFindingItemModel(_ClosedModel):
     # Issue #905 to-do facts: present on every current row, absent only on older recordings.
-    optional_non_null_fields = frozenset({"todo_state", "review_rounds", "finding_frontier"})
+    optional_non_null_fields = frozenset(
+        {"challenge", "todo_state", "review_rounds", "finding_frontier"}
+    )
 
     finding_id: FindingIdWire
     kind: FindingKindWire
@@ -3684,6 +3944,7 @@ class StatusFindingItemModel(_ClosedModel):
     reason: String1To8192 | OmittedContentModel | None
     waiver_scope: Literal["finding_only"] | None
     waiver_expiry: TimestampWire | None
+    challenge: CheckFindingChallengeModel | None = None
     todo_state: FindingTodoStateLiteral | None = None
     review_rounds: CanonicalUInt64Wire | None = None
     # Issue #917: the frontier of the ledger event that carries this finding's record
@@ -5216,6 +5477,7 @@ _PUBLISH_STRUCTURAL_POINTERS: Final = (
 _CHECK_STRUCTURAL_POINTERS: Final = (
     _COMMON_SUCCESS_LEAVES
     + (
+        "/semantic_conclusion",
         "/semantic_provenance",
         "/semantic_reason",
         "/semantic_status",
@@ -5270,6 +5532,12 @@ _CHECK_STRUCTURAL_POINTERS: Final = (
         "/finding_checklist/next",
     )
     + (
+        "/overall_next/action",
+        "/overall_next/acknowledged_incomplete_endpoint",
+        "/overall_next/status",
+        "/overall_next/target_refs/*",
+    )
+    + (
         "/children",
         "/children/label",
         "/children/tested_manifest_frontier",
@@ -5317,8 +5585,55 @@ _CHECK_STRUCTURAL_POINTERS: Final = (
     + _prefix_leaf_patterns("/findings/*/subject_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/findings/*/coverage", _COVERAGE_LEAVES)
     + _prefix_leaf_patterns("/findings/*/provenance", _SEMANTIC_PROVENANCE_LEAVES)
+    + _prefix_leaf_patterns("/findings/*/challenge", ("requested_next_step",))
+    + _prefix_leaf_patterns(
+        "/findings/*/challenge/alternative_interpretation", _OMITTED_CONTENT_LEAVES
+    )
+    + _prefix_leaf_patterns("/findings/*/challenge/discrepancy", _OMITTED_CONTENT_LEAVES)
+    + _prefix_leaf_patterns("/findings/*/challenge/snippet", _OMITTED_CONTENT_LEAVES)
+    + _prefix_leaf_patterns("/findings/*/challenge/uncertainty", _OMITTED_CONTENT_LEAVES)
     + _prefix_leaf_patterns("/findings/*/summary", _OMITTED_CONTENT_LEAVES)
     + _prefix_leaf_patterns("/findings/*/detail", _OMITTED_CONTENT_LEAVES)
+    + _prefix_leaf_patterns("/review_summary", _OMITTED_CONTENT_LEAVES)
+    + _prefix_leaf_patterns("/verified/*", ("cited_refs/*", "verdict"))
+    + _prefix_leaf_patterns("/verified/*/requirement_or_claim", _OMITTED_CONTENT_LEAVES)
+    + _prefix_leaf_patterns("/verified/*/snippet", _OMITTED_CONTENT_LEAVES)
+    + _prefix_leaf_patterns(
+        "/totals",
+        (
+            "obligations/declared",
+            "obligations/resolved",
+            "obligations/open",
+            "obligations/unreadable",
+            "obligations/with_evidence",
+            "obligations/scope_known",
+            "requested_items/attempted",
+            "requested_items/unattempted",
+            "commands/observed",
+            "commands/failed",
+            "commands/unknown",
+            "commands/live_failed",
+            "commands/retired_by_rerun",
+            "commands/disclosed_not_rerun_green",
+            "evidence/mutable_reference",
+            "evidence/metadata_only",
+            "evidence/content_digest",
+            "evidence/immutable_snapshot",
+            "evidence/independently_reproduced",
+            "findings/returned",
+            "findings/actionable_returned",
+            "findings/coverage_only_returned",
+            "findings/suppressed",
+            "test_edits/examined",
+            "test_edits/baseline_known",
+            "test_edits/modified",
+            "test_edits/renamed",
+            "test_edits/deleted",
+            "test_edits/skipped",
+            "test_edits/unjustified",
+            "test_edits/unknown",
+        ),
+    )
 )
 
 _RESPOND_STRUCTURAL_POINTERS: Final = (
@@ -5496,6 +5811,24 @@ _STATUS_COMPACT_STRUCTURAL_POINTERS: Final = (
         "/page/items/*/unanswered_findings/*/summary",
         _OMITTED_CONTENT_LEAVES,
     )
+    + _prefix_leaf_patterns(
+        "/page/items/*/latest_check_test_edits",
+        (
+            "baseline_known",
+            "deleted",
+            "examined",
+            "modified",
+            "read_availability",
+            "renamed",
+            "skipped",
+            "unjustified",
+            "unknown",
+        ),
+    )
+    + _prefix_leaf_patterns(
+        "/page/items/*/latest_check_test_edits/checked_frontier",
+        FRONTIER_LEAVES,
+    )
 )
 
 _STATUS_EVIDENCE_STRUCTURAL_POINTERS: Final = (
@@ -5547,6 +5880,13 @@ _STATUS_FINDINGS_STRUCTURAL_POINTERS: Final = (
     + _prefix_leaf_patterns("/page/items/*/subject_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/page/items/*/finding_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/page/items/*/provenance", _SEMANTIC_PROVENANCE_LEAVES)
+    + _prefix_leaf_patterns("/page/items/*/challenge", ("requested_next_step",))
+    + _prefix_leaf_patterns(
+        "/page/items/*/challenge/alternative_interpretation", _OMITTED_CONTENT_LEAVES
+    )
+    + _prefix_leaf_patterns("/page/items/*/challenge/discrepancy", _OMITTED_CONTENT_LEAVES)
+    + _prefix_leaf_patterns("/page/items/*/challenge/snippet", _OMITTED_CONTENT_LEAVES)
+    + _prefix_leaf_patterns("/page/items/*/challenge/uncertainty", _OMITTED_CONTENT_LEAVES)
     + _prefix_leaf_patterns("/page/items/*/detail", _OMITTED_CONTENT_LEAVES)
     + _prefix_leaf_patterns("/page/items/*/reason", _OMITTED_CONTENT_LEAVES)
     + _prefix_leaf_patterns("/page/items/*/summary", _OMITTED_CONTENT_LEAVES)
@@ -5868,6 +6208,13 @@ _RECEIPT_STRUCTURAL_POINTERS: Final = (
 _CHECK_CONTENT_RULES: Final[tuple[tuple[str, DataCategory], ...]] = (
     ("/findings/*/detail", DataCategory.FINDING_SUMMARY),
     ("/findings/*/summary", DataCategory.FINDING_SUMMARY),
+    ("/findings/*/challenge/alternative_interpretation", DataCategory.FINDING_SUMMARY),
+    ("/findings/*/challenge/discrepancy", DataCategory.FINDING_SUMMARY),
+    ("/findings/*/challenge/snippet", DataCategory.FINDING_SUMMARY),
+    ("/findings/*/challenge/uncertainty", DataCategory.FINDING_SUMMARY),
+    ("/review_summary", DataCategory.FINDING_SUMMARY),
+    ("/verified/*/requirement_or_claim", DataCategory.FINDING_SUMMARY),
+    ("/verified/*/snippet", DataCategory.FINDING_SUMMARY),
 )
 _RESPOND_CONTENT_RULES: Final[tuple[tuple[str, DataCategory], ...]] = (
     ("/response/evidence/*/description", DataCategory.EVIDENCE_EXCERPT),
@@ -5907,6 +6254,14 @@ _STATUS_CONTENT_RULES: Final[tuple[tuple[str, str, DataCategory], ...]] = (
     ("findings", "/page/items/*/detail", DataCategory.FINDING_SUMMARY),
     ("findings", "/page/items/*/reason", DataCategory.FINDING_SUMMARY),
     ("findings", "/page/items/*/summary", DataCategory.FINDING_SUMMARY),
+    (
+        "findings",
+        "/page/items/*/challenge/alternative_interpretation",
+        DataCategory.FINDING_SUMMARY,
+    ),
+    ("findings", "/page/items/*/challenge/discrepancy", DataCategory.FINDING_SUMMARY),
+    ("findings", "/page/items/*/challenge/snippet", DataCategory.FINDING_SUMMARY),
+    ("findings", "/page/items/*/challenge/uncertainty", DataCategory.FINDING_SUMMARY),
     ("obligations", "/page/items/*/acceptance_criteria", DataCategory.OBLIGATION_TEXT),
     ("obligations", "/page/items/*/description", DataCategory.OBLIGATION_TEXT),
     ("obligations", "/page/items/*/evidence_expectation", DataCategory.OBLIGATION_TEXT),
@@ -6086,7 +6441,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 1313:
+    if len(result) != 1410:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

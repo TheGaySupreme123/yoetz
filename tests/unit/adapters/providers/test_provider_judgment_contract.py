@@ -12,6 +12,10 @@ import pytest
 from jsonschema import Draft202012Validator
 from pydantic import TypeAdapter, ValidationError
 
+from yoetz.adapters.providers.local_model import (
+    LocalModelEndpointProfile,
+    normalize_local_response,
+)
 from yoetz.adapters.providers.openai_chat_completions import (
     ChatCompletionsProfile,
 )
@@ -25,6 +29,7 @@ from yoetz.adapters.providers.openai_responses import (
     MISSING_ITEM_FIELD_GLOSSARY,
     MISSING_ITEM_KIND_GLOSSARY,
     VERDICT_FIELD_GLOSSARY,
+    VERIFIED_FIELD_GLOSSARY,
     JudgmentValidationError,
     OpenAIProfile,
     build_judgment_json_schema,
@@ -58,6 +63,7 @@ _NOW = datetime(2026, 7, 28, tzinfo=UTC)
 _DIGEST = "sha256:" + "c" * 64
 _REPO = Path(__file__).resolve().parents[4]
 _FROZEN_SCHEMA = _REPO / "schemas" / "findings" / "provider-judgment-1.1.0.schema.json"
+_ACTIVE_SCHEMA = _REPO / "schemas" / "findings" / "provider-judgment-1.2.0.schema.json"
 _RELEASED_1_0_SCHEMA = _REPO / "schemas" / "findings" / "provider-judgment-1.0.0.schema.json"
 
 _REF_A = "clm_20000000-0000-4000-8000-000000000001"
@@ -80,6 +86,7 @@ def _challenge(
         "message_to_main_agent": "Main agent: provide evidence for the claim.",
         "requested_next_step": "provide_evidence",
         "uncertainty": "The missing material may exist outside the case.",
+        "snippet": "The claim lacks a recorded basis.",
     }
 
 
@@ -102,6 +109,8 @@ def _judgment(
 ) -> dict[str, JsonValue]:
     body: dict[str, JsonValue] = {
         "conclusion": conclusion,
+        "review_summary": "The supplied packet was reviewed.",
+        "verified": [],
         "reviewer_challenges": cast(list[JsonValue], [] if challenges is None else challenges),
         "prior_finding_verdicts": [],
     }
@@ -152,6 +161,25 @@ def _chat_profile() -> ChatCompletionsProfile:
     )
 
 
+def _local_profile() -> LocalModelEndpointProfile:
+    return LocalModelEndpointProfile(
+        profile_id="local-test",
+        profile_version="1.0.0",
+        endpoint_profile_id="local-test-endpoint",
+        endpoint_profile_version="1.0.0",
+        model="local-test-model",
+        protocol_version="1.0.0",
+        judgment_schema_version="1.2.0",
+        timeout_seconds=30,
+        expected_service_identity="local-test-service",
+        expected_owner_uid=0,
+        expected_peer_uid=0,
+        expected_socket_mode=0o600,
+        release_resource_digest=_DIGEST,
+        capability_evidence_digest=_DIGEST,
+    )
+
+
 class _ResponsesResponse:
     def __init__(
         self,
@@ -190,12 +218,12 @@ def test_generated_schema_matches_owning_model_and_frozen_artifact() -> None:
     assert rebuilt == JUDGMENT_JSON_SCHEMA
     assert canonical_digest(rebuilt) == canonical_digest(JUDGMENT_JSON_SCHEMA)
 
-    frozen = strict_json_parse(_FROZEN_SCHEMA.read_bytes())
-    assert type(frozen) is dict
-    frozen_doc = cast(dict[str, Any], frozen)
-    # Frozen catalog adds $id/$schema/root title; after dropping catalog chrome and nested titles,
-    # the constrained-output body matches the runtime request schema byte-for-byte.
-    assert frozen_doc["$id"].endswith("provider-judgment-1.1.0.schema.json")
+    active = strict_json_parse(_ACTIVE_SCHEMA.read_bytes())
+    assert type(active) is dict
+    frozen_doc = cast(dict[str, Any], active)
+    # The active catalog adds $id/$schema/root title; after dropping catalog chrome and nested
+    # titles, the constrained-output body matches the runtime request schema byte-for-byte.
+    assert frozen_doc["$id"].endswith("provider-judgment-1.2.0.schema.json")
 
     def _strip_titles(node: object) -> object:
         # The catalog artifact keeps title/description chrome for human readers; the request
@@ -252,7 +280,10 @@ def test_request_schema_root_is_an_object_never_a_union() -> None:
                 assert source.get("additionalProperties") is False, path
                 properties = cast(dict[str, Any], source.get("properties", {}))
                 required = cast(list[str], source.get("required", []))
-                assert set(properties) == set(required), path
+                # Conditional snippet requirements are expressed with allOf on the active
+                # verified-item contract; the base property is intentionally optional.
+                optional: set[str] = {"snippet"} if path.endswith("ProviderVerifiedItem") else set()
+                assert set(properties) - optional == set(required), path
             for key, value in source.items():
                 if key in {"properties", "$defs"}:
                     for name, child in cast(dict[str, Any], value).items():
@@ -290,6 +321,7 @@ def test_request_schema_carries_no_docstring_commentary() -> None:
 
     curated = (
         set(CHALLENGE_FIELD_GLOSSARY.values())
+        | set(VERIFIED_FIELD_GLOSSARY.values())
         | set(VERDICT_FIELD_GLOSSARY.values())
         | set(MISSING_ITEM_FIELD_GLOSSARY.values())
     )
@@ -570,6 +602,29 @@ def test_conforming_challenge_response_succeeds_on_first_parse() -> None:
         _REF_B,
         _REF_A,
     ) or result.judgment.challenges[0].cited_refs == tuple(sorted((_REF_A, _REF_B)))
+
+
+def test_local_normalizer_requires_the_active_part2_fields() -> None:
+    profile = _local_profile()
+    legacy: dict[str, JsonValue] = {
+        "conclusion": "no_material_discrepancy",
+        "reviewer_challenges": [],
+        "prior_finding_verdicts": [],
+    }
+    rejected = normalize_local_response(
+        json.dumps(legacy, separators=(",", ":")).encode(),
+        profile,
+        policy_digest=_DIGEST,
+        latency_ms=4,
+    )
+    assert type(rejected) is SemanticResultInvalid
+    accepted = normalize_local_response(
+        json.dumps(_judgment(), separators=(",", ":")).encode(),
+        profile,
+        policy_digest=_DIGEST,
+        latency_ms=4,
+    )
+    assert type(accepted) is SemanticResultSuccess
 
 
 @pytest.mark.parametrize(

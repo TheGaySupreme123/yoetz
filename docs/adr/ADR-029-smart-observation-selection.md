@@ -516,3 +516,26 @@ without an accounting bucket.
   receipt coverage needs a control-schema revision and is not part of this amendment. The advice
   policy version is unchanged so existing advice finding identities do not churn; the historical
   advisory finding already in older ledgers is #911's.
+
+## Amendment — separate standing coverage from recoverable observation health (2026-10-04, #974)
+
+The maintainer acknowledged this follow-up under tracker #961. The durable observation record and
+the operator status surface must retain coverage limits, but a standing limit must not manufacture
+agent work. The local fallback store and SQLite store therefore use one shared material-gap set;
+`unpaired_event`, `truncated_payload`, `content_capture_unavailable`, `pending_attempt_expired`,
+and `content_unselected` remain visible coverage records while a source is mapped, fresh, and
+draining. A recent, progressing outbox drain is healthy even when one row is still pending; a
+missing or stale drain, a freshness timeout, an unmapped source, a material acquisition gap, or an
+unsupported event can still keep lifecycle status degraded or stale.
+
+Only the named recoverable causes `source_lag`, `cursor_stale`, `service_unavailable`, and
+`vault_locked` produce the agent-facing `observation_gap_or_stale` / `refresh_observation` advice.
+Unsupported formats and events remain disclosed to operators and in coverage, but an agent refresh
+cannot repair them. A lifecycle label by itself, an empty observation path, a standing gap, or a
+pending outbox row never creates that advice.
+
+The one-time orphan notice remains available to local operator inspection after restart, but is no
+longer copied into Codex, Claude Code, or Cursor hook context. Codex `PreToolUse` observation is
+synchronous so its pairing identity is committed before the matching `PostToolUse`; the other
+pure-ingress hooks retain their asynchronous behavior. This is a timing and presentation change,
+not a new capture grant or a claim that every native call is observable.

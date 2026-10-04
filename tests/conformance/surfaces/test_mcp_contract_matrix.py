@@ -302,8 +302,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:b7ec8bfa1b188d2d9f3147a561999f3dc27eb7a03b2fc68c63d304802d598397",
-        "strict": "sha256:01f38133bfae636c30261c5bc94641b2e03647b3e0fa8dd99503f95c31f826ef",
+        "policy": "sha256:7de117f8bc28b3970e8ef5ab2ab11074683e7adb59d156cea6a465f952342b33",
+        "strict": "sha256:3ef47b80d54b8313e2376575d671444d7952c8909e42ece7b84424616731ffaa",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -329,7 +329,7 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
         assert "does not publish to GitHub" in local_description
         assert "run an AI-powered evaluation" in local_description
     assert descriptor_for("start").description.startswith(
-        "First read yoetz://guidance/workflow.md."
+        "First read yoetz://guidance/agent-instructions.md."
     )
     # The two argument conventions a first-time caller cannot infer from prose alone. Both cost a
     # rejected start call in the 2026-07-30 dogfood before the descriptor named them.
@@ -353,7 +353,7 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert publish_descriptor.input_schema_ref.endswith("publish-work-request-1.2.0.schema.json")
     assert publish_descriptor.output_schema_ref.endswith("publish-work-result-1.0.0.schema.json")
     check_descriptor = descriptor_for("check")
-    assert check_descriptor.output_schema_ref.endswith("check-result-1.3.0.schema.json")
+    assert check_descriptor.output_schema_ref.endswith("check-result-1.4.0.schema.json")
     status_descriptor = descriptor_for("status")
     assert status_descriptor.input_schema_ref.endswith("status-request-1.2.0.schema.json")
     assert status_descriptor.output_schema_ref.endswith("status-result-1.4.0.schema.json")

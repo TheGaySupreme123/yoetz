@@ -1942,7 +1942,8 @@ async def test_evaluator_rejects_deadline_not_bound_to_runtime_authority() -> No
 
 _REF = "clm_20000000-0000-4000-8000-000000000001"
 _NO_DISCREPANCY = (
-    '{"conclusion":"no_material_discrepancy","reviewer_challenges":[],"prior_finding_verdicts":[]}'
+    '{"conclusion":"no_material_discrepancy","review_summary":"The supplied packet was reviewed.",'
+    '"verified":[],"reviewer_challenges":[],"prior_finding_verdicts":[]}'
 )
 
 
@@ -1951,6 +1952,7 @@ def _challenge_json(**overrides: object) -> str:
         "finding_kind": "claim_without_admissible_evidence",
         "summary": "Evidence gap",
         "cited_refs": [_REF],
+        "snippet": "The claim lacks a recorded basis.",
         "discrepancy": "The claim lacks a recorded basis.",
         "alternative_interpretation": "The claim may remain unresolved.",
         "message_to_main_agent": "Main agent: provide evidence for the claim.",
@@ -1961,6 +1963,8 @@ def _challenge_json(**overrides: object) -> str:
     return json.dumps(
         {
             "conclusion": "challenges_returned",
+            "review_summary": "The supplied packet was reviewed.",
+            "verified": [],
             "reviewer_challenges": [challenge],
             "prior_finding_verdicts": [],
         }
@@ -2047,7 +2051,8 @@ async def test_unknown_message_phase_is_a_forbidden_event(
         ('{"result":' + _NO_DISCREPANCY + "}", "judgment_envelope_invalid"),
         ('{"judgment":"' + "prose-canary" + '"}', "judgment_envelope_invalid"),
         (
-            '{"conclusion":"maybe-canary","reviewer_challenges":[],"prior_finding_verdicts":[]}',
+            '{"conclusion":"maybe-canary","review_summary":"The supplied packet was reviewed.",'
+            '"verified":[],"reviewer_challenges":[],"prior_finding_verdicts":[]}',
             "judgment_enum_invalid",
         ),
         (_challenge_json(finding_kind="hunch-canary"), "judgment_enum_invalid"),
@@ -2055,13 +2060,16 @@ async def test_unknown_message_phase_is_a_forbidden_event(
         (_challenge_json(cited_refs=[_REF, _REF]), "judgment_refs_duplicate"),
         (_challenge_json(cited_refs=["item-canary"]), "judgment_refs_invalid"),
         (
-            '{"conclusion":"challenges_returned","reviewer_challenges":[],"prior_finding_verdicts":[]}',
+            '{"conclusion":"challenges_returned","review_summary":"The supplied packet was reviewed.",'
+            '"verified":[],"reviewer_challenges":[],"prior_finding_verdicts":[]}',
             "judgment_conclusion_mismatch",
         ),
         (
             json.dumps(
                 {
                     "conclusion": "no_material_discrepancy",
+                    "review_summary": "The supplied packet was reviewed.",
+                    "verified": [],
                     "reviewer_challenges": json.loads(_challenge_json())["reviewer_challenges"],
                     "prior_finding_verdicts": [],
                 }

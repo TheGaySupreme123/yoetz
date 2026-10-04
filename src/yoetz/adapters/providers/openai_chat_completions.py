@@ -87,9 +87,12 @@ CHAT_COMPLETIONS_JSON_SHAPE_SUFFIX: Final = (
     "Reply with one JSON object and nothing else: no "
     'prose, no code fence, no explanation outside it. Its exact shape is {"conclusion": one of '
     '"no_material_discrepancy" | "challenges_returned" | "insufficient_packet", '
+    '"review_summary" non-empty, "verified" array of objects with "requirement_or_claim", '
+    '"verdict" ("supported" | "not_supported" | "not_assessable"), "cited_refs" and an '
+    'exact "snippet" for supported/not_supported entries, '
     '"reviewer_challenges": array of objects with "finding_kind", "summary", "cited_refs", '
     '"discrepancy", "alternative_interpretation", "message_to_main_agent", '
-    '"requested_next_step", "uncertainty"; "prior_finding_verdicts": array of objects with '
+    '"requested_next_step", "uncertainty", "snippet"; "prior_finding_verdicts": array of objects with '
     '"finding_id", "verdict" (one of "fixed" | "still_present" | "answered_not_fixed" | '
     '"unassessable" | "withdrawn"), "cited_refs", "note"}. With "insufficient_packet" add '
     '"missing_for_assessment": one to eight objects with "kind", "target_refs" (refs from '
@@ -400,7 +403,7 @@ def normalize_response(
             raw_size=OPENAI_MAX_RESPONSE_BODY_BYTES + 1,
         )
     try:
-        judgment = normalize_judgment(strict_json_parse(raw_bytes))
+        judgment = normalize_judgment(strict_json_parse(raw_bytes), require_part2=True)
     except ValueError, TypeError, LookupError:
         return SemanticResultInvalid(
             _provenance(

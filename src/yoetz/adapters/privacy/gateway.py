@@ -931,7 +931,11 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
                 None,
                 None,
             ),
-            ReceiptTransformations(0, 0, len(case.included_item_ids)),
+            ReceiptTransformations(
+                0,
+                case.redacted_span_count,
+                len(case.included_item_ids),
+            ),
             ReceiptSecretScan(
                 _SCAN.version,
                 _SCAN.profile_digest,
@@ -1053,7 +1057,11 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
                 case.token_count,
                 len(body) if disclosed else 0,
             ),
-            ReceiptTransformations(0, 0, len(case.included_item_ids) - included_items),
+            ReceiptTransformations(
+                0,
+                case.redacted_span_count,
+                len(case.included_item_ids) - included_items,
+            ),
             ReceiptSecretScan(
                 _SCAN.version,
                 _SCAN.profile_digest,
@@ -1090,7 +1098,9 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
         if case.binding != binding or case.policy_digest != registry.policy_digest:
             return _local_unavailable_result(case)
         if self._classifier.scan_exact_bytes(case.payload):
-            return _local_unavailable_result(case)
+            return _local_unavailable_result(
+                case, failure_class=SemanticFailureClass.RESPONSE_CONTENT
+            )
 
         now = self._clock.now_utc()
         try:
@@ -1239,11 +1249,15 @@ def _result_outcome(result: SemanticResult) -> tuple[PrivacyOutcome, PrivacyReas
 
 
 def _preconsume_result(case: ApprovedOutboundCase, reason: PrivacyReason) -> SemanticResult:
-    failure_class = (
-        SemanticFailureClass.TIMEOUT
-        if reason is PrivacyReason.DEADLINE_EXPIRED
-        else SemanticFailureClass.UNSUPPORTED_PROFILE
-    )
+    if reason is PrivacyReason.DEADLINE_EXPIRED:
+        failure_class = SemanticFailureClass.TIMEOUT
+    elif reason is PrivacyReason.NEVER_SEND_DETECTED:
+        # The rendered-body scan is a privacy refusal, not an endpoint/profile failure. Carry a
+        # closed response-content marker so ready composition maps it to BLOCKED_FORBIDDEN_DATA /
+        # NEVER_SEND_DETECTED (and therefore semantic_privacy_blocked) instead of transport loss.
+        failure_class = SemanticFailureClass.RESPONSE_CONTENT
+    else:
+        failure_class = SemanticFailureClass.UNSUPPORTED_PROFILE
     return SemanticResultUnavailable(
         ProviderAttemptProvenance(
             provider=case.provider_binding.provider_id,
@@ -1285,7 +1299,11 @@ def _unknown_outcome_result(
     )
 
 
-def _local_unavailable_result(case: ApprovedLocalDisclosureCase) -> SemanticResult:
+def _local_unavailable_result(
+    case: ApprovedLocalDisclosureCase,
+    *,
+    failure_class: SemanticFailureClass = SemanticFailureClass.UNSUPPORTED_PROFILE,
+) -> SemanticResult:
     binding = case.binding
     provider = "local-model" if binding is None else binding.provider_id
     endpoint = "unavailable" if binding is None else binding.endpoint_profile_id
@@ -1305,7 +1323,7 @@ def _local_unavailable_result(case: ApprovedLocalDisclosureCase) -> SemanticResu
             sampling_params=SamplingParams(1),
             latency_ms=0,
             status=SemanticStatus.UNAVAILABLE,
-            failure_class=SemanticFailureClass.UNSUPPORTED_PROFILE,
+            failure_class=failure_class,
         )
     )
 

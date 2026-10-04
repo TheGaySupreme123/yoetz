@@ -229,16 +229,15 @@ from yoetz.domain.privacy import (
     ReviewSelectionPolicy,
 )
 from yoetz.domain.receipts import (
-    CHECK_TIME_CHANGE_GAPS,
     SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
-    SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
     SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
+    SEMANTIC_PROVIDER_INPUT_MANIFEST_FAILURES,
+    SEMANTIC_PROVIDER_INPUT_MANIFEST_RECOVERY_FAILED_GAP,
     PolicyVersionEntry,
     ReceiptVersionSlice,
     SchemaVersionEntry,
 )
 from yoetz.domain.task_statement import (
-    TASK_STATEMENT_GAPS,
     review_selection_for_delivery,
     specification_preflight,
 )
@@ -260,6 +259,7 @@ from yoetz.domain.values import (
 from yoetz.kernel.lineage import LineageEvaluation
 from yoetz.kernel.policies.observation_advice import ObservationCompositionFact
 from yoetz.kernel.projections import ProjectionState
+from yoetz.kernel.test_edit_visibility import preexisting_test_edits
 from yoetz.observability.logging import (
     record_bounded_counts_without_raising,
     record_bounded_event_without_raising,
@@ -3071,6 +3071,35 @@ def _egress_withheld_item_ids(result: object) -> tuple[str, ...]:
     return cast(tuple[str, ...], value) if type(value) is tuple else ()
 
 
+def _egress_case_content_gaps(result: object) -> tuple[str, ...]:
+    """Project bounded egress transformations into the existing check coverage vocabulary."""
+
+    value = getattr(result, "redacted_span_count", 0)
+    return ("content_redacted",) if type(value) is int and value > 0 else ()
+
+
+def _provider_manifest_has_redaction(manifest: object) -> bool:
+    """Recover the redaction coverage bit from the exact provider-bound manifest."""
+
+    if not isinstance(manifest, Mapping):
+        return False
+    typed_manifest = cast(Mapping[str, object], manifest)
+    for name in (
+        "specification",
+        "current_diff",
+        "caller_evidence",
+        "latest_verification",
+        "prior_finding_context",
+    ):
+        section = typed_manifest.get(name)
+        if not isinstance(section, Mapping):
+            continue
+        reasons = cast(Mapping[str, object], section).get("omission_reasons")
+        if isinstance(reasons, list) and "redacted_never_send" in reasons:
+            return True
+    return False
+
+
 def _map_provider_outcome(
     result: SemanticEgressProviderOutcome, *, attempt_id: str
 ) -> FinalSemanticEvaluation:  # attempt_id is the durable semantic_attempts row identity
@@ -3116,6 +3145,12 @@ def _map_provider_outcome(
             reason = SemanticReason.PROVIDER_RATE_LIMITED
         elif failure_class is SemanticFailureClass.QUOTA_EXHAUSTED:
             reason = SemanticReason.PROVIDER_QUOTA_EXHAUSTED
+        elif failure_class is SemanticFailureClass.RESPONSE_CONTENT:
+            # The privacy gateway uses the closed response-content class for a rendered-body
+            # never-send refusal.  Preserve that typed pre-dispatch fact so required review gets
+            # the privacy recovery directive instead of being misreported as transport loss.
+            status = SemanticStatus.BLOCKED_FORBIDDEN_DATA
+            reason = SemanticReason.NEVER_SEND_DETECTED
         else:
             # `transport_unavailable` is the public catch-all for every remaining class:
             # a rejected credential, a forbidden binding, a provider outage, an unsupported
@@ -3134,6 +3169,17 @@ def _map_provider_outcome(
             SemanticStatus.FAILED,
             SemanticReason.COORDINATOR_FAILURE,
             semantic_withheld_item_ids=withheld_item_ids,
+            case_content_gaps=_egress_case_content_gaps(result),
+        )
+    if status is SemanticStatus.BLOCKED_FORBIDDEN_DATA:
+        # A rendered-body privacy refusal is pre-dispatch.  Its typed result intentionally has no
+        # provider request commitment, so asking the normal provider-provenance gate to certify
+        # it would downgrade the bounded refusal to ``receipt_persistence_unknown``.
+        return FinalSemanticEvaluation(
+            status,
+            reason,
+            semantic_withheld_item_ids=withheld_item_ids,
+            case_content_gaps=_egress_case_content_gaps(result),
         )
     provenance = _provider_provenance(result, status=status, reason=reason, attempt_id=attempt_id)
     if provenance is None:
@@ -3141,12 +3187,14 @@ def _map_provider_outcome(
             SemanticStatus.UNAVAILABLE,
             SemanticReason.RECEIPT_PERSISTENCE_UNKNOWN,
             semantic_withheld_item_ids=withheld_item_ids,
+            case_content_gaps=_egress_case_content_gaps(result),
         )
     return FinalSemanticEvaluation(
         status,
         reason,
         provenance=provenance,
         semantic_withheld_item_ids=withheld_item_ids,
+        case_content_gaps=_egress_case_content_gaps(result),
     )
 
 
@@ -3185,6 +3233,7 @@ def _map_egress_to_final(
                 SemanticStatus.UNAVAILABLE,
                 SemanticReason.RECEIPT_PERSISTENCE_UNKNOWN,
                 semantic_withheld_item_ids=withheld_item_ids,
+                case_content_gaps=_egress_case_content_gaps(result),
             )
         return FinalSemanticEvaluation(
             SemanticStatus.SUCCEEDED,
@@ -3202,6 +3251,11 @@ def _map_egress_to_final(
             provider_input_manifest=(
                 None if result.disclosure is None else result.disclosure.provider_input_manifest
             ),
+            provider_input_text_by_ref=(
+                None if result.disclosure is None else result.disclosure.provider_input_text_by_ref
+            ),
+            provider_input_manifest_failure=result.provider_input_manifest_failure,
+            case_content_gaps=_egress_case_content_gaps(result),
         )
     if type(result) is SemanticEgressAwaitingHuman:
         # The proposal id and its expiry are the only things that make this branch recoverable.
@@ -3214,6 +3268,7 @@ def _map_egress_to_final(
             SemanticStatus.AWAITING_HUMAN,
             SemanticReason.HUMAN_APPROVAL_REQUIRED,
             semantic_withheld_item_ids=_egress_withheld_item_ids(result),
+            case_content_gaps=_egress_case_content_gaps(result),
             continuation=disclosure_continuation(
                 pending_id=result.privacy_proposal_id,
                 expires_at=result.expires_at,
@@ -3227,11 +3282,13 @@ def _map_egress_to_final(
             SemanticStatus.UNAVAILABLE,
             SemanticReason.OUTCOME_UNKNOWN,
             semantic_withheld_item_ids=_egress_withheld_item_ids(result),
+            case_content_gaps=_egress_case_content_gaps(result),
         )
     if type(result) is SemanticEgressBlocked:
         return replace(
             _map_blocked(result.outcome, result.reason),
             semantic_withheld_item_ids=_egress_withheld_item_ids(result),
+            case_content_gaps=_egress_case_content_gaps(result),
         )
     if type(result) is SemanticEgressProviderOutcome:
         return _map_provider_outcome(result, attempt_id=resolved_attempt)
@@ -3588,21 +3645,32 @@ def _judgment_to_response_json(judgment: object) -> dict[str, CanonicalJsonValue
     for item in judgment.challenges:
         if type(item) is not ReviewerChallenge:
             raise TypeError("semantic_judgment_required")
-        challenges.append(
-            {
-                "finding_kind": item.finding_kind.value,
-                "summary": item.summary,
-                "cited_refs": list(item.cited_refs),
-                "discrepancy": item.discrepancy,
-                "alternative_interpretation": item.alternative_interpretation,
-                "message_to_main_agent": item.message_to_main_agent,
-                "requested_next_step": item.requested_next_step,
-                "uncertainty": item.uncertainty,
-            }
-        )
+        challenge: dict[str, CanonicalJsonValue] = {
+            "finding_kind": item.finding_kind.value,
+            "summary": item.summary,
+            "cited_refs": list(item.cited_refs),
+            "discrepancy": item.discrepancy,
+            "alternative_interpretation": item.alternative_interpretation,
+            "message_to_main_agent": item.message_to_main_agent,
+            "requested_next_step": item.requested_next_step,
+            "uncertainty": item.uncertainty,
+        }
+        if item.snippet is not None:
+            challenge["snippet"] = item.snippet
+        challenges.append(challenge)
     body: dict[str, CanonicalJsonValue] = {
         "conclusion": judgment.conclusion,
         "reviewer_challenges": challenges,
+        "review_summary": judgment.review_summary,
+        "verified": [
+            {
+                "requirement_or_claim": item.requirement_or_claim,
+                "verdict": item.verdict,
+                "cited_refs": list(item.cited_refs),
+                **({} if item.snippet is None else {"snippet": item.snippet}),
+            }
+            for item in judgment.verified
+        ],
     }
     # Emitted only when present, so a judgment without verdicts keeps its earlier stored bytes.
     if judgment.prior_finding_verdicts:
@@ -3639,6 +3707,8 @@ def _judgment_from_response_json(value: object) -> object:
         ReviewerNextStep,
         SemanticConclusion,
         SemanticJudgment,
+        VerifiedReviewItem,
+        VerifiedReviewVerdict,
     )
 
     if type(value) is not dict:
@@ -3670,6 +3740,9 @@ def _judgment_from_response_json(value: object) -> object:
             raise ValueError("semantic_response_judgment_invalid")
         try:
             kind = FindingKind(cast(str, row["finding_kind"]))
+            snippet = row.get("snippet")
+            if snippet is not None and type(snippet) is not str:
+                raise ValueError("semantic_response_judgment_invalid")
             challenges.append(
                 ReviewerChallenge(
                     kind,
@@ -3680,6 +3753,7 @@ def _judgment_from_response_json(value: object) -> object:
                     cast(str, row["message_to_main_agent"]),
                     cast(ReviewerNextStep, next_step),
                     cast(str, row["uncertainty"]),
+                    snippet,
                 )
             )
         except (KeyError, TypeError, ValueError) as exc:
@@ -3730,6 +3804,36 @@ def _judgment_from_response_json(value: object) -> object:
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("semantic_response_judgment_invalid") from exc
+    raw_verified = source.get("verified", [])
+    if type(raw_verified) is not list:
+        raise ValueError("semantic_response_judgment_invalid")
+    verified: list[VerifiedReviewItem] = []
+    for item in cast(list[object], raw_verified):
+        if type(item) is not dict:
+            raise ValueError("semantic_response_judgment_invalid")
+        row = cast(dict[str, object], item)
+        cited = row.get("cited_refs")
+        if type(cited) is not list or any(
+            type(ref) is not str for ref in cast(list[object], cited)
+        ):
+            raise ValueError("semantic_response_judgment_invalid")
+        snippet = row.get("snippet")
+        if snippet is not None and type(snippet) is not str:
+            raise ValueError("semantic_response_judgment_invalid")
+        try:
+            verified.append(
+                VerifiedReviewItem(
+                    cast(str, row["requirement_or_claim"]),
+                    cast(VerifiedReviewVerdict, row["verdict"]),
+                    tuple(cast(list[str], cited)),
+                    snippet,
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("semantic_response_judgment_invalid") from exc
+    review_summary = source.get("review_summary", "No review summary recorded.")
+    if type(review_summary) is not str:
+        raise ValueError("semantic_response_judgment_invalid")
     try:
         return SemanticJudgment(
             cast(SemanticConclusion, conclusion_raw),
@@ -3737,6 +3841,8 @@ def _judgment_from_response_json(value: object) -> object:
             tuple(verdicts),
             cast(int, dropped),
             missing_for_assessment=tuple(missing),
+            review_summary=review_summary,
+            verified=tuple(verified),
         )
     except ValueError as exc:
         raise ValueError("semantic_response_judgment_invalid") from exc
@@ -3779,6 +3885,8 @@ async def _publish_semantic_response_object(
         body["provider_input_manifest"] = cast(
             CanonicalJsonValue, dict(evaluation.provider_input_manifest.items())
         )
+    if evaluation.provider_input_manifest_failure is not None:
+        body["provider_input_manifest_failure"] = evaluation.provider_input_manifest_failure
     payload = canonical_encode(cast(CanonicalJsonValue, body))
     staged = await runtime.objects.stage(
         ObjectSource(data=payload, declared_size=len(payload)),
@@ -3841,6 +3949,9 @@ async def _recover_selected_evaluation(
 async def _recover_response_evaluation(
     runtime: TaskRuntime, ref: ObjectRef
 ) -> FinalSemanticEvaluation | None:
+    from yoetz.application.semantic_case import (  # pyright: ignore[reportPrivateUsage]
+        _decode_review_input_manifest,  # pyright: ignore[reportPrivateUsage]
+    )
     from yoetz.domain.findings import semantic_provenance_from_json
     from yoetz.ports.semantic import SemanticJudgment
     from yoetz.protocol.canonical import strict_json_parse
@@ -3889,20 +4000,45 @@ async def _recover_response_evaluation(
         if all(type(ref) is str for ref in refs):
             disclosed = frozenset(cast(list[str], refs))
     provider_manifest = None
+    provider_manifest_failure: str | None = None
     raw_provider_manifest = body.get("provider_input_manifest")
-    if isinstance(raw_provider_manifest, dict):
-        try:
-            from yoetz.domain.values import JsonObject, freeze_json
-
-            frozen_provider = freeze_json(cast(CanonicalJsonValue, raw_provider_manifest))
+    raw_provider_failure = body.get("provider_input_manifest_failure")
+    if status is SemanticStatus.SUCCEEDED:
+        if raw_provider_failure is not None:
             if (
-                type(frozen_provider) is JsonObject
-                and frozen_provider.get("schema") == "yoetz.review-input-manifest/1"
-                and frozen_provider.get("phase") == "provider_bound"
+                type(raw_provider_failure) is str
+                and raw_provider_failure in SEMANTIC_PROVIDER_INPUT_MANIFEST_FAILURES
+                and raw_provider_manifest is None
             ):
-                provider_manifest = frozen_provider
-        except TypeError, ValueError:
-            provider_manifest = None
+                provider_manifest_failure = raw_provider_failure
+            else:
+                provider_manifest_failure = SEMANTIC_PROVIDER_INPUT_MANIFEST_RECOVERY_FAILED_GAP
+        elif raw_provider_manifest is None:
+            # Older response objects may predate the provider-bound field.  They remain readable,
+            # but recovery cannot prove what the provider received.
+            provider_manifest_failure = SEMANTIC_PROVIDER_INPUT_MANIFEST_RECOVERY_FAILED_GAP
+        elif isinstance(raw_provider_manifest, dict):
+            try:
+                from yoetz.domain.values import JsonObject, freeze_json
+
+                frozen_provider = freeze_json(cast(CanonicalJsonValue, raw_provider_manifest))
+                if (
+                    type(frozen_provider) is JsonObject
+                    and _decode_review_input_manifest(
+                        frozen_provider, expected_phase="provider_bound"
+                    )
+                    is not None
+                ):
+                    provider_manifest = frozen_provider
+                else:
+                    provider_manifest_failure = SEMANTIC_PROVIDER_INPUT_MANIFEST_RECOVERY_FAILED_GAP
+            except TypeError, ValueError:
+                provider_manifest_failure = SEMANTIC_PROVIDER_INPUT_MANIFEST_RECOVERY_FAILED_GAP
+    else:
+        provider_manifest_failure = SEMANTIC_PROVIDER_INPUT_MANIFEST_RECOVERY_FAILED_GAP
+    case_content_gaps = (
+        ("content_redacted",) if _provider_manifest_has_redaction(provider_manifest) else ()
+    )
     return FinalSemanticEvaluation(
         status,
         reason,
@@ -3911,6 +4047,9 @@ async def _recover_response_evaluation(
         case_included_refs=disclosed,
         semantic_withheld_item_ids=withheld_item_ids,
         provider_input_manifest=provider_manifest,
+        provider_input_manifest_failure=provider_manifest_failure,
+        provider_input_text_by_ref=None,
+        case_content_gaps=case_content_gaps,
     )
 
 
@@ -4655,6 +4794,21 @@ def _privacy_gated_semantic_evaluator(
                             clock=clock,
                             request_id=frozen.lease.operation_id,
                         )
+            test_edit_gaps = (
+                ()
+                if check_change.change is None
+                else preexisting_test_edits(
+                    check_change.change.capture,
+                    frozen.case.projection,
+                ).gaps
+            )
+            if test_edit_gaps:
+                # The aggregate codes are safe to carry into the reviewer packet: paths and
+                # content remain inside the encrypted bounded change capture, while the reviewer
+                # still sees that pre-existing test edits need scrutiny.
+                captured_content_gaps = tuple(
+                    sorted(set(captured_content_gaps) | set(test_edit_gaps), key=str.encode)
+                )
             workspace_root = await _workspace_root_for_runtime(runtime)
             semantic_case_id = recovered_case_id or ids.new(IdKind.OUTBOUND_CASE)
 
@@ -4792,19 +4946,7 @@ def _privacy_gated_semantic_evaluator(
                 sorted(
                     trimmed_prior
                     | set(semantic_case.packet.coverage.known_gaps)
-                    & {
-                        "captured_object_unavailable",
-                        "content_capture_unavailable",
-                        "content_unselected",
-                        "content_redacted",
-                        "truncated_payload",
-                        SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
-                        SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
-                        # A missing or title-only task statement is a packet fact the check
-                        # result and its receipt must disclose too (issue #908).
-                        *TASK_STATEMENT_GAPS,
-                        *CHECK_TIME_CHANGE_GAPS,
-                    }
+                    | set(test_edit_gaps)
                 )
             )
             over_item_limit = (
@@ -4881,11 +5023,14 @@ def _privacy_gated_semantic_evaluator(
                 # The mapper knows only the egress outcome; the truncation happened while
                 # composing the case, so it must be restated here or the probe path presents
                 # a shortened case as complete.
+                mapped = _map_egress_to_final(result, ids, projection=frozen.case.projection)
                 return replace(
-                    _map_egress_to_final(result, ids, projection=frozen.case.projection),
+                    mapped,
                     case_content_over_item_limit=over_item_limit,
                     case_reference_scope_reduced=reference_scope_reduced,
-                    case_content_gaps=content_gaps,
+                    case_content_gaps=tuple(
+                        sorted(set(content_gaps) | set(mapped.case_content_gaps), key=str.encode)
+                    ),
                     unsuppliable_missing_kinds=unsuppliable,
                     case_prior_finding_refs=packet_prior_refs,
                     case_citable_refs=packet_citable_refs,
@@ -5188,14 +5333,20 @@ def _privacy_gated_semantic_evaluator(
                 disclosed: frozenset[str] | None = None
                 semantic_withheld_item_ids: tuple[str, ...] = ()
                 provider_manifest = None
+                provider_manifest_failure = None
+                provider_input_text_by_ref = None
+                evaluation_content_gaps: tuple[str, ...] = ()
                 if type(evaluation) is FinalSemanticEvaluation:
                     semantic_withheld_item_ids = evaluation.semantic_withheld_item_ids
+                    evaluation_content_gaps = evaluation.case_content_gaps
                     if status is SemanticStatus.SUCCEEDED:
                         judgment = evaluation.judgment
                         provenance = evaluation.provenance
                         # What the exact sent packet carried, from the selected attempt (#904).
                         disclosed = evaluation.case_included_refs
                         provider_manifest = evaluation.provider_input_manifest
+                        provider_manifest_failure = evaluation.provider_input_manifest_failure
+                        provider_input_text_by_ref = evaluation.provider_input_text_by_ref
                     elif (
                         status is evaluation.status
                         and reason is evaluation.reason
@@ -5207,6 +5358,9 @@ def _privacy_gated_semantic_evaluator(
                 provenance = _with_fallback_origin(provenance, accounting)
                 if provenance is None and status is not SemanticStatus.SUCCEEDED:
                     status, reason = _without_provider_provenance(status, reason)
+                combined_content_gaps = tuple(
+                    sorted(set(content_gaps) | set(evaluation_content_gaps), key=str.encode)
+                )
                 # Terminal recovery of a succeeded job without a recoverable response object
                 # must not invent a judgment; surface an honest coordinator failure instead.
                 if status is SemanticStatus.SUCCEEDED and (judgment is None or provenance is None):
@@ -5218,11 +5372,13 @@ def _privacy_gated_semantic_evaluator(
                         withheld_review_categories=withheld,
                         case_content_over_item_limit=over_item_limit,
                         case_reference_scope_reduced=reference_scope_reduced,
-                        case_content_gaps=content_gaps,
+                        case_content_gaps=combined_content_gaps,
                         unsuppliable_missing_kinds=unsuppliable,
                         semantic_withheld_item_ids=semantic_withheld_item_ids,
                         review_input_manifest=input_manifest,
                         provider_input_manifest=provider_manifest,
+                        provider_input_manifest_failure=provider_manifest_failure,
+                        provider_input_text_by_ref=provider_input_text_by_ref,
                     )
                 return FinalSemanticEvaluation(
                     status,
@@ -5236,7 +5392,7 @@ def _privacy_gated_semantic_evaluator(
                     case_reference_scope_reduced=reference_scope_reduced,
                     case_included_refs=disclosed,
                     semantic_withheld_item_ids=semantic_withheld_item_ids,
-                    case_content_gaps=content_gaps,
+                    case_content_gaps=combined_content_gaps,
                     unsuppliable_missing_kinds=unsuppliable,
                     case_prior_finding_refs=packet_prior_refs,
                     case_citable_refs=packet_citable_refs,
@@ -5246,6 +5402,8 @@ def _privacy_gated_semantic_evaluator(
                     continuation=continuation,
                     review_input_manifest=input_manifest,
                     provider_input_manifest=provider_manifest,
+                    provider_input_manifest_failure=provider_manifest_failure,
+                    provider_input_text_by_ref=provider_input_text_by_ref,
                 )
 
             return cast(

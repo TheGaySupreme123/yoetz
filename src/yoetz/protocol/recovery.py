@@ -526,6 +526,16 @@ _DIRECTIVES: Final = (
         nudge="This names a Yoetz fault, never a finding about the work under review.",
     ),
     RecoveryDirective(
+        token="semantic_privacy_blocked",
+        directive=(
+            "Required review blocked before dispatch. Do not resend this case. Supply a new safe "
+            "replacement, let Yoetz rescan it, then run one check under a NEW request_id. If none "
+            "exists, report review unmet; local-only does not satisfy it."
+        ),
+        guidance_uri=_SEMANTIC_COVERAGE,
+        nudge="Never reuse the blocked bytes or case identity.",
+    ),
+    RecoveryDirective(
         token="consent_outcome_unconfirmed",
         directive=(
             "The decision was submitted but its outcome could not be confirmed, so it may already "
@@ -1056,6 +1066,8 @@ _SEMANTIC_REASON_CONTINUATIONS: Final[Mapping[str, str]] = MappingProxyType(
         "retry_budget_exhausted": "semantic_no_judgment",
         "outcome_unknown": "semantic_no_judgment",
         "coordinator_failure": "semantic_coordinator_review",
+        "never_send_detected": "semantic_privacy_blocked",
+        "classification_uncertain": "semantic_privacy_blocked",
     }
 )
 

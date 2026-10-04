@@ -8,6 +8,7 @@ from typing import cast
 
 import pytest
 
+from yoetz.domain.check_totals import CHECK_TOTAL_KEYS, render_check_totals
 from yoetz.domain.events import (
     CheckMode,
     CheckRecordedPayload,
@@ -155,6 +156,7 @@ def _check(
     missing_for_assessment: tuple[MissingForAssessmentItem, ...] = (),
     review_input_manifest: dict[str, object] | None = None,
     semantic_withheld_item_ids: tuple[str, ...] = (),
+    totals: JsonObject | None = None,
 ) -> CheckRecordedPayload:
     return CheckRecordedPayload(
         mode=(
@@ -198,6 +200,16 @@ def _check(
         engine_version="0.1.0",
         projection_version="yoetz/0.1.0",
         semantic_withheld_item_ids=semantic_withheld_item_ids,
+        totals=totals,
+    )
+
+
+def _totals() -> JsonObject:
+    return cast(
+        JsonObject,
+        freeze_json(
+            {group: {key: "1" for key in keys} for group, keys in CHECK_TOTAL_KEYS.items()}
+        ),
     )
 
 
@@ -368,6 +380,25 @@ def test_conclusion_selection_matches_state_strength() -> None:
     assert _build(_context(finding=finding, check=action_check)).conclusion is (
         ReceiptConclusion.UNRESOLVED_FINDINGS_REMAIN
     )
+
+
+def test_check_totals_are_carried_in_json_and_human_receipt_summary() -> None:
+    totals = _totals()
+    receipt = _build(
+        _context(
+            check=_check(CheckVerdict.NO_ISSUE_DETECTED, _coverage(), totals=totals),
+        )
+    )
+    rendered_totals = render_check_totals(totals)
+    summary = next(
+        section for section in receipt.sections if section.key is ReceiptSectionKey.SUMMARY
+    )
+    assert rendered_totals in summary.body
+    assert rendered_totals in render_receipt_human(receipt, markdown=True)
+    assert rendered_totals in render_receipt_human(receipt, markdown=False)
+    encoded = receipt_document_to_json(receipt)
+    sections = cast(list[dict[str, object]], encoded["sections"])
+    assert rendered_totals in cast(str, sections[0]["body"])
 
     clear_check = _check(CheckVerdict.NO_ISSUE_DETECTED, _coverage())
     assert _build(_context(check=clear_check)).conclusion is (
@@ -863,6 +894,28 @@ def test_semantic_review_not_configured_limitations_state_not_run() -> None:
     rendered = render_receipt_compact(receipt)
     assert "AI-powered relevance review was not run" in rendered
     assert "optional AI-powered review was blocked" not in rendered
+
+
+def test_scoped_deterministic_clean_keeps_the_review_gap_in_the_receipt() -> None:
+    """A scoped check result never upgrades the receipt past its standing coverage limit."""
+
+    from yoetz.domain.receipts import SEMANTIC_REVIEW_NOT_REQUESTED_GAP
+
+    coverage = _coverage(gaps=(SEMANTIC_REVIEW_NOT_REQUESTED_GAP,))
+    gap = CaseGap(
+        f"semantic_outcome:{SEMANTIC_REVIEW_NOT_REQUESTED_GAP}",
+        SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
+        (),
+    )
+    check = _check(CheckVerdict.NO_ISSUE_DETECTED, coverage)
+    receipt = _build(_context(coverage=coverage, gaps=(gap,), check=check))
+
+    assert receipt.conclusion is ReceiptConclusion.INSUFFICIENT_COVERAGE
+    assert SEMANTIC_REVIEW_NOT_REQUESTED_GAP in {item.code for item in receipt.gaps}
+    for markdown in (True, False):
+        rendered = render_receipt_human(receipt, markdown=markdown)
+        assert "AI-powered review was not requested (local-only check)." in rendered
+        assert SEMANTIC_REVIEW_NOT_REQUESTED_GAP in rendered
 
 
 @pytest.mark.parametrize("profile", tuple(ReceiptRedactionProfile))

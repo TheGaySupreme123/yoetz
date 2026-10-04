@@ -1931,6 +1931,13 @@ class CatalogPrivacyAudit:
         self, request: DisclosureProposalRequest
     ) -> PreparedDisclosureReservation:
         now = self._clock.now_utc()
+        route_row = self._db.execute(
+            "SELECT active_route_identity_digest FROM task_routes WHERE task_id = ? AND state = 'active'",
+            (request.task_id,),
+        ).fetchone()
+        if route_row is None or type(route_row[0]) is not str:
+            raise ValueError("privacy_audit_route_unavailable")
+        route_identity = cast(str, route_row[0])
         proposal_value = {
             "approved_categories": [item.value for item in request.minimized.approved_categories],
             "blocked_categories": [item.value for item in request.minimized.blocked_categories],
@@ -1946,12 +1953,14 @@ class CatalogPrivacyAudit:
             "schema": "yoetz.disclosure-proposal/1",
             "scope": _scope_json(request.scope),
             "source_item_digests": list(request.minimized.source_item_digests),
+            "included_item_ids": list(request.minimized.included_item_ids),
             "transformation_summary": [
                 list(item) for item in request.minimized.transformation_summary
             ],
             "withheld_item_ids": list(request.minimized.withheld_item_ids),
             "scanner_registry_version": request.minimized.scanner_registry_version,
             "scanner_profile_digest": request.minimized.scanner_profile_digest,
+            "route_identity_digest": route_identity,
         }
         proposal_bytes = canonical_encode(cast(JsonValue, proposal_value))
         proposal_commitment = _mac(self._key, _PROPOSAL_DOMAIN, proposal_bytes)
@@ -1963,13 +1972,6 @@ class CatalogPrivacyAudit:
         )
         staged = await self._objects.stage(ObjectSource(data=proposal_bytes), metadata)
         ref = await self._objects.finalize(staged)
-        route_row = self._db.execute(
-            "SELECT active_route_identity_digest FROM task_routes WHERE task_id = ? AND state = 'active'",
-            (request.task_id,),
-        ).fetchone()
-        if route_row is None or type(route_row[0]) is not str:
-            raise ValueError("privacy_audit_route_unavailable")
-        route_identity = cast(str, route_row[0])
         proposal = DisclosureProposal(
             request.privacy_proposal_id,
             request.request_id,
@@ -1993,6 +1995,8 @@ class CatalogPrivacyAudit:
             request.minimized.withheld_item_ids,
             request.minimized.scanner_registry_version,
             request.minimized.scanner_profile_digest,
+            request.minimized.included_item_ids,
+            route_identity,
         )
         structural = canonical_encode(
             {
@@ -2002,6 +2006,7 @@ class CatalogPrivacyAudit:
                 "prepared_case_digest": request.minimized.case_digest,
                 "proposal_commitment": proposal_commitment,
                 "request_id": request.request_id,
+                "route_identity_digest": route_identity,
                 "scope": _scope_json(request.scope),
             }
         )
@@ -2296,12 +2301,28 @@ class CatalogPrivacyAudit:
                       content_media_type, content_created_at, task_id,
                       provider_id, model_id, endpoint_profile_id, endpoint_profile_version,
                       local_sink, destination_kind, policy_version,
-                      subject_structural_canonical, expires_at
+                      subject_structural_canonical, expires_at, route_identity_digest
                FROM privacy_audit_records
                WHERE proposal_id = ? AND subject_kind = 'disclosure'""",
             (proposal_id,),
         ).fetchone()
-        if row is None or type(row[0]) is not str or type(row[8]) is not str:
+        if (
+            row is None
+            or type(row[0]) is not str
+            or type(row[8]) is not str
+            or type(row[18]) is not str
+        ):
+            return None
+        stored_route = cast(str, row[18])
+        current_route = self._db.execute(
+            "SELECT active_route_identity_digest FROM task_routes WHERE task_id = ? AND state = 'active'",
+            (cast(str, row[8]),),
+        ).fetchone()
+        if (
+            current_route is None
+            or type(current_route[0]) is not str
+            or current_route[0] != stored_route
+        ):
             return None
         structural = _mapping(strict_json_parse(cast(bytes, row[16])))
         task = cast(str, row[8])
@@ -2325,6 +2346,13 @@ class CatalogPrivacyAudit:
         except Exception:
             return None
         if parsed.get("schema") != "yoetz.disclosure-proposal/1":
+            return None
+        proposal_commitment = structural.get("proposal_commitment")
+        if type(proposal_commitment) is not str or not hmac.compare_digest(
+            _mac(self._key, _PROPOSAL_DOMAIN, body), proposal_commitment
+        ):
+            return None
+        if parsed.get("route_identity_digest") != stored_route:
             return None
         prepared_b64 = parsed.get("prepared_bytes_base64")
         if type(prepared_b64) is not str:
@@ -2407,6 +2435,8 @@ class CatalogPrivacyAudit:
                     str,
                     parsed.get("scanner_profile_digest") or "sha256:" + "0" * 64,
                 ),
+                tuple(sorted(_strings(parsed.get("included_item_ids") or []), key=str.encode)),
+                stored_route,
             )
         except Exception:
             return None

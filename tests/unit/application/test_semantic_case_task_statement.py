@@ -31,6 +31,7 @@ from yoetz.application.semantic_case import (
     build_semantic_case,
     review_input_manifest,
     review_packet_disclosure,
+    review_packet_disclosure_result,
     semantic_case_to_candidate_context,
     semantic_case_to_prepared_payload,
 )
@@ -60,7 +61,13 @@ from yoetz.domain.privacy import (
     ReviewContextProfile,
     ReviewSelectionPolicy,
 )
-from yoetz.domain.receipts import SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP
+from yoetz.domain.receipts import (
+    SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
+    SEMANTIC_PROVIDER_INPUT_MANIFEST_INVALID_GAP,
+    SEMANTIC_PROVIDER_INPUT_MANIFEST_MISMATCH_GAP,
+    SEMANTIC_PROVIDER_INPUT_MANIFEST_MISSING_GAP,
+    SEMANTIC_PROVIDER_INPUT_MANIFEST_PARSE_FAILED_GAP,
+)
 from yoetz.domain.task_statement import (
     TASK_STATEMENT_GAPS,
     TASK_STATEMENT_NOT_AUTHORIZED_GAP,
@@ -429,6 +436,18 @@ def test_disclosure_rejects_malformed_or_count_inconsistent_provider_manifest() 
 
     valid = _packet(semantic)
     assert review_packet_disclosure(canonical_encode(valid)) is not None
+    valid_result = review_packet_disclosure_result(canonical_encode(valid))
+    assert valid_result.failure is None
+    assert valid_result.disclosure is not None
+    assert valid_result.disclosure.provider_input_manifest is not None
+    assert valid_result.disclosure.provider_input_text_by_ref
+    first_item = _items(valid)[0]
+    first_source = first_item["source_ref"]
+    assert type(first_source) is str
+    assert (
+        cast(str, first_item["content"])
+        in valid_result.disclosure.provider_input_text_by_ref[first_source]
+    )
 
     malformed = _packet(semantic)
     malformed_packet = cast(dict[str, JsonValue], malformed["review_packet"])
@@ -443,6 +462,47 @@ def test_disclosure_rejects_malformed_or_count_inconsistent_provider_manifest() 
     provider = cast(dict[str, JsonValue], inconsistent_packet["provider_input_manifest"])
     provider["selected_item_count"] = 0
     assert review_packet_disclosure(canonical_encode(inconsistent)) is None
+
+
+def test_disclosure_result_keeps_provider_provenance_failures_distinct() -> None:
+    semantic = _build(_case(statement=_statement()))
+
+    missing = _packet(semantic)
+    missing_packet = cast(dict[str, JsonValue], missing["review_packet"])
+    del missing_packet["provider_input_manifest"]
+    missing_result = review_packet_disclosure_result(canonical_encode(missing))
+    assert missing_result.disclosure is not None
+    assert missing_result.disclosure.provider_input_manifest is None
+    assert missing_result.failure == SEMANTIC_PROVIDER_INPUT_MANIFEST_MISSING_GAP
+    # The compatibility helper retains its old fail-open behavior for a readable packet whose
+    # optional provider metadata was not present in an older response.
+    assert review_packet_disclosure(canonical_encode(missing)) is not None
+
+    malformed = _packet(semantic)
+    malformed_packet = cast(dict[str, JsonValue], malformed["review_packet"])
+    malformed_packet["provider_input_manifest"] = {"schema": "wrong", "phase": "provider_bound"}
+    malformed_result = review_packet_disclosure_result(canonical_encode(malformed))
+    assert malformed_result.disclosure is not None
+    assert malformed_result.failure == SEMANTIC_PROVIDER_INPUT_MANIFEST_INVALID_GAP
+
+    malformed_type = _packet(semantic)
+    malformed_type_packet = cast(dict[str, JsonValue], malformed_type["review_packet"])
+    malformed_type_packet["provider_input_manifest"] = []
+    malformed_type_result = review_packet_disclosure_result(canonical_encode(malformed_type))
+    assert malformed_type_result.disclosure is not None
+    assert malformed_type_result.failure == SEMANTIC_PROVIDER_INPUT_MANIFEST_INVALID_GAP
+
+    inconsistent = _packet(semantic)
+    inconsistent_packet = cast(dict[str, JsonValue], inconsistent["review_packet"])
+    provider = cast(dict[str, JsonValue], inconsistent_packet["provider_input_manifest"])
+    provider["selected_item_count"] = 0
+    inconsistent_result = review_packet_disclosure_result(canonical_encode(inconsistent))
+    assert inconsistent_result.disclosure is not None
+    assert inconsistent_result.failure == SEMANTIC_PROVIDER_INPUT_MANIFEST_MISMATCH_GAP
+
+    parse_result = review_packet_disclosure_result(b"{")
+    assert parse_result.disclosure is None
+    assert parse_result.failure == SEMANTIC_PROVIDER_INPUT_MANIFEST_PARSE_FAILED_GAP
 
 
 def test_per_check_manifest_keeps_title_only_and_policy_withheld_distinct() -> None:
@@ -503,6 +563,10 @@ def test_provider_manifest_tracks_privacy_removal_and_rendered_statement_bytes()
         dict[str, JsonValue],
         strict_json_parse(minimized.prepared_bytes),
     )
+    removed_result = review_packet_disclosure_result(minimized.prepared_bytes)
+    assert removed_result.failure is None
+    assert removed_result.disclosure is not None
+    assert removed_result.disclosure.provider_input_manifest is not None
     removed_packet = cast(dict[str, JsonValue], removed["review_packet"])
     removed_manifest = cast(dict[str, JsonValue], removed_packet["provider_input_manifest"])
     removed_specification = cast(dict[str, JsonValue], removed_manifest["specification"])
@@ -542,6 +606,10 @@ def test_provider_manifest_tracks_privacy_removal_and_rendered_statement_bytes()
             )
         ),
     )
+    clipped_result = review_packet_disclosure_result(canonical_encode(clipped))
+    assert clipped_result.failure is None
+    assert clipped_result.disclosure is not None
+    assert clipped_result.disclosure.provider_input_manifest is not None
     clipped_packet = cast(dict[str, JsonValue], clipped["review_packet"])
     clipped_manifest = cast(dict[str, JsonValue], clipped_packet["provider_input_manifest"])
     clipped_specification = cast(dict[str, JsonValue], clipped_manifest["specification"])

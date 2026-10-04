@@ -705,9 +705,9 @@ def test_claude_failure_advice_preserves_raw_event_and_commits_after_output(
     assert specific["hookEventName"] == "PostToolUseFailure"
     context = cast(str, specific["additionalContext"])
     assert context.startswith("Review the failed Yoetz operation before continuing.")
-    # The paired ordinary profile saw no pre for this call, so the one-time
-    # standing-limitation notice for its new orphan scope follows the advice (#917).
-    assert context.count("Yoetz notice (no response needed)") == 1
+    # The paired ordinary profile saw no pre for this call. The orphan remains a
+    # standing coverage record and is not injected into hook context (#974).
+    assert "Yoetz notice (no response needed)" not in context
     assert commits == ["failure-advice-1"]
     envelope = store.list_envelopes(commitment)[0]
     assert envelope.structural_payload["hook_name"] == "PostToolUse"

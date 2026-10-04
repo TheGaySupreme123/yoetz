@@ -38,7 +38,9 @@ from yoetz.adapters.workspace_binding import (
 )
 from yoetz.config.load import load_config
 from yoetz.config.models import LoggingConfig
+from yoetz.domain.check_totals import render_check_totals
 from yoetz.domain.closure import PREPARATION_REMEDIATIONS, prepare_closure
+from yoetz.domain.review_input_render import render_review_input_manifest_compact
 from yoetz.mcp.descriptors import (
     TOOL_DESCRIPTORS,
     McpRouteProfile,
@@ -68,11 +70,15 @@ from yoetz.mcp.resources import (
 from yoetz.mcp.resources import (
     read_resource as read_guidance_resource,
 )
+from yoetz.mcp.resources import (
+    resource_for_uri as guidance_resource_for_uri,
+)
 from yoetz.mcp.semantic_destination import (
     SemanticDestinationDisclosure,
     read_semantic_destination_disclosure,
 )
 from yoetz.mcp.summaries import (
+    render_check_reviewer_output,
     render_safe_compact_summary,
     summary_for_closure_prepare,
     summary_for_read_guidance,
@@ -201,7 +207,7 @@ _CLOSURE_PUBLIC_REASON_CODES: Final = MappingProxyType(
 )
 _INVALID_URI_ESCAPE: Final = re.compile(r"%(?![0-9A-Fa-f]{2})", re.ASCII)
 _REGISTERED_TOOL_NAMES: Final = frozenset(YOETZ_MCP_TOOL_NAMES)
-_GUIDANCE_BY_URI: Final = MappingProxyType(
+_GUIDANCE_BY_URI: Mapping[str, GuidanceResource] = MappingProxyType(
     {resource.uri: resource for resource in GUIDANCE_RESOURCES}
 )
 # Reconnecting only helps when the connection itself is the problem. A projection failure is
@@ -853,7 +859,13 @@ def _result_text(
         raise ValueError("mcp_host_profile_invalid")
     if wire.get("preparatory_only") is True:
         return summary_for_closure_prepare(wire)
-    return render_safe_compact_summary(wire)
+    compact = render_safe_compact_summary(wire)
+    reviewer = render_check_reviewer_output(wire)
+    totals = render_check_totals(wire.get("totals"))
+    manifest = render_review_input_manifest_compact(wire.get("review_input_manifest"))
+    if manifest and manifest in compact:
+        manifest = ""
+    return "\n".join(part for part in (compact, totals, manifest, reviewer) if part)
 
 
 def result_from_public_model(
@@ -2878,14 +2890,39 @@ async def dispatch_read_guidance(
         request = ReadGuidanceRequest.model_validate(arguments)
     except ValidationError as exc:
         locations = safe_validation_locations(exc)
+        page_size_reason = next(
+            (
+                location.get("reason")
+                for location in locations
+                if location.get("field") == "/page_size"
+            ),
+            None,
+        )
+        if page_size_reason == "guidance_page_size_invalid":
+            message = (
+                "Guidance page_size must be a canonical UTF-8 byte string between 4 and "
+                "16384 bytes inclusive; retry with page=0 and page_size=4096 or another "
+                "value in that range."
+            )
+        elif page_size_reason == "guidance_page_invalid":
+            message = "Guidance page must be a canonical page number; restart at page 0."
+        elif page_size_reason == "guidance_revision_digest_mismatch":
+            message = "Guidance revision and digest must match; restart at page 0."
+        else:
+            message = "The read_guidance request is invalid."
         return structured_error_result(
             PublicErrorCode.INVALID_REQUEST,
-            "The read_guidance request is invalid.",
+            message,
             safe_details=locations if locations else {"argument_count": len(arguments)},
             operation="read_guidance",
             host_profile=runtime.host_profile,
         )
     resource = _GUIDANCE_BY_URI.get(request.uri)
+    if resource is None:
+        try:
+            resource = guidance_resource_for_uri(request.uri)
+        except GuidanceResourceError:
+            resource = None
     if resource is None:
         return structured_error_result(
             PublicErrorCode.INVALID_REQUEST,
@@ -3193,7 +3230,12 @@ async def read_resource(uri: object) -> list[ReadResourceContents]:
         payload = read_guidance_resource(str(uri)).decode("utf-8", errors="strict")
     except GuidanceResourceError as exc:
         raise ValueError("guidance_resource_unavailable") from exc
-    resource = _GUIDANCE_BY_URI[str(uri)]
+    resource = _GUIDANCE_BY_URI.get(str(uri))
+    if resource is None:
+        try:
+            resource = guidance_resource_for_uri(str(uri))
+        except GuidanceResourceError as exc:
+            raise ValueError("guidance_resource_unavailable") from exc
     return [ReadResourceContents(content=payload, mime_type=resource.media_type)]
 
 

@@ -41,6 +41,7 @@ from yoetz.domain.receipts import CHECK_TIME_CHANGE_UNAVAILABLE_REASON_GAPS
 from yoetz.domain.values import FindingId, ObligationId
 from yoetz.kernel.finding_resolution import finding_is_resolved
 from yoetz.kernel.finding_todo import finding_blocks_receipt
+from yoetz.kernel.plan_drift import PLAN_DRIFT_GAPS
 from yoetz.kernel.projections import ProjectionState, observation_limitation_finding_ids
 from yoetz.kernel.receipt_capacity import current_receipt_findings
 from yoetz.kernel.reducers import invalidates_recorded_check
@@ -168,6 +169,19 @@ GAP_CLASSIFICATION: Final[Mapping[str, GapClass]] = MappingProxyType(
         "check_payload_unavailable": _S,
         # -- AI-powered review outcome and packet bounds: disclosure of how the review was bounded.
         "semantic_review_not_requested": _R,
+        # Plan drift is a diagnostic about the quality of the recorded planning trace.  It is
+        # deliberately standing: a refinement may remove it, but its presence never turns a
+        # receipt into an agent-actionable closure blocker by itself.
+        **{code: _S for code in sorted(PLAN_DRIFT_GAPS)},
+        # Test-edit accounting is structural and path-private.  A baseline gap is a standing
+        # limit; an unjustified edit remains agent-actionable until an explicit action/path
+        # decision is recorded.
+        "preexisting_test_baseline_unknown": _S,
+        "preexisting_test_modified": _S,
+        "preexisting_test_renamed": _S,
+        "preexisting_test_deleted": _S,
+        "preexisting_test_skipped": _S,
+        "preexisting_test_edit_unjustified": _A,
         "semantic_review_not_configured": _S,
         "semantic_relevance_review_not_run": _S,  # provider or evaluator failure
         "semantic_review_context_withheld": _S,
@@ -178,7 +192,14 @@ GAP_CLASSIFICATION: Final[Mapping[str, GapClass]] = MappingProxyType(
         "semantic_missing_structurally_unavailable": _S,
         "semantic_missing_already_supplied": _S,
         "semantic_missing_items_rejected": _S,
+        "semantic_missing_non_convergent": _S,
+        "semantic_provider_input_manifest_missing": _S,
+        "semantic_provider_input_manifest_invalid": _S,
+        "semantic_provider_input_manifest_parse_failed": _S,
+        "semantic_provider_input_manifest_mismatch": _S,
+        "semantic_provider_input_manifest_recovery_failed": _S,
         "semantic_challenges_rejected": _S,  # reviewer output dropped by the validation fence
+        "semantic_review_snippet_invalid": _S,  # provider quote could not be proved against sent text
         "semantic_case_content_over_item_limit": _S,  # packet item bound (#907)
         "semantic_case_finding_refs_over_limit": _S,
         # #904: what a reduced review sent could not be recorded; one new check is the remedy only

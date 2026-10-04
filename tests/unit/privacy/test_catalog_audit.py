@@ -985,6 +985,25 @@ def test_catalog_resume_finds_disclosure_by_case_digest() -> None:
     assert result.privacy_proposal_id == _PROPOSAL
 
 
+def test_catalog_resume_rejects_replaced_active_route() -> None:
+    db = _database()
+    _insert_task_route(db)
+    objects = _StoredObjects()
+    audit = CatalogPrivacyAudit(db, objects, _Key(), _Clock())  # type: ignore[arg-type]
+
+    async def run() -> None:
+        prepared = await audit.prepare_disclosure_proposal(_external_disclosure_request())
+        assert prepared.proposal.route_identity_digest == _ROUTE_DIGEST
+        assert prepared.proposal.included_item_ids == ("item-1",)
+        db.execute(
+            "UPDATE task_routes SET active_route_identity_digest = ? WHERE task_id = ?",
+            (f"sha256:{'9' * 64}", _TASK),
+        )
+        assert await audit.load_disclosure_proposal(prepared.proposal.privacy_proposal_id) is None
+
+    asyncio.run(run())
+
+
 def test_catalog_disclosure_attempt_rejects_tampered_lookup_identity() -> None:
     db = _database()
     _insert_task_route(db)

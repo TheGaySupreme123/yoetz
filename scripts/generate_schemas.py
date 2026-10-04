@@ -1910,6 +1910,22 @@ def _provider_judgment_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue
     (issue #907).
     """
 
+    # The active provider builder is intentionally versioned forward.  Loading the reviewed
+    # predecessor here keeps the released 1.1.0 bytes stable when the provider model gains a
+    # required field in 1.2.0.
+    document = _load_versioned_template(
+        entry,
+        "findings/provider-judgment-1.1.0.schema.json",
+    )
+    # Keep the reviewed predecessor byte-identical even if a local ripple previously stamped
+    # its title with the version (the active 1.2 contract owns any title change).
+    document["title"] = entry.schema_name
+    return document
+
+
+def _provider_judgment_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Build the active provider contract with the required Part 2 review evidence."""
+
     from yoetz.adapters.providers.openai_responses import build_judgment_json_schema
 
     document = cast(dict[str, JsonValue], dict(build_judgment_json_schema()))
@@ -1920,6 +1936,37 @@ def _provider_judgment_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue
     ordered.update(document)
     ordered["title"] = entry.schema_name
     return ordered
+
+
+def _add_semantic_finding_kinds(document: dict[str, JsonValue]) -> None:
+    """Add the semantic review kinds to a new finding-family schema only."""
+
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    finding_kind = cast(dict[str, JsonValue], definitions["finding_kind"])
+    enum_values = cast(list[JsonValue], finding_kind["enum"])
+    for value in ("code_defect", "task_requirement_unmet"):
+        if value not in enum_values:
+            enum_values.append(value)
+    enum_values.sort(key=lambda item: str(item).encode("ascii"))
+    all_of = cast(list[JsonValue], document["allOf"])
+    branches = cast(list[JsonValue], all_of[1]["oneOf"])
+    for value in ("code_defect", "task_requirement_unmet"):
+        branch: JsonValue = {
+            "properties": {"kind": {"const": value}, "priority": {"const": 1}},
+            "required": ["kind", "priority"],
+        }
+        if branch not in branches:
+            branches.append(branch)
+
+
+def _finding_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Add the semantic reviewer finding kinds without mutating the frozen 1.3.0 schema."""
+
+    document = _load_versioned_template(entry, "findings/finding-1.3.0.schema.json")
+    _add_semantic_finding_kinds(document)
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    document["title"] = f"Yoetz finding {entry.schema_version}"
+    return document
 
 
 def _finding_recorded_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
@@ -1988,6 +2035,123 @@ def _finding_recorded_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]
     )
     document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
     document["title"] = f"Yoetz finding recorded {entry.schema_version}"
+    return document
+
+
+def _finding_recorded_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Add challenge snippets and semantic finding kinds to the new finding event version."""
+
+    document = _finding_recorded_v1_3_schema(entry)
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    challenge = cast(dict[str, JsonValue], definitions["finding_challenge"])
+    challenge_properties = cast(dict[str, JsonValue], challenge["properties"])
+    challenge_properties["snippet"] = {"$ref": "#/$defs/review_text"}
+    _add_semantic_finding_kinds(document)
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    document["title"] = f"Yoetz finding recorded {entry.schema_version}"
+    return document
+
+
+def _check_totals_schema() -> dict[str, JsonValue]:
+    """Closed structural counters; prose and caller-defined keys are never admitted."""
+
+    from yoetz.domain.check_totals import CHECK_TOTAL_FLAG_KEYS, CHECK_TOTAL_KEYS
+
+    groups: dict[str, JsonValue] = {}
+    for group, keys in sorted(CHECK_TOTAL_KEYS.items()):
+        ordered = sorted(keys)
+        groups[group] = {
+            "additionalProperties": False,
+            "properties": {
+                key: (
+                    {"enum": ["0", "1"], "type": "string"}
+                    if (group, key) in CHECK_TOTAL_FLAG_KEYS
+                    else {
+                        "maxLength": 20,
+                        "pattern": "^(0|[1-9][0-9]{0,19})$",
+                        "type": "string",
+                    }
+                )
+                for key in ordered
+            },
+            "required": ordered,
+            "type": "object",
+        }
+    return {
+        "additionalProperties": False,
+        "properties": groups,
+        "required": sorted(groups),
+        "type": "object",
+    }
+
+
+def _check_recorded_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Add the persisted Part 2 reviewer fields to the new check event version."""
+
+    from yoetz.protocol.models import MAX_REVIEW_TEXT_BYTES
+
+    document = _check_recorded_v1_3_schema(entry)
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    properties = cast(dict[str, JsonValue], document["properties"])
+    definitions["review_text"] = {
+        "maxLength": MAX_REVIEW_TEXT_BYTES,
+        "minLength": 1,
+        "type": "string",
+    }
+    definitions["verified_item"] = {
+        "additionalProperties": False,
+        "allOf": [
+            {
+                "if": {
+                    "properties": {"verdict": {"const": "not_assessable"}},
+                    "required": ["verdict"],
+                },
+                "then": {"not": {"required": ["snippet"]}},
+            },
+            {
+                "if": {
+                    "properties": {"verdict": {"enum": ["not_supported", "supported"]}},
+                    "required": ["verdict"],
+                },
+                "then": {"required": ["snippet"]},
+            },
+        ],
+        "properties": {
+            "cited_refs": {
+                "items": {"$ref": "#/$defs/subject_id"},
+                "maxItems": 16,
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": True,
+            },
+            "requirement_or_claim": {"$ref": "#/$defs/review_text"},
+            "snippet": {"$ref": "#/$defs/review_text"},
+            "verdict": {
+                "enum": ["not_assessable", "not_supported", "supported"],
+                "type": "string",
+            },
+        },
+        "required": ["cited_refs", "requirement_or_claim", "verdict"],
+        "type": "object",
+    }
+    definitions["subject_id"] = {
+        "pattern": (
+            r"^(act|clm|evd|evt|fnd|obl|res)_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
+            r"[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        ),
+        "type": "string",
+    }
+    properties["review_summary"] = {"$ref": "#/$defs/review_text"}
+    definitions["check_totals"] = _check_totals_schema()
+    properties["totals"] = {"$ref": "#/$defs/check_totals"}
+    properties["verified"] = {
+        "items": {"$ref": "#/$defs/verified_item"},
+        "maxItems": 64,
+        "type": "array",
+        "uniqueItems": True,
+    }
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    document["title"] = f"Yoetz check recorded {entry.schema_version}"
     return document
 
 
@@ -2066,6 +2230,8 @@ def _lineage_child_finding_schema() -> dict[str, JsonValue]:
         "material_limitation_omitted": (1, True),
         "questionable_finding_rejection": (2, True),
         "coordination_overlap": (2, True),
+        "code_defect": (1, True),
+        "task_requirement_unmet": (1, True),
     }
     return {
         "additionalProperties": False,
@@ -3043,6 +3209,181 @@ def _check_result_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     return document
 
 
+def _check_result_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Add the public Part 2 review fields to the new check-result version.
+
+    The review prose is represented as either bounded text or the existing finding-summary
+    omission marker. Structural verdicts and refs remain visible under the agent projection,
+    while the prose leaves are replaced by the privacy gateway when the caller lacks access.
+    """
+
+    document = _check_result_v1_3_schema(entry)
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    success = cast(dict[str, JsonValue], definitions["success"])
+    properties = cast(dict[str, JsonValue], success["properties"])
+    content_text = {"$ref": "#/$defs/content_text"}
+    finding_omission = {"$ref": "#/$defs/finding_omission"}
+    definitions["finding_challenge"] = {
+        "additionalProperties": False,
+        "properties": {
+            "alternative_interpretation": {"oneOf": [content_text, finding_omission]},
+            "discrepancy": {"oneOf": [content_text, finding_omission]},
+            "requested_next_step": {
+                "enum": [
+                    "act",
+                    "dispute_with_evidence",
+                    "provide_evidence",
+                    "revise_claim",
+                    "state_unresolved_limitation",
+                ],
+                "type": "string",
+            },
+            "snippet": {"oneOf": [content_text, finding_omission, {"type": "null"}]},
+            "uncertainty": {"oneOf": [content_text, finding_omission]},
+        },
+        "required": [
+            "alternative_interpretation",
+            "discrepancy",
+            "requested_next_step",
+            "uncertainty",
+        ],
+        "type": "object",
+    }
+    definitions["verified_item"] = {
+        "additionalProperties": False,
+        "allOf": [
+            {
+                "if": {
+                    "properties": {"verdict": {"const": "not_assessable"}},
+                    "required": ["verdict"],
+                },
+                "then": {"not": {"required": ["snippet"]}},
+            },
+            {
+                "if": {
+                    "properties": {"verdict": {"enum": ["not_supported", "supported"]}},
+                    "required": ["verdict"],
+                },
+                "then": {"required": ["snippet"]},
+            },
+        ],
+        "properties": {
+            "cited_refs": {
+                "items": {"$ref": "#/$defs/subject_id"},
+                "maxItems": 16,
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": True,
+            },
+            "requirement_or_claim": {"oneOf": [content_text, finding_omission]},
+            "snippet": {"oneOf": [content_text, finding_omission]},
+            "verdict": {
+                "enum": ["not_assessable", "not_supported", "supported"],
+                "type": "string",
+            },
+        },
+        "required": ["cited_refs", "requirement_or_claim", "verdict"],
+        "type": "object",
+    }
+    properties["semantic_conclusion"] = {
+        "enum": ["challenges_returned", "insufficient_packet", "no_material_discrepancy"],
+        "type": "string",
+    }
+    properties["review_summary"] = {"oneOf": [content_text, finding_omission]}
+    definitions["check_totals"] = _check_totals_schema()
+    properties["totals"] = {"$ref": "#/$defs/check_totals"}
+    # Issue #963: the task-level continuation is separate from the finding-only checklist.
+    # Keep it additive on the active 1.4.0 contract; the frozen 1.3.0 shape remains unchanged.
+    definitions["overall_next"] = {
+        "additionalProperties": False,
+        "allOf": [
+            {
+                "if": {
+                    "properties": {
+                        "action": {"enum": ["work_open_findings", "review_recorded_work"]}
+                    },
+                    "required": ["action"],
+                },
+                "then": {
+                    "properties": {
+                        "status": {"const": "action_required"},
+                        "target_refs": {"minItems": 1},
+                    }
+                },
+            },
+            {
+                "if": {
+                    "properties": {"action": {"const": "supply_missing_input"}},
+                    "required": ["action"],
+                },
+                "then": {"properties": {"status": {"const": "action_required"}}},
+            },
+            {
+                "if": {
+                    "properties": {"action": {"const": "request_receipt"}},
+                    "required": ["action"],
+                },
+                "then": {"properties": {"target_refs": {"maxItems": 0}}},
+            },
+            {
+                "if": {
+                    "properties": {"acknowledged_incomplete_endpoint": {"const": "receipt"}},
+                    "required": ["acknowledged_incomplete_endpoint"],
+                },
+                "then": {
+                    "properties": {
+                        "action": {"const": "request_receipt"},
+                        "status": {"const": "ready_with_limitations"},
+                    }
+                },
+            },
+        ],
+        "properties": {
+            "action": {
+                "enum": [
+                    "supply_missing_input",
+                    "work_open_findings",
+                    "review_recorded_work",
+                    "request_receipt",
+                ],
+                "type": "string",
+            },
+            "acknowledged_incomplete_endpoint": {"oneOf": [{"const": "receipt"}, {"type": "null"}]},
+            "status": {
+                "enum": ["action_required", "ready_with_limitations", "ready"],
+                "type": "string",
+            },
+            "target_refs": {
+                "items": {"$ref": "#/$defs/subject_id"},
+                "maxItems": 64,
+                "type": "array",
+                "uniqueItems": True,
+            },
+        },
+        "required": ["action", "status", "target_refs"],
+        "type": "object",
+    }
+    properties["overall_next"] = {"$ref": "#/$defs/overall_next"}
+    properties["verified"] = {
+        "items": {"$ref": "#/$defs/verified_item"},
+        "maxItems": 64,
+        "type": "array",
+        "uniqueItems": True,
+    }
+    projected_finding = cast(dict[str, JsonValue], definitions["projected_finding"])
+    projected_properties = cast(dict[str, JsonValue], projected_finding["properties"])
+    projected_properties["challenge"] = {"$ref": "#/$defs/finding_challenge"}
+    kind = cast(dict[str, JsonValue], projected_properties["kind"])
+    values = cast(list[JsonValue], kind["enum"])
+    for value in ("code_defect", "task_requirement_unmet"):
+        if value not in values:
+            values.append(value)
+    values.sort(key=lambda item: str(item).encode("ascii"))
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    document["title"] = f"Yoetz check result {entry.schema_version}"
+    return document
+
+
 def _add_review_input_manifest_to_check_result(document: dict[str, JsonValue]) -> None:
     """Add input coverage/preflight metadata to the current check-result contract."""
 
@@ -3243,6 +3584,38 @@ def _status_result_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     definitions = cast(dict[str, JsonValue], document["$defs"])
     # The v1.4 history row exposes the metadata-only provider-bound review manifest.  Build the
     # shared definition in place without changing the frozen v1.0/v1.1 history schemas.
+    totals_properties = cast(dict[str, JsonValue], _check_totals_schema()["properties"])
+    test_edits = cast(dict[str, JsonValue], totals_properties["test_edits"])
+    test_edit_properties = cast(dict[str, JsonValue], test_edits["properties"])
+    test_edit_properties["checked_frontier"] = {
+        "$ref": SCHEMA_NAMESPACE + "common/frontier-1.0.0.schema.json"
+    }
+    test_edit_properties["read_availability"] = {
+        "enum": ["available", "unavailable", "unknown"],
+        "type": "string",
+    }
+    test_edits["required"] = sorted(test_edit_properties)
+    test_edits["allOf"] = [
+        {
+            "if": {"properties": {"examined": {"const": "0"}}},
+            "then": {"properties": {"read_availability": {"const": "unavailable"}}},
+            "else": {
+                "if": {
+                    "anyOf": [
+                        {"properties": {"baseline_known": {"const": "0"}}},
+                        {"properties": {"unknown": {"not": {"const": "0"}}}},
+                    ]
+                },
+                "then": {"properties": {"read_availability": {"const": "unknown"}}},
+                "else": {"properties": {"read_availability": {"const": "available"}}},
+            },
+        }
+    ]
+    definitions["latest_check_test_edits"] = test_edits
+    compact_item = cast(dict[str, JsonValue], definitions["compact_item"])
+    cast(dict[str, JsonValue], compact_item["properties"])["latest_check_test_edits"] = {
+        "$ref": "#/$defs/latest_check_test_edits"
+    }
     definitions.setdefault(
         "opaque_ref",
         {
@@ -3296,11 +3669,60 @@ def _status_result_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     history_codes.sort(key=lambda item: str(item).encode("ascii"))
     finding_kind = cast(dict[str, JsonValue], definitions["finding_kind"])
     finding_kind_values = cast(list[JsonValue], finding_kind["enum"])
-    if "coordination_overlap" not in finding_kind_values:
-        finding_kind_values.append("coordination_overlap")
-        finding_kind_values.sort(key=lambda item: str(item).encode("ascii"))
+    for value in ("code_defect", "coordination_overlap", "task_requirement_unmet"):
+        if value not in finding_kind_values:
+            finding_kind_values.append(value)
+    finding_kind_values.sort(key=lambda item: str(item).encode("ascii"))
     finding_item = cast(dict[str, JsonValue], definitions["finding_item"])
     finding_item_properties = cast(dict[str, JsonValue], finding_item["properties"])
+    definitions["finding_challenge"] = {
+        "additionalProperties": False,
+        "properties": {
+            "alternative_interpretation": {
+                "oneOf": [
+                    {"$ref": "#/$defs/content_text"},
+                    {"$ref": "#/$defs/finding_omission"},
+                ]
+            },
+            "discrepancy": {
+                "oneOf": [
+                    {"$ref": "#/$defs/content_text"},
+                    {"$ref": "#/$defs/finding_omission"},
+                ]
+            },
+            "requested_next_step": {
+                "enum": [
+                    "act",
+                    "dispute_with_evidence",
+                    "provide_evidence",
+                    "revise_claim",
+                    "state_unresolved_limitation",
+                ],
+                "type": "string",
+            },
+            "snippet": {
+                "oneOf": [
+                    {"$ref": "#/$defs/content_text"},
+                    {"$ref": "#/$defs/finding_omission"},
+                    {"type": "null"},
+                ]
+            },
+            "uncertainty": {
+                "oneOf": [
+                    {"$ref": "#/$defs/content_text"},
+                    {"$ref": "#/$defs/finding_omission"},
+                ]
+            },
+        },
+        "required": [
+            "alternative_interpretation",
+            "discrepancy",
+            "requested_next_step",
+            "uncertainty",
+        ],
+        "type": "object",
+    }
+    finding_item_properties["challenge"] = {"$ref": "#/$defs/finding_challenge"}
     _admit_acknowledged_not_done(cast(dict[str, JsonValue], finding_item_properties["disposition"]))
     # Issue #905 to-do facts on each row, and the budget they read against on the page.
     definitions["todo_state"] = _todo_state_schema()
@@ -4096,7 +4518,7 @@ def _receipt_document_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]
     cast(list[JsonValue], receipt_response["allOf"]).insert(1, _acknowledged_not_done_condition())
     properties = cast(dict[str, JsonValue], document["properties"])
     findings = cast(dict[str, JsonValue], properties["findings"])
-    findings["items"] = {"$ref": SCHEMA_NAMESPACE + "findings/finding-1.3.0.schema.json"}
+    findings["items"] = {"$ref": SCHEMA_NAMESPACE + "findings/finding-1.4.0.schema.json"}
     properties["children"] = {"$ref": "#/$defs/receipt_children"}
     # Issue #905 terminal states, disclosed by id; present only when non-empty.
     for name in ("acknowledged_not_done_finding_ids", "rejection_accepted_finding_ids"):
@@ -4877,12 +5299,13 @@ def _plan_payload_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
 def _read_guidance_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     """Build the closed read-guidance result, including bounded page metadata."""
 
-    from yoetz.protocol.models import REGISTERED_GUIDANCE_URIS
-
     raw: dict[str, object] = {
         "$defs": {
             "guidance_resource_uri": {
-                "enum": list(REGISTERED_GUIDANCE_URIS),
+                # The exact catalog is enforced by the runtime model. Keep the advertised schema
+                # compact: emitting every heading anchor as an enum would put the full guidance
+                # index back into each host tool declaration (#969).
+                "pattern": r"^yoetz://guidance/[a-z0-9.-]+\.md(?:#[a-z0-9-]+)?$",
                 "type": "string",
             },
             "success": {
@@ -5011,12 +5434,12 @@ def _read_guidance_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
 def _read_guidance_request_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     """Build the closed request with optional, non-null bounded-page selectors."""
 
-    from yoetz.protocol.models import REGISTERED_GUIDANCE_URIS
-
     raw: dict[str, object] = {
         "$defs": {
             "GuidanceResourceUri": {
-                "enum": list(REGISTERED_GUIDANCE_URIS),
+                # Runtime validation admits only the exact registered catalog. A pattern keeps
+                # the 100+ bounded heading topics from inflating the host-visible input schema.
+                "pattern": r"^yoetz://guidance/[a-z0-9.-]+\.md(?:#[a-z0-9-]+)?$",
                 "type": "string",
             },
             "canonical_uint": {
@@ -5618,6 +6041,27 @@ def _control_v2_9_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
                 retarget_respond(value)
 
     retarget_respond(document)
+    # 2.9.0 is the active control envelope. Its embedded operation and receipt bodies must
+    # follow the current public finding/check contracts; earlier control artifacts remain frozen.
+    active_replacements = {
+        SCHEMA_NAMESPACE + "operations/check-result-1.3.0.schema.json": SCHEMA_NAMESPACE
+        + "operations/check-result-1.4.0.schema.json",
+        SCHEMA_NAMESPACE + "findings/finding-1.3.0.schema.json": SCHEMA_NAMESPACE
+        + "findings/finding-1.4.0.schema.json",
+    }
+
+    def retarget_active(node: JsonValue) -> None:
+        if isinstance(node, dict):
+            for key, value in tuple(node.items()):
+                if type(value) is str:
+                    node[key] = active_replacements.get(value, value)
+                else:
+                    retarget_active(value)
+        elif isinstance(node, list):
+            for value in node:
+                retarget_active(value)
+
+    retarget_active(document)
     # The active control result carries both network and local receipts.  Extend its inline local
     # shape with the same additive scan/omission vocabulary as the external receipt schema.
     if entry.schema_name == "control-result":
@@ -7305,6 +7749,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "events/check-recorded-1.4.0.schema.json",
+        "check-recorded",
+        "1.4.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "yoetz.domain.events", fromlist=["CheckRecordedPayload"]
+            ).CheckRecordedPayload
+        ),
+    ),
+    _RegistryEntry(
         "events/claim-recorded-1.0.0.schema.json",
         "claim-recorded",
         "1.0.0",
@@ -7452,6 +7908,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "events/finding-recorded-1.3.0.schema.json",
         "finding-recorded",
         "1.3.0",
+        "event",
+        "event-payload",
+        lambda: __import__("yoetz.domain.findings", fromlist=["Finding"]).Finding,
+    ),
+    _RegistryEntry(
+        "events/finding-recorded-1.4.0.schema.json",
+        "finding-recorded",
+        "1.4.0",
         "event",
         "event-payload",
         lambda: __import__("yoetz.domain.findings", fromlist=["Finding"]).Finding,
@@ -7745,6 +8209,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         lambda: __import__("yoetz.domain.findings", fromlist=["Finding"]).Finding,
     ),
     _RegistryEntry(
+        "findings/finding-1.4.0.schema.json",
+        "finding",
+        "1.4.0",
+        "request_result",
+        "finding",
+        lambda: __import__("yoetz.domain.findings", fromlist=["Finding"]).Finding,
+    ),
+    _RegistryEntry(
         "findings/semantic-provenance-1.0.0.schema.json",
         "semantic-provenance",
         "1.0.0",
@@ -7823,6 +8295,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "findings/provider-judgment-1.2.0.schema.json",
+        "provider-judgment",
+        "1.2.0",
+        "request_result",
+        "provider-judgment",
+        lambda: (
+            __import__(
+                "yoetz.protocol.models", fromlist=["ProviderJudgmentEnvelopeModel"]
+            ).ProviderJudgmentEnvelopeModel
+        ),
+    ),
+    _RegistryEntry(
         "operations/check-request-1.0.0.schema.json",
         "check-request",
         "1.0.0",
@@ -7870,6 +8354,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "operations/check-result-1.3.0.schema.json",
         "check-result",
         "1.3.0",
+        "request_result",
+        "MCP output",
+        lambda: __import__("yoetz.protocol.models", fromlist=["CheckResultModel"]).CheckResultModel,
+    ),
+    _RegistryEntry(
+        "operations/check-result-1.4.0.schema.json",
+        "check-result",
+        "1.4.0",
         "request_result",
         "MCP output",
         lambda: __import__("yoetz.protocol.models", fromlist=["CheckResultModel"]).CheckResultModel,
@@ -8836,7 +9328,10 @@ _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
         "privacy/outbound-case-1.2.0.schema.json",
         "privacy/privacy-policy-1.2.0.schema.json",
         "events/check-recorded-1.3.0.schema.json",
+        "events/check-recorded-1.4.0.schema.json",
+        "events/finding-recorded-1.4.0.schema.json",
         "findings/provider-judgment-1.1.0.schema.json",
+        "findings/provider-judgment-1.2.0.schema.json",
         "consent/status-7.0.0.schema.json",
         "consent/review-result-7.0.0.schema.json",
         "consent/prepare-result-7.0.0.schema.json",
@@ -8866,6 +9361,7 @@ _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
         "events/work-closed-1.0.0.schema.json",
         "events/work-written-off-1.0.0.schema.json",
         "operations/check-result-1.3.0.schema.json",
+        "operations/check-result-1.4.0.schema.json",
         "config/yoetz-config-1.3.0.schema.json",
         "operations/check-request-1.1.0.schema.json",
         "operations/publish-work-request-1.2.0.schema.json",
@@ -8881,6 +9377,7 @@ _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
         "observations/routine-read-summary-1.0.0.schema.json",
         "receipts/receipt-document-1.3.0.schema.json",
         "findings/finding-1.3.0.schema.json",
+        "findings/finding-1.4.0.schema.json",
         "service/control-hello-2.7.0.schema.json",
         "service/control-hello-result-2.7.0.schema.json",
         "service/control-request-2.7.0.schema.json",
@@ -9135,8 +9632,12 @@ def build_schema_documents(
             normalized = _check_recorded_v1_1_schema(entry)
         elif entry.relative_path == "events/check-recorded-1.3.0.schema.json":
             normalized = _check_recorded_v1_3_schema(entry)
+        elif entry.relative_path == "events/check-recorded-1.4.0.schema.json":
+            normalized = _check_recorded_v1_4_schema(entry)
         elif entry.relative_path == "findings/provider-judgment-1.1.0.schema.json":
             normalized = _provider_judgment_v1_1_schema(entry)
+        elif entry.relative_path == "findings/provider-judgment-1.2.0.schema.json":
+            normalized = _provider_judgment_v1_2_schema(entry)
         elif entry.relative_path == "events/check-recorded-1.2.0.schema.json":
             normalized = _simple_versioned_schema(
                 entry,
@@ -9151,6 +9652,8 @@ def build_schema_documents(
             )
         elif entry.relative_path == "events/finding-recorded-1.3.0.schema.json":
             normalized = _finding_recorded_v1_3_schema(entry)
+        elif entry.relative_path == "events/finding-recorded-1.4.0.schema.json":
+            normalized = _finding_recorded_v1_4_schema(entry)
         elif entry.relative_path in {
             "events/evidence-recorded-1.1.0.schema.json",
             "events/evidence-recorded-1.2.0.schema.json",
@@ -9230,12 +9733,16 @@ def build_schema_documents(
             )
         elif entry.relative_path == "findings/finding-1.3.0.schema.json":
             normalized = _finding_v1_3_schema(entry)
+        elif entry.relative_path == "findings/finding-1.4.0.schema.json":
+            normalized = _finding_v1_4_schema(entry)
         elif entry.relative_path == "operations/check-request-1.1.0.schema.json":
             normalized = _check_request_v1_1_schema(entry)
         elif entry.relative_path == "operations/check-result-1.1.0.schema.json":
             normalized = _check_result_v1_1_schema(entry)
         elif entry.relative_path == "operations/check-result-1.3.0.schema.json":
             normalized = _check_result_v1_3_schema(entry)
+        elif entry.relative_path == "operations/check-result-1.4.0.schema.json":
+            normalized = _check_result_v1_4_schema(entry)
         elif entry.relative_path == "operations/receipt-result-1.1.0.schema.json":
             normalized = _simple_versioned_schema(
                 entry,

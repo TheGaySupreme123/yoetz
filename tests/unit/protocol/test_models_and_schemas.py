@@ -318,7 +318,7 @@ _EXPECTED_RESULT_PATTERN_COUNTS: dict[tuple[str, str | None], int] = {
     ("status", "advice"): 25,
     ("status", "assignment"): 6,
     ("status", "candidate_findings"): 32,
-    ("status", "compact"): 46,
+    ("status", "compact"): 57,
     ("status", "evidence"): 19,
     ("status", "findings"): 108,
     ("status", "history"): 61,
@@ -417,6 +417,11 @@ _RESULT_SUPPORT_MODEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ),
     ("StatusCompactFindingModel", "operations/status-result-1.1.0.schema.json", "compact_finding"),
     ("StatusCompactItemModel", "operations/status-result-1.1.0.schema.json", "compact_item"),
+    (
+        "StatusLatestCheckTestEditsModel",
+        "operations/status-result-1.4.0.schema.json",
+        "latest_check_test_edits",
+    ),
     (
         "StatusCompactObligationModel",
         "operations/status-result-1.1.0.schema.json",
@@ -835,6 +840,54 @@ def test_human_status_renders_operation_continuation_and_exact_trusted_command()
     assert "Continuation: repository_privacy_setup" in rendered
     assert "Trusted command: yoetz --privacy" in rendered
     assert f"Replay request ID: {operation_request_id}" in rendered
+
+
+def test_human_status_reports_latest_check_test_edit_totals() -> None:
+    from yoetz.cli.render import render_human_status
+
+    models = _models_module()
+    result = _status_result_wire()
+    result["view"] = "compact"
+    result["page"] = {
+        "items": [
+            {
+                "task_id": _test_id("tsk_"),
+                "session_id": _test_id("ses_"),
+                "task_title": "Test-edit visibility",
+                "current_plan_event_id": None,
+                "declared_obligation_count": "0",
+                "no_obligations_reason": None,
+                "open_obligation_count": "0",
+                "unanswered_finding_count": "0",
+                "receipt_blocking_finding_count": "0",
+                "open_obligations": [],
+                "unanswered_findings": [],
+                "freshness": "current",
+                "coverage": _coverage_wire(),
+                "gaps": [],
+                "latest_check_test_edits": {
+                    "checked_frontier": {"sequence": "0", "head_digest": "genesis"},
+                    "read_availability": "available",
+                    "examined": "1",
+                    "baseline_known": "1",
+                    "modified": "2",
+                    "renamed": "0",
+                    "deleted": "0",
+                    "skipped": "1",
+                    "unjustified": "0",
+                    "unknown": "0",
+                },
+            }
+        ],
+        "next_cursor": None,
+    }
+    parsed = models.StatusResultModel.model_validate(result)
+    assert type(parsed.root) is models.StatusSuccessModel
+    rendered = render_human_status(parsed.root)
+    assert (
+        "Latest check test edits: available; checked frontier 0; 2 modified, 0 renamed, "
+        "0 deleted, 1 skipped, 0 unjustified, 0 unknown (baseline known 1)"
+    ) in rendered
 
 
 @pytest.mark.parametrize("attempt_count", [0, 3, 64])

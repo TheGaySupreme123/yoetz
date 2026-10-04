@@ -74,6 +74,20 @@ def test_closed_reason_tokens_cover_issue_examples() -> None:
     )
 
 
+def test_privacy_blocked_required_review_gets_safe_recovery() -> None:
+    for status, reason in (
+        (SemanticStatus.BLOCKED_FORBIDDEN_DATA, SemanticReason.NEVER_SEND_DETECTED),
+        (SemanticStatus.CLASSIFICATION_UNCERTAIN, SemanticReason.CLASSIFICATION_UNCERTAIN),
+    ):
+        token = continuation_for_semantic_outcome(status=status, reason=reason)
+        assert token == "semantic_privacy_blocked"
+        directive = directive_for(token)
+        assert directive is not None
+        assert "NEW request_id" in directive.directive
+        assert "resend" in directive.directive
+        assert "local-only" in directive.directive
+
+
 def test_terminal_outcome_reasons_are_not_misread_as_a_transport_diagnosis() -> None:
     """``retry_budget_exhausted`` and ``outcome_unknown`` name how a job ended, not why."""
 
@@ -150,6 +164,7 @@ def test_directives_never_copy_caller_or_provider_text() -> None:
         "semantic_transport_retry",
         "semantic_no_judgment",
         "semantic_coordinator_review",
+        "semantic_privacy_blocked",
     ):
         entry = RECOVERY_DIRECTIVES[token]
         blob = f"{entry.directive} {entry.nudge or ''}"

@@ -65,6 +65,7 @@ from yoetz.domain.values import (
 )
 from yoetz.kernel.claims import effective_claim_items
 from yoetz.kernel.completion_scope import completion_scope_codes
+from yoetz.kernel.plan_drift import plan_drift_signals
 from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.projections import (
     ProjectionRecord,
@@ -116,6 +117,7 @@ __all__ = [
     "PolicyPack",
     "UnavailableCapturedObject",
     "build_deterministic_case",
+    "build_test_edit_integrity_assessment",
     "case_coverage",
     "healthy_storage_availability",
     "deterministic_case_from_json",
@@ -134,7 +136,8 @@ type PublicSubjectRef = EventId | ObligationId | ClaimId
 
 _MAX_SAFE_INTEGER: Final = 2**53 - 1
 # Work-integrity fact naming a hook-observed failure that is still live at the claim: the latest
-# observed run of its command identity failed and no successful observed edit followed it (#909).
+# observed run of its command identity failed and no covering rerun or acknowledgement followed
+# it (#909).
 OBSERVED_FAILURE_LIVE_FACT: Final = "observed_failure_live"
 _CODE_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$", re.ASCII)
 _POLICY_PATTERN: Final = re.compile(r"^[a-z][a-z0-9-]{0,127}$", re.ASCII)
@@ -454,6 +457,14 @@ DETERMINISTIC_FINDING_TEMPLATES: Final[
             "Accepted work overlaps another live task in the coordination scope.",
             "Record a coordination disposition, then run a qualifying check to resolve the overlap.",
         ),
+        FindingKind.CODE_DEFECT: DeterministicFindingTemplate(
+            "A code defect was recorded without a qualifying deterministic repair.",
+            "Record the repair evidence or revise the code-defect finding.",
+        ),
+        FindingKind.TASK_REQUIREMENT_UNMET: DeterministicFindingTemplate(
+            "An existing test-file edit lacks the recorded justification required by the task.",
+            "Record an exact action/path-digest decision for the edit or revert the test change.",
+        ),
     }
 )
 if frozenset(DETERMINISTIC_FINDING_TEMPLATES) != frozenset(FindingKind):
@@ -606,13 +617,12 @@ def render_deterministic_finding_text(
             named = f"result {run_results}" + (f" of action {run_actions}" if run_actions else "")
             detail = (
                 f"{detail} Observed run: {named} failed, and before the claim no later "
-                "hook-observed run of the same command identity followed it and no observed "
-                "workspace edit that reported success followed it. status view=results lists its "
+                "hook-observed run of the same command identity followed it. status view=results lists its "
                 "tool, occurrence, command commitment (when recorded) and exit status; command "
                 "text is never recorded. Either disclose it as above, or fix it and publish a "
-                "replacement claim once a later observed run of the same command passes or an "
-                "observed edit that reports success follows it (a run without a command "
-                "commitment is retired only by the edit)."
+                "replacement claim once a later observed run of the same command passes. A run "
+                "without a command commitment keeps its disclosure duty until it is explicitly "
+                "acknowledged."
             )
     if kind is FindingKind.CONTRADICTORY_CLAIMS_UNRESOLVED:
         claim_refs = tuple(ref for ref in refs if ref.startswith("clm_"))
@@ -1745,6 +1755,12 @@ def build_deterministic_case(
             scope_gap.subject_refs,
         )
 
+    # Plan drift is a bounded advisory derived from the same accepted prefix.  Keep it in the
+    # frozen case so a resumed check and a receipt replay disclose the same signal, while the
+    # check/receipt conclusion paths explicitly treat these codes as non-blocking diagnostics.
+    for code in plan_drift_signals(projection, accepted_prefix).codes:
+        _add_gap(gaps, code, code, ())
+
     relevant_evidence: set[EvidenceId] = set()
     relevant_results: set[ResultId] = set()
     for _, record in effective_claim_items(projection):
@@ -2244,6 +2260,28 @@ def build_policy_assessment(
         provenance=None,
     )
     return DeterministicAssessment(candidate, basis)
+
+
+def build_test_edit_integrity_assessment(
+    case: DeterministicCase,
+    source_event_refs: tuple[EventId, ...],
+    support_refs: tuple[EventId, ...],
+) -> DeterministicAssessment:
+    """Build the local finding for an unjustified pre-existing test edit.
+
+    The public subjects are action source events; the same safe event identities stay in the basis
+    as exact structural support. Neither side contains a captured path.
+    """
+
+    if not source_event_refs or not support_refs:
+        raise _invalid_policy()
+    return build_policy_assessment(
+        case,
+        PolicyPack("research-evidence", "0.1.0"),
+        FindingKind.TASK_REQUIREMENT_UNMET,
+        source_event_refs,
+        (FindingFact("preexisting_test_edit_unjustified", support_refs),),
+    )
 
 
 def run_deterministic_policies(

@@ -80,6 +80,13 @@ __all__ = [
     "COMPLETION_PLAN_NOT_CLAIMED_GAP",
     "COMPLETION_SCOPE_DECLARED_NONE_GAP",
     "COMPLETION_SCOPE_UNDECLARED_GAP",
+    "PREEXISTING_TEST_BASELINE_UNKNOWN_GAP",
+    "PREEXISTING_TEST_DELETED_GAP",
+    "PREEXISTING_TEST_EDIT_UNJUSTIFIED_GAP",
+    "PREEXISTING_TEST_MODIFIED_GAP",
+    "PREEXISTING_TEST_RENAMED_GAP",
+    "PREEXISTING_TEST_SKIPPED_GAP",
+    "PREEXISTING_TEST_INFORMATIONAL_GAPS",
     "OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP",
     "OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP",
     "PolicyVersionEntry",
@@ -106,10 +113,18 @@ __all__ = [
     "SEMANTIC_PRIOR_VERDICTS_UNSUPPORTED_GAP",
     "SEMANTIC_RESTATEMENTS_SUPPRESSED_GAP",
     "SEMANTIC_CHALLENGES_REJECTED_GAP",
+    "SEMANTIC_REVIEW_SNIPPET_INVALID_GAP",
     "SEMANTIC_MISSING_AGENT_SUPPLIABLE_GAP",
     "SEMANTIC_MISSING_ALREADY_SUPPLIED_GAP",
     "SEMANTIC_MISSING_ITEMS_REJECTED_GAP",
+    "SEMANTIC_MISSING_NON_CONVERGENT_GAP",
     "SEMANTIC_MISSING_UNAVAILABLE_GAP",
+    "SEMANTIC_PROVIDER_INPUT_MANIFEST_FAILURES",
+    "SEMANTIC_PROVIDER_INPUT_MANIFEST_INVALID_GAP",
+    "SEMANTIC_PROVIDER_INPUT_MANIFEST_MISMATCH_GAP",
+    "SEMANTIC_PROVIDER_INPUT_MANIFEST_MISSING_GAP",
+    "SEMANTIC_PROVIDER_INPUT_MANIFEST_PARSE_FAILED_GAP",
+    "SEMANTIC_PROVIDER_INPUT_MANIFEST_RECOVERY_FAILED_GAP",
     "SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP",
     "SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP",
     "SEMANTIC_PACKET_INSUFFICIENT_GAP",
@@ -137,6 +152,22 @@ COMPLETION_SCOPE_DECLARED_NONE_GAP: Final = "completion_scope_declared_none"
 # not policy findings, and remain bounded to two fixed relation codes regardless of claim count.
 COMPLETION_CLAIM_OUTSIDE_PLAN_GAP: Final = "completion_claim_outside_plan"
 COMPLETION_PLAN_NOT_CLAIMED_GAP: Final = "completion_plan_not_claimed"
+# Structural, privacy-preserving test-edit accounting.  These are aggregate codes derived from
+# an encrypted change capture; raw paths remain inside that object and never enter status rows.
+PREEXISTING_TEST_BASELINE_UNKNOWN_GAP: Final = "preexisting_test_baseline_unknown"
+PREEXISTING_TEST_MODIFIED_GAP: Final = "preexisting_test_modified"
+PREEXISTING_TEST_RENAMED_GAP: Final = "preexisting_test_renamed"
+PREEXISTING_TEST_DELETED_GAP: Final = "preexisting_test_deleted"
+PREEXISTING_TEST_SKIPPED_GAP: Final = "preexisting_test_skipped"
+PREEXISTING_TEST_EDIT_UNJUSTIFIED_GAP: Final = "preexisting_test_edit_unjustified"
+PREEXISTING_TEST_INFORMATIONAL_GAPS: Final = frozenset(
+    {
+        PREEXISTING_TEST_MODIFIED_GAP,
+        PREEXISTING_TEST_RENAMED_GAP,
+        PREEXISTING_TEST_DELETED_GAP,
+        PREEXISTING_TEST_SKIPPED_GAP,
+    }
+)
 # The applicable check still contributes its coverage, but only because every material event
 # appended after it answered a finding that same check returned. Its verdict is current as of the
 # frontier it tested, not the receipt's; the gap keeps the receipt from reading as re-checked here.
@@ -161,6 +192,10 @@ SEMANTIC_PACKET_INSUFFICIENT_GAP: Final = "semantic_packet_insufficient"
 # post-validation fence. The reviewer said something the check did not carry; coverage says so
 # rather than letting the drop look like the reviewer having found nothing there.
 SEMANTIC_CHALLENGES_REJECTED_GAP: Final = "semantic_challenges_rejected"
+# The provider returned a supporting quote that was not an exact substring of the packet item it
+# cited. The review itself remains usable; the affected judgement/challenge is dropped and this
+# gap keeps the loss visible on every receipt surface.
+SEMANTIC_REVIEW_SNIPPET_INVALID_GAP: Final = "semantic_review_snippet_invalid"
 # An ``insufficient_packet`` review named what it needed (issue #907). These say, as a check
 # limitation, whether any named item is one the agent can supply, whether any cannot be carried on
 # this host or policy at all, whether the reviewer re-requested an item the agent had already
@@ -170,6 +205,31 @@ SEMANTIC_MISSING_AGENT_SUPPLIABLE_GAP: Final = "semantic_missing_agent_suppliabl
 SEMANTIC_MISSING_UNAVAILABLE_GAP: Final = "semantic_missing_structurally_unavailable"
 SEMANTIC_MISSING_ALREADY_SUPPLIED_GAP: Final = "semantic_missing_already_supplied"
 SEMANTIC_MISSING_ITEMS_REJECTED_GAP: Final = "semantic_missing_items_rejected"
+# A later review named the same target again without a directly related agent publication.  This
+# is a bounded non-convergence disclosure, not proof that a new target was supplied or that the
+# reviewer was wrong; the next step is to publish the named relationship or stop rechecking.
+SEMANTIC_MISSING_NON_CONVERGENT_GAP: Final = "semantic_missing_non_convergent"
+# A successful provider call can still lose the exact post-admission input manifest.  Keep the
+# failure reason closed and coverage-bounded so a composed manifest is never presented as what the
+# provider received.  These are internal provenance facts surfaced as ordinary receipt gaps.
+SEMANTIC_PROVIDER_INPUT_MANIFEST_MISSING_GAP: Final = "semantic_provider_input_manifest_missing"
+SEMANTIC_PROVIDER_INPUT_MANIFEST_INVALID_GAP: Final = "semantic_provider_input_manifest_invalid"
+SEMANTIC_PROVIDER_INPUT_MANIFEST_PARSE_FAILED_GAP: Final = (
+    "semantic_provider_input_manifest_parse_failed"
+)
+SEMANTIC_PROVIDER_INPUT_MANIFEST_MISMATCH_GAP: Final = "semantic_provider_input_manifest_mismatch"
+SEMANTIC_PROVIDER_INPUT_MANIFEST_RECOVERY_FAILED_GAP: Final = (
+    "semantic_provider_input_manifest_recovery_failed"
+)
+SEMANTIC_PROVIDER_INPUT_MANIFEST_FAILURES: Final = frozenset(
+    {
+        SEMANTIC_PROVIDER_INPUT_MANIFEST_MISSING_GAP,
+        SEMANTIC_PROVIDER_INPUT_MANIFEST_INVALID_GAP,
+        SEMANTIC_PROVIDER_INPUT_MANIFEST_PARSE_FAILED_GAP,
+        SEMANTIC_PROVIDER_INPUT_MANIFEST_MISMATCH_GAP,
+        SEMANTIC_PROVIDER_INPUT_MANIFEST_RECOVERY_FAILED_GAP,
+    }
+)
 SEMANTIC_REVIEW_NOT_REQUESTED_GAP: Final = "semantic_review_not_requested"
 # Publish-side prose accepts twice what one AI-powered review case item can carry, so text that publishes
 # cleanly can still reach the reviewer shortened or replaced by a bounded-omission marker. The

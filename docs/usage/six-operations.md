@@ -31,9 +31,14 @@ Field-level shapes live in [`docs/INTERFACES.md`](../INTERFACES.md); the JSON Sc
 [`schemas/`](../../schemas/) and the golden vectors under [`fixtures/`](../../fixtures/) are the
 exact wire authority.
 
-If an MCP host drops schema examples or renders required fields as unknown, read the ordinary
-guidance resource `yoetz://guidance/request-templates.md`. It contains complete bodies for all six
-operations and all nine ordinary publication families. Replace every illustrative identifier,
+Before starting ordinary work, read the startup core once. Codex, Claude Code and Cursor then load
+small guidance topics when needed: publication before recording work, review before checking,
+receipt before closure, and recovery on an error. After compaction, reacquire the core and the
+topic for the current operation. Anchored guidance links return only their named section.
+
+If an MCP host drops schema examples or renders required fields as unknown, read the topic for
+that operation, such as `yoetz://guidance/request-templates.md#publish-work-plan-plus-obligation`.
+It contains a complete request body. Replace every illustrative identifier,
 timestamp, frontier, digest, and content string before use; the resource is an authoring fallback,
 not a second wire authority.
 
@@ -71,8 +76,9 @@ to be disclosed; naming it there does not call it a partial or a failure. Read
 the original claim remains immutable history.
 
 A failed run that Yoetz observed through a host hook stops needing disclosure once a later observed
-run of the same command passes, or a later observed edit reports success, before the claim. Only the
-latest run of a command is judged, so an earlier failure of a command you ran again is history too.
+run of the same command passes before the claim. A later failed or partial rerun replaces the earlier
+failure's disclosure duty with its own; a rerun with unknown outcome does not. An edit by itself never
+proves that a failed check was repaired.
 The receipt's limitations still name it once. For every observed run, `status view=results` shows
 the tool, its occurrence number, a keyed identity of the command, and its exit status, so you can
 find a run that is still red and name its result in `limitation_refs`. The command text itself is
@@ -107,6 +113,18 @@ An unavailable required review remains an unmet requirement. Report completed im
 tests separately; do not silently replace required AI-powered review with local-check coverage.
 Optional terminal review gaps may be disclosed while continuing the task. Pending approvals must
 follow their exact continuation.
+
+Every completed check includes compact totals for obligations, attempted requested items, observed
+commands and outstanding failures, evidence strength, and findings. The totals describe the recorded
+work; an attempt or a linked evidence item does not establish that a requirement passed. Missing
+scope or capture stays explicit. Test-edit counters distinguish changes to existing tests from new
+tests, and disclose when the task-start baseline was unavailable.
+
+A local-only check can report “no issue detected within deterministic coverage” while preserving
+the limitation that AI-powered review did not run. Open obligations, missing requested attempts,
+live failures and actionable findings prevent that result. Follow the overall next step: supply
+missing input when it names something you can provide; disclose standing limitations when there is
+no further agent action. The finding checklist describes findings only.
 
 #### Approved workspace checks
 

@@ -8,6 +8,26 @@ from yoetz.kernel.projections import ProjectionState
 from yoetz.protocol.models import StatusCommandAttemptModel
 
 
+def attempted_items_for_obligation(
+    state: ProjectionState, obligation_id: ObligationId
+) -> frozenset[str]:
+    """Return action assertions attributable to one obligation.
+
+    An action with no ``obligation_refs`` is an explicitly global assertion and may
+    cover every obligation.  Once an action names obligations, its attempted items
+    belong only to those exact ids.  Keeping this rule in one helper makes the
+    status projection and deterministic requested-item policy agree (#967).
+    """
+
+    return frozenset(
+        item
+        for record in state.actions.values()
+        if record.payload is not None
+        and (not record.payload.obligation_refs or obligation_id in record.payload.obligation_refs)
+        for item in record.payload.attempted_items
+    )
+
+
 def command_attempts(
     state: ProjectionState, records: tuple[LedgerRecord, ...], obligation_id: ObligationId
 ) -> tuple[StatusCommandAttemptModel, ...]:

@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Final, Literal, cast
 
+from yoetz.domain.check_totals import render_check_totals
 from yoetz.domain.events import (
     CheckRecordedPayload,
     ClaimKind,
@@ -37,6 +38,7 @@ from yoetz.domain.receipts import (
     COMPLETION_SCOPE_DECLARED_NONE_GAP,
     COMPLETION_SCOPE_UNDECLARED_GAP,
     OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP,
+    PREEXISTING_TEST_INFORMATIONAL_GAPS,
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
     SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
@@ -111,6 +113,7 @@ from yoetz.kernel.observed_failures import (
     observed_event_ids_from_records,
     observed_failure_states,
 )
+from yoetz.kernel.plan_drift import PLAN_DRIFT_GAPS
 from yoetz.kernel.plan_scope import CurrentPlanScope, current_plan_scope
 from yoetz.kernel.projections import ObligationProjectionRecord, ProjectionRecord, ProjectionState
 from yoetz.kernel.reducers import is_material_event_family
@@ -899,6 +902,7 @@ def _conclusion(
     context: ReceiptBuildContext,
     unresolved_actionable: tuple[Finding, ...],
 ) -> ReceiptConclusion:
+    advisory_gaps = PLAN_DRIFT_GAPS | PREEXISTING_TEST_INFORMATIONAL_GAPS
     if _COMPLETION_SCOPE_GAPS & set(context.coverage.known_gaps):
         # These two closed gaps bound completion itself. Findings remain visible and actionable,
         # but they cannot make an empty completion scope read as sufficiently covered.
@@ -925,7 +929,11 @@ def _conclusion(
         execution.outcome == "run" and execution.reason == "completed"
         for execution in check.policy_executions
     )
-    if not executions_complete or context.gaps or context.coverage.known_gaps:
+    if (
+        not executions_complete
+        or any(gap.code not in advisory_gaps for gap in context.gaps)
+        or (set(context.coverage.known_gaps) - advisory_gaps)
+    ):
         return ReceiptConclusion.INSUFFICIENT_COVERAGE
     return ReceiptConclusion.NO_UNRESOLVED_DETERMINISTIC_FINDINGS
 
@@ -972,10 +980,10 @@ def _listed_refs(refs: set[ResultId]) -> str:
 def _observed_failure_history_sentence(context: ReceiptBuildContext) -> str:
     """Disclose, once, the hook-observed failures a completion claim did not have to name (#909).
 
-    A failure a later passing run of the same command superseded, or that a completed observed
-    edit made historical, is not a finding, but it is never silent: the receipt counts and names
-    it here, beside the observed failures the claim disclosed through ``limitation_refs``. The
-    sentence reads the same shared predicate the policies and the replay invariant apply.
+    A failure a later run of the same command superseded is not a finding, but it is never silent:
+    the receipt counts and names it here, beside the observed failures the claim disclosed through
+    ``limitation_refs``. Legacy historical rows remain readable for replay; current edits do not
+    create history because they prove no covering rerun.
     """
 
     if not context.records:
@@ -1448,6 +1456,7 @@ def _sections(
     check_change_gap_texts: Mapping[str, str] | None = None,
     review_input_manifest: object | None = None,
     missing_for_assessment: object = (),
+    check_totals_text: str = "",
 ) -> tuple[ReceiptSection, ...]:
     gap_codes = coverage.known_gaps
     gap_texts = check_change_gap_texts or {}
@@ -1472,6 +1481,8 @@ def _sections(
             f"{phrase[:1].upper() + phrase[1:]} remain unresolved at frontier {frontier.sequence}."
             + resolved_sentence
         )
+    if check_totals_text:
+        bodies[ReceiptSectionKey.SUMMARY] += " " + check_totals_text
     # The summary's items are the resolved historical finding ids: the one place every include
     # level carries, so a renderer can always separate resolved rows from current ones.
     items[ReceiptSectionKey.SUMMARY] = resolved_finding_ids
@@ -1628,6 +1639,11 @@ def _sections(
             )
         else:
             gap_body = f"Coverage is limited by: {', '.join(gap_codes)}."
+        if PREEXISTING_TEST_INFORMATIONAL_GAPS & set(gap_codes):
+            gap_body += (
+                " Existing test-file edits are listed for review; their presence alone does not "
+                "block this receipt."
+            )
         if COMPLETION_CLAIM_OUTSIDE_PLAN_GAP in gap_codes:
             gap_body += (
                 " A completion claim covers obligations outside the effective plan. " + SCOPE_REPAIR
@@ -1863,6 +1879,11 @@ def build_receipt(
             ()
             if context.applicable_check is None
             else context.applicable_check.missing_for_assessment
+        ),
+        check_totals_text=(
+            ""
+            if context.applicable_check is None
+            else render_check_totals(context.applicable_check.totals)
         ),
     )
     suppressed_count = (

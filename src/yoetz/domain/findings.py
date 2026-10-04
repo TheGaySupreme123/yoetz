@@ -128,6 +128,12 @@ class FindingKind(str, Enum):  # noqa: UP042 - exact wire enum base
     RESULT_WITHOUT_ACTION = "result_without_action"
     STALE_EVIDENCE_FOR_CHANGED_STATE = "stale_evidence_for_changed_state"
     WEAK_OR_STALE_RESPONSE = "weak_or_stale_response"
+    # AI-powered review findings introduced by the verifying-reviewer contract (issue #906).
+    # These are deliberately additive: old ledgers and deterministic policy packs retain their
+    # historical kinds, while a provider can name a concrete source defect or a requirement the
+    # submitted change failed to satisfy.
+    CODE_DEFECT = "code_defect"
+    TASK_REQUIREMENT_UNMET = "task_requirement_unmet"
 
 
 # D7 keeps project coordination local: coordination findings are produced from the admitted
@@ -149,6 +155,8 @@ EXTERNAL_SEMANTIC_FINDING_KINDS: Final[tuple[FindingKind, ...]] = (
     FindingKind.RESULT_WITHOUT_ACTION,
     FindingKind.STALE_EVIDENCE_FOR_CHANGED_STATE,
     FindingKind.WEAK_OR_STALE_RESPONSE,
+    FindingKind.CODE_DEFECT,
+    FindingKind.TASK_REQUIREMENT_UNMET,
 )
 
 
@@ -349,6 +357,8 @@ FINDING_KIND_TRAITS: Final[MappingProxyType[FindingKind, tuple[int, bool]]] = Ma
         FindingKind.MATERIAL_LIMITATION_OMITTED: (1, True),
         FindingKind.QUESTIONABLE_FINDING_REJECTION: (2, True),
         FindingKind.COORDINATION_OVERLAP: (2, True),
+        FindingKind.CODE_DEFECT: (1, True),
+        FindingKind.TASK_REQUIREMENT_UNMET: (1, True),
     }
 )
 
@@ -808,6 +818,9 @@ class FindingChallenge:
     alternative_interpretation: str
     requested_next_step: str
     uncertainty: str
+    # Verbatim support from the packet. Older finding records omit this field; new provider
+    # judgments may supply it and the check fence validates it against the frozen case.
+    snippet: str | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("discrepancy", "alternative_interpretation", "uncertainty"):
@@ -817,6 +830,8 @@ class FindingChallenge:
             or self.requested_next_step not in REVIEWER_NEXT_STEPS
         ):
             raise ProtocolValueError("finding_json_shape_invalid")
+        if self.snippet is not None:
+            object.__setattr__(self, "snippet", _validate_review_text(self.snippet))
 
 
 def _validate_dialogue_fields(
@@ -1586,6 +1601,15 @@ def finding_to_json(finding: Finding) -> JsonObject:
 
 
 _CHALLENGE_KEYS: Final = frozenset(
+    {
+        "discrepancy",
+        "alternative_interpretation",
+        "requested_next_step",
+        "uncertainty",
+        "snippet",
+    }
+)
+_CHALLENGE_REQUIRED_KEYS: Final = frozenset(
     {"discrepancy", "alternative_interpretation", "requested_next_step", "uncertainty"}
 )
 _FINDING_EVENT_ALLOWED_KEYS: Final = _FINDING_ALLOWED_KEYS | {"challenge", "relates_to"}
@@ -1616,7 +1640,7 @@ def finding_event_from_json(value: JsonValue) -> Finding:
     if challenge_value is not None:
         fields = _require_json_object(
             challenge_value,
-            required=_CHALLENGE_KEYS,
+            required=_CHALLENGE_REQUIRED_KEYS,
             allowed=_CHALLENGE_KEYS,
             reason="finding_json_shape_invalid",
         )
@@ -1625,6 +1649,7 @@ def finding_event_from_json(value: JsonValue) -> Finding:
             alternative_interpretation=cast(str, fields["alternative_interpretation"]),
             requested_next_step=cast(str, fields["requested_next_step"]),
             uncertainty=cast(str, fields["uncertainty"]),
+            snippet=(None if fields.get("snippet") is None else cast(str, fields["snippet"])),
         )
     return Finding(
         finding_id=finding.finding_id,
@@ -1661,6 +1686,11 @@ def finding_event_to_json(finding: Finding) -> JsonObject:
                 "discrepancy": finding.challenge.discrepancy,
                 "requested_next_step": finding.challenge.requested_next_step,
                 "uncertainty": finding.challenge.uncertainty,
+                **(
+                    {}
+                    if finding.challenge.snippet is None
+                    else {"snippet": finding.challenge.snippet}
+                ),
             }
         )
     if finding.related_finding_ids:

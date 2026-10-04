@@ -713,6 +713,11 @@ provider-repair request. The service emits it only when verification is not disa
 endpoint is bound, network egress is permitted, and an LLM inference channel is enabled, and the
 provider is still structurally unusable, including when no factory id is available.
 
+Observation-health advice follows the same boundary: `refresh_observation` for source lag, a stale
+cursor, a drain backlog, service unavailability, or a locked vault stays in operator status and
+structured advice, and is excluded from every hook `additionalContext` response. Hook context is
+reserved for work advice.
+
 The rendered hook commands bind `--workspace "${CLAUDE_PROJECT_DIR}"`. When a hook ingests
 nothing it still exits 0 with `{}`, but records one payload-free `hook_diagnostics` reason that
 `yoetz observe status --workspace <project>` reports: `workspace_unresolvable` (the variable was
@@ -1234,14 +1239,16 @@ activation, and native host dogfood remain separate evidence.
 ### Observation limitation findings and closure rechecks (issue #911)
 
 Claude Code's ordinary profile is paired, so a missing `PostToolUse` leaves an orphan
-(`unpaired_event`) and lag or drain gaps can raise the same advisory, delivered through
-`PostToolUse` `additionalContext`. Decision for this host: supported, same rule as every host. The
+(`unpaired_event`) and lag or drain gaps can raise the same advisory. Decision for this host:
+supported, same rule as every host. The
 rule is service-side and host-neutral: an observation-authored, non-actionable finding (the
 "Observation coverage is incomplete or stale" advisory, including rows written by earlier builds)
 never counts in `unanswered_finding_count` or `findings_unanswered`, and acknowledging it once is
 optional and never supersedes a recorded check. It stays in `status view=findings` and on the
-receipt as a disclosed limitation and does not become resolvable. The hook `refresh_observation`
-clause asks the agent to wait only while `yoetz observe status` reports lag or a drain backlog. The
+receipt as a disclosed limitation and does not become resolvable. `refresh_observation` remains in
+operator-facing status and structured advice while a recoverable cause is present, but it is never
+emitted through Claude's `hookSpecificOutput.additionalContext`; hook context carries work advice
+only. The
 shared guidance and this host's skill give the closure order: answer unanswered findings before the
 final check (the current status frontier is a valid `finding_frontier`), answer only the findings
 that check returns that are still unanswered, then `receipt`, then `work_closed`; no recheck follows

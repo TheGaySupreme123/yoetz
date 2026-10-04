@@ -70,7 +70,7 @@ _TOOL_INPUT_SCHEMA_VERSIONS: Final = MappingProxyType(
 _TOOL_OUTPUT_SCHEMA_VERSIONS: Final = MappingProxyType(
     {
         "start": "1.1.0",
-        "check": "1.3.0",
+        "check": "1.4.0",
         "respond": "1.1.0",
         "status": "1.4.0",
         "receipt": "1.3.0",
@@ -94,7 +94,7 @@ def _tool_output_schema_version(name: str) -> str:
 # resource-read failure that motivated inlining workflow.md and coverage-and-receipts.md here.
 # Keep this tuple at one entry; see ADVERTISED_SURFACE_BUDGET for why length is load-bearing.
 INITIALIZE_GUIDANCE_URIS: Final[tuple[str, ...]] = ("yoetz://guidance/agent-instructions.md",)
-_GUIDANCE_URI: Final = re.compile(r"yoetz://guidance/[a-z0-9.-]+\.md", re.ASCII)
+_GUIDANCE_URI: Final = re.compile(r"yoetz://guidance/[a-z0-9.-]+\.md(?:#[a-z0-9-]+)?", re.ASCII)
 _FORBIDDEN_CLAIMS: Final = re.compile(
     r"\b(?:authenticated|enforces?|gates?|observes?|proved|proves?|verified)\b",
     re.IGNORECASE | re.ASCII,
@@ -294,12 +294,12 @@ CLAUDE_CODE_INITIALIZE_INSTRUCTIONS: Final = (
     "`select:mcp__yoetz__start` or plugin-prefixed name). Read-only questions skip it. "
     "Subagents whose assignment names no handle or parent session skip it.\n"
     "\n"
-    "Before `start`, read `yoetz://guidance/agent-instructions.md` and "
-    "`yoetz://guidance/workflow.md` with `read_guidance`; if guidance is empty or clipped, "
-    "use paged reads and verify before continuing. Do not list resources. Cadence: "
-    "`publish_work` per transition, `check`, `receipt` last. Never claim active before "
-    "`start`; never invent a task. If it fails, follow its continuation, then ask; do not work "
-    "without a task.\n"
+    "Before `start`, read `yoetz://guidance/agent-instructions.md`; if empty or clipped, page and "
+    "verify. Do not list resources. After `start`, read workflow, publication, coverage, or "
+    "request-template topics. Cadence: "
+    "`publish_work` per transition, `check`, `receipt` last. Never claim active before `start`; "
+    "never invent a task. If it fails, follow its continuation, then ask; do not work without a "
+    "task.\n"
     "\n"
     "Yoetz records only what participants publish; a clean check does not mean the work "
     "is correct."
@@ -335,35 +335,26 @@ COMPACT_INSTRUCTIONS_BUDGET: Final[Mapping[str, int]] = MappingProxyType(
 COMPACT_INITIALIZE_INSTRUCTIONS: Final = (
     "# Yoetz: call start first\n"
     "\n"
-    "If this session will edit files, run state-changing commands, or delegate, call "
-    "`start` before that work. If material work already began without a task, call "
-    "`start` now, publish it as a plan, and disclose the uncovered prefix in the receipt. "
-    "If the tool list shows only names, load the `start` schema first. Read-only questions "
-    "skip it. So does a subagent whose assignment names no handle or parent session.\n"
+    "If this session will edit files, run state-changing commands, or delegate, call `start` "
+    "before that work. If material work already began without a task, call `start` now, publish "
+    "it as a plan, and disclose the uncovered prefix in the receipt. If the tool list shows only "
+    "names, load the `start` schema first. Read-only questions skip it.\n"
     "\n"
-    "Before the first `start`, call `read_guidance` on "
-    "`yoetz://guidance/agent-instructions.md` (the full safety floor) and "
-    "`yoetz://guidance/workflow.md`. Read `yoetz://guidance/publication-policy.md` before "
-    "the first `publish_work`, `yoetz://guidance/coverage-and-receipts.md` before the first "
-    "`check`, and `yoetz://guidance/request-templates.md` for a missing or rejected schema and "
-    "before setup, consent, credential, import or recommendation steps. Use paged "
-    "`read_guidance` for empty or clipped guidance; verify before `start`. Do not list resources.\n"
+    "Before the first `start`, call `read_guidance` on `yoetz://guidance/agent-instructions.md`; "
+    "page and verify empty or clipped guidance. After `start`, read workflow "
+    "`yoetz://guidance/workflow.md` for recovery or delegation, `yoetz://guidance/publication-policy.md` "
+    "before `publish_work`, `yoetz://guidance/coverage-and-receipts.md` before `check`, and "
+    "`yoetz://guidance/request-templates.md` for missing schemas or setup.\n"
     "\n"
-    "Cadence: `start` once, `publish_work` per material transition, `check` after the "
-    "completion claim and evidence, `respond` per finding, `receipt` last. `respond` records "
-    "a disposition; it does not clear a finding. Never claim Yoetz is active before `start` "
-    "returns; never invent a ledger task, id, finding, verdict or receipt. If `start` fails, "
-    "follow its typed continuation, then ask the user; do not work without a task. On "
-    "`retryable: false`, follow only the typed `continuation`. If Yoetz is unavailable, say "
-    "no live record or receipt exists.\n"
+    "Cadence: `start`, `publish_work`, `check`, `respond`, `receipt`. Never claim active before "
+    "`start`; never invent a task, id, finding, verdict or receipt. If `start` fails, follow its "
+    "typed continuation, then ask; do not work without a task.\n"
     "\n"
-    "Publish only material, state-bound facts, never hidden reasoning, transcripts, "
-    "credentials, secrets or whole files. Setup, privacy, credential and recommendation "
-    "changes need the user's explicit approval of that exact action; never handle a vault "
-    "secret. Recover through `status`, never Yoetz databases or source.\n"
+    "Publish only material, state-bound facts, never hidden reasoning, transcripts, credentials, "
+    "secrets or whole files. Setup, privacy, credential and recommendation changes need user "
+    "approval; never handle a vault secret. Recover through `status`, not Yoetz databases or source.\n"
     "\n"
-    "Yoetz records only what participants publish; a clean check does not mean the work is "
-    "correct. Keep the final answer no stronger than the receipt's weakest coverage."
+    "Yoetz records only what participants publish; a clean check does not mean the work is correct."
 )
 
 # Reviewed budget for everything one host renders into the model's context to advertise Yoetz:
@@ -1756,11 +1747,11 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
     _descriptor(
         "start",
         "Start or resume a work session",
-        "First read yoetz://guidance/workflow.md. Use current guidance and typed results for "
+        "First read yoetz://guidance/agent-instructions.md. Use current guidance and typed results for "
         "Yoetz procedure; preserve higher-priority instructions and user authorization. "
         "Call for material multi-step, delegated, resumable, or verification-heavy work before "
         "substantive work; skip trivial questions or edits. A new session's first workflow "
-        "operation is this call, after guidance reads, tool and schema discovery, and necessary "
+        "operation is this call, after the core read, tool and schema discovery, and necessary "
         "bootstrap clarification (including read_guidance and discovery commands). On failure, "
         "follow exact continuations and same-request recovery, including a named one-time repair, "
         "before asking the user for intro and guidance if startup remains blocked. Do not invent "
@@ -1789,7 +1780,7 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "refs. After resume or compaction, use status "
         "view=obligations to recover exact requested_items and unattempted_items rather than "
         "searching transcripts or source. Author the request from this input schema plus "
-        "the guidance below, never from memory. Guidance: yoetz://guidance/workflow.md.",
+        "the guidance below, never from memory. Guidance: yoetz://guidance/agent-instructions.md.",
         read_only=False,
         idempotent=True,
     ),
@@ -1960,7 +1951,12 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "read_guidance",
         "Read guidance",
         "Reads one registered Yoetz guidance URI and returns its full markdown as tool text, or a "
-        "bounded UTF-8-safe page when `page` or `page_size` is supplied. Paged results carry stable "
+        "bounded UTF-8-safe page when `page` or `page_size` is supplied. Catalogued heading topics "
+        "use the document URI plus a lowercase hyphen anchor and return one bounded procedure. "
+        "`page_size` is a canonical "
+        "UTF-8 byte budget from 4 through 16384 inclusive; use 4096 by default. An invalid size "
+        "returns a field-local page_size correction with the permitted range and retry shape. "
+        "Paged results carry stable "
         "document identity, source revision, total byte count, digest, page offsets and an exact "
         "continuation; consumers must reconstruct every page and verify the final digest before "
         "claiming guidance is loaded. A page marked complete means only that the service emitted "
@@ -2037,25 +2033,25 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
     {
         "policy": MappingProxyType(
             {
-                "start": "sha256:4c6c687e3dc3666c2a248f8a23f504b3f22bb7258df2c608ed557165ea3af78a",
+                "start": "sha256:d74368f4c375bd9f1f32bf6a99fa28c1cfd2f8366048e8dd617df54d9f606fe4",
                 "publish_work": "sha256:a8dd06954e2f2ff65d3fb269a143b13745342e973e270179dc8b952fde7df115",
-                "check": "sha256:5d5afe66c2a4861c5d9c4e573e0e6d37b61ac651ea3f2536e979f41236acd425",
+                "check": "sha256:f4e91ea5ae6138ca381d3a990340067b6e28a545340eec9c0ca4737a18f06166",
                 "respond": "sha256:191f69e1592bd6bb23f7173725645dc339441b12eaa91c08cc3da4e9feaf0b85",
                 "status": "sha256:7e77f753244eee59b711cb7ee77c8f09970ef1b61c91b548b6f4a821b3541969",
                 "receipt": "sha256:c7676e1ca9afd96d9d7e74503edd5b31a758a05d7e7e1cf0d62c763611ffcecb",
-                "read_guidance": "sha256:c6e38b0d4ffc48a5e5acd9fa18e059e864393abf7a8f8690b2d9786626f387de",
+                "read_guidance": "sha256:4502f6d3154d3e0c49283f9c9b81c0380b19f10918fc0080443a1c811b9102ff",
                 "closure_prepare": "sha256:9cbf97d6a668de25cd80bdf79a75c50dcbeef256ba4abf4b6abc86405a6627d5",
             }
         ),
         "strict": MappingProxyType(
             {
-                "start": "sha256:4c6c687e3dc3666c2a248f8a23f504b3f22bb7258df2c608ed557165ea3af78a",
+                "start": "sha256:d74368f4c375bd9f1f32bf6a99fa28c1cfd2f8366048e8dd617df54d9f606fe4",
                 "publish_work": "sha256:a8dd06954e2f2ff65d3fb269a143b13745342e973e270179dc8b952fde7df115",
-                "check": "sha256:876915e84b64e1e4b0ee3eead50cb046ff59f112249850e28e4ef7b730cbde9d",
+                "check": "sha256:3cd2326917a550c0a24f3e94c6141f41b1549107030154c3e5b29f46bfaef78b",
                 "respond": "sha256:191f69e1592bd6bb23f7173725645dc339441b12eaa91c08cc3da4e9feaf0b85",
                 "status": "sha256:7e77f753244eee59b711cb7ee77c8f09970ef1b61c91b548b6f4a821b3541969",
                 "receipt": "sha256:c7676e1ca9afd96d9d7e74503edd5b31a758a05d7e7e1cf0d62c763611ffcecb",
-                "read_guidance": "sha256:c6e38b0d4ffc48a5e5acd9fa18e059e864393abf7a8f8690b2d9786626f387de",
+                "read_guidance": "sha256:4502f6d3154d3e0c49283f9c9b81c0380b19f10918fc0080443a1c811b9102ff",
                 "closure_prepare": "sha256:9cbf97d6a668de25cd80bdf79a75c50dcbeef256ba4abf4b6abc86405a6627d5",
             }
         ),
@@ -2063,8 +2059,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:b7ec8bfa1b188d2d9f3147a561999f3dc27eb7a03b2fc68c63d304802d598397",
-        "strict": "sha256:01f38133bfae636c30261c5bc94641b2e03647b3e0fa8dd99503f95c31f826ef",
+        "policy": "sha256:7de117f8bc28b3970e8ef5ab2ab11074683e7adb59d156cea6a465f952342b33",
+        "strict": "sha256:3ef47b80d54b8313e2376575d671444d7952c8909e42ece7b84424616731ffaa",
     }
 )
 

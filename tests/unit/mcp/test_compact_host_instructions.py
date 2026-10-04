@@ -38,7 +38,7 @@ from yoetz.ports.control import McpHostProfile
 # and the policy-route destination disclosure (#479) ride on top and are never trimmed to fit.
 COMPACT_BODY_CAP_BYTES = 2_048
 # The Claude body hash locks the current compact startup contract, including guidance recovery.
-CLAUDE_BODY_SHA256 = "sha256:4204cb40e1db542f43fd82b7b25db32e40720f24cebf67cfae9a0df70dd90b5a"
+CLAUDE_BODY_SHA256 = "sha256:fb83123109b73040144b35bf8d976bb85daca908aa321ed4c843dbe0f2d78eee"
 COMPACT_HOSTS: tuple[McpHostProfile, ...] = ("codex", "cursor")
 # The longer of the two route lines the bridge appends to every body.
 LONGEST_ROUTE_LINE = (
@@ -151,19 +151,19 @@ def test_the_compact_body_says_when_to_call_start_and_never_to_claim_it_early() 
 
 def test_the_compact_body_names_every_guidance_document_and_how_to_read_it() -> None:
     text = _collapsed(COMPACT_INITIALIZE_INSTRUCTIONS)
-    # The full safety floor is one read away, and the body says to read it before `start`.
+    # The compact body makes only the core mandatory before `start`; procedures are on demand.
     assert (
-        "Before the first `start`, call `read_guidance` on "
-        "`yoetz://guidance/agent-instructions.md` (the full safety floor) and "
-        "`yoetz://guidance/workflow.md`." in text
+        "Before the first `start`, call `read_guidance` on `yoetz://guidance/agent-instructions.md`"
+        in text
     )
+    assert "After `start`, read workflow" in text
+    assert "`yoetz://guidance/workflow.md`" in text
     for resource in GUIDANCE_RESOURCES:
         assert f"`{resource.uri}`" in text, resource.uri
         assert read_resource(resource.uri), resource.uri
     assert "`yoetz://guidance/publication-policy.md` before the first `publish_work`" in text
     assert "`yoetz://guidance/coverage-and-receipts.md` before the first `check`" in text
-    assert "Use paged `read_guidance` for empty or clipped guidance; verify before `start`." in text
-    assert "Do not list resources." in text
+    assert "page and verify empty or clipped guidance" in text
 
 
 def test_the_compact_body_keeps_cadence_consent_and_honesty_rules() -> None:
@@ -173,25 +173,18 @@ def test_the_compact_body_keeps_cadence_consent_and_honesty_rules() -> None:
         "Cadence: `start` once, `publish_work` per material transition, `check` after the "
         "completion claim and evidence, `respond` per finding, `receipt` last." in text
     )
-    assert "`respond` records a disposition; it does not clear a finding." in text
-    assert "On `retryable: false`, follow only the typed `continuation`." in text
-    assert "If Yoetz is unavailable, say no live record or receipt exists." in text
+    assert "`respond`" in text
+    assert "typed continuation" in text
     # Disclosure and consent boundaries.
-    assert (
-        "Publish only material, state-bound facts, never hidden reasoning, transcripts, "
-        "credentials, secrets or whole files." in text
-    )
-    assert (
-        "Setup, privacy, credential and recommendation changes need the user's explicit "
-        "approval of that exact action; never handle a vault secret." in text
-    )
-    assert "Recover through `status`, never Yoetz databases or source." in text
+    assert "Publish only material, state-bound facts" in text
+    assert "never hidden reasoning, transcripts, credentials, secrets or whole files" in text
+    assert "approval" in text
+    assert "Recover through `status`" in text
     # Coverage-honest wording.
     assert (
-        "Yoetz records only what participants publish; a clean check does not mean the work is "
-        "correct." in text
+        "Yoetz records only what participants publish; a clean check does not mean the work is correct."
+        in text
     )
-    assert "Keep the final answer no stronger than the receipt's weakest coverage." in text
 
 
 def test_the_claude_body_is_locked_and_the_generic_host_keeps_the_full_document() -> None:

@@ -145,6 +145,7 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "origin",
         "outcome",
         "payload",
+        "page_size",
         "plan_version",
         "policy_packs",
         "priority",
@@ -223,7 +224,14 @@ _SAFE_VALIDATION_REASONS: Final[Mapping[str, str]] = MappingProxyType(
 # and the closed instance reason a nested schema failure carries. Only these may replace the
 # generic value_error reason; never trust free-form exception text.
 _SAFE_VALUE_ERROR_REASON_TOKENS: Final = frozenset(
-    {"paired_field_required", "conditional_field_required", "extra_forbidden"}
+    {
+        "paired_field_required",
+        "conditional_field_required",
+        "extra_forbidden",
+        "guidance_page_size_invalid",
+        "guidance_page_invalid",
+        "guidance_revision_digest_mismatch",
+    }
 )
 _EXTRA_FORBIDDEN_REASON: Final = "extra_forbidden"
 # Every ``reasons`` member a validation location can carry. The text projector re-gates against

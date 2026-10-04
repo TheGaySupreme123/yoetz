@@ -23,7 +23,11 @@ from yoetz.domain.privacy import (
     PrivacyDecision,
     ProjectionProvenanceContext,
 )
-from yoetz.observability.privacy import scan_finding_is_heuristic, scan_for_sensitive_content
+from yoetz.observability.privacy import (
+    redact_heuristic_spans,
+    scan_finding_is_heuristic,
+    scan_for_sensitive_content,
+)
 from yoetz.ports.privacy import EffectivePrivacyPolicy, MinimizedDisclosure
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 from yoetz.protocol.models import DataCategory
@@ -58,8 +62,11 @@ def estimated_token_count(byte_count: int) -> int:
     return (byte_count + EGRESS_BYTES_PER_TOKEN_ESTIMATE - 1) // EGRESS_BYTES_PER_TOKEN_ESTIMATE
 
 
-_SCANNER_REGISTRY_VERSION = "observability-sensitive-content-v2"
-_SCANNER_PROFILE_DIGEST = "sha256:38c2f95c318fcc23df7f3e472d9d0ae46fe4376ff89d289e2aee63599c754c1f"
+# The bounded Python source proof and minimum-span transform are a new scanner profile. Keep the
+# profile identity distinct so proposals and receipts cannot present the previous whole-item policy
+# as though it had used the new semantics.
+_SCANNER_REGISTRY_VERSION = "observability-sensitive-content-v3"
+_SCANNER_PROFILE_DIGEST = "sha256:70957e0aac5cefb3d012c21715049718ec1cd2c51a8c4b4489d4bc5eacfb5726"
 _STRUCTURAL_CATEGORIES = frozenset(
     {DataCategory.BOUNDED_STRUCTURAL_METADATA, DataCategory.DECLARED_FILE_TYPE}
 )
@@ -211,6 +218,7 @@ def _assemble_semantic_review_payload(
     included: tuple[ClassifiedContextItem, ...],
     *,
     withheld_item_ids: tuple[str, ...] = (),
+    transformed_content: dict[str, bytes] | None = None,
 ) -> bytes:
     """Assemble the versioned review-packet document from privacy-approved case items.
 
@@ -236,7 +244,12 @@ def _assemble_semantic_review_payload(
             )
         )
     try:
-        envelope = strict_json_parse(envelope_item.candidate.plaintext)
+        envelope_bytes = (
+            transformed_content.get(REVIEW_PACKET_ITEM_ID, envelope_item.candidate.plaintext)
+            if transformed_content is not None
+            else envelope_item.candidate.plaintext
+        )
+        envelope = strict_json_parse(envelope_bytes)
     except Exception:
         return canonical_encode(
             cast(
@@ -253,7 +266,11 @@ def _assemble_semantic_review_payload(
             cast(JsonValue, {"items": [], "omissions": [], "schema": _SEMANTIC_PACKET_SCHEMA})
         )
     content_by_id = {
-        item_id: item.candidate.plaintext
+        item_id: (
+            transformed_content.get(item_id, item.candidate.plaintext)
+            if transformed_content is not None
+            else item.candidate.plaintext
+        )
         for item_id, item in included_by_id.items()
         if item_id != REVIEW_PACKET_ITEM_ID
     }
@@ -262,6 +279,7 @@ def _assemble_semantic_review_payload(
         content_by_id=content_by_id,
         included_item_ids=set(included_by_id),
         withheld_item_ids=set(withheld_item_ids),
+        redacted_item_ids=set(transformed_content or ()),
     )
 
 
@@ -356,7 +374,6 @@ class LocalPrivacyEnforcer:
             if item.candidate.item_id in approved
             and item.scope_valid
             and not item.forbidden_findings
-            and not item.heuristic_findings
             and item.data_class is not DataClass.SECRET_OR_CRYPTOGRAPHIC
         )
         included_id_set = {entry.candidate.item_id for entry in included}
@@ -372,17 +389,44 @@ class LocalPrivacyEnforcer:
                 key=str.encode,
             )
         )
+        transformed_content: dict[str, bytes] = {}
+        redacted_span_count = 0
+        for item in included:
+            if not item.heuristic_findings:
+                continue
+            sanitized, span_count = redact_heuristic_spans(item.candidate.plaintext)
+            transformed_content[item.candidate.item_id] = sanitized
+            redacted_span_count += span_count
         if classified.candidate.purpose == "semantic-review":
             prepared = _assemble_semantic_review_payload(
                 classified,
                 included,
                 withheld_item_ids=withheld_item_ids,
+                transformed_content=transformed_content,
             )
+            # The assembly helper fails closed to a structural empty fallback when the approved
+            # envelope is missing or malformed.  That fallback is useful as a bounded diagnostic,
+            # but it is not a provider-bound review packet.  Clear the approved ids so the
+            # coordinator returns INSUFFICIENT_APPROVED_CONTEXT instead of dispatching a successful
+            # contentless semantic request.
+            try:
+                semantic_packet = strict_json_parse(prepared)
+            except TypeError, ValueError, UnicodeDecodeError:
+                included = ()
+            else:
+                if not (
+                    isinstance(semantic_packet, dict)
+                    and semantic_packet.get("schema") == _SEMANTIC_PACKET_SCHEMA
+                    and isinstance(semantic_packet.get("review_packet"), dict)
+                ):
+                    included = ()
         else:
             rows = [
                 {
                     "category": item.candidate.category.value,
-                    "content_base64": base64.b64encode(item.candidate.plaintext).decode("ascii"),
+                    "content_base64": base64.b64encode(
+                        transformed_content.get(item.candidate.item_id, item.candidate.plaintext)
+                    ).decode("ascii"),
                     "item_id": item.candidate.item_id,
                 }
                 for item in included
@@ -411,7 +455,15 @@ class LocalPrivacyEnforcer:
             source_item_digests=source_digests,
             approved_categories=approved_categories,
             blocked_categories=decision.blocked_categories,
-            transformation_summary=(("minimized_items", removed),),
+            transformation_summary=tuple(
+                sorted(
+                    {
+                        ("minimized_items", removed),
+                        ("redacted_spans", redacted_span_count),
+                    },
+                    key=lambda item: item[0].encode(),
+                )
+            ),
             byte_count=len(prepared),
             token_count=estimated_token_count(len(prepared)),
             case_digest=f"sha256:{hashlib.sha256(prepared).hexdigest()}",
@@ -420,7 +472,13 @@ class LocalPrivacyEnforcer:
             forbidden_findings=prepared_scan.high_confidence,
             withheld_item_ids=withheld_item_ids,
             heuristic_findings=prepared_scan.heuristic,
+            redacted_span_count=redacted_span_count,
         )
 
     def scan_exact_bytes(self, data: bytes) -> tuple[ForbiddenDataKind, ...]:
         return scan_exact_bytes(data)
+
+    def scanner_identity(self) -> tuple[str, str]:
+        """Return the registry/profile pair that guards prepared and rendered bytes."""
+
+        return self._scanner.version, self._scanner.profile_digest

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 from types import MappingProxyType
 from typing import Final, cast
 
+from yoetz.protocol.guidance_uris import GUIDANCE_TOPIC_URIS
 from yoetz.version import read_verified_resource
 
 __all__ = [
@@ -16,6 +19,7 @@ __all__ = [
     "MAX_GUIDANCE_PAGE_SIZE",
     "MAX_GUIDANCE_PAGE_COUNT",
     "GUIDANCE_RESOURCES",
+    "GUIDANCE_TOPIC_URIS",
     "GuidanceResource",
     "GuidanceResourceAnnotations",
     "GuidanceResourceError",
@@ -23,6 +27,7 @@ __all__ = [
     "GuidanceResourcePage",
     "GuidancePageAssembler",
     "list_resources",
+    "resource_for_uri",
     "read_resource_page",
     "read_resource",
 ]
@@ -42,6 +47,7 @@ MAX_GUIDANCE_DOCUMENT_BYTES: Final = 1_048_576
 MAX_GUIDANCE_PAGE_COUNT: Final = 16_384
 _MAX_GUIDANCE_PAGE_BYTES: Final = 65_536
 _MIN_GUIDANCE_PAGE_SIZE: Final = 4
+_GUIDANCE_HEADING: Final = re.compile(r"^(#{1,6}) (.+?)\s*$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,10 +67,29 @@ class GuidanceResource:
     description: str
     annotations: GuidanceResourceAnnotations
     media_type: str = "text/markdown"
+    section_start: int | None = None
+    section_end: int | None = None
+
+    @property
+    def source_bytes(self) -> bytes:
+        """Return the complete verified source document backing this resource."""
+
+        return read_verified_resource(self.logical_name)
 
     @property
     def bytes(self) -> bytes:
-        return read_verified_resource(self.logical_name)
+        payload = self.source_bytes
+        if self.section_start is None and self.section_end is None:
+            return payload
+        if (
+            self.section_start is None
+            or self.section_end is None
+            or self.section_start < 0
+            or self.section_end < self.section_start
+            or self.section_end > len(payload)
+        ):
+            raise GuidanceResourceError("guidance_topic_range_invalid")
+        return payload[self.section_start : self.section_end]
 
     @property
     def text(self) -> str:
@@ -526,9 +551,118 @@ GUIDANCE_RESOURCES: Final = (
     ),
 )
 
+
 _RESOURCE_BY_URI: Final = MappingProxyType(
     {resource.uri: resource for resource in GUIDANCE_RESOURCES}
 )
+_FOCUSED_TOPIC_FILES: Final = frozenset(
+    {
+        "startup.md",
+        "recovery.md",
+        "publication.md",
+        "review.md",
+        "receipt.md",
+        "delegation.md",
+        "consent.md",
+        "page-delivery.md",
+    }
+)
+_FOCUSED_TOPIC_URIS: Final = frozenset(f"yoetz://guidance/{name}" for name in _FOCUSED_TOPIC_FILES)
+
+
+def _guidance_anchor(value: str) -> str:
+    """Use the stable, human-readable anchor form shared by guidance links and topics."""
+
+    lowered = value.casefold()
+    lowered = re.sub(r"[^\w\s-]", "", lowered, flags=re.UNICODE)
+    return re.sub(r"[\s_-]+", "-", lowered).strip("-")
+
+
+def _guidance_headings(text: str) -> tuple[tuple[int, str, int, int], ...]:
+    """Return Markdown headings while ignoring fenced code examples."""
+
+    headings: list[tuple[int, str, int, int]] = []
+    offset = 0
+    fence: str | None = None
+    for line in text.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            marker = stripped[:3]
+            fence = None if fence == marker else marker if fence is None else fence
+        elif fence is None:
+            content = line.rstrip("\r\n")
+            match = _GUIDANCE_HEADING.fullmatch(content)
+            if match is not None:
+                headings.append(
+                    (len(match.group(1)), match.group(2).strip(), offset, offset + len(line))
+                )
+        offset += len(line)
+    return tuple(headings)
+
+
+@lru_cache(maxsize=256)
+def _topic_resource(uri: str) -> GuidanceResource:
+    """Resolve one catalogued heading to a byte-bounded view of its source document."""
+
+    if uri in _FOCUSED_TOPIC_URIS:
+        name = uri.rsplit("/", 1)[-1]
+        stem = name.removesuffix(".md").replace("-", " ")
+        return GuidanceResource(
+            uri=uri,
+            logical_name=f"guidance/{name}",
+            name=name,
+            title=f"Yoetz {stem} topic",
+            description="Small triggered guidance topic; read it only when its procedure applies.",
+            annotations=GuidanceResourceAnnotations(audience=("assistant",), priority=0.7),
+        )
+    base_uri, separator, anchor = uri.partition("#")
+    if not separator or not anchor:
+        raise GuidanceResourceError("guidance_resource_uri_unregistered")
+    try:
+        source = _RESOURCE_BY_URI[base_uri]
+    except KeyError:
+        raise GuidanceResourceError("guidance_resource_uri_unregistered") from None
+    if uri not in GUIDANCE_TOPIC_URIS:
+        raise GuidanceResourceError("guidance_resource_uri_unregistered")
+    text = source.source_bytes.decode("utf-8", errors="strict")
+    headings = _guidance_headings(text)
+    seen: dict[str, int] = {}
+    selected: tuple[int, int, str] | None = None
+    for index, heading in enumerate(headings):
+        level, heading_title, heading_start, _heading_end = heading
+        slug = _guidance_anchor(heading_title)
+        occurrence = seen.get(slug, 0) + 1
+        seen[slug] = occurrence
+        candidate = slug if occurrence == 1 else f"{slug}-{occurrence}"
+        if candidate != anchor:
+            continue
+        end = len(text)
+        for following in headings[index + 1 :]:
+            following_level, _following_title, following_start, _following_end = following
+            # A document title's topic is its introduction only; otherwise the first H2 would
+            # make the title topic the entire long archive. Nested headings stay with their
+            # parent procedure, while every heading also receives its own narrower topic.
+            if (level == 1 and following_level >= 2) or following_level <= level:
+                end = following_start
+                break
+        selected = (heading_start, end, heading_title)
+        break
+    if selected is None:
+        raise GuidanceResourceError("guidance_resource_uri_unregistered")
+    start_char, end_char, title = selected
+    start = len(text[:start_char].encode("utf-8"))
+    end = len(text[:end_char].encode("utf-8"))
+    return GuidanceResource(
+        uri=uri,
+        logical_name=source.logical_name,
+        name=f"{source.name}#{anchor}",
+        title=f"{source.title}: {title}",
+        description=f"Bounded topic from {source.name}; read this procedure when its trigger applies.",
+        annotations=source.annotations,
+        media_type=source.media_type,
+        section_start=start,
+        section_end=end,
+    )
 
 
 def _resource_for_uri(uri: object) -> GuidanceResource:
@@ -537,7 +671,13 @@ def _resource_for_uri(uri: object) -> GuidanceResource:
     try:
         return _RESOURCE_BY_URI[uri]
     except KeyError:
-        raise GuidanceResourceError("guidance_resource_uri_unregistered") from None
+        return _topic_resource(uri)
+
+
+def resource_for_uri(uri: object) -> GuidanceResource:
+    """Return one registered document or bounded heading topic by its exact URI."""
+
+    return _resource_for_uri(uri)
 
 
 def list_resources() -> tuple[GuidanceResource, ...]:

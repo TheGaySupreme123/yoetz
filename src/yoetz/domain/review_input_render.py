@@ -13,7 +13,9 @@ from collections.abc import Mapping, Sequence
 from typing import Final, cast
 
 __all__ = [
+    "has_agent_suppliable_missing",
     "render_missing_for_assessment_lines",
+    "render_missing_for_assessment_next",
     "render_review_input_manifest_compat_line",
     "render_review_input_manifest_compact",
     "render_review_input_manifest_coverage_note",
@@ -218,18 +220,12 @@ def render_review_input_manifest_compat_line(value: object) -> str:
     return "Provider-bound review input: " + "; ".join(states) + "." if states else ""
 
 
-def render_missing_for_assessment_lines(
-    items: object, *, include_refs: bool = True
-) -> tuple[str, ...]:
-    """Render #907 missing-item classifications for any public surface.
-
-    ``items`` may be the typed event rows or their JSON projection.  Only closed kind,
-    availability, and already admitted opaque references are copied.
-    """
+def _missing_rows(items: object) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+    """Return safe ``(kind, availability, target_refs)`` rows for public renderers."""
 
     if not isinstance(items, Sequence) or isinstance(items, str):
         return ()
-    lines = ["Missing for assessment (the reviewer could not assess the packet):"]
+    rows: list[tuple[str, str, tuple[str, ...]]] = []
     for item in cast(Sequence[object], items):
         if isinstance(item, Mapping):
             source = _mapping(cast(object, item))
@@ -249,13 +245,50 @@ def render_missing_for_assessment_lines(
         availability = _token(source.get("availability"), _MISSING_AVAILABILITIES)
         if kind is None or availability is None:
             continue
-        refs = _refs(source.get("target_refs"))
+        rows.append((kind, availability, _refs(source.get("target_refs"))))
+    return tuple(rows)
+
+
+def has_agent_suppliable_missing(items: object) -> bool:
+    """Whether a check has a named review input the agent can supply or repair."""
+
+    return any(availability == "agent_suppliable" for _, availability, _ in _missing_rows(items))
+
+
+def render_missing_for_assessment_next(items: object) -> str:
+    """Return the authoritative continuation for actionable review-input gaps, if any."""
+
+    if not has_agent_suppliable_missing(items):
+        return ""
+    return (
+        "Overall next: supply or repair the named agent-suppliable review input "
+        "before requesting an ordinary receipt."
+    )
+
+
+def render_missing_for_assessment_lines(
+    items: object, *, include_refs: bool = True
+) -> tuple[str, ...]:
+    """Render #907 missing-item classifications for any public surface.
+
+    ``items`` may be the typed event rows or their JSON projection.  Only closed kind,
+    availability, and already admitted opaque references are copied.
+    """
+
+    rows = _missing_rows(items)
+    if not rows:
+        return ()
+    lines = ["Missing for assessment (the reviewer could not assess the packet):"]
+    for kind, availability, refs in rows:
         target = (
             ", ".join(refs)
             if include_refs and refs
             else (f"{len(refs)} target refs" if refs else "no packet ref")
         )
         lines.append(f"- {kind} ({target}): {availability}")
+    next_step = render_missing_for_assessment_next(items)
+    if next_step:
+        lines.append(next_step)
     return tuple(lines) if len(lines) > 1 else ()
 
 

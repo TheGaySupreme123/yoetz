@@ -5,6 +5,9 @@ These are complete request bodies for the six Yoetz operations and ordinary
 metadata. The operation input schema remains the field-shape authority; these templates are an
 authoring fallback, not a second protocol.
 
+Use the small `startup.md`, `publication.md`, `consent.md`, or `page-delivery.md` topic when only
+one request family is needed. Keep this complete document for exact bodies and exceptional flows.
+
 For setup, settings changes, credentials, vault initialization/rotation, or transcript import,
 read [Setup and consent](#setup-and-consent) before preparing an action. For a SessionStart
 recommendation, read [Recommendations](#recommendations). Ordinary workflow calls with complete
@@ -60,13 +63,16 @@ limitation claim.
 
 `read_guidance` with only `uri` returns the full current document on demand. When a host may clip a
 large response, use the paged shape below. `page_size` is a bounded UTF-8 byte budget, not a
-character count; the service never splits a Unicode scalar value.
+character count; the service never splits a Unicode scalar value. The accepted range is **4 through
+16,384 bytes inclusive**, and the usable default is **4,096 bytes** when `page_size` is omitted.
+Send canonical decimal strings. A rejected size must identify `/page_size`, state the permitted
+range, and show the valid paged retry shape without echoing caller content; do not guess a size.
 
 ```json
 {
   "uri": "yoetz://guidance/workflow.md",
   "page": "0",
-  "page_size": "2048"
+  "page_size": "4096"
 }
 ```
 
@@ -672,6 +678,12 @@ recheck can still qualify when only `captured_object_unavailable`, `content_unse
 `host_outcome_unavailable`, or `unpaired_event` limits its case-wide host-observation coverage and
 the original finding coverage was readable; those gaps remain receipt limitations and the exception
 never applies to AI-powered findings.
+
+When writing the final answer or reading `human_text`, lead with scope and limits: what evidence and
+checks were actually covered, what was not verified, the checked frontier, AI-powered review
+status/reason, and material coverage gaps. Counts come after that statement. Never present a bare
+“no findings”, “zero actionable findings”, “clean”, or “verified” headline; say what the empty set
+means within the recorded scope and what remains unverified.
 
 ```json
 {

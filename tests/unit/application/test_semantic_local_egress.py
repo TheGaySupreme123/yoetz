@@ -32,6 +32,10 @@ from yoetz.domain.privacy import (
     PrivacyReason,
     ProviderBinding,
 )
+from yoetz.domain.receipts import (
+    SEMANTIC_PROVIDER_INPUT_MANIFEST_INVALID_GAP,
+    SEMANTIC_PROVIDER_INPUT_MANIFEST_MISSING_GAP,
+)
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.privacy import (
     EffectivePrivacyPolicy,
@@ -41,7 +45,7 @@ from yoetz.ports.privacy import (
     PrivacyClassifierPort,
     PrivacyPolicyStorePort,
 )
-from yoetz.ports.semantic import Deadline, SemanticJudgment
+from yoetz.ports.semantic import Deadline, SemanticJudgment, SemanticResultSuccess
 from yoetz.protocol.models import DataCategory, SemanticReason, SemanticStatus
 
 _NOW = datetime(2026, 7, 26, tzinfo=UTC)
@@ -299,6 +303,10 @@ async def test_local_semantic_success_persists_receipt_and_finalizes_local_prove
     assert final.provenance.local_disclosure_reservation_id == _PROPOSAL
     assert final.provenance.egress_authorization_id is None
     assert final.provenance.request_commitment is None
+    redacted_final = ready_composition._map_egress_to_final(  # pyright: ignore[reportPrivateUsage]
+        replace(result, redacted_span_count=2), ready_composition.IdPort()
+    )
+    assert redacted_final.case_content_gaps == ("content_redacted",)
 
 
 @pytest.mark.anyio
@@ -360,6 +368,7 @@ async def test_semantic_success_names_only_content_the_exact_prepared_packet_car
     assert result.disclosure.carried == frozenset({shown, recorded_by})
     assert result.disclosure.withheld == frozenset({withheld, clipped})
     assert result.disclosure.payload_events == frozenset({recorded_by})
+    assert result.provider_input_manifest_failure == SEMANTIC_PROVIDER_INPUT_MANIFEST_MISSING_GAP
     final = ready_composition._map_egress_to_final(  # pyright: ignore[reportPrivateUsage]
         result, ready_composition.IdPort()
     )
@@ -376,6 +385,23 @@ async def test_semantic_success_names_only_content_the_exact_prepared_packet_car
     opaque, _audit, _gateway = await _dispatch(persist=True)
     assert isinstance(opaque, SemanticEgressSuccess)
     assert opaque.disclosure is None
+    assert opaque.provider_input_manifest_failure == SEMANTIC_PROVIDER_INPUT_MANIFEST_INVALID_GAP
+
+
+def test_success_boundary_rejects_unclassified_provider_manifest_failures() -> None:
+    with pytest.raises(ValueError, match="provider_input_manifest_failure_invalid"):
+        SemanticEgressSuccess(
+            _REQUEST,
+            _PROPOSAL,
+            None,
+            SemanticDispatchKind.LOCAL_MODEL,
+            cast(
+                SemanticResultSuccess,
+                scripted_success(SemanticJudgment("no_material_discrepancy", ())).result,
+            ),
+            _CASE_DIGEST,
+            provider_input_manifest_failure="provider_text",
+        )
 
 
 @pytest.mark.anyio

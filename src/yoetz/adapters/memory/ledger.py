@@ -9,11 +9,13 @@ from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Final, Literal, cast
+from typing import Any, Final, Literal, cast
 
 from yoetz.domain.events import (
     CHECK_EVENT_SCHEMA_VERSION,
     FINDING_EVENT_SCHEMA_VERSION,
+    FINDING_SNIPPET_EVENT_SCHEMA_VERSION,
+    REVIEW_CHECK_EVENT_SCHEMA_VERSION,
     SEMANTIC_EVENT_SCHEMA_VERSION,
     AcceptedEvent,
     ActionRecordedPayload,
@@ -57,6 +59,7 @@ from yoetz.domain.events import (
     public_error_for_obligation_resolution_mismatch,
 )
 from yoetz.domain.findings import (
+    FindingKind,
     PriorFindingVerdictRecord,
     RankedFindings,
     RuntimeTokenUsage,
@@ -87,8 +90,9 @@ from yoetz.domain.values import (
     timestamp_from_datetime,
     writer_id,
 )
+from yoetz.kernel.check_totals import build_check_totals
 from yoetz.kernel.closure_readiness import ClosureReadinessFacts, closure_readiness_facts
-from yoetz.kernel.command_attempts import command_attempts
+from yoetz.kernel.command_attempts import attempted_items_for_obligation, command_attempts
 from yoetz.kernel.completion_scope import completion_scope_codes, with_completion_scope_coverage
 from yoetz.kernel.deterministic_checks import (
     CaseAvailabilityFacts,
@@ -108,6 +112,7 @@ from yoetz.kernel.observed_failures import (
     observed_event_ids_from_records,
     observed_run_facts,
 )
+from yoetz.kernel.plan_drift import plan_drift_signals
 from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.projections import (
     PROJECTION_VERSION,
@@ -210,6 +215,7 @@ from yoetz.protocol.models import (
     SEMANTIC_PROGRESS_PHASE_RANK,
     CheckPolicyExecutionModel,
     CheckScopeModel,
+    CheckTestEditTotalsModel,
     CoverageModel,
     FreshnessWire,
     FrontierModel,
@@ -225,6 +231,7 @@ from yoetz.protocol.models import (
     StatusFindingItemModel,
     StatusHistoryItemModel,
     StatusHistoryItemV14Model,
+    StatusLatestCheckTestEditsModel,
     StatusObligationItemModel,
     StatusObservedRunModel,
     StatusResultItemModel,
@@ -1162,6 +1169,53 @@ def compact_status_coverage(
     return coverage
 
 
+def _latest_check_test_edits(
+    records: tuple[LedgerRecord, ...], projection: ProjectionState
+) -> StatusLatestCheckTestEditsModel | None:
+    """Expose only the latest check's persisted structural test-edit counters."""
+
+    latest = projection.latest_tested_state
+    if latest is None:
+        return None
+    check_record = next(
+        (record for record in records if record.event_id == latest.source_check_event_id),
+        None,
+    )
+    if check_record is None or type(check_record.payload) is not CheckRecordedPayload:
+        return None
+    totals = check_record.payload.totals
+    if totals is None:
+        return None
+    try:
+        counters = CheckTestEditTotalsModel.model_validate(totals["test_edits"])
+    except KeyError, TypeError, ValueError:
+        # Legacy check events have no totals group. Status must keep that absence explicit rather
+        # than manufacture zero counts for an unexamined capture.
+        return None
+    read_availability = (
+        "unavailable"
+        if counters.examined == "0"
+        else "unknown"
+        if counters.baseline_known == "0" or counters.unknown != "0"
+        else "available"
+    )
+    return StatusLatestCheckTestEditsModel(
+        checked_frontier=FrontierModel(
+            sequence=str(latest.subject_frontier.sequence),
+            head_digest=latest.subject_frontier.head_digest,
+        ),
+        read_availability=read_availability,
+        examined=counters.examined,
+        baseline_known=counters.baseline_known,
+        modified=counters.modified,
+        renamed=counters.renamed,
+        deleted=counters.deleted,
+        skipped=counters.skipped,
+        unjustified=counters.unjustified,
+        unknown=counters.unknown,
+    )
+
+
 def _obligation_item(
     obligation: str,
     record: object,
@@ -1512,12 +1566,6 @@ def _projection_items(
             )
         return tuple(result)
     if view is ProjectionView.OBLIGATIONS:
-        attempted_items = frozenset(
-            item
-            for action in projection.actions.values()
-            if action.payload is not None
-            for item in action.payload.attempted_items
-        )
         actors: dict[str, set[str]] = {}
         for assignment in projection.assignments.values():
             if assignment.payload is None:
@@ -1529,7 +1577,7 @@ def _projection_items(
                 obligation,
                 record,
                 tuple(sorted(actors.get(obligation, ()), key=str.encode)),
-                attempted_items,
+                attempted_items_for_obligation(projection, obligation),
             ).model_copy(
                 update={"command_attempts": command_attempts(projection, records, obligation)}
             )
@@ -1591,61 +1639,72 @@ def _projection_items(
             response_record = projection.responses.get(finding.finding_id)
             response = None if response_record is None else response_record.payload
             finding_frontier = _record_frontier(records, source_frontiers[finding.finding_id])
-            finding_items.append(
-                StatusFindingItemModel(
-                    finding_id=finding.finding_id,
-                    kind=finding.kind.value,
-                    origin=finding.origin.value,
-                    priority=finding.priority,
-                    summary=finding.summary,
-                    detail=append_resolution_explanation(
-                        finding.detail,
-                        finding_resolution_explanation(
-                            projection,
-                            finding.finding_id,
-                            records,
-                            proof_state_cache=proof_state_cache,
-                        ),
+            finding_fields: dict[str, Any] = {
+                "finding_id": finding.finding_id,
+                "kind": finding.kind.value,
+                "origin": finding.origin.value,
+                "priority": finding.priority,
+                "summary": finding.summary,
+                "detail": append_resolution_explanation(
+                    finding.detail,
+                    finding_resolution_explanation(
+                        projection,
+                        finding.finding_id,
+                        records,
+                        proof_state_cache=proof_state_cache,
                     ),
-                    subject_refs=finding.subject_refs,
-                    policy_id=cast(
-                        Literal["research-evidence", "work-integrity"], finding.policy_id
+                ),
+                "subject_refs": finding.subject_refs,
+                "policy_id": cast(
+                    Literal["research-evidence", "work-integrity"], finding.policy_id
+                ),
+                "policy_version": cast(Literal["0.1.0"], finding.policy_version),
+                "subject_frontier": FrontierModel.model_validate(
+                    dict(finding.subject_frontier.as_wire())
+                ),
+                "coverage": CoverageModel.model_validate(coverage_to_json(finding.coverage)),
+                "provenance": (
+                    None
+                    if finding.provenance is None
+                    else semantic_provenance_to_json(finding.provenance)
+                ),
+                "disposition": "none" if response is None else response.disposition.value,
+                "resolved": finding_is_resolved(projection, finding.finding_id),
+                "response_event_id": (
+                    None if response_record is None else response_record.source_event_id
+                ),
+                "reason": None if response is None else response.reason,
+                "waiver_scope": (
+                    None
+                    if response is None or response.waiver_scope is None
+                    else response.waiver_scope.value
+                ),
+                "waiver_expiry": (
+                    None
+                    if response is None or response.waiver_expiry is None
+                    else response.waiver_expiry.wire
+                ),
+                "todo_state": finding_todo_state(projection, finding.finding_id).value,
+                "review_rounds": str(projection.findings[finding.finding_id].review_rounds),
+                "finding_frontier": (
+                    None
+                    if finding_frontier is None
+                    else FrontierModel.model_validate(dict(finding_frontier.as_wire()))
+                ),
+            }
+            if finding.challenge is not None:
+                finding_fields["challenge"] = {
+                    "alternative_interpretation": finding.challenge.alternative_interpretation,
+                    "discrepancy": finding.challenge.discrepancy,
+                    "requested_next_step": finding.challenge.requested_next_step,
+                    "uncertainty": finding.challenge.uncertainty,
+                    **(
+                        {}
+                        if finding.challenge.snippet is None
+                        else {"snippet": finding.challenge.snippet}
                     ),
-                    policy_version=cast(Literal["0.1.0"], finding.policy_version),
-                    subject_frontier=FrontierModel.model_validate(
-                        dict(finding.subject_frontier.as_wire())
-                    ),
-                    coverage=CoverageModel.model_validate(coverage_to_json(finding.coverage)),
-                    provenance=(
-                        None
-                        if finding.provenance is None
-                        else semantic_provenance_to_json(finding.provenance)
-                    ),
-                    disposition="none" if response is None else response.disposition.value,
-                    resolved=finding_is_resolved(projection, finding.finding_id),
-                    response_event_id=(
-                        None if response_record is None else response_record.source_event_id
-                    ),
-                    reason=None if response is None else response.reason,
-                    waiver_scope=(
-                        None
-                        if response is None or response.waiver_scope is None
-                        else response.waiver_scope.value
-                    ),
-                    waiver_expiry=(
-                        None
-                        if response is None or response.waiver_expiry is None
-                        else response.waiver_expiry.wire
-                    ),
-                    todo_state=finding_todo_state(projection, finding.finding_id).value,
-                    review_rounds=str(projection.findings[finding.finding_id].review_rounds),
-                    finding_frontier=(
-                        None
-                        if finding_frontier is None
-                        else FrontierModel.model_validate(dict(finding_frontier.as_wire()))
-                    ),
-                )
-            )
+                }
+            finding_items.append(StatusFindingItemModel(**finding_fields))
         return tuple(finding_items)
     if view is ProjectionView.COMPACT:
         opened = next(
@@ -1733,28 +1792,34 @@ def _projection_items(
                 key=str.encode,
             )
         )
-        return (
-            StatusCompactItemModel(
-                task_id=task,
-                session_id=session,
-                task_title=opened.task_title,
-                current_plan_event_id=scope.current_plan_event_id,
-                declared_obligation_count=(None if declared_count is None else str(declared_count)),
-                no_obligations_reason=(
-                    None
-                    if scope.no_obligations_reason is None
-                    else scope.no_obligations_reason.value
-                ),
-                open_obligation_count=None if open_count is None else str(open_count),
-                unanswered_finding_count=str(unanswered_count),
-                receipt_blocking_finding_count=str(receipt_blocking_count),
-                open_obligations=open_obligations[:10],
-                unanswered_findings=unanswered_findings[:10],
-                freshness=item_freshness.value,
-                coverage=CoverageModel.model_validate(coverage_to_json(item_coverage)),
-                gaps=item_gaps,
-            ),
+        item_gaps = tuple(
+            sorted(
+                set(item_gaps) | set(plan_drift_signals(projection, records).codes),
+                key=str.encode,
+            )
         )
+        compact_item_fields: dict[str, object] = {
+            "task_id": task,
+            "session_id": session,
+            "task_title": opened.task_title,
+            "current_plan_event_id": scope.current_plan_event_id,
+            "declared_obligation_count": (None if declared_count is None else str(declared_count)),
+            "no_obligations_reason": (
+                None if scope.no_obligations_reason is None else scope.no_obligations_reason.value
+            ),
+            "open_obligation_count": None if open_count is None else str(open_count),
+            "unanswered_finding_count": str(unanswered_count),
+            "receipt_blocking_finding_count": str(receipt_blocking_count),
+            "open_obligations": open_obligations[:10],
+            "unanswered_findings": unanswered_findings[:10],
+            "freshness": item_freshness.value,
+            "coverage": CoverageModel.model_validate(coverage_to_json(item_coverage)),
+            "gaps": item_gaps,
+        }
+        latest_check_test_edits = _latest_check_test_edits(records, projection)
+        if latest_check_test_edits is not None:
+            compact_item_fields["latest_check_test_edits"] = latest_check_test_edits
+        return (StatusCompactItemModel.model_validate(compact_item_fields),)
     if view is ProjectionView.VERSIONS:
         facts = build_status_version_slice_facts()
         return (
@@ -2646,6 +2711,12 @@ class MemoryLedgerAdapter:
             sorted(
                 set(_status_gap_codes(effective_projection.coverage_gaps))
                 | set(completion_scope_codes(effective_projection)),
+                key=str.encode,
+            )
+        )
+        status_gaps = tuple(
+            sorted(
+                set(status_gaps) | set(plan_drift_signals(effective_projection, prefix).codes),
                 key=str.encode,
             )
         )
@@ -3782,12 +3853,15 @@ class MemoryLedgerAdapter:
         *,
         scope: CheckScopeModel | None = None,
         semantic_conclusion: str | None = None,
+        review_summary: str | None = None,
+        verified: tuple[JsonObject, ...] = (),
         prior_finding_verdicts: tuple[PriorFindingVerdictRecord, ...] = (),
         missing_for_assessment: tuple[MissingForAssessmentItem, ...] = (),
         check_change_files: CheckChangeShownFiles | None = None,
         semantic_included_refs: tuple[str, ...] | None = None,
         semantic_withheld_item_ids: tuple[str, ...] = (),
         review_input_manifest: JsonObject | None = None,
+        totals: JsonObject | None = None,
     ) -> CheckCommitResult:
         key = (frozen.lease.writer_id, frozen.lease.operation_id)
         async with self._lock:
@@ -3896,12 +3970,19 @@ class MemoryLedgerAdapter:
             projection_version=PROJECTION_VERSION,
             semantic_provenance=semantic_provenance,
             semantic_conclusion=semantic_conclusion,
+            review_summary=review_summary,
+            verified=verified,
             missing_for_assessment=missing_for_assessment,
             prior_finding_verdicts=prior_finding_verdicts,
             check_change_files=check_change_files,
             semantic_included_refs=semantic_included_refs,
             semantic_withheld_item_ids=semantic_withheld_item_ids,
             review_input_manifest=review_input_manifest,
+            totals=(
+                build_check_totals(frozen.case, findings.findings, findings.suppressed_count)
+                if totals is None
+                else totals
+            ),
         )
         event_payloads.append((event_id(self._ids.new(IdKind.EVENT)), check_payload))
         accepted_at = _now(self._clock)
@@ -3927,10 +4008,21 @@ class MemoryLedgerAdapter:
                 ObjectSource(data=payload_bytes, declared_size=len(payload_bytes)), metadata
             )
             payload_ref = await self._objects.finalize(staged)
+            finding_schema_version = (
+                FINDING_SNIPPET_EVENT_SCHEMA_VERSION
+                if type(payload) is FindingRecordedPayload
+                and (
+                    payload.kind in {FindingKind.CODE_DEFECT, FindingKind.TASK_REQUIREMENT_UNMET}
+                    or (payload.challenge is not None and payload.challenge.snippet is not None)
+                )
+                else FINDING_EVENT_SCHEMA_VERSION
+            )
             schema = EventSchema(
                 "finding_recorded" if type(payload) is FindingRecordedPayload else "check_recorded",
-                FINDING_EVENT_SCHEMA_VERSION
+                finding_schema_version
                 if type(payload) is FindingRecordedPayload
+                else REVIEW_CHECK_EVENT_SCHEMA_VERSION
+                if review_summary is not None or verified or check_payload.totals is not None
                 else CHECK_EVENT_SCHEMA_VERSION
                 if semantic_conclusion is not None
                 else SEMANTIC_EVENT_SCHEMA_VERSION,
@@ -4015,9 +4107,13 @@ class MemoryLedgerAdapter:
             semantic_provenance,
             findings.coverage,
             CheckVersionSlice("0.1", "0.1.0", PROJECTION_VERSION, packs),
+            semantic_conclusion=check_payload.semantic_conclusion,
+            review_summary=check_payload.review_summary,
+            verified=check_payload.verified,
             missing_for_assessment=check_payload.missing_for_assessment,
             semantic_withheld_item_ids=check_payload.semantic_withheld_item_ids,
             review_input_manifest=check_payload.review_input_manifest,
+            totals=check_payload.totals,
         )
         canonical = canonical_encode(
             {

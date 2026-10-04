@@ -6,8 +6,10 @@ from collections.abc import Iterable, Mapping, Sequence
 from enum import Enum
 from typing import Final, cast
 
+from yoetz.domain.check_totals import render_check_totals
 from yoetz.domain.receipts import check_time_change_gap_sentence
 from yoetz.domain.review_input_render import (
+    has_agent_suppliable_missing,
     render_missing_for_assessment_lines,
     render_review_input_manifest_compat_line,
     render_review_input_manifest_lines,
@@ -18,6 +20,7 @@ from yoetz.protocol.ids import validate_opaque_item_id
 from yoetz.protocol.models import (
     CheckAwaitingHumanModel,
     CheckFindingChecklistModel,
+    CheckOverallNextModel,
     CheckProjectedFindingModel,
     CheckSuccessModel,
     OmittedContentModel,
@@ -26,6 +29,7 @@ from yoetz.protocol.models import (
     StatusAdvicePageModel,
     StatusCheckAdmissionModel,
     StatusClosureReadinessModel,
+    StatusCompactPageModel,
     StatusEvidencePageModel,
     StatusFindingsPageModel,
     StatusLineagePageModel,
@@ -203,7 +207,9 @@ def render_checklist_line(
     return line
 
 
-def _render_checklist(checklist: CheckFindingChecklistModel) -> list[str]:
+def _render_checklist(
+    checklist: CheckFindingChecklistModel, *, input_action_required: bool = False
+) -> list[str]:
     lines = [f"To-do list (review-round budget {checklist.attempt_budget}):"]
     for index, item in enumerate(checklist.items, start=1):
         lines.append(
@@ -235,8 +241,31 @@ def _render_checklist(checklist: CheckFindingChecklistModel) -> list[str]:
     )
     if total > len(checklist.items):
         lines.append(f"Not listed: {total - len(checklist.items)}")
-    lines.append(f"Next: {_CHECKLIST_NEXT_TEXT[checklist.next]}")
+    label = "Finding checklist next" if input_action_required else "Next"
+    lines.append(f"{label}: {_CHECKLIST_NEXT_TEXT[checklist.next]}")
     return lines
+
+
+def _render_overall_next(next_step: CheckOverallNextModel) -> str:
+    if next_step.action == "supply_missing_input":
+        action = "Supply or repair the named review input"
+    elif next_step.action == "work_open_findings":
+        action = "Repair or answer the named open findings"
+    elif next_step.action == "review_recorded_work":
+        action = "Review the recorded work for open obligations or undisclosed failures"
+    else:
+        action = (
+            "Disclose the limitation at the receipt endpoint"
+            if next_step.status == "ready_with_limitations"
+            else "Request the receipt"
+        )
+    targets = ""
+    if next_step.target_refs:
+        targets = " (targets: " + ", ".join(next_step.target_refs) + ")"
+    endpoint = ""
+    if next_step.acknowledged_incomplete_endpoint is not None:
+        endpoint = "; acknowledged incomplete endpoint: receipt"
+    return f"Overall next [{next_step.status}]: {action}{targets}{endpoint}."
 
 
 def render_human_check(result: CheckSuccessModel) -> str:
@@ -244,11 +273,23 @@ def render_human_check(result: CheckSuccessModel) -> str:
 
     if type(result) is not CheckSuccessModel:
         raise TypeError("check_result_invalid")
+    scoped_local_verdict = (
+        result.verdict == "no_issue_detected"
+        and result.semantic_status == "not_requested"
+        and result.semantic_reason == "deterministic_mode"
+    )
+    verdict_line = (
+        "Verdict: no issue detected within deterministic coverage"
+        if scoped_local_verdict
+        else f"Verdict: {result.verdict}"
+    )
     lines = [
-        f"Verdict: {result.verdict}",
+        verdict_line,
         f"AI-powered review: {_token(result.semantic_status)} ({_token(result.semantic_reason)})",
         render_human_findings(result.findings),
     ]
+    if result.totals is not None:
+        lines.insert(2, render_check_totals(result.totals.model_dump(mode="json")))
     if result.review_input_manifest is not None:
         compat_line = render_review_input_manifest_compat_line(
             result.review_input_manifest.model_dump(mode="json", by_alias=True)
@@ -270,8 +311,15 @@ def render_human_check(result: CheckSuccessModel) -> str:
     suppressed = int(result.suppressed_count)
     if suppressed:
         lines.append(f"Suppressed findings: {suppressed}")
+    if result.overall_next is not None:
+        lines.append(_render_overall_next(result.overall_next))
     if result.finding_checklist is not None:
-        lines.extend(_render_checklist(result.finding_checklist))
+        lines.extend(
+            _render_checklist(
+                result.finding_checklist,
+                input_action_required=has_agent_suppliable_missing(result.missing_for_assessment),
+            )
+        )
     if result.children is not None:
         children = result.children
         lines.append(f"Child dependencies ({children.label}):")
@@ -428,6 +476,18 @@ def render_human_status(result: StatusSuccessModel) -> str:
         ),
         *render_closure_readiness_lines(result.closure_readiness),
     ]
+    if isinstance(result.page, StatusCompactPageModel):
+        for item in result.page.items:
+            edits = item.latest_check_test_edits
+            if edits is not None:
+                lines.append(
+                    "Latest check test edits: "
+                    f"{edits.read_availability}; checked frontier {edits.checked_frontier.sequence}; "
+                    f"{edits.modified} modified, {edits.renamed} renamed, "
+                    f"{edits.deleted} deleted, {edits.skipped} skipped, "
+                    f"{edits.unjustified} unjustified, {edits.unknown} unknown "
+                    f"(baseline known {edits.baseline_known})"
+                )
     if isinstance(result.page, StatusOperationPageModel):
         lines.extend((f"Operation: {result.page.operation_request_id} ({result.page.state})",))
         if result.page.continuation is not None:

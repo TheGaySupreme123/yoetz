@@ -1285,6 +1285,83 @@ def test_function_call_output_maps_completed_tool_without_unknown_gap() -> None:
     assert tuple(item.role for item in batch.drafts) == ("action", "result")
 
 
+def test_completed_masking_compound_command_preserves_outer_zero_with_nested_gap() -> None:
+    record = CodexParsedRecord(
+        1,
+        0,
+        160,
+        "event_msg",
+        "CommandExecution",
+        JsonObject(
+            {
+                "payload": {
+                    "item": {
+                        "id": "command-compound",
+                        "type": "CommandExecution",
+                        "command": "pnpm vitest test/a.ts; tsc --noEmit",
+                        "exit_code": 0,
+                        "status": "completed",
+                    },
+                    "type": "item_completed",
+                }
+            }
+        ),
+    )
+    envelope = envelope_from_stream_record(
+        record,
+        session_commitment="hmac-sha256:" + ("ae" * 32),
+        cursor=ObservationCursor(
+            source_generation=1,
+            byte_position=160,
+            event_position=1,
+            last_source_commitment=_EMPTY,
+            mapping_version=STREAM_MAPPING_VERSION,
+        ),
+    )
+    assert envelope.structural_payload["runner_class"] == "compound"
+    assert envelope.structural_payload["exit_status"] == 0
+    assert envelope.structural_payload["result_status"] == "completed"
+    assert ObservationGapCode.COMPOUND_OUTCOME_UNAVAILABLE.value in envelope.gap_codes
+
+
+def test_completed_and_compound_command_keeps_proven_zero_without_nested_gap() -> None:
+    record = CodexParsedRecord(
+        1,
+        0,
+        160,
+        "event_msg",
+        "CommandExecution",
+        JsonObject(
+            {
+                "payload": {
+                    "item": {
+                        "id": "command-compound-and",
+                        "type": "CommandExecution",
+                        "command": "pnpm vitest test/a.ts && tsc --noEmit",
+                        "exit_code": 0,
+                        "status": "completed",
+                    },
+                    "type": "item_completed",
+                }
+            }
+        ),
+    )
+    envelope = envelope_from_stream_record(
+        record,
+        session_commitment="hmac-sha256:" + ("af" * 32),
+        cursor=ObservationCursor(
+            source_generation=1,
+            byte_position=160,
+            event_position=1,
+            last_source_commitment=_EMPTY,
+            mapping_version=STREAM_MAPPING_VERSION,
+        ),
+    )
+    assert envelope.structural_payload["runner_class"] == "compound"
+    assert envelope.structural_payload["exit_status"] == 0
+    assert ObservationGapCode.COMPOUND_OUTCOME_UNAVAILABLE.value not in envelope.gap_codes
+
+
 def test_function_call_output_preserves_negative_one_exit_status() -> None:
     record = CodexParsedRecord(
         1,
@@ -1534,6 +1611,7 @@ def test_0_150_1_stream_admits_from_header_and_envelopes_carry_no_content(
         "action",
         "tool_name",
         "result_status",
+        "runner_class",
         "exit_status",
         "tool_call_id",
         "subagent_id",

@@ -36,6 +36,10 @@ _COMPLETION_SCOPE_GAPS: Final = frozenset(
 
 class CheckCompleteness(str, Enum):  # noqa: UP042 - exact internal contract token
     COMPLETE = "complete"
+    # Deterministic-only checks may have the standing absence-of-semantic-review limitation while
+    # still reporting a bounded local result.  This is an internal ranking state; the public
+    # coverage vector continues to carry every gap and the receipt remains coverage-bounded.
+    SCOPED_COMPLETE = "scoped_complete"
     COVERAGE_INCOMPLETE = "coverage_incomplete"
     REQUIRED_INCOMPLETE = "required_incomplete"
 
@@ -138,6 +142,11 @@ def _verdict(
         return CheckVerdict.ACTION_REQUIRED
     if context.completeness is CheckCompleteness.COVERAGE_INCOMPLETE:
         return CheckVerdict.INSUFFICIENT_COVERAGE
+    if context.completeness is CheckCompleteness.SCOPED_COMPLETE:
+        # A non-actionable coverage finding can remain visible beside a scoped result.  It does
+        # not make the local work actionable, but the selected row is still returned rather than
+        # tripping the complete-context invariant below.
+        return CheckVerdict.NO_ISSUE_DETECTED
     if selected:
         raise ProtocolValueError("invalid_ranked_findings")
     return CheckVerdict.NO_ISSUE_DETECTED

@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -70,6 +71,7 @@ from yoetz.domain.values import (
     ClaimId,
     EvidenceId,
     Frontier,
+    JsonObject,
     disclosure_continuation,
     object_id,
     timestamp_from_string,
@@ -80,6 +82,12 @@ from yoetz.kernel.projections import (
     ClaimProjectionRecord,
     EvidenceProjectionRecord,
     PendingMissingForAssessment,
+)
+from yoetz.ports.change_capture import (
+    ChangeMetadataEntry,
+    CheckChangeCapture,
+    CheckChangeMetadata,
+    CheckWorkspaceSource,
 )
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ids import IdPort
@@ -375,6 +383,8 @@ class _App:
         self.crash_semantic = crash_semantic
         self.semantic_calls = 0
         self.reconcile_observation_capture: Callable[[TaskRuntime], Awaitable[None]] | None = None
+        self.change_capture: object | None = None
+        self.start_catalog: object | None = None
         capabilities = {
             RuntimeCapability.WRITE,
             RuntimeCapability.PAYLOAD_READ,
@@ -421,28 +431,56 @@ class _App:
         return self.semantic_result
 
 
-def _request(mode: str = "deterministic_only", *, max_findings: str = "1") -> CheckRequest:
-    return CheckRequest.model_validate(
-        {
-            "protocol_version": "0.1",
-            "schema_version": "1.0.0",
-            "request_id": _REQUEST,
-            "session_id": _SESSION,
-            "writer_id": _WRITER,
-            "expected_frontier": {
-                "sequence": str(FRONTIER.sequence),
-                "head_digest": FRONTIER.head_digest,
-            },
-            "mode": mode,
-            "max_findings": max_findings,
-            "actor": {"actor_id": "harness:test", "actor_type": "harness"},
-            "client": {
-                "kind": "test_client",
-                "version": "0.1.0",
-                "integration": "local_cli",
-            },
-        }
-    )
+class _StructuralCapturePort:
+    def __init__(self, capture: CheckChangeCapture) -> None:
+        self.capture_result = capture
+        self.calls: list[tuple[str, object]] = []
+        self.metadata_calls: list[tuple[str, object]] = []
+
+    def capture(self, workspace: str, base: object) -> CheckChangeCapture:
+        raise AssertionError("structural accounting must not call content capture")
+
+    def capture_metadata(self, workspace: str, base: object) -> CheckChangeMetadata:
+        self.metadata_calls.append((workspace, base))
+        return CheckChangeMetadata(
+            base=self.capture_result.base,
+            entries=(ChangeMetadataEntry("M", "tests/test_existing.py"),),
+            tracked_files=1,
+            untracked_files=0,
+            omitted_files=0,
+            truncated=False,
+            base_commit=self.capture_result.base_commit,
+        )
+
+
+class _StructuralStartCatalog:
+    async def resolve_route(self, session_id: str) -> object:
+        assert session_id == _SESSION
+        return SimpleNamespace(repository_privacy_commitment="hmac-sha256:" + "a" * 64)
+
+
+def _request(mode: str | None = "deterministic_only", *, max_findings: str = "1") -> CheckRequest:
+    body: dict[str, object] = {
+        "protocol_version": "0.1",
+        "schema_version": "1.0.0",
+        "request_id": _REQUEST,
+        "session_id": _SESSION,
+        "writer_id": _WRITER,
+        "expected_frontier": {
+            "sequence": str(FRONTIER.sequence),
+            "head_digest": FRONTIER.head_digest,
+        },
+        "max_findings": max_findings,
+        "actor": {"actor_id": "harness:test", "actor_type": "harness"},
+        "client": {
+            "kind": "test_client",
+            "version": "0.1.0",
+            "integration": "local_cli",
+        },
+    }
+    if mode is not None:
+        body["mode"] = mode
+    return CheckRequest.model_validate(body)
 
 
 @pytest.mark.anyio
@@ -462,6 +500,70 @@ async def test_deterministic_check_freezes_ranks_commits_and_releases() -> None:
         (CheckPhase.LOCAL_READY, CheckPhase.READY_TO_FINALIZE),
     ]
     assert cast(_Runtime, app.runtime).release_count == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("mode", "semantic"),
+    (("deterministic_only", False), ("semantic_if_configured", True)),
+)
+async def test_checks_account_for_preexisting_test_edits_without_provider_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    semantic: bool,
+) -> None:
+    capture = CheckChangeCapture(
+        base="task_start",
+        text=b"""Yoetz check-time change
+Files:
+  M tests/test_existing.py (+1 -1)
+End of header. The unified diff follows.
+diff --git a/tests/test_existing.py b/tests/test_existing.py
+--- a/tests/test_existing.py
++++ b/tests/test_existing.py
+@@ -1 +1 @@
+-assert True
++assert False
+""",
+        tracked_files=1,
+        untracked_files=0,
+        omitted_files=0,
+        truncated=False,
+        base_commit="a" * 40,
+    )
+    app = _App(semantic=semantic)
+    action = ActionRecordedPayload(
+        act(1),
+        ActionKind.EDIT,
+        "Edit the existing test",
+        attempted_items=("tests/test_existing.py",),
+    )
+    app.ledger.frozen = FrozenCase(
+        make_case(actions={act(1): record(action, 1)}), app.ledger.frozen.lease
+    )
+    app.change_capture = _StructuralCapturePort(capture)
+    app.start_catalog = _StructuralStartCatalog()
+    source = CheckWorkspaceSource("/workspace", "hmac-sha256:" + "a" * 64)
+    monkeypatch.setattr(check_module, "current_check_workspace_source", lambda: source)
+
+    result = await execute_check_commit(app, _request(mode, max_findings="4"))
+
+    if semantic:
+        assert result.semantic_status is SemanticStatus.NOT_CONFIGURED
+        assert result.semantic_reason is SemanticReason.PROVIDER_NOT_CONFIGURED
+    else:
+        assert result.semantic_status is SemanticStatus.NOT_REQUESTED
+        assert result.semantic_reason is SemanticReason.DETERMINISTIC_MODE
+    assert "preexisting_test_edit_unjustified" in result.coverage.known_gaps
+    # This fixture records an edit but only a material claim. The integrity finding is gated on
+    # an explicit completion claim, so routine research checks keep the structural gap visible
+    # without misclassifying the test edit as an actionable completion failure.
+    assert not any(
+        finding.kind is FindingKind.TASK_REQUIREMENT_UNMET for finding in result.findings
+    )
+    assert isinstance(app.change_capture, _StructuralCapturePort)
+    assert app.change_capture.calls == []
+    assert app.change_capture.metadata_calls == [("/workspace", None)]
 
 
 @pytest.mark.anyio
@@ -616,7 +718,10 @@ async def test_resolved_declared_scope_reaches_clean_check_verdict() -> None:
     )
     assert deterministic_checks_module.completion_scope_gap(case.projection) is None
     app = _App(semantic=True)
-    app.semantic_result = _succeeded(SemanticJudgment("no_material_discrepancy", ()))
+    app.semantic_result = replace(
+        _succeeded(SemanticJudgment("no_material_discrepancy", ())),
+        provider_input_manifest=_provider_bound_manifest(),
+    )
     app.ledger.frozen = FrozenCase(case, app.ledger.frozen.lease)
 
     checked = await execute_check_commit(app, _request("semantic_if_configured"))
@@ -624,6 +729,94 @@ async def test_resolved_declared_scope_reaches_clean_check_verdict() -> None:
     assert checked.findings == ()
     assert checked.coverage.known_gaps == ()
     assert checked.verdict.value == "no_issue_detected"
+
+
+@pytest.mark.anyio
+async def test_deterministic_only_returns_scoped_clean_with_standing_review_gap() -> None:
+    action = ActionRecordedPayload(
+        act(1),
+        ActionKind.COMMAND,
+        "Run the declared change",
+        obligation_refs=(obl(1),),
+        command="true",
+    )
+    result = ResultRecordedPayload(res(1), act(1), ResultOutcome.SUCCESS, exit_status=0)
+    obligation = ObligationPublishedPayload(
+        obl(1),
+        "Complete the declared change",
+        "A successful recorded result",
+        ObligationStatus.RESOLVED,
+        resolution_evidence_refs=(res(1),),
+    )
+    claim = ClaimRecordedPayload(
+        clm(1),
+        ClaimKind.COMPLETION,
+        "The declared change is complete.",
+        (res(1),),
+        obligation_refs=(obl(1),),
+    )
+    plan = PlanPublishedPayload(1, "Declared change", (obl(1),), ())
+    case = make_case(
+        plans={1: plan_record(plan, 1)},
+        obligations={obl(1): obligation_record(obligation, 2)},
+        actions={act(1): record(action, 3)},
+        results={res(1): record(result, 4)},
+        claims={clm(1): record(claim, 5)},
+    )
+    app = _App()
+    app.ledger.frozen = FrozenCase(case, app.ledger.frozen.lease)
+
+    checked = await execute_check_commit(app, _request("deterministic_only"))
+
+    assert checked.findings == ()
+    assert checked.verdict.value == "no_issue_detected"
+    assert checked.semantic_status is SemanticStatus.NOT_REQUESTED
+    assert checked.semantic_reason is SemanticReason.DETERMINISTIC_MODE
+    assert checked.coverage.known_gaps == ("semantic_review_not_requested",)
+
+
+@pytest.mark.anyio
+async def test_disabled_policy_resolves_omitted_mode_to_scoped_clean() -> None:
+    action = ActionRecordedPayload(
+        act(1),
+        ActionKind.COMMAND,
+        "Run the declared change",
+        obligation_refs=(obl(1),),
+        command="true",
+    )
+    result = ResultRecordedPayload(res(1), act(1), ResultOutcome.SUCCESS, exit_status=0)
+    obligation = ObligationPublishedPayload(
+        obl(1),
+        "Complete the declared change",
+        "A successful recorded result",
+        ObligationStatus.RESOLVED,
+        resolution_evidence_refs=(res(1),),
+    )
+    claim = ClaimRecordedPayload(
+        clm(1),
+        ClaimKind.COMPLETION,
+        "The declared change is complete.",
+        (res(1),),
+        obligation_refs=(obl(1),),
+    )
+    case = make_case(
+        plans={1: plan_record(PlanPublishedPayload(1, "Declared change", (obl(1),), ()), 1)},
+        obligations={obl(1): obligation_record(obligation, 2)},
+        actions={act(1): record(action, 3)},
+        results={res(1): record(result, 4)},
+        claims={clm(1): record(claim, 5)},
+    )
+    app = _App()
+    app.verification_policy = VerificationPolicy(semantic="disabled")
+    app.ledger.frozen = FrozenCase(case, app.ledger.frozen.lease)
+
+    checked = await execute_check_commit(app, _request(None))
+
+    assert checked.findings == ()
+    assert checked.verdict.value == "no_issue_detected"
+    assert checked.semantic_status is SemanticStatus.NOT_REQUESTED
+    assert checked.semantic_reason is SemanticReason.DETERMINISTIC_MODE
+    assert checked.coverage.known_gaps == ("semantic_review_not_requested",)
 
 
 @pytest.mark.anyio
@@ -1092,6 +1285,36 @@ def _succeeded(judgment: SemanticJudgment) -> FinalSemanticEvaluation:
             egress_authorization_id="aut_30000000-0000-4000-8000-000000000001",
             request_commitment="hmac-sha256:" + "b" * 64,
         ),
+    )
+
+
+def _provider_bound_manifest() -> JsonObject:
+    section = JsonObject(
+        {
+            "status": "missing",
+            "source_refs": [],
+            "item_ids": [],
+            "omitted_refs": [],
+            "omission_reasons": [],
+            "revision": None,
+            "content_digest": None,
+            "content_bytes": 0,
+        }
+    )
+    return JsonObject(
+        {
+            "schema": "yoetz.review-input-manifest/1",
+            "phase": "provider_bound",
+            "specification": section,
+            "current_diff": section,
+            "caller_evidence": section,
+            "latest_verification": section,
+            "prior_finding_context": section,
+            "missing_inputs": [],
+            "selected_item_count": 0,
+            "selected_excerpt_bytes": 0,
+            "omitted_item_count": 0,
+        }
     )
 
 
