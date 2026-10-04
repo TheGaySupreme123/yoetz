@@ -245,7 +245,7 @@ img, svg { max-width: 100%; }
 .stanza .bench-dot.off { opacity: 0; }
 
 /* ---------- Story copy: one fixed layer, blocks cross-fade in place ---------- */
-.story .spacer { height: 945vh; height: 945svh; margin-top: -100vh; margin-top: -100svh; }
+.story .spacer { height: 982vh; height: 982svh; margin-top: -100vh; margin-top: -100svh; }
 .copies { position: absolute; inset: 0; pointer-events: none; }
 .copy {
   position: absolute;
