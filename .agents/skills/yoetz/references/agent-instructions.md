@@ -10,7 +10,7 @@ Do not call `resources/list` or `list_mcp_resources` to find Yoetz guidance. The
 
 Legacy triggers: startup `yoetz://guidance/agent-instructions.md`; resume/recovery/delegation/capacity `yoetz://guidance/workflow.md`; publication `yoetz://guidance/publication-policy.md`; check/receipt `yoetz://guidance/coverage-and-receipts.md`; schema/setup/consent/import `yoetz://guidance/request-templates.md`.
 
-Focused topics: `startup.md`, `recovery.md`, `publication.md`, `review.md`, `receipt.md`, `delegation.md`, `consent.md`, `page-delivery.md`. Heading topics such as `yoetz://guidance/workflow.md#start-and-resume` are a closed catalog: use only an anchor guidance names verbatim, never one derived from a heading, tool, or event name. If unsure, read the whole document; an unknown anchor's rejection lists that document's anchors.
+Focused topics: `startup.md`, `recovery.md`, `publication.md`, `review.md`, `receipt.md`, `delegation.md`, `consent.md`, `page-delivery.md`. Heading topics such as `yoetz://guidance/workflow.md#start-and-resume` are a closed catalog: use only anchors guidance names verbatim, never derived ones; an unknown anchor's rejection lists the valid ones.
 
 # Start contract
 
