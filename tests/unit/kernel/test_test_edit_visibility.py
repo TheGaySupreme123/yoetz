@@ -3,15 +3,24 @@ from __future__ import annotations
 import hashlib
 from dataclasses import replace
 
+import pytest
+
 from yoetz.domain.events import (
     ActionKind,
     ActionRecordedPayload,
     DecisionRecordedPayload,
+    ObligationPublishedPayload,
+    ObligationStatus,
+    PlanPublishedPayload,
+    RequestedItem,
+    RequestedItemKind,
     encode_payload,
 )
-from yoetz.domain.values import action_id, actor_id, event_id
+from yoetz.domain.values import EventId, action_id, actor_id, event_id, obligation_id
 from yoetz.kernel.projections import (
     DecisionProjectionRecord,
+    ObligationProjectionRecord,
+    PlanProjectionRecord,
     ProjectionRecord,
     ProjectionState,
     empty_projection_state,
@@ -280,3 +289,110 @@ def test_an_older_decision_does_not_clear_a_later_edit_of_the_same_path() -> Non
 
     assert facts.unjustified == 1
     assert "preexisting_test_edit_unjustified" in facts.gaps
+
+
+_STATEMENT_EVENT = event_id("evt_10000000-0000-4000-8000-000000000090")
+
+
+def _with_statement_obligation(
+    projection: ProjectionState,
+    *,
+    value: str,
+    cites_statement: bool = True,
+    item_kind: RequestedItemKind = RequestedItemKind.FILE,
+) -> ProjectionState:
+    """Add a plan whose one obligation requests ``value`` (TB4 mvcc pilot shape)."""
+
+    obligation = ObligationPublishedPayload(
+        obligation_id("obl_10000000-0000-4000-8000-000000000001"),
+        "Add the requested regression test",
+        "The regression test runs",
+        ObligationStatus.OPEN,
+        requested_items=(RequestedItem(item_kind, value),),
+        source_refs=(_STATEMENT_EVENT,) if cites_statement else (),
+    )
+    plan = PlanPublishedPayload(1, "Plan", (obligation.obligation_id,))
+    return replace(
+        projection,
+        plans={
+            1: PlanProjectionRecord(
+                payload=plan,
+                payload_digest=canonical_digest(encode_payload(plan)),
+                redacted=False,
+                source_event_id=event_id("evt_10000000-0000-4000-8000-000000000091"),
+                source_frontier=1,
+            )
+        },
+        obligations={
+            obligation.obligation_id: ObligationProjectionRecord(
+                payload=obligation,
+                payload_digest=canonical_digest(encode_payload(obligation)),
+                redacted=False,
+                source_event_id=event_id("evt_10000000-0000-4000-8000-000000000092"),
+                source_frontier=1,
+            )
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    ("tests/skip_test.py", "./tests/skip_test.py", "/app/tests/skip_test.py"),
+)
+def test_statement_sourced_obligation_requesting_the_file_justifies_the_edit(value: str) -> None:
+    projection = _with_statement_obligation(_projection(justified=False), value=value)
+
+    facts = preexisting_test_edits(
+        _capture(include_ordinary=False), projection, task_statement_event_id=_STATEMENT_EVENT
+    )
+
+    assert facts.unjustified == 0
+    assert "preexisting_test_edit_unjustified" not in facts.gaps
+    # The edit stays visible as a disclosed pre-existing test modification.
+    assert "preexisting_test_modified" in facts.gaps
+
+
+@pytest.mark.parametrize(
+    ("value", "cites", "kind", "statement"),
+    (
+        ("tests/skip_test.py", False, RequestedItemKind.FILE, _STATEMENT_EVENT),
+        ("tests/skip_test.py", True, RequestedItemKind.CHANGE, _STATEMENT_EVENT),
+        ("tests/other_test.py", True, RequestedItemKind.FILE, _STATEMENT_EVENT),
+        ("app/tests/skip_test.py", True, RequestedItemKind.FILE, _STATEMENT_EVENT),
+        ("tests/skip_test.py", True, RequestedItemKind.FILE, None),
+    ),
+)
+def test_only_the_exact_statement_sourced_file_item_justifies_the_edit(
+    value: str, cites: bool, kind: RequestedItemKind, statement: EventId | None
+) -> None:
+    projection = _with_statement_obligation(
+        _projection(justified=False), value=value, cites_statement=cites, item_kind=kind
+    )
+
+    facts = preexisting_test_edits(
+        _capture(include_ordinary=False), projection, task_statement_event_id=statement
+    )
+
+    assert facts.unjustified == 1
+    assert "preexisting_test_edit_unjustified" in facts.gaps
+
+
+def test_statement_sourced_file_item_also_justifies_a_metadata_only_edit() -> None:
+    metadata = CheckChangeMetadata(
+        base="task_start",
+        entries=(ChangeMetadataEntry("M", "tests/skip_test.py"),),
+        tracked_files=1,
+        untracked_files=0,
+        omitted_files=0,
+        truncated=False,
+        base_commit="a" * 40,
+    )
+    projection = _with_statement_obligation(
+        _projection(justified=False), value="tests/skip_test.py"
+    )
+
+    justified = preexisting_test_edits(
+        metadata, projection, task_statement_event_id=_STATEMENT_EVENT
+    )
+    assert justified.unjustified == 0
+    assert preexisting_test_edits(metadata, projection).unjustified == 1

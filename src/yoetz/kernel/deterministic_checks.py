@@ -473,8 +473,10 @@ DETERMINISTIC_FINDING_TEMPLATES: Final[
             "Record the repair evidence or revise the code-defect finding.",
         ),
         FindingKind.TASK_REQUIREMENT_UNMET: DeterministicFindingTemplate(
-            "An existing test-file edit lacks the recorded justification required by the task.",
-            "Record an exact action/path-digest decision for the edit or revert the test change.",
+            "An existing test file was edited without a recorded justification.",
+            "If the user's request asks for this test change, list the file's path as a"
+            " requested_items entry (item_kind file) of an obligation whose source_refs cite"
+            " the task-statement event, then check again; otherwise revert the test change.",
         ),
     }
 )

@@ -4803,6 +4803,11 @@ def _privacy_gated_semantic_evaluator(
                 else preexisting_test_edits(
                     check_change.change.capture,
                     frozen.case.projection,
+                    task_statement_event_id=(
+                        None
+                        if frozen.case.task_statement is None
+                        else frozen.case.task_statement.source_event_id
+                    ),
                 ).gaps
             )
             if test_edit_gaps:

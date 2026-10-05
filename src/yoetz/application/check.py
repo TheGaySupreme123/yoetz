@@ -3530,7 +3530,15 @@ async def execute_check_commit(
                     request_id=request.request_id,
                 )
                 if capture is not None:
-                    test_edit_facts = preexisting_test_edits(capture, frozen.case.projection)
+                    test_edit_facts = preexisting_test_edits(
+                        capture,
+                        frozen.case.projection,
+                        task_statement_event_id=(
+                            None
+                            if frozen.case.task_statement is None
+                            else frozen.case.task_statement.source_event_id
+                        ),
+                    )
                     deterministic_test_edit_facts = (
                         test_edit_facts if test_edit_facts.baseline_known else None
                     )
