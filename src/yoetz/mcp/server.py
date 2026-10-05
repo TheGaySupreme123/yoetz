@@ -3252,7 +3252,16 @@ async def _handle_call_tool_request(
 
 
 async def list_resources(runtime: BridgeRuntime = BRIDGE_RUNTIME) -> list[types.Resource]:
-    """List only static manifest-verified guidance; never touch the service slot."""
+    """List only static manifest-verified guidance; never touch the service slot.
+
+    The wire listing carries no fractional number. Codex builds its rmcp client with serde_json's
+    ``arbitrary_precision`` feature, under which rmcp before modelcontextprotocol/rust-sdk#1300
+    cannot decode a buffered float such as ``annotations.priority: 0.9``; the whole
+    ``ListResourcesResult`` then falls through to ``CustomResult`` and Codex reports
+    ``resources/list failed: Unexpected response type`` (every Codex attempt in the full3
+    benchmark). The registry keeps its relative priority, and the listing order already carries
+    it, so ``priority`` is omitted for every host rather than advertised to some.
+    """
 
     return [
         types.Resource(
@@ -3264,7 +3273,6 @@ async def list_resources(runtime: BridgeRuntime = BRIDGE_RUNTIME) -> list[types.
             size=resource.size,
             annotations=types.Annotations(
                 audience=cast(list[types.Role], list(resource.annotations.audience)),
-                priority=resource.annotations.priority,
             ),
         )
         for resource in runtime.resources
