@@ -80,6 +80,7 @@ from yoetz.mcp.semantic_destination import (
 from yoetz.mcp.summaries import (
     render_check_reviewer_output,
     render_safe_compact_summary,
+    summary_for_check_awaiting,
     summary_for_closure_prepare,
     summary_for_read_guidance,
 )
@@ -865,6 +866,10 @@ def _result_text(
     if wire.get("preparatory_only") is True:
         return summary_for_closure_prepare(wire)
     compact = render_safe_compact_summary(wire)
+    awaiting = summary_for_check_awaiting(wire)
+    if awaiting:
+        # A paused check has no verdict; its continuation is the only actionable fact, so it leads.
+        compact = f"{awaiting}\n{compact}" if compact else awaiting
     reviewer = render_check_reviewer_output(wire)
     totals = render_check_totals(wire.get("totals"))
     manifest = render_review_input_manifest_compact(wire.get("review_input_manifest"))
