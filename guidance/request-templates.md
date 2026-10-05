@@ -452,7 +452,11 @@ including a failed attempt — so the receipt can account for every requested it
 
 Use `claim_recorded/1.1.0` for new claims. Its payload keeps admissible evidence, successful
 results, and resolved obligations in `supporting_refs`, while partial or failed results belong in
-`limitation_refs`. It also admits `claim_id`, `claim_kind`, `disputes_refs`, `obligation_refs`,
+`limitation_refs`. A completion claim must list every live failed, partial, or unknown result in
+its scope, including command runs host hooks recorded that you never published; a failure retires
+only when a later observed run of the same command passes before the claim. Do not copy every
+non-success id from `status view=results`: if one is missing, the rejection names the exact ids
+(and their count) to add, so add those and retry with a new `request_id`. It also admits `claim_id`, `claim_kind`, `disputes_refs`, `obligation_refs`,
 `statement`, `subject_state`, and `supersedes_claim_refs` — never `attempted_items`, which lives on
 `action_recorded`. The current descriptor selects `publish-work-request/1.2.0`, but the public
 request body's `schema_version` remains `1.0.0` as shown below.

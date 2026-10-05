@@ -301,7 +301,10 @@ For `claim_revision_mismatch`, `safe_details` carries an allowlisted `invariant`
 domain rule that rejected the draft, and both the MCP text projection and the CLI render an
 `Invariant:` plus `Correction:` clause from it. The corrective phrases live in the shared recovery
 registry beside the continuation directives (ADR-030), so the same rejection reads the same way on
-both surfaces; the CLI previously rendered no correction at all.
+both surfaces; the CLI previously rendered no correction at all. For `limitation_refs_complete` the
+rejection also names the missing live result ids: `safe_details.count` is their number and the
+message lists up to 32 of them in ascending order (structural ledger ids, never caller content),
+so an author can disclose hook-observed failures it never published without reading every result.
 
 The invariant vocabulary is closed and gated twice: `yoetz.protocol.errors` holds
 `ADMITTED_CLAIM_REVISION_INVARIANTS` literally because it is a dependency root, `yoetz.domain.events`

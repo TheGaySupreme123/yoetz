@@ -1654,6 +1654,11 @@ class ClaimRevisionMismatch(ValueError):
     field: str
     invariant: str
     event_id: EventId | None = None
+    # Structural result ids a completion claim still owes in ``limitation_refs``. They are ledger
+    # identifiers, never caller content, and are carried only for ``limitation_refs_complete`` so
+    # the rejection names exactly what to add (hook-observed runs the author never published were
+    # otherwise invisible to it).
+    missing_refs: tuple[ResultId, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.field) is not str or self.field not in _CLAIM_REVISION_FIELDS:
@@ -1662,6 +1667,15 @@ class ClaimRevisionMismatch(ValueError):
             raise ProtocolValueError("invalid_event_value_type")
         if self.event_id is not None:
             object.__setattr__(self, "event_id", event_id(self.event_id))
+        if type(self.missing_refs) is not tuple:
+            raise ProtocolValueError("invalid_event_value_type")
+        if self.missing_refs and self.invariant != "limitation_refs_complete":
+            raise ProtocolValueError("invalid_event_value_type")
+        object.__setattr__(
+            self,
+            "missing_refs",
+            tuple(sorted({result_id(value) for value in self.missing_refs}, key=str.encode)),
+        )
         ValueError.__init__(self, "claim_revision_mismatch")
 
     @property
@@ -1705,16 +1719,24 @@ def public_error_for_claim_revision_mismatch(
     # ``invariant`` rides as a typed detail (ADR-030). It was previously legible only inside the
     # message below, which the MCP text projector does not copy, so that projector had to recover
     # it by matching this whole sentence with a regex.
-    details: dict[str, str] = {
+    details: dict[str, str | int] = {
         "invariant": mismatch.invariant,
         "reason_code": mismatch.reason_code,
     }
     if type(event_index) is int and 0 <= event_index < _MAX_EVENTS_PER_BATCH_FOR_POINTER:
         details["field"] = f"/event_drafts/{event_index}/payload/{mismatch.field}"
+    if mismatch.invariant == "limitation_refs_complete" and mismatch.missing_refs:
+        details["count"] = len(mismatch.missing_refs)
+        return PublicOperationError(
+            PublicErrorCode.EVENT_INVALID,
+            _limitation_refs_complete_message(mismatch.missing_refs),
+            False,
+            safe_details=details,
+        )
     return PublicOperationError(
         PublicErrorCode.EVENT_INVALID,
         (
-            "The event batch is invalid. claim_recorded/1.1.0 correction requires invariant "
+            "The event batch is invalid. claim_recorded/1.1.0 requires invariant "
             f"{mismatch.invariant} at {mismatch.field}. Use supersedes_claim_refs only for exact "
             "prior effective claim ids with overlapping obligation scope and a fresh, materially "
             "changed claim. Keep partial or failed result ids in limitation_refs rather than "
@@ -1723,6 +1745,30 @@ def public_error_for_claim_revision_mismatch(
         ),
         False,
         safe_details=details,
+    )
+
+
+# Bounded so the public message stays far below its 4096-byte ceiling: 32 result ids are 1,344
+# bytes. A larger set is named in order across retries, each naming the next 32.
+_MAX_NAMED_MISSING_LIMITATIONS: Final = 32
+
+
+def _limitation_refs_complete_message(missing: tuple[ResultId, ...]) -> str:
+    """Name the exact live non-success results a completion claim still has to disclose."""
+
+    named = missing[:_MAX_NAMED_MISSING_LIMITATIONS]
+    remainder = len(missing) - len(named)
+    more = f" and {remainder} more that the next attempt will name" if remainder > 0 else ""
+    return (
+        "The event batch is invalid. A claim_recorded/1.1.0 completion claim requires invariant "
+        "limitation_refs_complete: limitation_refs must name every failed, partial, or unknown "
+        "result that is still live in its "
+        "obligation scope, including command runs Yoetz observed through host hooks that you never "
+        f"published. Missing {len(missing)}: {', '.join(named)}{more}. Add these ids to "
+        "limitation_refs (unique, ascending, beside any already listed; never in supporting_refs), "
+        "and retry with a new request_id. A hook-observed "
+        "failure stops being required only after a later observed run of the same command passes "
+        "before the claim."
     )
 
 
