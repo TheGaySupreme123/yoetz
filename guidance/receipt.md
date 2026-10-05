@@ -4,7 +4,9 @@ Read this topic before closure or final prose. A receipt reports the recorded sc
 it is not a pass and never closes work.
 
 Before the final check, publish the completion claim and current evidence, read `status`, answer
-each unanswered finding, and check the repaired/current record. After the check, answer only the
+each unanswered finding, and check the repaired/current record. Answer each finding once; its
+`finding_frontier` may be the current status frontier, so no historical frontier search is needed.
+Non-actionable observation-authored findings need no answer. After the check, answer only the
 findings it returned that remain unanswered, then read `status view=findings` with
 `filter.include_resolved=true` and inspect `resolved`. Not returned is not resolved. A response does
 not repair a finding; a material repair needs a qualifying recheck. Responses to the check's own
