@@ -196,7 +196,8 @@ tokens, never the statement, plan, obligation or command prose.
    resolution evidence of the obligations it names) cites no hook-observed verification result
    recorded after the latest hook-observed edit. A verification result is a service-stamped
    observed command result with a recorded outcome whose host runner class is not `exploration`
-   or `vcs`. The rule is silent when hooks observed neither an edit nor a verification run, so a
+   or `vcs`; hook-captured evidence (native tool output) and evidence a verification result links
+   count at their own frontier. The rule is silent when hooks observed neither an edit nor a verification run, so a
    host without hooks keeps its coverage disclosure instead of an unanswerable finding. Repair:
    replace the claim citing the observed `res_` id from `status view=results`.
 3. *Test-edit justification.* An edit to a pre-existing test file is also justified when an

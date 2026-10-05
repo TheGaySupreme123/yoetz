@@ -382,8 +382,8 @@ def _unsupported_claim_findings(case: DeterministicCase) -> list[DeterministicAs
 
 def _observed_verification_facts(
     case: DeterministicCase,
-) -> tuple[int | None, dict[ResultId, int]]:
-    """Return the latest hook-observed edit frontier and the observed verification runs.
+) -> tuple[int | None, dict[str, int]]:
+    """Return the latest hook-observed edit frontier and the observed verification refs.
 
     Only service-stamped hook observations count (ADR-022): a cooperative edit or result never
     stands in for an observed one. A verification run is a hook-observed command result with a
@@ -401,7 +401,7 @@ def _observed_verification_facts(
             and payload.action_kind is ActionKind.EDIT
         ):
             latest_edit = max(latest_edit or 0, action.source_frontier)
-    runs: dict[ResultId, int] = {}
+    runs: dict[str, int] = {}
     for result_ref, result in case.projection.results.items():
         payload = result.payload
         if (
@@ -419,7 +419,19 @@ def _observed_verification_facts(
             or observed_action_runner_class(action.payload.description) in _NON_VERIFICATION_RUNNERS
         ):
             continue
-        runs[result_ref] = result.source_frontier
+        runs[str(result_ref)] = result.source_frontier
+    # Hook-captured evidence (for example native tool output) corroborates at its own frontier,
+    # and evidence a verification run links inherits that run's frontier.
+    for evidence_ref, evidence in case.projection.evidence.items():
+        if evidence.payload is not None and evidence.source_event_id in observed:
+            runs[str(evidence_ref)] = evidence.source_frontier
+    for result_ref, frontier in tuple(runs.items()):
+        if not result_ref.startswith("res_"):
+            continue
+        result = case.projection.results[ResultId(result_ref)]
+        if result.payload is not None:
+            for evidence_ref in result.payload.evidence_refs:
+                runs[str(evidence_ref)] = max(runs.get(str(evidence_ref), 0), frontier)
     return latest_edit, runs
 
 
@@ -449,7 +461,7 @@ def _uncorroborated_completion_findings(case: DeterministicCase) -> list[Determi
             obligation = case.projection.obligations.get(obligation_ref)
             if obligation is not None and obligation.payload is not None:
                 chain.update(obligation.payload.resolution_evidence_refs)
-        if any(ref.startswith("res_") and runs.get(ResultId(ref), -1) > after for ref in chain):
+        if any(runs.get(ref, -1) > after for ref in chain):
             continue
         output.append(
             build_policy_assessment(

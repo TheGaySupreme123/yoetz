@@ -8000,8 +8000,8 @@ plan. Names and contracts:
 - Observed corroboration (same amendment): work-integrity `claim_without_admissible_evidence` with
   facts `observed_verification_uncited` / `observed_verification_absent` (subject: the completion
   claim) fires when hooks observed an edit or verification run and the claim's support chain cites
-  no hook-observed, non-`exploration`/`vcs` command result with a recorded outcome after the latest
-  hook-observed edit.
+  no hook-observed, non-`exploration`/`vcs` command result with a recorded outcome (or hook-captured
+  evidence, or evidence such a result links) after the latest hook-observed edit.
 - The unreleased local control 2.9.0 carries the fields in place and admits either
   privacy-policy wire version. A newer client meets an older running service at the schema-manifest
   digest in `control-hello` (`manifest_mismatch`, superseded through `yoetz service restart`), and a

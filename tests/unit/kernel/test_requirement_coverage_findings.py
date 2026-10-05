@@ -16,6 +16,8 @@ from builders.policy_cases import (
     act,
     claim_record,
     clm,
+    evd,
+    evidence_record,
     evt,
     make_case,
     obl,
@@ -29,6 +31,8 @@ from yoetz.domain.events import (
     ActionRecordedPayload,
     ClaimKind,
     ClaimRecordedPayloadV1_1,
+    EvidenceKind,
+    EvidenceRecordedPayload,
     NoObligationsReason,
     ObligationPublishedPayload,
     ObligationStatus,
@@ -38,7 +42,7 @@ from yoetz.domain.events import (
 )
 from yoetz.domain.findings import FindingKind
 from yoetz.domain.task_statement import RecordedTaskStatement
-from yoetz.domain.values import ResultId
+from yoetz.domain.values import ResultId, object_id, timestamp_from_string
 from yoetz.kernel.closure_readiness import GapClass, classify_gap
 from yoetz.kernel.deterministic_checks import (
     DeterministicCase,
@@ -53,7 +57,7 @@ from yoetz.kernel.plan_drift import (
 )
 from yoetz.kernel.policies.work_integrity import work_integrity_findings
 from yoetz.kernel.projections import ProjectionRecord
-from yoetz.protocol.coverage import Coverage, PublicationChannel
+from yoetz.protocol.coverage import Coverage, EvidenceImmutability, PublicationChannel
 
 _STATEMENT_EVENT = evt(1)
 
@@ -320,3 +324,29 @@ def test_no_hook_observation_keeps_the_rule_silent() -> None:
     case = _corroboration_case(cooperative_result=60, claim=_claim(res(60)))
 
     assert _uncorroborated(case) == []
+
+
+def test_citing_hook_captured_evidence_after_the_last_edit_is_quiet() -> None:
+    """Native tool-output captures corroborate like the observed run that produced them."""
+
+    captured = EvidenceRecordedPayload(
+        evidence_id=evd(50),
+        evidence_kind=EvidenceKind.TEST_RESULT,
+        strength=EvidenceImmutability.IMMUTABLE_SNAPSHOT,
+        observed_at=timestamp_from_string("2026-10-05T12:00:00.000Z"),
+        captured_object_id=object_id("obj_10000000-0000-4000-8000-000000000050"),
+        content_digest="sha256:" + "a" * 64,
+    )
+
+    def case_with(edit_at: int) -> DeterministicCase:
+        base = _corroboration_case(edits=(edit_at,), claim=_claim(evd(50)))
+        return make_case(
+            plans=dict(base.projection.plans),
+            actions=dict(base.projection.actions),
+            evidence={evd(50): evidence_record(captured, 50)},
+            claims=dict(base.projection.claims),
+            coverage_overrides={evt(edit_at): _HOOK, evt(50): _HOOK},
+        )
+
+    assert _uncorroborated(case_with(20)) == []
+    assert len(_uncorroborated(case_with(60))) == 1
