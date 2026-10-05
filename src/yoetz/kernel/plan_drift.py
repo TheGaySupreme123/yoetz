@@ -303,17 +303,21 @@ def task_statement_unmapped(
 def no_material_work_decided(
     projection: ProjectionState,
     statement: RecordedTaskStatement | EventId | Iterable[EventId] | None,
+    *,
+    workspace_changed: bool | None,
 ) -> bool:
     """Whether a readable decision records that the request asks for no material work.
 
     The decision's statement must hold the exact line ``yoetz-no-material-work:<event>`` naming an
     event that recorded the current statement content; its rationale is required by the schema.
     The decision is contradicted, and therefore never counts, while the task records any edit
-    action: a task that changed files did material work and must map it to obligations.
+    action or ``workspace_changed`` is not ``False``: hosts record shell writes as command actions,
+    so the check-time change capture is the structural witness that no file changed. ``True``
+    (the capture shows a changed path) and ``None`` (no capture was available) both fail closed.
     """
 
     events = _statement_events(statement)
-    if not events:
+    if not events or workspace_changed is not False:
         return False
     if any(
         row.payload is not None and row.payload.action_kind is ActionKind.EDIT
@@ -337,13 +341,16 @@ def no_material_work_decided(
 def task_statement_scope_empty_at_completion(
     projection: ProjectionState,
     statement: RecordedTaskStatement | EventId | Iterable[EventId] | None,
+    *,
+    workspace_changed: bool | None,
 ) -> bool:
     """True when a completion claim stands on no plan or an explicit empty scope.
 
     A recorded statement, an effective completion claim, and a readable plan chain that declares
     no obligation (no plan at all, or an explicit empty-scope declaration) mean the agent is
     claiming completion without decomposing the user's request. Mid-task checks before any
-    completion claim never report it. A recorded no-material-work decision answers it.
+    completion claim never report it. A recorded no-material-work decision answers it only when
+    ``workspace_changed`` is ``False`` (see ``no_material_work_decided``).
     """
 
     events = _statement_events(statement)
@@ -354,13 +361,16 @@ def task_statement_scope_empty_at_completion(
         return False
     if not completion_claim_present(projection):
         return False
-    return not no_material_work_decided(projection, events)
+    return not no_material_work_decided(projection, events, workspace_changed=workspace_changed)
 
 
 def _instruction_unmapped(projection: ProjectionState, records: tuple[LedgerRecord, ...]) -> bool:
+    # This advisory drift code is derived from the ledger prefix alone, where no check-time change
+    # capture exists. It keeps the edit-action rule only (``workspace_changed=False``); the
+    # completion-gating finding in the check path consults the capture and fails closed.
     statement = current_task_statement(records)
     return task_statement_unmapped(projection, statement) or (
-        task_statement_scope_empty_at_completion(projection, statement)
+        task_statement_scope_empty_at_completion(projection, statement, workspace_changed=False)
     )
 
 

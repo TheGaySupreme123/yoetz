@@ -2075,17 +2075,20 @@ def _collapse_failed_work_overlap(
 def _task_statement_assessments(
     case: DeterministicCase,
     scope: CheckScope,
+    workspace_changed: bool | None,
 ) -> tuple[DeterministicAssessment, ...]:
     """The unmapped-task-statement finding for a whole-case check (TB4 pilot).
 
     The statement bounds the whole task, so a claim- or obligation-scoped check neither raises nor
     resolves it. Like the test-edit integrity finding it runs in every check mode: the agent must
     decompose the request into statement-sourced obligations before completion can read clean.
+    ``workspace_changed`` is the check-time change capture's answer (``None`` when unavailable);
+    a no-material-work decision answers the empty-scope form only when it is ``False``.
     """
 
     if not scope.whole_case:
         return ()
-    assessment = build_task_statement_unmapped_assessment(case)
+    assessment = build_task_statement_unmapped_assessment(case, workspace_changed=workspace_changed)
     return () if assessment is None else (assessment,)
 
 
@@ -2105,6 +2108,7 @@ def _requirement_assessments(
     scope: CheckScope,
     executions: tuple[CheckPolicyExecution, ...],
     test_edit_support_refs: tuple[EventId, ...],
+    workspace_changed: bool | None = None,
 ) -> tuple[DeterministicAssessment, ...]:
     """The research-evidence ``task_requirement_unmet`` findings computed beside the pack run.
 
@@ -2125,7 +2129,7 @@ def _requirement_assessments(
                 case, test_edit_support_refs, test_edit_support_refs
             )
         )
-    output.extend(_task_statement_assessments(case, scope))
+    output.extend(_task_statement_assessments(case, scope, workspace_changed))
     return tuple(output)
 
 
@@ -3523,6 +3527,10 @@ async def execute_check_commit(
         deterministic_test_edit_gaps: tuple[str, ...] = ()
         deterministic_test_edit_support_refs: tuple[EventId, ...] = ()
         deterministic_test_edit_facts: PreExistingTestEdits | None = None
+        # Whether the check-time change capture shows any changed path; ``None`` when no capture
+        # ran. A no-material-work decision counts only on an observed ``False`` (fail closed):
+        # hosts record shell writes as command actions, so edit actions alone cannot prove it.
+        workspace_changed: bool | None = None
         change_capture = getattr(app, "change_capture", None)
         start_catalog = getattr(app, "start_catalog", None)
         recorded_edit = any(
@@ -3558,6 +3566,9 @@ async def execute_check_commit(
                     request_id=request.request_id,
                 )
                 if capture is not None:
+                    workspace_changed = bool(
+                        capture.entries or capture.tracked_files or capture.untracked_files
+                    )
                     test_edit_facts = preexisting_test_edits(
                         capture,
                         frozen.case.projection,
@@ -3633,7 +3644,11 @@ async def execute_check_commit(
                 packs,
             )
             assessments = assessments + _requirement_assessments(
-                frozen.case, scope, executions, deterministic_test_edit_support_refs
+                frozen.case,
+                scope,
+                executions,
+                deterministic_test_edit_support_refs,
+                workspace_changed,
             )
             deterministic = allocate_findings(
                 app.ids,
@@ -3680,7 +3695,11 @@ async def execute_check_commit(
                     packs,
                 )
                 assessments = assessments + _requirement_assessments(
-                    frozen.case, scope, executions, deterministic_test_edit_support_refs
+                    frozen.case,
+                    scope,
+                    executions,
+                    deterministic_test_edit_support_refs,
+                    workspace_changed,
                 )
                 deterministic = allocate_findings(
                     app.ids,

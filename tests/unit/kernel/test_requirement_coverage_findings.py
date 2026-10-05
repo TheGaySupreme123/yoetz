@@ -227,11 +227,33 @@ def test_a_no_material_work_decision_answers_the_empty_scope_unless_work_was_edi
         f"The request needs no material work (yoetz-no-material-work:{_STATEMENT_EVENT}).",
     )
 
-    assert build_task_statement_unmapped_assessment(decided) is None
+    unchanged = {"workspace_changed": False}
+    assert build_task_statement_unmapped_assessment(decided, **unchanged) is None
     # A task that edited files did material work: the decision is contradicted.
-    assert build_task_statement_unmapped_assessment(contradicted) is not None
-    assert build_task_statement_unmapped_assessment(wrong_event) is not None
-    assert build_task_statement_unmapped_assessment(prose_only) is not None
+    assert build_task_statement_unmapped_assessment(contradicted, **unchanged) is not None
+    assert build_task_statement_unmapped_assessment(wrong_event, **unchanged) is not None
+    assert build_task_statement_unmapped_assessment(prose_only, **unchanged) is not None
+
+
+def test_a_no_material_work_decision_does_not_survive_shell_only_file_changes() -> None:
+    """Shell writes are command actions, so the check-time capture must witness no change."""
+
+    marker = f"No material work.\nyoetz-no-material-work:{_STATEMENT_EVENT}"
+    decided = _with_decision(_with_completion(_statement_case(empty_reason=True)), marker)
+    assert not any(
+        row.payload is not None and row.payload.action_kind is ActionKind.EDIT
+        for row in decided.projection.actions.values()
+    )
+
+    # The capture shows a changed path although no edit action was recorded: finding kept.
+    changed = build_task_statement_unmapped_assessment(decided, workspace_changed=True)
+    assert changed is not None
+    assert changed.candidate.summary == TASK_STATEMENT_SCOPE_EMPTY_SUMMARY
+    # No capture available: the decision is not honoured (fail closed), including by default.
+    assert build_task_statement_unmapped_assessment(decided, workspace_changed=None) is not None
+    assert build_task_statement_unmapped_assessment(decided) is not None
+    # A genuine no-change task still clears with the decision.
+    assert build_task_statement_unmapped_assessment(decided, workspace_changed=False) is None
 
 
 def test_an_obligation_citing_an_equivalent_statement_event_maps_the_statement() -> None:

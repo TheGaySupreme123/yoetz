@@ -624,7 +624,8 @@ def render_deterministic_finding_text(
             " again. If the request asks for no material work, revise the plan to an explicit"
             " empty scope and record a decision_recorded whose statement holds the exact line"
             f" {NO_MATERIAL_WORK_MARKER}:{statement_refs} and whose rationale says why; that"
-            " decision counts only while the task records no edit.",
+            " decision counts only while the task records no edit and the check-time change"
+            " shows no changed file.",
         )
     if kind is FindingKind.TASK_REQUIREMENT_UNMET and any(
         fact.fact_code == TASK_STATEMENT_SCOPE_EMPTY_FACT for fact in observed_facts
@@ -641,8 +642,9 @@ def render_deterministic_finding_text(
             " naming them in obligation_refs; or, if the request asks for no material work,"
             " record a decision_recorded whose statement holds the exact line"
             f" {NO_MATERIAL_WORK_MARKER}:{statement_refs} and whose rationale says why. That"
-            " decision counts only while the task records no edit. Then check again; a rerun"
-            " without one of these returns this finding again.",
+            " decision counts only while the task records no edit and the check-time change"
+            " shows no changed file (shell writes count). Then check again; a rerun without one"
+            " of these returns this finding again.",
         )
     if kind is FindingKind.TASK_REQUIREMENT_UNMET and any(
         fact.fact_code == TASK_STATEMENT_RECORDED_FACT for fact in observed_facts
@@ -2460,6 +2462,8 @@ def build_test_edit_integrity_assessment(
 
 def build_task_statement_unmapped_assessment(
     case: DeterministicCase,
+    *,
+    workspace_changed: bool | None = None,
 ) -> DeterministicAssessment | None:
     """Raise the local finding for a task statement the plan does not decompose (TB4 pilot).
 
@@ -2469,7 +2473,9 @@ def build_task_statement_unmapped_assessment(
       current statement content in ``source_refs`` (``task_statement_unmapped``); or
     * a completion claim stands on no plan or an explicit empty scope and no recorded
       no-material-work decision answers it (``task_statement_scope_empty``). Mid-task checks
-      before any completion claim never raise this form.
+      before any completion claim never raise this form. The decision answers it only when
+      ``workspace_changed`` is ``False``: the caller's check-time change capture showed no changed
+      path. A changed path or an unavailable capture (the default ``None``) fails closed.
 
     No statement and an unreadable plan raise nothing. The single public subject is the current
     statement event, so both forms share one issue identity across plan revisions until the
@@ -2486,7 +2492,9 @@ def build_task_statement_unmapped_assessment(
         return None
     if task_statement_unmapped(case.projection, statement):
         fact = TASK_STATEMENT_UNMAPPED_FACT
-    elif task_statement_scope_empty_at_completion(case.projection, statement):
+    elif task_statement_scope_empty_at_completion(
+        case.projection, statement, workspace_changed=workspace_changed
+    ):
         fact = TASK_STATEMENT_SCOPE_EMPTY_FACT
     else:
         return None

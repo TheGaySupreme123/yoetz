@@ -258,8 +258,13 @@ maintainer approved these changes for the pilot (design-gated: check outcomes an
    `task_requirement_unmet` identity (fact `task_statement_scope_empty`). Its repair is
    statement-sourced obligations, or a `decision_recorded` whose statement holds the exact line
    `yoetz-no-material-work:<statement event>` with a rationale. That decision is a structural answer
-   the next check reads; it is contradicted, and ignored, while any edit is recorded. Mid-task
-   checks before a completion claim, and tasks with no statement, are unchanged.
+   the next check reads; it is contradicted, and ignored, while any edit is recorded or while the
+   check-time change capture shows any changed path. Hosts record shell writes (`sed -i`,
+   redirections, scripts) as command actions, not edits, so the capture is the structural witness
+   that no file changed; when no capture is available the decision is not honoured (fail closed).
+   Uncommitted changes present before the task count as changed paths too. Mid-task checks before a
+   completion claim, and tasks with no statement, are unchanged. The ledger-only
+   `instruction_requirement_unmapped` drift advisory has no capture and keeps the edit-action rule.
 4. *Repair text is the full working sequence.* The test-edit finding names the statement event and
    every step that makes the repair clear (new obligation with the test path, `plan_revised`, an
    edit action attempting the path with its result, resolution with observed evidence, superseding claim).

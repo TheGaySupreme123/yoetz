@@ -714,6 +714,107 @@ async def test_completion_on_an_empty_scope_with_a_statement_is_an_actionable_fi
     assert checked.verdict.value == "action_required"
 
 
+class _MetadataOnlyCapturePort:
+    def __init__(self, entries: tuple[ChangeMetadataEntry, ...]) -> None:
+        self.entries = entries
+
+    def capture(self, workspace: str, base: object) -> CheckChangeCapture:
+        raise AssertionError("structural accounting must not call content capture")
+
+    def capture_metadata(self, workspace: str, base: object) -> CheckChangeMetadata:
+        return CheckChangeMetadata(
+            base="task_start",
+            entries=self.entries,
+            tracked_files=sum(1 for item in self.entries if not item.untracked),
+            untracked_files=sum(1 for item in self.entries if item.untracked),
+            omitted_files=0,
+            truncated=False,
+            base_commit="a" * 40,
+        )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("workspace", ("shell_changed", "unchanged", "capture_unavailable"))
+async def test_no_material_work_decision_needs_a_capture_showing_no_changed_path(
+    monkeypatch: pytest.MonkeyPatch,
+    workspace: str,
+) -> None:
+    """The escape is cancelled by any changed path, not only by an ``edit`` action.
+
+    Hosts record shell writes (``sed -i``, ``cat > file``) as command actions, so a task with no
+    edit action can still have changed files. Only a check-time capture that shows no changed path
+    honours the decision; a missing capture fails closed.
+    """
+
+    from yoetz.domain.events import (
+        ClaimKind,
+        ClaimRecordedPayloadV1_1,
+        DecisionRecordedPayload,
+        encode_payload,
+    )
+    from yoetz.domain.task_statement import (
+        TASK_STATEMENT_SCOPE_EMPTY_SUMMARY,
+        RecordedTaskStatement,
+    )
+    from yoetz.domain.values import actor_id
+    from yoetz.kernel.projections import DecisionProjectionRecord
+    from yoetz.protocol.canonical import canonical_digest
+
+    statement_event = evt(1)
+    plan = PlanPublishedPayload(1, "Plan", (), (), NoObligationsReason.NO_MATERIAL_CHANGE)
+    claim = ClaimRecordedPayloadV1_1(
+        claim_id=clm(1),
+        claim_kind=ClaimKind.COMPLETION,
+        statement="Answered.",
+        supporting_refs=(),
+        obligation_refs=(),
+        limitation_refs=(),
+        supersedes_claim_refs=(),
+    )
+    command = ActionRecordedPayload(
+        act(1), ActionKind.COMMAND, "Ran a shell command", command="sed -i s/a/b/ calc.py"
+    )
+    decision = DecisionRecordedPayload(
+        f"The request asks only for an explanation.\nyoetz-no-material-work:{statement_event}",
+        "The user asked a question; no file needs to change.",
+        actor_id("agent:1"),
+    )
+    base = make_case(
+        plans={1: plan_record(plan, 2)},
+        actions={act(1): record(command, 3)},
+        claims={clm(1): claim_record(claim, 4)},
+        extra_refs=(statement_event,),
+    )
+    row = DecisionProjectionRecord(
+        payload=decision,
+        payload_digest=canonical_digest(encode_payload(decision)),
+        redacted=False,
+        source_event_id=evt(5),
+        source_frontier=5,
+    )
+    case = replace(
+        replace(base, projection=replace(base.projection, decisions={evt(5): row})),
+        task_statement=RecordedTaskStatement("Explain it.", statement_event, "session_opened", 1),
+    )
+    app = _App()
+    app.ledger.frozen = FrozenCase(case, app.ledger.frozen.lease)
+    if workspace != "capture_unavailable":
+        entries = (ChangeMetadataEntry("M", "calc.py"),) if workspace == "shell_changed" else ()
+        app.change_capture = _MetadataOnlyCapturePort(entries)
+        app.start_catalog = _StructuralStartCatalog()
+        source = CheckWorkspaceSource("/workspace", "hmac-sha256:" + "a" * 64)
+        monkeypatch.setattr(check_module, "current_check_workspace_source", lambda: source)
+
+    checked = await execute_check_commit(app, _request(max_findings="8"))
+
+    unmet = [item for item in checked.findings if item.kind is FindingKind.TASK_REQUIREMENT_UNMET]
+    if workspace == "unchanged":
+        assert unmet == []
+    else:
+        assert [item.summary for item in unmet] == [TASK_STATEMENT_SCOPE_EMPTY_SUMMARY]
+        assert unmet[0].subject_refs == (statement_event,)
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("mode", ("deterministic_only", "semantic_required"))
 @pytest.mark.parametrize(

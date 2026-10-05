@@ -304,7 +304,8 @@ coverage-incomplete: `completion_scope_undeclared` without a reason or
 also returns `task_requirement_unmet` until you either publish statement-sourced obligations or
 record a `decision_recorded` whose statement holds the exact line
 `yoetz-no-material-work:<statement event id>` with a rationale. The decision counts only while the
-task records no edit action; a task that edited files must map the work to obligations.
+task records no edit action and the check sees no changed file in the workspace (shell writes
+count); a task that changed files must map the work to obligations.
 
 ## Obligation resolution
 

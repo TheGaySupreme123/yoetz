@@ -38,7 +38,7 @@ the statement, or a completion claim on no plan or an explicit empty scope, retu
 agent-actionable `task_requirement_unmet` finding naming the statement event id. When the request
 truly asks for no material work, answer it with a `decision_recorded` whose statement holds the
 exact line `yoetz-no-material-work:<statement event id>` and a rationale; it counts only while no
-edit is recorded. Then run `check` once on the plan before editing, and again after each material
+file changed. Then run `check` once on the plan before editing, and again after each material
 milestone.
 
 If `start` fails, retain its exact request and correlation identity. Follow the typed continuation

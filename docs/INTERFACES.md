@@ -8077,7 +8077,11 @@ plan. Names and contracts:
   claim never raise it. It is answered by statement-sourced obligations, or by a readable,
   unsuperseded `decision_recorded` whose statement holds the exact line
   `yoetz-no-material-work:<statement event id>` (any equivalent id; `NO_MATERIAL_WORK_MARKER`);
-  that decision is contradicted, and does not count, while the projection holds any `edit` action.
+  that decision is contradicted, and does not count, while the projection holds any `edit` action
+  or the check-time change capture (`CheckChangeMetadata`) shows any changed path. Shell writes are
+  recorded as command actions, so the capture is the witness; a check without that capture does not
+  honour the decision (fail closed). `application/check.py` passes `workspace_changed` to
+  `build_task_statement_unmapped_assessment`; the ledger-only drift advisory keeps the edit rule.
 - Both research-evidence `task_requirement_unmet` rules (statement and test edit) are emitted only by
   a check whose research-evidence execution is `run/completed`, the same condition their
   resolution requires. A recorded statement is a research-evidence root, so the pack runs before
