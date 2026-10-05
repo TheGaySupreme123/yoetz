@@ -19,8 +19,8 @@ observation capacity for an ordinary task. On request run `yoetz observe selecti
 the lower/pause/resume path, and apply only after the user accepts that preview. A no-cap request
 returns `capacity_no_cap_unsupported`; See "Change local retention capacity" in [workflow.md](references/workflow.md).
 
-`check` after the plan and each milestone; on a finding, change work or record what it names,
-not just recheck. Request `receipt` last. At
+For closure, `check` after the plan and each milestone; on a finding, change work or record
+what it names, not just recheck. `receipt` last. At
 `ready_with_limitations`, nothing further is to do: request the receipt without another check;
 `standing_limitations` are disclosed, never tasks. A `respond` does not clear a finding.
 Keep `unresolved_findings_remain`.
