@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from yoetz.mcp.summaries import summary_for_status
+from yoetz.mcp.summaries import summary_for_check, summary_for_status
 
 
 def _row(number: int, kind: str, state: str, rounds: str) -> dict[str, object]:
@@ -41,3 +41,47 @@ def test_actionable_rows_are_counted_and_unknown_kinds_are_ignored() -> None:
     assert "to-do: open 1 (1 at budget 5), verified 1, not done 0, rejection accepted 0;" in text
     assert "not_a_kind" not in text
     assert len(text.encode()) <= 512
+
+
+def _check_envelope(next_step: str) -> dict[str, object]:
+    open_refs = [f"fnd_59000000-0000-4000-8000-{index:012d}" for index in range(1, 3)]
+    return {
+        "verdict": "action_required",
+        "findings": [],
+        "suppressed_count": "0",
+        "semantic_status": "succeeded",
+        "semantic_reason": "semantic_completed",
+        "overall_next": {
+            "action": "work_open_findings",
+            "status": "action_required",
+            "target_refs": open_refs,
+        },
+        "finding_checklist": {
+            "attempt_budget": "2",
+            "counts": {
+                "acknowledged_not_done": "0",
+                "open": "2",
+                "open_at_budget": "1",
+                "rejection_accepted": "0",
+                "verified_resolved": "0",
+            },
+            "items": [],
+            "next": next_step,
+        },
+        "result_frontier": {"sequence": "6", "head_digest": "sha256:" + "a" * 64},
+    }
+
+
+def test_the_at_budget_decision_survives_a_long_task_continuation() -> None:
+    """Issue #905: the budget cue stays visible when the full to-do clause cannot fit."""
+
+    text = summary_for_check(_check_envelope("decide_at_budget"))
+    assert "overall next: work_open_findings" in text
+    assert "finding checklist next: decide_at_budget (at budget 2);" in text
+    assert len(text.encode("ascii")) <= 512
+
+
+def test_no_compact_cue_is_invented_below_the_budget() -> None:
+    text = summary_for_check(_check_envelope("work_open_findings"))
+    assert "decide_at_budget" not in text
+    assert "at budget" not in text
