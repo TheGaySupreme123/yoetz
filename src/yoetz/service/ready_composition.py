@@ -75,7 +75,7 @@ from yoetz.adapters.sqlite.migrations import (
 from yoetz.adapters.sqlite.project_operations import SqliteProjectOperationJournal
 from yoetz.adapters.sqlite.repository import SqliteLedger
 from yoetz.adapters.sqlite.start_catalog import SqliteStartCatalog
-from yoetz.application.check import FinalSemanticEvaluation
+from yoetz.application.check import SEMANTIC_EVALUATION_GAPS, FinalSemanticEvaluation
 from yoetz.application.check_change import (
     CheckChangeOutcome,
     capture_check_time_change,
@@ -4942,10 +4942,14 @@ def _privacy_gated_semantic_evaluator(
                 frozen.case, captured_content, captured_content_scope
             )
             trimmed_prior = set(_packet_view_gaps(packet_view))
+            # The packet's coverage also carries task-level ledger gaps (plan drift, completion
+            # scope, unreadable events). The reviewer still sees them in the packet and the check
+            # reports them from the ledger; only case-content codes belong to the evaluation, which
+            # rejects any other code and would turn a successful review into a coordinator failure.
             content_gaps = tuple(
                 sorted(
                     trimmed_prior
-                    | set(semantic_case.packet.coverage.known_gaps)
+                    | (set(semantic_case.packet.coverage.known_gaps) & SEMANTIC_EVALUATION_GAPS)
                     | set(test_edit_gaps)
                 )
             )

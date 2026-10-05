@@ -3145,8 +3145,9 @@ class SpecificationPreflightModel(_ClosedModel):
     status: Literal["complete", "title_only", "missing", "withheld"]
     source: Literal["agent_transcribed", "host_captured_user_prompt", "task_title_only"] | None
     content_digest: Sha256Digest | None
-    content_bytes: CanonicalUInt64Wire
-    revision: CanonicalUInt64Wire | None
+    # The check-result schema types these as JSON integers (unlike counters elsewhere on the wire).
+    content_bytes: int = Field(ge=0, le=2**53 - 1, strict=True)
+    revision: int | None = Field(ge=0, le=2**53 - 1, strict=True)
     required: bool
     actionable: bool
     gap: Literal["task_statement_not_authorized", "task_statement_not_supplied"] | None = None

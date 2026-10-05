@@ -283,6 +283,8 @@ SEMANTIC_CASE_CONTENT_GAPS: Final = frozenset(
 _SEMANTIC_EVALUATION_GAPS: Final = SEMANTIC_CASE_CONTENT_GAPS | frozenset(
     {SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP, *TASK_STATEMENT_GAPS, *CHECK_TIME_CHANGE_GAPS}
 )
+# Public name for composition: the case-content vocabulary a FinalSemanticEvaluation admits.
+SEMANTIC_EVALUATION_GAPS: Final = _SEMANTIC_EVALUATION_GAPS
 
 
 class SemanticJudgmentRejected(ValueError):

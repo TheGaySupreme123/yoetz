@@ -3470,6 +3470,17 @@ def _add_review_input_manifest_to_check_result(document: dict[str, JsonValue]) -
         "type": "string",
     }
     awaiting_properties["specification_preflight"] = {"$ref": "#/$defs/specification_preflight"}
+    _add_review_input_continuation(definitions)
+
+
+def _add_review_input_continuation(definitions: dict[str, JsonValue]) -> None:
+    """Admit the same-request review-input continuation wherever a CHECK continuation projects.
+
+    CHECK returns it on the awaiting_input branch, and STATUS replays the same continuation on
+    the pending operation page; both result contracts must carry the branch or the projection
+    of a paused check fails validation.
+    """
+
     continuation = cast(dict[str, JsonValue], definitions["continuation"])
     continuation_one_of = cast(list[JsonValue], continuation["oneOf"])
     continuation_one_of.append(
@@ -4138,6 +4149,7 @@ def _status_result_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     _add_status_observed_run(definitions)
     _add_status_closure_checklist(definitions)
     _add_status_finding_frontier(definitions)
+    _add_review_input_continuation(definitions)
     document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
     document["title"] = f"Yoetz status result {entry.schema_version}"
     return document
