@@ -5474,11 +5474,24 @@ def _privacy_gated_semantic_evaluator(
                     operation="semantic_failure_detail_dropped",
                     request_id=frozen.lease.operation_id,
                 )
-                return FinalSemanticEvaluation(
-                    SemanticStatus.FAILED,
-                    SemanticReason.COORDINATOR_FAILURE,
-                    operation_lease=current_lease[0],
+                # Keep the coverage gaps the evaluation can still carry, so the failed check does
+                # not under-report what its case lacked.
+                admissible_gaps = tuple(
+                    sorted(set(content_gaps) & SEMANTIC_EVALUATION_GAPS, key=str.encode)
                 )
+                try:
+                    return FinalSemanticEvaluation(
+                        SemanticStatus.FAILED,
+                        SemanticReason.COORDINATOR_FAILURE,
+                        operation_lease=current_lease[0],
+                        case_content_gaps=admissible_gaps,
+                    )
+                except ValueError:
+                    return FinalSemanticEvaluation(
+                        SemanticStatus.FAILED,
+                        SemanticReason.COORDINATOR_FAILURE,
+                        operation_lease=current_lease[0],
+                    )
 
     return _evaluate
 
