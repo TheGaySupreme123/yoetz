@@ -40,6 +40,8 @@ from yoetz.domain.receipts import (
     CHECK_TIME_CHANGE_UNAVAILABLE_REASON_GAPS,
     OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
     OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP,
+    PREEXISTING_TEST_BASELINE_UNKNOWN_GAP,
+    PREEXISTING_TEST_INFORMATIONAL_GAPS,
     SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
     SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
     SEMANTIC_CHALLENGES_REJECTED_GAP,
@@ -66,6 +68,7 @@ from yoetz.domain.receipts import (
 from yoetz.domain.task_statement import TASK_STATEMENT_GAPS, may_carry_task_statement
 from yoetz.domain.values import ClaimId, EventId, EvidenceId, FindingId, ResultId
 from yoetz.kernel.claims import effective_claim_items
+from yoetz.kernel.plan_drift import PLAN_DRIFT_GAPS
 from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.projections import (
     MAX_CHECK_CHANGE_RAISING_CHECKS,
@@ -218,8 +221,14 @@ _REVIEW_DIALOGUE_DISCLOSURE_GAPS: Final = frozenset(
         SEMANTIC_RESTATEMENTS_SUPPRESSED_GAP,
     }
 )
+# Plan drift (``kernel.plan_drift``) is an advisory diagnostic about the planning trace: it says the
+# ledger lacks a relation needed to read the plan as current, never that a local pack could not
+# read the rows it judges. It stays on every receipt but never vetoes a local absence proof.
 _BASE_DETERMINISTIC_PROOF_TOLERATED_GAPS: Final = (
-    _SEMANTIC_ONLY_GAPS | _EVIDENCE_STRENGTH_GAPS | _REVIEW_DIALOGUE_DISCLOSURE_GAPS
+    _SEMANTIC_ONLY_GAPS
+    | _EVIDENCE_STRENGTH_GAPS
+    | _REVIEW_DIALOGUE_DISCLOSURE_GAPS
+    | PLAN_DRIFT_GAPS
 )
 # A reduced AI-powered review scope bounds the review packet only; the local-check case is not
 # reduced (ADR-006), so review selection never weakens a local absence proof (issue #904).
@@ -227,6 +236,16 @@ _DETERMINISTIC_PROOF_TOLERATED_GAPS: Final = (
     _BASE_DETERMINISTIC_PROOF_TOLERATED_GAPS | _HOST_OBSERVATION_GAPS | REVIEW_SELECTION_GAPS
 )
 _SEMANTIC_PROOF_TOLERATED_GAPS: Final = _EVIDENCE_STRENGTH_GAPS | _REVIEW_DIALOGUE_DISCLOSURE_GAPS
+# Structural test-edit accounting (ADR-032) is read by exactly one local rule: the unjustified
+# pre-existing test edit, which raises ``task_requirement_unmet``. It is local accounting, never
+# review-packet input. An unknown edit baseline or an informational edit count therefore bounds
+# only that kind's proof; every other local pack judges ledger rows the accounting never touches,
+# and an AI-powered review of another issue did not see it, so these standing limits must not make
+# an unrelated repaired finding permanently unresolvable. The actionable ``preexisting_test_edit_unjustified`` code is
+# deliberately not here, and a ``task_requirement_unmet`` finding never tolerates any of them.
+_TEST_EDIT_ACCOUNTING_GAPS: Final = frozenset(
+    {PREEXISTING_TEST_BASELINE_UNKNOWN_GAP, *PREEXISTING_TEST_INFORMATIONAL_GAPS}
+)
 # These native capture limits may be compared with the readable original finding's baseline.
 # The check stamps the ones its review ran under onto every semantic finding it raises, so the
 # baseline is durable finding coverage, not a later reconstruction (issue #884). Recorded clipping
@@ -884,6 +903,10 @@ def resolution_blockers(
     gaps = frozenset(check.coverage.known_gaps)
     if finding.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED:
         tolerated = _SEMANTIC_PROOF_TOLERATED_GAPS
+        if finding.kind is not FindingKind.TASK_REQUIREMENT_UNMET:
+            # Local test-edit accounting is never review input, so it cannot bound what the
+            # reviewer saw of an unrelated issue (see ``_TEST_EDIT_ACCOUNTING_GAPS``).
+            tolerated = tolerated | _TEST_EDIT_ACCOUNTING_GAPS
         ruled_fixed, verdict_reasons, verdict_tolerated = _prior_verdict_effect(finding, check)
         reasons.extend(verdict_reasons)
         tolerated |= verdict_tolerated
@@ -957,11 +980,14 @@ def resolution_blockers(
     else:
         tolerated = _DETERMINISTIC_PROOF_TOLERATED_GAPS
         freshness_gaps = gaps
+        if finding.kind is not FindingKind.TASK_REQUIREMENT_UNMET:
+            tolerated = tolerated | _TEST_EDIT_ACCOUNTING_GAPS
+            freshness_gaps = freshness_gaps - _TEST_EDIT_ACCOUNTING_GAPS
         if gaps & _COMMAND_GAPS:
             partition = _command_gap_partition(finding, check, proof_state)
             if partition == ():
                 tolerated = tolerated | _COMMAND_GAPS
-                freshness_gaps = gaps - _COMMAND_GAPS
+                freshness_gaps = freshness_gaps - _COMMAND_GAPS
             elif partition is not None:
                 reasons.append("command_relation_overlaps_obligation:" + ",".join(partition[:16]))
                 if len(partition) > 16:

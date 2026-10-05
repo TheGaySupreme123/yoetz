@@ -1949,7 +1949,16 @@ rows only the evidence-strength codes, `semantic_prior_findings_over_limit`,
 (plus, for a row the check records a `fixed` ruling for, the insufficient-packet codes and
 `content_unselected`), and the check must also record `succeeded/semantic_completed`; the
 capture-baseline comparison below (#884, #904) may also tolerate codes already in the row's own
-recorded baseline. Outside the narrow command-gap partition described below, any
+recorded baseline. Two closed families are decided by meaning rather than by baseline. The
+advisory plan-drift codes (`plan_unrefined_before_first_edit|
+obligation_evidence_stale_after_scope_edit|instruction_requirement_unmapped`) are tolerated for
+local rows only: they describe the planning trace, not ledger rows a local pack failed to read.
+The structural test-edit accounting codes (`preexisting_test_baseline_unknown|
+preexisting_test_modified|preexisting_test_renamed|preexisting_test_deleted|
+preexisting_test_skipped`) are tolerated by both proof classes for every kind except
+`task_requirement_unmet`, the one kind that accounting can raise; that kind still blocks on them.
+The actionable `preexisting_test_edit_unjustified` blocks every row. All of these codes stay on
+check, status and receipt coverage. Outside the narrow command-gap partition described below, any
 other gap — redacted or unavailable payloads, redacted objects,
 missing refs, unknown events, completion scope, import range, or a code not in the list — blocks
 both proof classes. A local-only check therefore never resolves an AI-powered finding, and a

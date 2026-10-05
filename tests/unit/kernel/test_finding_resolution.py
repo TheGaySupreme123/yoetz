@@ -49,6 +49,7 @@ from yoetz.kernel.finding_resolution import (
     reopen_findings_resolved_by,
     resolved_finding_ids,
 )
+from yoetz.kernel.plan_drift import PLAN_DRIFT_GAPS
 from yoetz.kernel.projections import (
     MAX_CHECK_CHANGE_RAISING_CHECKS,
     FindingProjectionRecord,
@@ -325,6 +326,60 @@ def test_semantic_absence_does_not_weaken_a_deterministic_proof(gap: str) -> Non
     """A local finding is proven absent by the local pack, not by the reviewer."""
 
     assert _resolves(_finding(), _check(coverage=_coverage(gaps=(gap,)))) is True
+
+
+_TEST_EDIT_ACCOUNTING = (
+    "preexisting_test_baseline_unknown",
+    "preexisting_test_deleted",
+    "preexisting_test_modified",
+    "preexisting_test_renamed",
+    "preexisting_test_skipped",
+)
+
+
+@pytest.mark.parametrize("gap", _TEST_EDIT_ACCOUNTING)
+def test_test_edit_accounting_limits_only_the_test_edit_requirement(gap: str) -> None:
+    """Structural test-edit accounting (ADR-032) bounds only the rule that reads it.
+
+    A check that recorded an edit without a change capture carries an unknown test-edit baseline.
+    That standing limit must not make an unrelated repaired issue unresolvable, local or
+    AI-powered, while a ``task_requirement_unmet`` finding the accounting can raise stays open.
+    """
+
+    local = _coverage(gaps=("semantic_review_not_requested", gap))
+    assert _resolves(_finding(), _check(coverage=local)) is True
+    reviewed = _coverage(gaps=(gap,), semantic=True)
+    semantic = _finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
+    assert _resolves(semantic, _check(semantic=_SEMANTIC_OK, coverage=reviewed)) is True
+    requirement = _finding(kind=FindingKind.TASK_REQUIREMENT_UNMET, policy_id="research-evidence")
+    assert _resolves(requirement, _check(coverage=local)) is False
+    semantic_requirement = _finding(
+        kind=FindingKind.TASK_REQUIREMENT_UNMET,
+        origin=FindingOrigin.SEMANTIC_MODEL_DERIVED,
+        policy_id="research-evidence",
+    )
+    assert (
+        _resolves(semantic_requirement, _check(semantic=_SEMANTIC_OK, coverage=reviewed)) is False
+    )
+
+
+def test_an_unjustified_test_edit_still_blocks_every_proof() -> None:
+    gap = "preexisting_test_edit_unjustified"
+    assert _resolves(_finding(), _check(coverage=_coverage(gaps=(gap,)))) is False
+    semantic = _finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
+    reviewed = _coverage(gaps=(gap,), semantic=True)
+    assert _resolves(semantic, _check(semantic=_SEMANTIC_OK, coverage=reviewed)) is False
+
+
+@pytest.mark.parametrize("gap", sorted(PLAN_DRIFT_GAPS))
+def test_advisory_plan_drift_never_vetoes_a_local_absence_proof(gap: str) -> None:
+    """Plan drift is a planning-trace diagnostic; it stays disclosed but proves nothing absent."""
+
+    coverage = _coverage(gaps=("semantic_review_not_requested", gap))
+    assert _resolves(_finding(), _check(coverage=coverage)) is True
+    reviewed = _coverage(gaps=(gap,), semantic=True)
+    semantic = _finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
+    assert _resolves(semantic, _check(semantic=_SEMANTIC_OK, coverage=reviewed)) is False
 
 
 def test_registration_drift_check_resolves_deterministic_never_semantic() -> None:
@@ -2721,11 +2776,35 @@ def test_selection_and_capture_failure_classes_are_disjoint_and_closed() -> None
         SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP: (False, True),
         SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP: (False, True),
     }
+    # Structural test-edit accounting (ADR-032, #961) is decided by kind rather than baseline: the
+    # standing accounting limits bound only ``task_requirement_unmet``, while the actionable
+    # unjustified-edit code blocks every proof until its decision is recorded.
+    test_edit_accounting = {
+        "preexisting_test_baseline_unknown",
+        "preexisting_test_deleted",
+        "preexisting_test_modified",
+        "preexisting_test_renamed",
+        "preexisting_test_skipped",
+    }
+    test_edit_actionable = {"preexisting_test_edit_unjustified"}
     packet_codes = SEMANTIC_CASE_CONTENT_GAPS | {
         SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
         SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP,
     }
-    assert packet_codes == set(decided)
+    assert packet_codes == set(decided) | test_edit_accounting | test_edit_actionable
+    requirement = replace(
+        _finding(kind=FindingKind.TASK_REQUIREMENT_UNMET, policy_id="research-evidence"),
+        coverage=_coverage(semantic=True, freshness=LedgerFreshness.PARTIAL),
+    )
+    for code in sorted(test_edit_accounting):
+        later = _review_check(code)
+        assert _blockers(_finding(), later) == (), code
+        assert _blockers(_semantic_finding(), later) == (), code
+        assert _blockers(requirement, later) == ("coverage:" + code,), code
+    for code in sorted(test_edit_actionable):
+        later = _review_check(code)
+        assert _blockers(_finding(), later) == ("coverage:" + code,), code
+        assert _blockers(_semantic_finding(), later) == ("coverage:" + code,), code
     for code, (blocks_local, unchanged_tolerated) in decided.items():
         later = _review_check(code)
         assert bool(_blockers(_finding(), later)) is blocks_local, code
