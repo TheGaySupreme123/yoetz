@@ -470,6 +470,17 @@ def safe_validation_locations(exc: object) -> tuple[dict[str, str], ...]:
             count = _unknown_count_from_validation_item(source)
             if count:
                 entry["count"] = str(count)
+        elif (
+            reason == "invalid_type_or_value"
+            and _EVENT_DRAFT_PAYLOAD_POINTER.fullmatch(pointer) is not None
+        ):
+            # A payload missing a required key: the validator named the frozen family whose
+            # branch the caller's discriminator selected, so the hint can state its contract.
+            family = _family_from_validation_item(source)
+            family_version = _family_version_from_validation_item(source)
+            if family is not None and family_version is not None:
+                entry["family"] = family
+                entry["family_version"] = family_version
         elif reason == _CONDITIONAL_FIELD_REQUIRED_REASON:
             family = _family_from_validation_item(source)
             family_version = _family_version_from_validation_item(source)
@@ -523,6 +534,7 @@ def authoring_hint(
         # Fixed order, least specific last, so truncation at _MAX_HINT_FIELDS always keeps the
         # part that names the most about how to author the next request.
         keyed_parts: list[tuple[str, tuple[str, str]]] = [
+            *_family_payload_contract_hint_parts(document, locations),
             *_unknown_payload_key_hint_parts(document, locations),
             *_conditional_requirement_hint_parts(document, locations),
             *((text, (text, "")) for text in _object_rule_hint_parts(document, locations)),
@@ -706,6 +718,56 @@ def _unknown_payload_key_hint_parts(
             names = _union_schema_names(document, cast(JsonValue, _event_draft_items(document)))
             if names:
                 parts.append((f"schema.name admits {names}", ("schema.name", names)))
+        if len(parts) >= _MAX_HINT_FIELDS:
+            break
+    return parts
+
+
+def _family_payload_contract_hint_parts(
+    document: Mapping[str, JsonValue], locations: Sequence[Mapping[str, str]]
+) -> list[tuple[str, tuple[str, str]]]:
+    """State the selected family's required and admitted payload keys for a malformed payload.
+
+    Benchmark full3 agents wrote ``plan_revised`` drafts with ``plan_published`` keys (no
+    ``supersedes_plan_version``, ``reason``, or ``obligation_changes``) and got only the generic
+    envelope recital, which their drafts already satisfied. The family and version arrive from the
+    validator's catalogue lookup, and every name below is read from the frozen presentation schema;
+    nothing the caller sent is echoed.
+    """
+
+    parts: list[tuple[str, tuple[str, str]]] = []
+    for location in locations:
+        if location.get("reason", "") != "invalid_type_or_value":
+            continue
+        pointer = location.get("field", "")
+        if type(pointer) is not str or _EVENT_DRAFT_PAYLOAD_POINTER.fullmatch(pointer) is None:
+            continue
+        family = location.get("family")
+        family_version = location.get("family_version")
+        payload = _payload_schema(
+            document,
+            family if type(family) is str else None,
+            family_version if type(family_version) is str else None,
+        )
+        if payload is None:
+            continue
+        properties = payload.get("properties")
+        if not isinstance(properties, Mapping):
+            continue
+        prop_names = cast(Mapping[str, JsonValue], properties)
+        required = _format_required_list(payload.get("required"), prop_names)
+        admitted = _payload_property_names(
+            document,
+            cast(str, family),
+            cast(str, family_version),
+        )
+        if not required or not admitted:
+            continue
+        text = (
+            f"the {family} {family_version} payload requires {required}; "
+            f"admitted keys are {admitted}"
+        )
+        parts.append((text, (text, "")))
         if len(parts) >= _MAX_HINT_FIELDS:
             break
     return parts
@@ -959,7 +1021,11 @@ def _recital_applies(location: Mapping[str, str]) -> bool:
     if not _is_event_draft_index_pointer(location):
         return False
     if location.get("reason", "") != _EXTRA_FORBIDDEN_REASON:
-        return True
+        # A payload whose family the validator named is already a well-formed draft; its own
+        # contract hint answers it, and the envelope recital would only restate what it satisfies.
+        return not (
+            location.get("field", "").endswith("/payload") and type(location.get("family")) is str
+        )
     return not location.get("field", "").endswith("/payload")
 
 

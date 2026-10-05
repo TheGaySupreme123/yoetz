@@ -1194,7 +1194,14 @@ def validate_schema_instance(name: str, version: str, value: JsonValue) -> None:
         path = _path_items_from(best) or ()
         if path:
             reason = _instance_reason_for(best)
-            identity = _selected_family_for(best) if reason is not None else None
+            # A missing required payload key also names its frozen family, so the MCP hint can
+            # state that family's required and admitted keys instead of the generic envelope
+            # recital (benchmark full3: plan_revised drafts written with plan_published keys).
+            identity = (
+                _selected_family_for(best)
+                if reason is not None or best.validator == "required"
+                else None
+            )
             raise SchemaInstanceInvalid(
                 path,
                 reason=reason,
