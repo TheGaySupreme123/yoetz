@@ -8088,8 +8088,8 @@ plan. Names and contracts:
   the first claim. The test-edit finding adds fact `task_statement_recorded` (the statement event)
   when a statement is recorded, and its text spells out the complete repair: a new statement-sourced
   obligation listing the test path as a `file` item, `plan_revised` carrying it, an `edit` action
-  whose `attempted_items` list the path (with its result), the resolved obligation with observed evidence, and a
-  superseding claim naming it.
+  whose `attempted_items` list the path (with its result), a verification rerun after that action,
+  the resolved obligation citing that fresh observed evidence, and a superseding claim naming it.
 - Path-metadata test-edit captures carry no diff body: an edited pre-existing test whose skip
   marker cannot be read is `preexisting_test_skip_unknown` (standing; not informational, so the
   check stays coverage-incomplete) rather than `preexisting_test_baseline_unknown`, which now means

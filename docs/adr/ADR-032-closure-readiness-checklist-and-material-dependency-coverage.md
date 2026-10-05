@@ -267,7 +267,8 @@ maintainer approved these changes for the pilot (design-gated: check outcomes an
    `instruction_requirement_unmapped` drift advisory has no capture and keeps the edit-action rule.
 4. *Repair text is the full working sequence.* The test-edit finding names the statement event and
    every step that makes the repair clear (new obligation with the test path, `plan_revised`, an
-   edit action attempting the path with its result, resolution with observed evidence, superseding claim).
+   edit action attempting the path with its result, a verification rerun after that edit action and
+   resolution citing that fresh observed evidence, superseding claim).
 5. *Emission matches resolution.* Both research-evidence `task_requirement_unmet` rules are raised
    only by a check whose research-evidence execution completed, the condition their resolution
    requires; a recorded statement is a research-evidence root, so the pack runs before any claim.
