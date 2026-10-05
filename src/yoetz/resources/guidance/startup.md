@@ -38,7 +38,7 @@ cadence, startup failure precedence, selectors, and handoff table remain in
 Use one cell per Yoetz call. Discover the exact declaration before calling a tool:
 
 ```js
-const decl=name=>{const d=ALL_TOOLS.find(t=>t.name===`mcp__yoetz__${name}`)?.description??"";const i=d.indexOf("exec tool declaration:");text(i<0?d:d.slice(i))};
+const decl=name=>{const d=ALL_TOOLS.find(t=>t.name===`mcp__yoetz__${name}`)?.description??"";const i=d.indexOf("exec tool declaration:");text(i<0?d:d.slice(i))};decl("start");
 ```
 
 Read a page through its structured result and verify its byte metadata before using it:
