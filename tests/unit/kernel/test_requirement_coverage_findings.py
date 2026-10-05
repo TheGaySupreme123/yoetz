@@ -350,3 +350,32 @@ def test_citing_hook_captured_evidence_after_the_last_edit_is_quiet() -> None:
 
     assert _uncorroborated(case_with(20)) == []
     assert len(_uncorroborated(case_with(60))) == 1
+
+
+def test_hook_captured_evidence_alone_keeps_the_rule_silent() -> None:
+    """Captured evidence corroborates a claim but never makes the rule apply on its own.
+
+    Codex states no outcome for a shell post and an unpaired post becomes captured evidence only,
+    so a task whose hooks observed no edit and no verification run (the #913 bandit B shape) has
+    nothing a completion claim could be asked to cite.
+    """
+
+    unpaired = EvidenceRecordedPayload(
+        evidence_id=evd(50),
+        evidence_kind=EvidenceKind.OTHER,
+        strength=EvidenceImmutability.IMMUTABLE_SNAPSHOT,
+        observed_at=timestamp_from_string("2026-10-05T12:00:00.000Z"),
+        captured_object_id=object_id("obj_10000000-0000-4000-8000-000000000050"),
+        content_digest="sha256:" + "a" * 64,
+    )
+    base = _corroboration_case(cooperative_result=60, claim=_claim(res(60)))
+    case = make_case(
+        plans=dict(base.projection.plans),
+        actions=dict(base.projection.actions),
+        results=dict(base.projection.results),
+        evidence={evd(50): evidence_record(unpaired, 50)},
+        claims=dict(base.projection.claims),
+        coverage_overrides={evt(50): _HOOK},
+    )
+
+    assert _uncorroborated(case) == []

@@ -382,8 +382,8 @@ def _unsupported_claim_findings(case: DeterministicCase) -> list[DeterministicAs
 
 def _observed_verification_facts(
     case: DeterministicCase,
-) -> tuple[int | None, dict[str, int]]:
-    """Return the latest hook-observed edit frontier and the observed verification refs.
+) -> tuple[int | None, bool, dict[str, int]]:
+    """Return the latest observed edit frontier, whether a verification ran, and its refs.
 
     Only service-stamped hook observations count (ADR-022): a cooperative edit or result never
     stands in for an observed one. A verification run is a hook-observed command result with a
@@ -420,6 +420,10 @@ def _observed_verification_facts(
         ):
             continue
         runs[str(result_ref)] = result.source_frontier
+    # Only an observed edit or verification run makes the rule apply; captured evidence below
+    # corroborates a claim but never triggers the rule on its own (for example a Codex shell post
+    # with no stated outcome, or an unpaired post that became metadata-only evidence).
+    verification_observed = bool(runs)
     # Hook-captured evidence (for example native tool output) corroborates at its own frontier,
     # and evidence a verification run links inherits that run's frontier.
     for evidence_ref, evidence in case.projection.evidence.items():
@@ -432,7 +436,7 @@ def _observed_verification_facts(
         if result.payload is not None:
             for evidence_ref in result.payload.evidence_refs:
                 runs[str(evidence_ref)] = max(runs.get(str(evidence_ref), 0), frontier)
-    return latest_edit, runs
+    return latest_edit, verification_observed, runs
 
 
 def _uncorroborated_completion_findings(case: DeterministicCase) -> list[DeterministicAssessment]:
@@ -445,8 +449,8 @@ def _uncorroborated_completion_findings(case: DeterministicCase) -> list[Determi
     corroboration too. A rerun of the check changes none of these relations.
     """
 
-    latest_edit, runs = _observed_verification_facts(case)
-    if latest_edit is None and not runs:
+    latest_edit, verification_observed, runs = _observed_verification_facts(case)
+    if latest_edit is None and not verification_observed:
         return []
     after = latest_edit or 0
     output: list[DeterministicAssessment] = []
