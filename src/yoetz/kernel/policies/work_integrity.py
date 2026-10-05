@@ -6,7 +6,9 @@ from collections.abc import Iterable
 from typing import Final, cast
 
 from yoetz.domain.events import (
+    ActionKind,
     ClaimKind,
+    ClaimRecordedPayloadV1_1,
     ObligationChangeKind,
     ObligationStatus,
     ResponseDisposition,
@@ -31,6 +33,8 @@ from yoetz.kernel.command_attempts import attempted_items_for_obligation
 from yoetz.kernel.deterministic_checks import (
     CALLER_DIGEST_PROVENANCE_GAPS,
     OBSERVED_FAILURE_LIVE_FACT,
+    OBSERVED_VERIFICATION_ABSENT_FACT,
+    OBSERVED_VERIFICATION_UNCITED_FACT,
     DeterministicAssessment,
     DeterministicCase,
     FindingBasisRef,
@@ -44,6 +48,7 @@ from yoetz.kernel.deterministic_checks import (
 from yoetz.kernel.observed_failures import (
     ObservedFailureState,
     observed_action_is_exploratory,
+    observed_action_runner_class,
     observed_event_ids_from_coverage,
     observed_failure_states,
 )
@@ -96,8 +101,13 @@ WORK_INTEGRITY_FACT_CODES: Final = frozenset(
         "finding_response_present",
         "response_basis_insufficient",
         "response_state_stale",
+        OBSERVED_VERIFICATION_UNCITED_FACT,
+        OBSERVED_VERIFICATION_ABSENT_FACT,
     }
 )
+# Hook-derived runner classes that read or inspect rather than verify (closed tokens; no
+# command text is parsed here).
+_NON_VERIFICATION_RUNNERS: Final = frozenset({"exploration", "vcs"})
 
 _RULE_ORDER: Final = (
     FindingKind.COMPLETION_WITH_OPEN_OBLIGATIONS,
@@ -359,6 +369,108 @@ def _unsupported_claim_findings(case: DeterministicCase) -> list[DeterministicAs
                 (_fact("claim_present", claim_id),),
                 (_fact("admissible_evidence_absent", claim_id),),
                 source_availability=availability,
+            )
+        )
+    reported = {assessment.candidate.subject_refs for assessment in output}
+    output.extend(
+        assessment
+        for assessment in _uncorroborated_completion_findings(case)
+        if assessment.candidate.subject_refs not in reported
+    )
+    return output
+
+
+def _observed_verification_facts(
+    case: DeterministicCase,
+) -> tuple[int | None, dict[str, int]]:
+    """Return the latest hook-observed edit frontier and the observed verification refs.
+
+    Only service-stamped hook observations count (ADR-022): a cooperative edit or result never
+    stands in for an observed one. A verification run is a hook-observed command result with a
+    recorded outcome whose host-derived runner class is not ``exploration`` or ``vcs``; an
+    unclassified command counts, so the rule never fires merely because a host omitted the class.
+    """
+
+    observed = observed_event_ids_from_coverage(case.coverage_by_ref)
+    latest_edit: int | None = None
+    for action in case.projection.actions.values():
+        payload = action.payload
+        if (
+            payload is not None
+            and action.source_event_id in observed
+            and payload.action_kind is ActionKind.EDIT
+        ):
+            latest_edit = max(latest_edit or 0, action.source_frontier)
+    runs: dict[str, int] = {}
+    for result_ref, result in case.projection.results.items():
+        payload = result.payload
+        if (
+            payload is None
+            or result.source_event_id not in observed
+            or payload.outcome is ResultOutcome.UNKNOWN
+        ):
+            continue
+        action = case.projection.actions.get(payload.action_id)
+        if (
+            action is None
+            or action.payload is None
+            or action.source_event_id not in observed
+            or action.payload.action_kind is not ActionKind.COMMAND
+            or observed_action_runner_class(action.payload.description) in _NON_VERIFICATION_RUNNERS
+        ):
+            continue
+        runs[str(result_ref)] = result.source_frontier
+    # Hook-captured evidence (for example native tool output) corroborates at its own frontier,
+    # and evidence a verification run links inherits that run's frontier.
+    for evidence_ref, evidence in case.projection.evidence.items():
+        if evidence.payload is not None and evidence.source_event_id in observed:
+            runs[str(evidence_ref)] = evidence.source_frontier
+    for result_ref, frontier in tuple(runs.items()):
+        if not result_ref.startswith("res_"):
+            continue
+        result = case.projection.results[ResultId(result_ref)]
+        if result.payload is not None:
+            for evidence_ref in result.payload.evidence_refs:
+                runs[str(evidence_ref)] = max(runs.get(str(evidence_ref), 0), frontier)
+    return latest_edit, runs
+
+
+def _uncorroborated_completion_findings(case: DeterministicCase) -> list[DeterministicAssessment]:
+    """A completion claim must cite an observed verification run made after the latest edit.
+
+    Applies only when hook observation recorded an edit or a verification run in this task, so a
+    host without hooks keeps its ordinary coverage disclosure instead of an unanswerable finding.
+    The support chain is the claim's ``supporting_refs`` and ``limitation_refs`` plus the
+    resolution evidence of the resolved obligations it names: an honestly disclosed failing run is
+    corroboration too. A rerun of the check changes none of these relations.
+    """
+
+    latest_edit, runs = _observed_verification_facts(case)
+    if latest_edit is None and not runs:
+        return []
+    after = latest_edit or 0
+    output: list[DeterministicAssessment] = []
+    for claim_id, record in effective_claim_items(case.projection):
+        claim = record.payload
+        if claim is None or claim.claim_kind is not ClaimKind.COMPLETION:
+            continue
+        chain: set[str] = {*claim.supporting_refs}
+        if type(claim) is ClaimRecordedPayloadV1_1:
+            chain.update(claim.limitation_refs)
+        for obligation_ref in claim.obligation_refs:
+            obligation = case.projection.obligations.get(obligation_ref)
+            if obligation is not None and obligation.payload is not None:
+                chain.update(obligation.payload.resolution_evidence_refs)
+        if any(runs.get(ref, -1) > after for ref in chain):
+            continue
+        output.append(
+            build_policy_assessment(
+                case,
+                WORK_INTEGRITY_POLICY_PACK,
+                FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE,
+                (claim_id,),
+                (_fact(OBSERVED_VERIFICATION_UNCITED_FACT, claim_id),),
+                (_fact(OBSERVED_VERIFICATION_ABSENT_FACT, claim_id),),
             )
         )
     return output

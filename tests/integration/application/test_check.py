@@ -586,6 +586,45 @@ async def test_post_admission_protocol_failure_is_internal_and_terminalizes_oper
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("mapped", (False, True))
+async def test_unmapped_task_statement_is_an_actionable_check_finding(mapped: bool) -> None:
+    """TB4 pilot: an unmapped request must reach the agent as a finding, not an advisory gap."""
+
+    from yoetz.domain.task_statement import RecordedTaskStatement
+
+    statement_event = evt(1)
+    obligation = ObligationPublishedPayload(
+        obl(1),
+        "Repair the planner",
+        "The planner output is correct",
+        ObligationStatus.OPEN,
+        source_refs=(statement_event,) if mapped else (),
+    )
+    plan = PlanPublishedPayload(1, "Plan", (obl(1),))
+    base = make_case(
+        plans={1: plan_record(plan, 2)},
+        obligations={obl(1): obligation_record(obligation, 3)},
+        extra_refs=(statement_event,),
+    )
+    case = replace(
+        base,
+        task_statement=RecordedTaskStatement("Fix it.", statement_event, "session_opened", 1),
+    )
+    app = _App()
+    app.ledger.frozen = FrozenCase(case, app.ledger.frozen.lease)
+
+    checked = await execute_check_commit(app, _request(max_findings="4"))
+
+    unmet = [item for item in checked.findings if item.kind is FindingKind.TASK_REQUIREMENT_UNMET]
+    if mapped:
+        assert unmet == []
+    else:
+        assert checked.verdict.value == "action_required"
+        assert [item.subject_refs for item in unmet] == [(statement_event,)]
+        assert "source_refs [" + statement_event + "]" in unmet[0].detail
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("mode", ("deterministic_only", "semantic_required"))
 @pytest.mark.parametrize(
     ("reason", "expected_gap"),

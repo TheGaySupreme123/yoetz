@@ -289,6 +289,14 @@ its refs and optional empty-scope reason become the complete effective declarati
 root or version gap makes the chain unreadable. Yoetz never infers obligations from prompts, source
 code, workspace state, or plan prose.
 
+You decompose the request; Yoetz checks the link. When a task statement is recorded and the
+effective plan declares obligations, at least one of them must name the statement event in
+`source_refs`, or every whole-task check returns the agent-actionable `task_requirement_unmet`
+finding (subject: the statement event) and readiness lists `instruction_requirement_unmapped`.
+Cite it from every obligation that maps a stated requirement. The rule checks presence of the
+link, not that every requirement is mapped: an obligation per stated requirement is your duty, and
+AI-powered review, when it runs, compares the plan with the statement.
+
 An empty-scope reason clears the `no_obligations_declared` readiness blocker, but it does not buy a
 clean completion check. A completion claim over zero declared obligations remains
 coverage-incomplete: `completion_scope_undeclared` without a reason or

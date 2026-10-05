@@ -1775,6 +1775,61 @@ async def test_explicit_empty_completion_scope_remains_authorable() -> None:
     assert accepted.outcome == "accepted"
 
 
+@pytest.mark.parametrize("scoped_replacement", (False, True))
+async def test_claim_without_obligation_scope_can_be_corrected(scoped_replacement: bool) -> None:
+    """TB4 pilot (finding F): an early claim naming no obligations stays correctable.
+
+    The pilot's own session ran 0.2.5, which rejected this correction with
+    ``scope_overlap_required``; an empty-scope target has no scope to overlap, so a replacement
+    with either an empty or a populated scope is admitted. A populated target still requires
+    overlap (kernel replay tests lock that side).
+    """
+
+    app, _ = _composition()
+    first = _claim_revision_draft(
+        870,
+        claim_tail=870,
+        version="1.1.0",
+        supporting_refs=[],
+        limitation_refs=[],
+        supersedes_claim_refs=[],
+    )
+    cast(dict[str, object], first["payload"])["obligation_refs"] = []
+    accepted = await execute_publish_work(
+        cast(Application, app),
+        _request(
+            request_tail=870,
+            event_drafts=(first,),
+            expected_frontier={"sequence": "0", "head_digest": "genesis"},
+        ),
+    )
+    assert accepted.outcome == "accepted"
+    correction = _claim_revision_draft(
+        871,
+        claim_tail=871,
+        version="1.1.0",
+        supporting_refs=[],
+        limitation_refs=[],
+        supersedes_claim_refs=["clm_00000000-0000-4000-8000-000000000870"],
+    )
+    payload = cast(dict[str, object], correction["payload"])
+    payload["statement"] = "Corrected: the earlier claim overstated the result."
+    if not scoped_replacement:
+        payload["obligation_refs"] = []
+    frontier = await app.runtime.task.ledger.load_frontier()
+    request = _request(
+        request_tail=871,
+        event_drafts=(correction,),
+        expected_frontier={"sequence": str(frontier.sequence), "head_digest": frontier.head_digest},
+    )
+    preview = await execute_publish_work(
+        cast(Application, app), request.model_copy(update={"dry_run": True})
+    )
+    assert preview.outcome == "dry_run"
+    corrected = await execute_publish_work(cast(Application, app), request)
+    assert corrected.outcome == "accepted"
+
+
 @pytest.mark.parametrize("route_field", ("session_id", "writer_id"))
 @pytest.mark.parametrize("preview", (True, False))
 async def test_empty_scope_correction_keeps_session_and_writer_fences(

@@ -8,15 +8,13 @@ This small core is required before `start`; retain one triggered topic through i
 
 Do not call `resources/list` or `list_mcp_resources` to find Yoetz guidance. The five index URIs are the complete legacy catalog; a list failure is not a missing server or reason to read product source. If a body is empty, carries a truncation marker, or is nonempty but clipped, call `read_guidance` with the same URI; verify `structuredContent.text`, UTF-8 byte counts, offsets, markers, revision, continuation, and final digest. `page_size` is a UTF-8 byte string from 4 through 16,384 inclusive; default 4,096. Only if that result is also empty, use installed `references/<name>.md` or the focused topic's parent index. Do not call `start` on incomplete guidance.
 
-Legacy triggers: startup `yoetz://guidance/agent-instructions.md`; resume/recovery/delegation/capacity `yoetz://guidance/workflow.md`; publication `yoetz://guidance/publication-policy.md`; check/receipt `yoetz://guidance/coverage-and-receipts.md`; schema/setup/consent/import `yoetz://guidance/request-templates.md`.
-
 Focused topics: `startup.md`, `recovery.md`, `publication.md`, `review.md`, `receipt.md`, `delegation.md`, `consent.md`, `page-delivery.md`. Heading topics such as `yoetz://guidance/workflow.md#start-and-resume` are a closed catalog: use only anchors guidance names verbatim, never derived ones; an unknown anchor's rejection lists the valid ones.
 
 # Start contract
 
-Before `start`, discover its schema, use a fresh `req_` UUIDv4, and provide `mode`, `task_title`, `task_statement`, `requested_view`, `actor`, `client`, plus a held `session_id` or `workspace_ref` + `external_ref`. A child needs a handle or selector; otherwise it does no Yoetz work. If recovery still blocks startup, ask for intro and guidance; never invent a task.
+Before `start`, discover its schema, use a fresh `req_` UUIDv4, and provide `mode`, `task_title`, `task_statement`, `requested_view`, `actor`, `client`, plus a held `session_id` or `workspace_ref` + `external_ref`. A child needs a handle or selector.
 
-Use two stages: `start` records intent, delivery, and constraints; after bounded exploration and before the first material edit, publish one `plan_revised` refinement mapping every instruction requirement to a testable obligation. Carry, supersede, or waive each earlier obligation with a visible reason. Example: `start` → explore → `plan_revised` → edit. Do not edit material files before refinement.
+Use two stages: `start` records intent, delivery, and constraints; after bounded exploration and before the first material edit, publish one `plan_revised` refinement mapping every instruction requirement to a testable obligation whose `source_refs` cite the `start` event (`status view=history`) and whose `requested_items` name requested files/commands. Carry, supersede, or waive earlier obligations visibly. Example: `start` → explore → `plan_revised` → `check` → edit. Do not edit material files before refinement.
 
 # Essential boundaries
 
@@ -26,9 +24,9 @@ Never publish hidden reasoning or chain-of-thought, full prompts, transcripts, c
 
 Select `semantic_required` when the user, effective policy, or named acceptance criterion requires independent review; use `semantic_if_configured` only when optional; reserve `deterministic_only` for local/structural or no-egress work and disclose the limit. Host authorization and Yoetz disclosure are separate. Read review/coverage before `check`.
 
-Before material evidence or a completion claim, read `status`; cite IDs you published. Find native captures with `view=evidence` filter `strength=immutable_snapshot`, reusing only IDs a structural link ties to the claim. Omitted descriptions are a privacy setting, not missing evidence. Publish claim/evidence before the final check; answer findings, check, and inspect resolved state. Recheck only after repair/material record. After `insufficient_packet`, go to the receipt; never use `deterministic_only` merely to shorten closure.
+Before material evidence or a completion claim, read `status`; cite IDs you published. Find native captures with `view=evidence` filter `strength=immutable_snapshot`, reusing only IDs a structural link ties to the claim. Omitted descriptions are a privacy setting, not missing evidence. `check` after the plan and each milestone; cite observed runs (`status view=results`) as support. Publish claim/evidence before the final check; answer findings, check, and inspect resolved state. On a finding, change the work or record what it names; an unchanged recheck returns it. Recheck only after repair/material record. After `insufficient_packet`, go to the receipt; never use `deterministic_only` merely to shorten closure.
 
-Final prose and receipts are scope-first: lead with evidence/checks covered, what was not verified, frontier, review status/reason, and coverage limits; then give actionable-unresolved, unanswered, and resolved-history counts. Never headline “no findings”, “zero findings”, “clean”, or “verified”. Keep the final answer no stronger than the receipt's weakest coverage. Read delegation guidance before delegating.
+Final prose and receipts are scope-first: lead with evidence/checks covered, what was not verified, frontier, review status/reason, and coverage limits; then give actionable-unresolved, unanswered, and resolved-history counts. Never headline “no findings”, “zero findings”, “clean”, or “verified”. Keep the final answer no stronger than the receipt's weakest coverage.
 
 # Multi-agent work
 
@@ -36,4 +34,4 @@ Before delegating, read the multi-agent sections of `yoetz://guidance/workflow.m
 
 # Read more
 
-Topics: `yoetz://guidance/agent-instructions.md`, `yoetz://guidance/workflow.md`, `yoetz://guidance/publication-policy.md`, `yoetz://guidance/coverage-and-receipts.md`, `yoetz://guidance/request-templates.md`; read with `read_guidance`, never memory.
+Index triggers: startup `yoetz://guidance/agent-instructions.md`; resume/recovery/delegation/capacity `yoetz://guidance/workflow.md`; publication `yoetz://guidance/publication-policy.md`; check/receipt `yoetz://guidance/coverage-and-receipts.md`; schema/setup/consent/import `yoetz://guidance/request-templates.md`. Read with `read_guidance`, never memory.

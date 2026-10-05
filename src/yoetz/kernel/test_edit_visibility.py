@@ -2,8 +2,11 @@
 
 The only input that can name a changed path is the encrypted, bounded repository capture.  This
 module reads those names in process, reduces them to fixed counters and coverage codes, and never
-returns a path.  A decision clears an edit only when it cites the exact edit action and a digest of
-the exact path; unrelated decision prose is not accepted as justification.
+returns a path.  Two structural relations justify an edit; unrelated prose never does:
+
+* an effective obligation whose ``source_refs`` cite the current task-statement event lists the
+  test file as a ``requested_items`` entry with ``item_kind`` ``file`` (the request asked for it);
+* a later decision cites the exact edit action and a digest of the exact path.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from yoetz.domain.events import (
     ActionKind,
     ActionRecordedPayload,
     DecisionRecordedPayload,
+    RequestedItemKind,
 )
 from yoetz.domain.receipts import (
     PREEXISTING_TEST_BASELINE_UNKNOWN_GAP,
@@ -28,6 +32,7 @@ from yoetz.domain.receipts import (
     PREEXISTING_TEST_SKIPPED_GAP,
 )
 from yoetz.domain.values import EventId
+from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.projections import ProjectionState
 from yoetz.ports.change_capture import ChangeMetadataEntry, CheckChangeCapture, CheckChangeMetadata
 
@@ -390,7 +395,61 @@ def _header_entries(capture: CheckChangeCapture) -> tuple[tuple[str, str | None]
     return tuple(entries)
 
 
-def _path_justified(path: str, actions: Mapping[Any, Any], decisions: Mapping[Any, Any]) -> bool:
+def _statement_requested_files(
+    projection: ProjectionState | None, statement_event_id: EventId | None
+) -> frozenset[str]:
+    """File items requested by effective obligations that cite the current task statement.
+
+    An obligation whose ``source_refs`` names the statement event is the agent's recorded mapping
+    of the user's request (TB4 pilot). When it lists a test file in ``requested_items`` with
+    ``item_kind`` ``file``, the request asked for that file to change, so the edit is attributable
+    without the decision marker. Only that exact structural relation counts; obligation prose,
+    plan text and the statement itself are never read.
+    """
+
+    if projection is None or statement_event_id is None:
+        return frozenset()
+    scope = current_plan_scope(projection.plans, projection.coverage_gaps)
+    if not scope.readable or not scope.effective_obligation_refs:
+        return frozenset()
+    values: set[str] = set()
+    for obligation in scope.effective_obligation_refs:
+        row = projection.obligations.get(obligation)
+        payload = None if row is None else row.payload
+        if payload is None or statement_event_id not in payload.source_refs:
+            continue
+        values.update(
+            item.value
+            for item in payload.requested_items
+            if item.item_kind is RequestedItemKind.FILE
+        )
+    return frozenset(values)
+
+
+def _path_requested(path: str, requested: frozenset[str]) -> bool:
+    """Match a captured repository-relative path against requested file items, exactly.
+
+    Accepted spellings are the path itself, ``./`` plus the path, an absolute path ending in
+    ``/`` plus the path (the workspace root is not recorded), or the path's digest. Nothing is
+    normalized beyond those fixed forms.
+    """
+
+    if not requested:
+        return False
+    if path in requested or f"./{path}" in requested or _path_digest(path) in requested:
+        return True
+    suffix = f"/{path}"
+    return any(value.startswith("/") and value.endswith(suffix) for value in requested)
+
+
+def _path_justified(
+    path: str,
+    actions: Mapping[Any, Any],
+    decisions: Mapping[Any, Any],
+    requested: frozenset[str] = frozenset(),
+) -> bool:
+    if _path_requested(path, requested):
+        return True
     latest = _latest_edit_action(path, actions)
     if latest is None:
         return False
@@ -453,16 +512,22 @@ def _edit_action_refs(path: str, actions: Mapping[Any, Any]) -> tuple[set[str], 
 def preexisting_test_edits(
     capture: CheckChangeCapture | CheckChangeMetadata,
     projection: ProjectionState | None = None,
+    *,
+    task_statement_event_id: EventId | None = None,
 ) -> PreExistingTestEdits:
     """Reduce one bounded change capture to privacy-safe pre-existing-test edit facts.
 
     Only ``task_start`` captures prove the task-start baseline.  ``first_check``, ``head`` and
     ``empty`` captures do not prove what existed before the first check, so they produce the
     explicit baseline coverage gap and never create an unjustified-edit count.
+    ``task_statement_event_id`` names the current statement event; a test file requested by a
+    statement-sourced obligation is justified without the decision marker.
     """
 
     if type(capture) is CheckChangeMetadata:
-        return _preexisting_test_edits_from_metadata(capture, projection)
+        return _preexisting_test_edits_from_metadata(
+            capture, projection, task_statement_event_id=task_statement_event_id
+        )
     if type(capture) is not CheckChangeCapture:
         raise TypeError("preexisting_test_capture_invalid")
     baseline_known = capture.base == "task_start"
@@ -481,6 +546,7 @@ def preexisting_test_edits(
     unknown = capture.omitted_files if capture.omitted_files else int(capture.truncated)
     actions: Mapping[Any, Any] = {} if projection is None else projection.actions
     decisions: Mapping[Any, Any] = {} if projection is None else projection.decisions
+    requested = _statement_requested_files(projection, task_statement_event_id)
     skip_paths = _diff_paths_with_skip_markers(capture)
     diff_pairs = list(_diff_path_pairs(capture))
     used_pairs: set[int] = set()
@@ -521,7 +587,8 @@ def preexisting_test_edits(
         if any(candidate in skip_paths for candidate in candidate_paths):
             counts["skipped"] += 1
         if projection is not None and not any(
-            _path_justified(candidate, actions, decisions) for candidate in candidate_paths
+            _path_justified(candidate, actions, decisions, requested)
+            for candidate in candidate_paths
         ):
             # The destination/header identity is only an in-process aggregate key; no path is
             # returned by this reducer.
@@ -543,6 +610,8 @@ def preexisting_test_edits(
 def _preexisting_test_edits_from_metadata(
     capture: CheckChangeMetadata,
     projection: ProjectionState | None,
+    *,
+    task_statement_event_id: EventId | None = None,
 ) -> PreExistingTestEdits:
     """Reduce path/status metadata without treating missing content as a clean skip result."""
 
@@ -560,6 +629,7 @@ def _preexisting_test_edits_from_metadata(
     unknown = capture.omitted_files if capture.omitted_files else int(capture.truncated)
     actions: Mapping[Any, Any] = {} if projection is None else projection.actions
     decisions: Mapping[Any, Any] = {} if projection is None else projection.decisions
+    requested = _statement_requested_files(projection, task_statement_event_id)
     test_edit_present = False
     for entry in capture.entries:
         if type(entry) is not ChangeMetadataEntry:
@@ -579,7 +649,8 @@ def _preexisting_test_edits_from_metadata(
         test_edit_present = True
         counts[kind] += 1
         if projection is not None and not any(
-            _path_justified(candidate, actions, decisions) for candidate in candidate_paths
+            _path_justified(candidate, actions, decisions, requested)
+            for candidate in candidate_paths
         ):
             unjustified_paths.add(entry.path)
             for candidate in candidate_paths:

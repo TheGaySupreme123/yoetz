@@ -122,7 +122,9 @@ each status read and never cached across frontiers:
   plan or scope, a stale projection, a receipt-blocking finding you have not acknowledged, a
   check still in progress, a missing or superseded check, and every gap code whose remedy is an
   agent action (for example
-  `completion_plan_not_claimed`, `completion_claim_outside_plan`, `missing_ref`).
+  `completion_plan_not_claimed`, `completion_claim_outside_plan`, `missing_ref`, and
+  `instruction_requirement_unmapped`: a recorded task statement that no effective obligation
+  cites in `source_refs`; the other plan-drift codes stay standing diagnostics).
 - `standing_limitations`: gap codes that no action available under this host, profile and
   privacy policy removes, such as `host_outcome_unavailable`, `unpaired_event`,
   `content_unselected`, `content_capture_unavailable`, `content_redacted`,

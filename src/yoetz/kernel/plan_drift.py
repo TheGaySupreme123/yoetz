@@ -1,9 +1,15 @@
-"""Advisory drift signals for plans that no longer describe the work.
+"""Drift signals for plans that no longer describe the work.
 
 The signals in this module are intentionally derived from recorded frontiers and explicit
 relations.  They never inspect plan prose, action descriptions, or the user's request looking
 for similar words.  A signal is therefore a bounded diagnostic: it says that the ledger lacks a
 relation needed to read the plan as current, not that the work is incomplete.
+
+``plan_unrefined_before_first_edit`` and ``obligation_evidence_stale_after_scope_edit`` stay
+advisory.  ``instruction_requirement_unmapped`` is agent-actionable (TB4 pilot, 2026-10-05):
+when a task statement is recorded and the effective plan declares obligations, none of which
+cites the statement event in ``source_refs``, the agent has not decomposed the user's request
+into the plan.  Yoetz checks only that structural link; the agent does the extraction.
 """
 
 from __future__ import annotations
@@ -22,22 +28,25 @@ from yoetz.domain.events import (
     PlanRevisedPayload,
 )
 from yoetz.domain.task_statement import current_task_statement
-from yoetz.domain.values import EvidenceId, ObligationId, ResultId
+from yoetz.domain.values import EventId, EvidenceId, ObligationId, ResultId
 from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.projections import PlanProjectionRecord, ProjectionState
 
 __all__ = [
     "INSTRUCTION_REQUIREMENT_UNMAPPED_GAP",
     "OBLIGATION_EVIDENCE_STALE_AFTER_SCOPE_EDIT_GAP",
+    "PLAN_DRIFT_ADVISORY_GAPS",
     "PLAN_DRIFT_GAPS",
     "PLAN_UNREFINED_BEFORE_FIRST_EDIT_GAP",
     "PlanDriftSignals",
     "plan_drift_signals",
+    "task_statement_unmapped",
 ]
 
 
-# These are advisory coverage annotations.  Callers must keep them visible in status/check and
-# receipt text while excluding them from completion verdicts and closure blockers.
+# Every plan drift code stays visible in status/check and receipt text.  Only the advisory subset
+# below is excluded from completion verdicts and closure blockers; an unmapped task statement is
+# agent work (the work-integrity pack raises a finding for it) and bounds completion coverage.
 PLAN_UNREFINED_BEFORE_FIRST_EDIT_GAP: Final = "plan_unrefined_before_first_edit"
 OBLIGATION_EVIDENCE_STALE_AFTER_SCOPE_EDIT_GAP: Final = "obligation_evidence_stale_after_scope_edit"
 INSTRUCTION_REQUIREMENT_UNMAPPED_GAP: Final = "instruction_requirement_unmapped"
@@ -48,6 +57,7 @@ PLAN_DRIFT_GAPS: Final = frozenset(
         INSTRUCTION_REQUIREMENT_UNMAPPED_GAP,
     }
 )
+PLAN_DRIFT_ADVISORY_GAPS: Final = PLAN_DRIFT_GAPS - {INSTRUCTION_REQUIREMENT_UNMAPPED_GAP}
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,19 +218,32 @@ def _stale_obligations(
     return tuple(sorted(set(stale), key=str.encode))
 
 
-def _instruction_unmapped(projection: ProjectionState, records: tuple[LedgerRecord, ...]) -> bool:
-    statement = current_task_statement(records)
+def task_statement_unmapped(projection: ProjectionState, statement_event: EventId | None) -> bool:
+    """True when a statement exists and no effective obligation cites its event.
+
+    The relation is exact: an obligation maps the statement only when its ``source_refs`` names
+    the current statement event.  No statement, an unreadable or absent plan, and an explicit
+    empty-scope declaration never report the condition.
+    """
+
     scope = current_plan_scope(projection.plans, projection.coverage_gaps)
-    if statement is None or not scope.readable or scope.effective_obligation_refs is None:
+    if statement_event is None or not scope.readable or scope.effective_obligation_refs is None:
         return False
     if not scope.effective_obligation_refs:
         # An explicit empty-scope declaration is a plan decision, not evidence that a requirement
         # was accidentally omitted from the plan.
         return False
     return not any(
-        row.payload is not None and statement.source_event_id in row.payload.source_refs
+        row.payload is not None and statement_event in row.payload.source_refs
         for obligation in scope.effective_obligation_refs
         if (row := projection.obligations.get(obligation)) is not None
+    )
+
+
+def _instruction_unmapped(projection: ProjectionState, records: tuple[LedgerRecord, ...]) -> bool:
+    statement = current_task_statement(records)
+    return task_statement_unmapped(
+        projection, None if statement is None else statement.source_event_id
     )
 
 
@@ -228,7 +251,7 @@ def plan_drift_signals(
     projection: ProjectionState,
     records: Iterable[LedgerRecord],
 ) -> PlanDriftSignals:
-    """Derive advisory plan signals from exact ledger relations.
+    """Derive plan drift signals from exact ledger relations.
 
     A caller must pass the same accepted prefix that produced ``projection``.  The helper is
     deliberately total for a readable projection and ignores unknown/redacted payloads rather

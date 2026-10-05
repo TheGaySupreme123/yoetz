@@ -41,7 +41,7 @@ from yoetz.domain.receipts import CHECK_TIME_CHANGE_UNAVAILABLE_REASON_GAPS
 from yoetz.domain.values import FindingId, ObligationId
 from yoetz.kernel.finding_resolution import finding_is_resolved
 from yoetz.kernel.finding_todo import finding_blocks_receipt
-from yoetz.kernel.plan_drift import PLAN_DRIFT_GAPS
+from yoetz.kernel.plan_drift import PLAN_DRIFT_ADVISORY_GAPS, PLAN_DRIFT_GAPS
 from yoetz.kernel.projections import ProjectionState, observation_limitation_finding_ids
 from yoetz.kernel.receipt_capacity import current_receipt_findings
 from yoetz.kernel.reducers import invalidates_recorded_check
@@ -172,10 +172,14 @@ GAP_CLASSIFICATION: Final[Mapping[str, GapClass]] = MappingProxyType(
         "check_payload_unavailable": _S,
         # -- AI-powered review outcome and packet bounds: disclosure of how the review was bounded.
         "semantic_review_not_requested": _R,
-        # Plan drift is a diagnostic about the quality of the recorded planning trace.  It is
-        # deliberately standing: a refinement may remove it, but its presence never turns a
-        # receipt into an agent-actionable closure blocker by itself.
-        **{code: _S for code in sorted(PLAN_DRIFT_GAPS)},
+        # Plan drift is a diagnostic about the quality of the recorded planning trace.  The
+        # advisory codes are deliberately standing: a refinement may remove them, but their
+        # presence never turns a receipt into an agent-actionable closure blocker by itself.
+        **{code: _S for code in sorted(PLAN_DRIFT_ADVISORY_GAPS)},
+        # A recorded task statement that no effective obligation cites in source_refs is agent
+        # work (TB4 pilot): decompose the request into statement-sourced obligations, or revise
+        # the plan to an explicit empty scope. Yoetz checks the link, never the request prose.
+        "instruction_requirement_unmapped": _A,
         # Test-edit accounting is structural and path-private.  A baseline gap is a standing
         # limit; an unjustified edit remains agent-actionable until an explicit action/path
         # decision is recorded.
@@ -304,6 +308,8 @@ GAP_CLASSIFICATION: Final[Mapping[str, GapClass]] = MappingProxyType(
         "wrapper_shape_unsupported": _S,
     }
 )
+if not PLAN_DRIFT_GAPS <= set(GAP_CLASSIFICATION):  # pragma: no cover - closed drift vocabulary
+    raise ValueError("gap_classification_plan_drift_incomplete")
 if any(_CODE_RE.fullmatch(code) is None for code in GAP_CLASSIFICATION):  # pragma: no cover
     raise ValueError("gap_classification_code_invalid")
 if [code for code, value in GAP_CLASSIFICATION.items() if value is _R] != [

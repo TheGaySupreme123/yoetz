@@ -189,6 +189,12 @@ task, and do not request a receipt before that check reaches a terminal result.
 This is the first material publication. Name the requested outcome in `description` and
 `acceptance_criteria`, and its acceptance evidence in `evidence_expectation`; do not turn
 routine file mechanics into obligations. The requested outcome is not an `item_kind`.
+Publish one such obligation per requirement, symptom, constraint, or deliverable the user's
+request states. Replace the `source_refs` placeholder with the id of the event that recorded the
+task statement (your `start`'s `session_opened`, or `session_resumed` when an attach carried the
+statement; `status view=history` lists it). A plan whose obligations never cite that event
+returns an agent-actionable `task_requirement_unmet` finding that names the id. A `file` item for
+an existing test the request asks you to change also justifies that test edit.
 
 ```json
 {
@@ -228,8 +234,10 @@ routine file mechanics into obligations. The requested outcome is not an `item_k
         "status": "open",
         "requested_items": [
           {"item_kind": "command", "value": "pytest -q"},
-          {"item_kind": "change", "value": "Replace with the named change this obligation owes"}
-        ]
+          {"item_kind": "change", "value": "Replace with the named change this obligation owes"},
+          {"item_kind": "file", "value": "tests/test_requested_regression.py"}
+        ],
+        "source_refs": ["evt_00000000-0000-4000-8000-000000000000"]
       },
       "artifact_refs": [],
       "evidence_refs": []

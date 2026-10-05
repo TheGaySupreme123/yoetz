@@ -114,9 +114,14 @@ __all__ = [
     "MAX_FROZEN_HISTORY_BYTES",
     "MAX_FROZEN_HISTORY_EVENTS",
     "OBSERVED_FAILURE_LIVE_FACT",
+    "OBSERVED_VERIFICATION_ABSENT_FACT",
+    "OBSERVED_VERIFICATION_UNCITED_FACT",
+    "STATEMENT_SOURCED_OBLIGATION_ABSENT_FACT",
+    "TASK_STATEMENT_UNMAPPED_FACT",
     "PolicyPack",
     "UnavailableCapturedObject",
     "build_deterministic_case",
+    "build_task_statement_unmapped_assessment",
     "build_test_edit_integrity_assessment",
     "case_coverage",
     "healthy_storage_availability",
@@ -139,6 +144,12 @@ _MAX_SAFE_INTEGER: Final = 2**53 - 1
 # observed run of its command identity failed and no covering rerun or acknowledgement followed
 # it (#909).
 OBSERVED_FAILURE_LIVE_FACT: Final = "observed_failure_live"
+# The recorded task statement has no effective obligation citing it in source_refs (TB4 pilot).
+TASK_STATEMENT_UNMAPPED_FACT: Final = "task_statement_unmapped"
+STATEMENT_SOURCED_OBLIGATION_ABSENT_FACT: Final = "statement_sourced_obligation_absent"
+# A completion claim cites no hook-observed verification run made after the latest observed edit.
+OBSERVED_VERIFICATION_UNCITED_FACT: Final = "observed_verification_uncited"
+OBSERVED_VERIFICATION_ABSENT_FACT: Final = "observed_verification_absent"
 _CODE_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$", re.ASCII)
 _POLICY_PATTERN: Final = re.compile(r"^[a-z][a-z0-9-]{0,127}$", re.ASCII)
 _VERSION_PATTERN: Final = re.compile(
@@ -462,8 +473,10 @@ DETERMINISTIC_FINDING_TEMPLATES: Final[
             "Record the repair evidence or revise the code-defect finding.",
         ),
         FindingKind.TASK_REQUIREMENT_UNMET: DeterministicFindingTemplate(
-            "An existing test-file edit lacks the recorded justification required by the task.",
-            "Record an exact action/path-digest decision for the edit or revert the test change.",
+            "An existing test file was edited without a recorded justification.",
+            "If the user's request asks for this test change, list the file's path as a"
+            " requested_items entry (item_kind file) of an obligation whose source_refs cite"
+            " the task-statement event, then check again; otherwise revert the test change.",
         ),
     }
 )
@@ -551,6 +564,35 @@ def render_deterministic_finding_text(
                     " resolve it, and it stays current until a qualifying check proves those"
                     f" other gaps absent.{support}"
                 )
+    if kind is FindingKind.TASK_REQUIREMENT_UNMET and any(
+        fact.fact_code == TASK_STATEMENT_UNMAPPED_FACT for fact in observed_facts
+    ):
+        statement_refs = ", ".join(ref for ref in refs if ref.startswith("evt_"))
+        return (
+            "No obligation in the current plan cites the recorded task statement.",
+            f"Subjects: {', '.join(refs)}. Main agent: Decompose the user's request into"
+            " obligations, one per stated requirement, symptom, constraint, or deliverable."
+            f" Give each source_refs [{statement_refs}], observable acceptance_criteria, and"
+            " requested_items for every file, command, or output the request names. Add them"
+            " with plan_revised (change=carried) and resolve each with its own evidence. A"
+            " check rerun without that plan change returns this finding again. If the request"
+            " asks for no material work, revise the plan to an explicit empty scope instead.",
+        )
+    if kind is FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE and any(
+        fact.fact_code == OBSERVED_VERIFICATION_UNCITED_FACT for fact in observed_facts
+    ):
+        claim_refs = ", ".join(ref for ref in refs if ref.startswith("clm_"))
+        return (
+            "A completion claim cites no hook-observed verification run made after the latest"
+            " observed edit.",
+            f"Subjects: {', '.join(refs)}. Main agent: Self-asserted evidence is not"
+            " corroborated by observation. Run the verification the request needs after your"
+            " last edit, find that run in status view=results (tool, occurrence, exit status),"
+            " and replace the claim with claim_recorded/1.1.0 supersedes_claim_refs"
+            f" [{claim_refs}], citing the observed res_ id in supporting_refs (or in"
+            " limitation_refs when it failed). A check rerun alone returns this finding again;"
+            " if no verification is possible, narrow the claim or answer with respond.",
+        )
     if kind is FindingKind.MATERIAL_LIMITATION_OMITTED:
         limitation_refs = tuple(
             ref
@@ -690,6 +732,12 @@ def _text_contract_corpus() -> tuple[JsonValue, ...]:
         ),
         ("limitation_result", FindingKind.MATERIAL_LIMITATION_OMITTED, (), (limitation_result,)),
         ("limitation_record", FindingKind.MATERIAL_LIMITATION_OMITTED, (), (limitation_record,)),
+        (
+            "task_statement_unmapped",
+            FindingKind.TASK_REQUIREMENT_UNMET,
+            (),
+            (FindingFact(TASK_STATEMENT_UNMAPPED_FACT, subject),),
+        ),
     )
     failed_subjects = (failed_claim, *subject)
     return (
@@ -697,6 +745,16 @@ def _text_contract_corpus() -> tuple[JsonValue, ...]:
             [label, kind.value, *render_deterministic_finding_text(kind, subject, gaps, facts)]
             for label, kind, gaps, facts in branches
         ),
+        [
+            "observed_verification_uncited",
+            FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE.value,
+            *render_deterministic_finding_text(
+                FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE,
+                (failed_claim,),
+                (),
+                (FindingFact(OBSERVED_VERIFICATION_UNCITED_FACT, (failed_claim,)),),
+            ),
+        ],
         [
             "failed_observed_run",
             FindingKind.FAILED_WORK_OMITTED.value,
@@ -2281,6 +2339,36 @@ def build_test_edit_integrity_assessment(
         FindingKind.TASK_REQUIREMENT_UNMET,
         source_event_refs,
         (FindingFact("preexisting_test_edit_unjustified", support_refs),),
+    )
+
+
+def build_task_statement_unmapped_assessment(
+    case: DeterministicCase,
+) -> DeterministicAssessment | None:
+    """Raise the local finding for a task statement no effective obligation cites (TB4 pilot).
+
+    The rule reads one exact relation: whether an obligation in the effective plan scope names the
+    current statement event in ``source_refs``. It never reads the statement, plan or obligation
+    prose. No statement, an unreadable or absent plan, and an explicit empty-scope declaration
+    raise nothing. The single public subject is the statement event, so the finding keeps its
+    identity across plan revisions until a statement-sourced obligation exists.
+    """
+
+    from yoetz.kernel.plan_drift import task_statement_unmapped
+
+    statement = case.task_statement
+    if statement is None or statement.source_event_id not in case.allowed_ids:
+        return None
+    if not task_statement_unmapped(case.projection, statement.source_event_id):
+        return None
+    subject = (statement.source_event_id,)
+    return build_policy_assessment(
+        case,
+        PolicyPack("research-evidence", "0.1.0"),
+        FindingKind.TASK_REQUIREMENT_UNMET,
+        subject,
+        (FindingFact(TASK_STATEMENT_UNMAPPED_FACT, subject),),
+        (FindingFact(STATEMENT_SOURCED_OBLIGATION_ABSENT_FACT, subject),),
     )
 
 
