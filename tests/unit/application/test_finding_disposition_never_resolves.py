@@ -186,13 +186,15 @@ def test_a_later_qualifying_check_resolves_whatever_the_disposition(
     """The proof lives on the finding record, set only by the reducer from a qualifying check.
 
     The receipt state and the status counter read that one fact, so a repaired record whose
-    issue a later check found absent earns a clean receipt with or without a response.
+    issue a later check found absent earns a clean receipt with or without a response. A
+    verified-resolved row with no response is final (``respond`` refuses it), so it is not
+    response work either: counting it would leave an item no action can clear.
     """
 
     projection = _projection(None if disposition is None else _response(disposition), resolved=True)
     assert [state.resolved for state in _finding_states(projection)] == [True]
     assert receipt_blocking_finding_count(projection) == 0
-    assert unanswered_finding_count(projection, ()) == (1 if disposition is None else 0)
+    assert unanswered_finding_count(projection, ()) == 0
 
 
 def test_provenance_dispute_pins_the_row_unresolved_on_the_released_wire() -> None:

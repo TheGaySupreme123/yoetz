@@ -3751,9 +3751,10 @@ async def test_repair_plus_later_qualifying_check_resolves_the_finding(
         )
     )
     compact = cast(StatusCompactPageModel, status.page).items[0]
-    # Answered and resolved are independent: the two seeded rows never responded to are still
-    # unanswered history, and the advisory row is unanswered and current; none of them blocks.
-    assert compact.unanswered_finding_count == str(len(seeded_ids) - 1 + len(advisory_ids))
+    # A seeded row the recheck resolved without a response is verified_resolved, a final state
+    # ``respond`` refuses, so it is no longer response work (pilot blocker); any advisory row the
+    # recheck returned is unanswered and current. None of them blocks.
+    assert compact.unanswered_finding_count == str(len(advisory_ids))
     assert compact.receipt_blocking_finding_count == "0"
     assert "receipt_findings_unresolved" not in status.closure_readiness.blocking_conditions
 

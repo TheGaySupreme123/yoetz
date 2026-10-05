@@ -1052,11 +1052,20 @@ def unanswered_finding_ids(
     finding. An observation-authored, non-actionable finding (``is_observation_limitation``) is a
     disclosed coverage limitation that needs no response, so it is never response work. Neither
     rule sets the receipt's ``resolved`` field, which remains false for every response disposition.
+
+    A readable finding a later qualifying check already proved absent, with no response, is
+    ``verified_resolved``: that state is final and ``respond`` refuses it, so counting it as
+    response work would leave an agent that repaired before answering with a readiness item it
+    can never clear (pilot blocker).
     """
 
     limitations = observation_limitation_finding_ids(state, records)
     return frozenset(
-        key for key in state.findings if key not in state.responses and key not in limitations
+        key
+        for key, record in state.findings.items()
+        if key not in state.responses
+        and key not in limitations
+        and not (record.payload is not None and record.resolved_by_check_event_id is not None)
     )
 
 
