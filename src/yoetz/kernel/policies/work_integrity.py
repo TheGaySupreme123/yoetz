@@ -104,6 +104,7 @@ WORK_INTEGRITY_FACT_CODES: Final = frozenset(
         OBSERVED_VERIFICATION_ABSENT_FACT,
     }
 )
+_COMMAND_ATTEMPT_UNCORROBORATED_GAP: Final = "command_attempt_uncorroborated"
 # Hook-derived runner classes that read or inspect rather than verify (closed tokens; no
 # command text is parsed here).
 _NON_VERIFICATION_RUNNERS: Final = frozenset({"exploration", "vcs"})
@@ -385,9 +386,15 @@ def _observed_verification_facts(
     """Return the latest observed edit frontier, whether a verification ran, and its refs.
 
     Only service-stamped hook observations count (ADR-022): a cooperative edit or result never
-    stands in for an observed one. A verification run is a hook-observed command result with a
-    recorded outcome whose host-derived runner class is not ``exploration`` or ``vcs``; an
-    unclassified command counts, so the rule never fires merely because a host omitted the class.
+    stands in for an observed one. A verification run is a hook-observed command result whose
+    host-derived runner class is not ``exploration`` or ``vcs``; an unclassified command counts,
+    so the rule never fires merely because a host omitted the class.
+
+    Corroboration is verification-class only (TB4 pilot): the run's own result, or captured
+    output that result links, at the run's frontier. Captured output of an edit, of an
+    exploration or VCS command, or a standalone capture no run links never corroborates. A run
+    whose host stated no outcome (a long Codex run that outlived its yield) still corroborates
+    that it ran after the edit, but only a run with a recorded outcome makes the rule apply.
     """
 
     observed = observed_event_ids_from_coverage(case.coverage_by_ref)
@@ -401,13 +408,10 @@ def _observed_verification_facts(
         ):
             latest_edit = max(latest_edit or 0, action.source_frontier)
     runs: dict[str, int] = {}
+    verification_observed = False
     for result_ref, result in case.projection.results.items():
         payload = result.payload
-        if (
-            payload is None
-            or result.source_event_id not in observed
-            or payload.outcome is ResultOutcome.UNKNOWN
-        ):
+        if payload is None or result.source_event_id not in observed:
             continue
         action = case.projection.actions.get(payload.action_id)
         if (
@@ -419,22 +423,13 @@ def _observed_verification_facts(
         ):
             continue
         runs[str(result_ref)] = result.source_frontier
-    # Only an observed edit or verification run makes the rule apply; captured evidence below
-    # corroborates a claim but never triggers the rule on its own (for example a Codex shell post
-    # with no stated outcome, or an unpaired post that became metadata-only evidence).
-    verification_observed = bool(runs)
-    # Hook-captured evidence (for example native tool output) corroborates at its own frontier,
-    # and evidence a verification run links inherits that run's frontier.
-    for evidence_ref, evidence in case.projection.evidence.items():
-        if evidence.payload is not None and evidence.source_event_id in observed:
-            runs[str(evidence_ref)] = evidence.source_frontier
-    for result_ref, frontier in tuple(runs.items()):
-        if not result_ref.startswith("res_"):
-            continue
-        result = case.projection.results[ResultId(result_ref)]
-        if result.payload is not None:
-            for evidence_ref in result.payload.evidence_refs:
-                runs[str(evidence_ref)] = max(runs.get(str(evidence_ref), 0), frontier)
+        # Only an observed edit or a verification run with a recorded outcome makes the rule
+        # apply; an outcome-less run corroborates but never triggers the rule on its own.
+        verification_observed = (
+            verification_observed or payload.outcome is not ResultOutcome.UNKNOWN
+        )
+        for evidence_ref in payload.evidence_refs:
+            runs[str(evidence_ref)] = max(runs.get(str(evidence_ref), 0), result.source_frontier)
     return latest_edit, verification_observed, runs
 
 
@@ -666,6 +661,13 @@ def _ledger_finding(case: DeterministicCase) -> list[DeterministicAssessment]:
             # label, not a ledger defect: it stays in case coverage and the receipt names it once
             # with a count, but no agent action can change it, so it never becomes a finding
             # subject whose growth would mint a new issue on every publication (issue #912).
+            continue
+        if gap.code == _COMMAND_ATTEMPT_UNCORROBORATED_GAP:
+            # Same principle (TB4 pilot): a hook records a keyed commitment instead of command
+            # text, so a requested command item can never be byte-compared with the observed run.
+            # Nothing the agent publishes changes that; the gap stays in case coverage and on the
+            # receipt as a standing limitation, never a finding an honest agent cannot clear.
+            # ``command_attempt_mismatch`` is actionable and keeps its finding.
             continue
         if gap.code == "unknown_event":
             fact_code = "unknown_event_present"

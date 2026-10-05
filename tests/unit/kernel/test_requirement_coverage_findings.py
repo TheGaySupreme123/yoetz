@@ -326,30 +326,107 @@ def test_no_hook_observation_keeps_the_rule_silent() -> None:
     assert _uncorroborated(case) == []
 
 
-def test_citing_hook_captured_evidence_after_the_last_edit_is_quiet() -> None:
-    """Native tool-output captures corroborate like the observed run that produced them."""
-
-    captured = EvidenceRecordedPayload(
-        evidence_id=evd(50),
+def _captured(number: int) -> EvidenceRecordedPayload:
+    return EvidenceRecordedPayload(
+        evidence_id=evd(number),
         evidence_kind=EvidenceKind.TEST_RESULT,
         strength=EvidenceImmutability.IMMUTABLE_SNAPSHOT,
         observed_at=timestamp_from_string("2026-10-05T12:00:00.000Z"),
-        captured_object_id=object_id("obj_10000000-0000-4000-8000-000000000050"),
+        captured_object_id=object_id(f"obj_10000000-0000-4000-8000-0000000000{number:02d}"),
         content_digest="sha256:" + "a" * 64,
     )
 
-    def case_with(edit_at: int) -> DeterministicCase:
-        base = _corroboration_case(edits=(edit_at,), claim=_claim(evd(50)))
-        return make_case(
-            plans=dict(base.projection.plans),
-            actions=dict(base.projection.actions),
-            evidence={evd(50): evidence_record(captured, 50)},
-            claims=dict(base.projection.claims),
-            coverage_overrides={evt(edit_at): _HOOK, evt(50): _HOOK},
+
+def _with_captured_output(
+    base: DeterministicCase, *, linked_from: int | None, captured_at: int = 50
+) -> DeterministicCase:
+    """Add hook-captured output, linked from result ``linked_from`` when given."""
+
+    results = dict(base.projection.results)
+    if linked_from is not None:
+        row = results[res(linked_from)]
+        assert row.payload is not None
+        results[res(linked_from)] = record(
+            replace(row.payload, evidence_refs=(evd(captured_at),)), row.source_frontier
         )
+    observed: dict[FindingBasisRef, Coverage] = {
+        ref: coverage
+        for ref, coverage in base.coverage_by_ref.items()
+        if PublicationChannel.HOOK_OBSERVED in coverage.publication_channels
+    }
+    observed[evt(captured_at)] = _HOOK
+    return make_case(
+        plans=dict(base.projection.plans),
+        actions=dict(base.projection.actions),
+        results=results,
+        evidence={evd(captured_at): evidence_record(_captured(captured_at), captured_at)},
+        claims=dict(base.projection.claims),
+        coverage_overrides=observed,
+    )
+
+
+def test_captured_output_of_a_verification_run_after_the_last_edit_is_quiet() -> None:
+    """Native output a verification run links corroborates at that run's frontier (R2)."""
+
+    def case_with(edit_at: int) -> DeterministicCase:
+        base = _corroboration_case(
+            edits=(edit_at,),
+            commands=((40, "test", ResultOutcome.SUCCESS),),
+            claim=_claim(evd(50)),
+        )
+        return _with_captured_output(base, linked_from=40)
 
     assert _uncorroborated(case_with(20)) == []
-    assert len(_uncorroborated(case_with(60))) == 1
+    assert len(_uncorroborated(case_with(45))) == 1
+
+
+def test_only_verification_class_captures_corroborate() -> None:
+    """A standalone capture, an edit's own output, or an exploration run's output is not a run."""
+
+    standalone = _with_captured_output(
+        _corroboration_case(edits=(20,), claim=_claim(evd(50))), linked_from=None
+    )
+    exploration = _with_captured_output(
+        _corroboration_case(
+            edits=(20,),
+            commands=((40, "exploration", ResultOutcome.SUCCESS),),
+            claim=_claim(evd(50)),
+        ),
+        linked_from=40,
+    )
+    edit_output = _corroboration_case(edits=(20,), claim=_claim(evd(50)))
+    edit_result = ResultRecordedPayload(res(20), act(20), ResultOutcome.SUCCESS)
+    edit_output = _with_captured_output(
+        make_case(
+            plans=dict(edit_output.projection.plans),
+            actions=dict(edit_output.projection.actions),
+            results={res(20): record(edit_result, 21)},
+            claims=dict(edit_output.projection.claims),
+            coverage_overrides={evt(20): _HOOK, evt(21): _HOOK},
+        ),
+        linked_from=20,
+    )
+
+    for case in (standalone, exploration, edit_output):
+        assert len(_uncorroborated(case)) == 1
+
+
+def test_an_outcome_less_verification_run_corroborates_but_never_triggers() -> None:
+    """A long run whose host stated no outcome still shows a run after the edit (R1/R2)."""
+
+    cited = _corroboration_case(
+        edits=(20,),
+        commands=((40, "test", ResultOutcome.UNKNOWN),),
+        claim=_claim(res(40)),
+    )
+    no_edit = _corroboration_case(
+        commands=((40, "test", ResultOutcome.UNKNOWN),),
+        cooperative_result=60,
+        claim=_claim(res(60)),
+    )
+
+    assert _uncorroborated(cited) == []
+    assert _uncorroborated(no_edit) == []
 
 
 def test_hook_captured_evidence_alone_keeps_the_rule_silent() -> None:

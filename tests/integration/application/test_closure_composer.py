@@ -236,13 +236,30 @@ async def test_composer_paginates_and_requires_explicit_attempt_and_resolution()
     assert recovery.filter.operation_request_id == claim_request.request_id  # type: ignore[union-attr]
     await app.publish_work(claim_request)
     claimed = await app.publish_work(claim_request.model_copy(update={"dry_run": False}))
+    frontier = claimed.result_frontier
+    # The uncorroborated command attempt is a standing coverage limit, not a finding (pilot
+    # blocker). An unsupported material claim gives the respond phase a real finding to answer.
+    await publish(
+        [
+            draft(
+                "claim_recorded",
+                {
+                    "claim_id": protocol_id("clm_", 9650),
+                    "claim_kind": "material",
+                    "statement": "Unsupported synthetic assertion",
+                    "supporting_refs": [],
+                },
+            )
+        ],
+        9651,
+    )
     checked = await app.check(
         CheckRequest.model_validate(
             {
                 **request_base(protocol_id("req_", 9700)),
                 "session_id": started.session_id,
                 "writer_id": started.writer_id,
-                "expected_frontier": frontier_json(claimed.result_frontier),
+                "expected_frontier": frontier_json(frontier),
                 "mode": "deterministic_only",
                 "max_findings": "10",
             }
@@ -250,7 +267,7 @@ async def test_composer_paginates_and_requires_explicit_attempt_and_resolution()
     )
     assert isinstance(checked, CheckCommitResult)
     assert "command_attempt_uncorroborated" in checked.coverage.known_gaps
-    assert checked.findings
+    assert [item.kind.value for item in checked.findings] == ["claim_without_admissible_evidence"]
     response = await prepare_closure(
         status,
         started.session_id,
