@@ -41,7 +41,12 @@ from yoetz.domain.findings import (
     SemanticProvenance,
 )
 from yoetz.kernel.deterministic_checks import DeterministicCase
-from yoetz.ports.semantic import PriorFindingVerdict, ReviewerChallenge, SemanticJudgment
+from yoetz.ports.semantic import (
+    PriorFindingVerdict,
+    ReviewerChallenge,
+    SemanticJudgment,
+    VerifiedReviewItem,
+)
 from yoetz.protocol.models import SemanticReason, SemanticStatus
 
 _DIGEST = "sha256:" + "a" * 64
@@ -148,6 +153,49 @@ def test_reviewer_snippets_use_exact_provider_bound_text() -> None:
     assert recovered_without_text.challenges_rejected == 1
     assert recovered_without_text.snippets_rejected == 1
     assert recovered_without_text.candidates == ()
+
+
+@pytest.mark.parametrize("conclusion", ["no_material_discrepancy", "challenges_returned"])
+def test_dropped_verified_rows_are_not_counted_as_rejected_challenges(conclusion: str) -> None:
+    """A verified row the fence drops is a disclosed snippet loss, never a rejected challenge.
+
+    Regression: dropped verified rows were folded into the snippet-rejected *challenge* count,
+    so returned != accepted + rejected + suppressed and every such review failed the check with
+    a non-retryable internal error (a cited ref with no provider-bound text, or an inexact quote).
+    """
+
+    case = make_case(extra_refs=(clm(1), obl(1)))
+    challenges = (
+        (_challenge(str(clm(1)), snippet="sent-safe-row"),)
+        if conclusion == "challenges_returned"
+        else ()
+    )
+    judgment = SemanticJudgment(
+        conclusion,  # pyright: ignore[reportArgumentType]
+        challenges,
+        review_summary="Checked the claim and the obligation.",
+        verified=(
+            VerifiedReviewItem("Claim holds", "supported", (str(clm(1)),), "sent-safe-row"),
+            # Citable but never sent as text: the row is dropped.
+            VerifiedReviewItem("Obligation met", "not_assessable", (str(obl(1)),)),
+            # Quote that is not an exact packet substring: the row is dropped.
+            VerifiedReviewItem("Claim quoted", "supported", (str(clm(1)),), "invented quote"),
+        ),
+    )
+    review = validate_semantic_judgment(
+        case,
+        (),
+        judgment,
+        _provenance(),
+        expected_frontier=case.frontier,
+        citable_refs=frozenset({str(clm(1)), str(obl(1))}),
+        provider_input_text_by_ref={str(clm(1)): ("sent-safe-row",)},
+    )
+    assert review.challenges_rejected == 0
+    assert review.challenges_returned == len(challenges)
+    assert len(review.candidates) == len(challenges)
+    assert review.snippets_rejected == 2
+    assert [item.requirement_or_claim for item in review.verified] == ["Claim holds"]
 
 
 def test_semantic_judgment_accepts_only_frozen_refs_and_derives_policy() -> None:

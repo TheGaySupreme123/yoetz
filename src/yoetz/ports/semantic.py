@@ -1737,6 +1737,9 @@ class SemanticJudgment:
     # must supply this field; legacy local scripts retain the explicit bounded fallback text.
     review_summary: str = "No review summary recorded."
     verified: tuple[VerifiedReviewItem, ...] = ()
+    # Verified rows the normalizer dropped because their quote did not match their verdict
+    # (supported/not_supported without a quote). Disclosed through the snippet gap.
+    verified_dropped: int = 0
 
     def __post_init__(self) -> None:
         if type(self.conclusion) is not str or self.conclusion not in _CONCLUSIONS:
@@ -1782,6 +1785,9 @@ class SemanticJudgment:
             raise _invalid_judgment()
         dropped = self.prior_finding_verdicts_dropped
         if type(dropped) is not int or not 0 <= dropped <= _MAX_SAFE_INTEGER:
+            raise _invalid_judgment()
+        verified_dropped = self.verified_dropped
+        if type(verified_dropped) is not int or not 0 <= verified_dropped <= _MAX_SAFE_INTEGER:
             raise _invalid_judgment()
 
 

@@ -2488,8 +2488,12 @@ def _validate_reviewer_snippets(
     *,
     citable_refs: frozenset[str] | None,
     provider_input_text_by_ref: Mapping[str, tuple[str, ...]] | None,
-) -> tuple[SemanticJudgment, int]:
+) -> tuple[SemanticJudgment, int, int]:
     """Drop reviewer quotes that are not exact packet substrings.
+
+    Returns the fenced judgment, the number of dropped challenges, and the number of dropped
+    verified rows. The two are counted apart: only a dropped challenge is a rejected challenge;
+    a dropped verified row is a coverage loss disclosed through the snippet gap.
 
     The provider may still provide useful challenges/judgements beside one malformed quote. A
     bad quote therefore loses only that entry and leaves a bounded diagnostic for the check/receipt
@@ -2504,7 +2508,7 @@ def _validate_reviewer_snippets(
         and not any(challenge.snippet is not None for challenge in judgment.challenges)
         and not any(item.snippet is not None for item in judgment.verified)
     ):
-        return judgment, 0
+        return judgment, 0, 0
 
     if citable_refs is not None:
         # A snippet-bearing judgement must name refs that survived the exact provider-bound
@@ -2520,6 +2524,7 @@ def _validate_reviewer_snippets(
     else:
         allowed = frozenset(provider_input_text_by_ref)
     rejected = 0
+    verified_rejected = 0
     challenges: list[ReviewerChallenge] = []
     for challenge in judgment.challenges:
         cited = tuple(ref for ref in challenge.cited_refs if ref in allowed)
@@ -2544,32 +2549,41 @@ def _validate_reviewer_snippets(
                 for text in _packet_text_for_refs(cited, provider_input_text_by_ref)
             )
         if not valid:
-            rejected += 1
+            verified_rejected += 1
             continue
         verified.append(item)
 
     if (
         rejected == 0
+        and verified_rejected == 0
         and tuple(challenges) == judgment.challenges
         and tuple(verified) == judgment.verified
     ):
-        return judgment, 0
+        return judgment, 0, 0
     if judgment.conclusion == "challenges_returned" and not challenges:
         # The domain coupling requires at least one challenge for that conclusion. Preserve the
         # response as a bounded "no admitted challenge" review so one malformed quote does not
         # turn the whole provider response into an invalid check; the caller records the snippet
         # gap from ``rejected`` and retains the provider's original conclusion separately.
-        return replace(
+        return (
+            replace(
+                judgment,
+                conclusion="no_material_discrepancy",
+                challenges=(),
+                verified=tuple(verified),
+            ),
+            rejected,
+            verified_rejected,
+        )
+    return (
+        replace(
             judgment,
-            conclusion="no_material_discrepancy",
-            challenges=(),
+            challenges=tuple(challenges),
             verified=tuple(verified),
-        ), rejected
-    return replace(
-        judgment,
-        challenges=tuple(challenges),
-        verified=tuple(verified),
-    ), rejected
+        ),
+        rejected,
+        verified_rejected,
+    )
 
 
 # A finding names at most 64 subjects. Several cited findings can union past that; such a
@@ -2826,19 +2840,27 @@ def validate_semantic_judgment(
         if prior_finding_refs is not None:
             prior_finding_refs &= provider_refs
     returned_challenges = len(judgment.challenges)
-    judgment, snippets_rejected = _validate_reviewer_snippets(
+    judgment, challenge_snippets_rejected, verified_snippets_rejected = _validate_reviewer_snippets(
         judgment,
         citable_refs=citable_refs,
         provider_input_text_by_ref=provider_input_text_by_ref,
+    )
+    # Every dropped quote is disclosed through the snippet gap (including verified rows the
+    # normalizer already dropped as inconsistent with their verdict); only dropped challenges
+    # count toward the returned == accepted + rejected + suppressed challenge accounting.
+    snippets_rejected = (
+        challenge_snippets_rejected + verified_snippets_rejected + judgment.verified_dropped
     )
     admitted, verdicts_unsupported, verdicts_set_aside = _admit_prior_verdicts(
         case, judgment, prior_finding_refs=prior_finding_refs, citable_refs=citable_refs
     )
     if judgment.conclusion != "challenges_returned":
         rejected_by_reason = (
-            ((SEMANTIC_REJECTED_SNIPPET, snippets_rejected),) if snippets_rejected else ()
+            ((SEMANTIC_REJECTED_SNIPPET, challenge_snippets_rejected),)
+            if challenge_snippets_rejected
+            else ()
         )
-        return SemanticJudgmentReview(
+        return _judgment_review(
             (),
             returned_challenges,
             rejected_by_reason,
@@ -2866,8 +2888,8 @@ def validate_semantic_judgment(
         )
     candidates: list[CandidateFinding] = []
     rejections: dict[str, int] = {}
-    if snippets_rejected:
-        rejections[SEMANTIC_REJECTED_SNIPPET] = snippets_rejected
+    if challenge_snippets_rejected:
+        rejections[SEMANTIC_REJECTED_SNIPPET] = challenge_snippets_rejected
     restatements = 0
     for challenge in judgment.challenges:
         resolution = _resolve_challenge_refs(case, deterministic, challenge)
@@ -2940,7 +2962,7 @@ def validate_semantic_judgment(
         if admitted[key].verdict == "fixed":
             admitted[key] = PriorFindingVerdictRecord(finding_id(key), "unassessable", ())
             verdicts_unsupported += 1
-    return SemanticJudgmentReview(
+    return _judgment_review(
         tuple(candidates),
         returned_challenges,
         tuple(sorted(rejections.items(), key=lambda item: item[0].encode("ascii"))),
@@ -2952,6 +2974,22 @@ def validate_semantic_judgment(
         judgment.verified,
         snippets_rejected,
     )
+
+
+def _judgment_review(*args: object, **kwargs: object) -> SemanticJudgmentReview:
+    """Build the review, turning an accounting-invariant failure into a rejected judgment.
+
+    The invariant still fails loudly (a diagnostic and ``semantic_judgment_rejected``), but the
+    check commits its local findings and terminates instead of failing as a non-retryable internal
+    error that a same-request replay re-raises forever.
+    """
+
+    try:
+        return SemanticJudgmentReview(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+    except SemanticJudgmentRejected:
+        raise
+    except ValueError as exc:
+        raise _rejected("semantic_judgment_review_invalid") from exc
 
 
 def _ref_sequence(case: DeterministicCase, ref: str) -> int | None:

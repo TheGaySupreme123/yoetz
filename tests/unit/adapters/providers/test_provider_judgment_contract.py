@@ -365,8 +365,10 @@ def test_strict_wire_output_with_null_snippet_decodes_under_the_contract() -> No
 
     missing_quote = json.loads(json.dumps(body))
     missing_quote["judgment"]["verified"][0]["snippet"] = None
-    with pytest.raises(JudgmentValidationError):
-        normalize_judgment(cast(JsonValue, missing_quote), require_part2=True)
+    # Strict output allows this shape; the row is dropped and counted, never the whole review.
+    degraded = normalize_judgment(cast(JsonValue, missing_quote), require_part2=True)
+    assert degraded.verified_dropped == 1
+    assert [item.verdict for item in degraded.verified] == ["not_assessable"]
 
 
 def test_request_schema_carries_no_docstring_commentary() -> None:
@@ -1001,3 +1003,47 @@ def test_a_present_non_array_rulings_value_is_counted_not_read_as_the_1_0_0_shap
     assert len(judgment.challenges) == 1
     assert judgment.prior_finding_verdicts == ()
     assert judgment.prior_finding_verdicts_dropped == 1
+
+
+def test_verified_rows_inconsistent_with_their_verdict_cost_only_themselves() -> None:
+    """Strict output cannot couple snippet to verdict; a mismatched row must not reject the review.
+
+    A not_assessable row keeps its judgement without the quote; a supported/not_supported row
+    without a quote is dropped and counted so the check can disclose it.
+    """
+
+    ref = "evt_00000000-0000-4000-8000-000000000001"
+    body: dict[str, Any] = {
+        "judgment": {
+            "conclusion": "no_material_discrepancy",
+            "review_summary": "Checked three rows.",
+            "prior_finding_verdicts": [],
+            "reviewer_challenges": [],
+            "verified": [
+                {
+                    "requirement_or_claim": "Quoted support",
+                    "verdict": "supported",
+                    "cited_refs": [ref],
+                    "snippet": "quoted",
+                },
+                {
+                    "requirement_or_claim": "Support without a quote",
+                    "verdict": "supported",
+                    "cited_refs": [ref],
+                    "snippet": None,
+                },
+                {
+                    "requirement_or_claim": "Unassessable with a stray quote",
+                    "verdict": "not_assessable",
+                    "cited_refs": [ref],
+                    "snippet": "stray",
+                },
+            ],
+        }
+    }
+    judgment = normalize_judgment(cast(JsonValue, body), require_part2=True)
+    assert judgment.verified_dropped == 1
+    assert [(item.requirement_or_claim, item.snippet) for item in judgment.verified] == [
+        ("Quoted support", "quoted"),
+        ("Unassessable with a stray quote", None),
+    ]

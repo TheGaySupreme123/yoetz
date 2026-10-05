@@ -3684,6 +3684,8 @@ def _judgment_to_response_json(judgment: object) -> dict[str, CanonicalJsonValue
         ]
     if judgment.prior_finding_verdicts_dropped:
         body["prior_finding_verdicts_dropped"] = judgment.prior_finding_verdicts_dropped
+    if judgment.verified_dropped:
+        body["verified_dropped"] = judgment.verified_dropped
     if judgment.missing_for_assessment:
         # Issue #907: the named missing items, reviewer reason included, live only in this
         # encrypted durable response object; the check record keeps the structural fields.
@@ -3843,6 +3845,7 @@ def _judgment_from_response_json(value: object) -> object:
             missing_for_assessment=tuple(missing),
             review_summary=review_summary,
             verified=tuple(verified),
+            verified_dropped=cast(int, source.get("verified_dropped", 0)),
         )
     except ValueError as exc:
         raise ValueError("semantic_response_judgment_invalid") from exc
@@ -5445,16 +5448,32 @@ def _privacy_gated_semantic_evaluator(
                 operation="semantic_evaluation_failed",
                 request_id=frozen.lease.operation_id,
             )
-            return FinalSemanticEvaluation(
-                SemanticStatus.FAILED,
-                SemanticReason.COORDINATOR_FAILURE,
-                operation_lease=current_lease[0],
-                withheld_review_categories=withheld,
-                case_content_over_item_limit=over_item_limit,
-                case_reference_scope_reduced=reference_scope_reduced,
-                case_content_gaps=content_gaps,
-                unsuppliable_missing_kinds=unsuppliable,
-            )
+            try:
+                return FinalSemanticEvaluation(
+                    SemanticStatus.FAILED,
+                    SemanticReason.COORDINATOR_FAILURE,
+                    operation_lease=current_lease[0],
+                    withheld_review_categories=withheld,
+                    case_content_over_item_limit=over_item_limit,
+                    case_reference_scope_reduced=reference_scope_reduced,
+                    case_content_gaps=content_gaps,
+                    unsuppliable_missing_kinds=unsuppliable,
+                )
+            except ValueError as detail_exc:
+                # The failure record itself must never lose the renewed lease: raising here sent
+                # the check to the outer fence with a stale lease, and it stayed OPERATION_PENDING
+                # forever. Keep only the fields that cannot fail validation.
+                record_unexpected_exception_without_raising(
+                    detail_exc,
+                    component="semantic_composition",
+                    operation="semantic_failure_detail_dropped",
+                    request_id=frozen.lease.operation_id,
+                )
+                return FinalSemanticEvaluation(
+                    SemanticStatus.FAILED,
+                    SemanticReason.COORDINATOR_FAILURE,
+                    operation_lease=current_lease[0],
+                )
 
     return _evaluate
 

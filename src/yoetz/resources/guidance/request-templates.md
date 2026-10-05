@@ -101,10 +101,10 @@ Pass the user's request verbatim in `task_statement`: the whole request as the u
 a paraphrase and not your plan. It is recorded in the task ledger and labelled as your
 transcription (`agent_transcribed`). AI-powered review reads it as the specification, apart from
 your plan, only when the approved privacy policy lists the `task_statement` section; otherwise the
-check and receipt say `task_statement_not_authorized`. When the user amends the request, call
-`start` again with a fresh `request_id`, `mode=attach`, the `session_id` you hold, and the whole
-amended request in `task_statement` (a CLI publisher may instead carry it in a `plan_revised`
-1.1.0 payload). On a resume that does not change the request, omit `task_statement`; the recorded
+check and receipt say `task_statement_not_authorized`. When the user amends the request, or a check
+pauses for it, publish the whole request in a `plan_revised` `1.1.0` payload through the session and
+writer you hold (template below), then replay any paused check with its original `request_id`; a
+new `start` call does not resume a paused check. On a resume that does not change the request, omit `task_statement`; the recorded
 statement stays current. The newest statement is current and earlier ones stay in history. Never
 put the statement in a plan `summary`, and never infer it from commit messages or files.
 
@@ -133,22 +133,45 @@ put the statement in a plan `summary`, and never infer it from commit messages o
 
 ### `publish_work`: revise the task statement
 
-When a semantic-required check pauses because the complete request is missing, publish a
-statement-carrying `plan_published` or `plan_revised` event at version `1.1.0` through the same
-session and writer. Include the exact `expected_frontier` returned by the paused check, then replay
-the original check request. This preserves the check identity and lets the service recompute the
-deterministic assessment from the amended frontier.
+When a semantic-required check pauses with `state: "awaiting_input"` and
+`semantic_reason: "review_input_required"`, the review needs the user's complete request. Publish it
+through the same session and writer: a `plan_revised` event at version `1.1.0` carrying
+`task_statement` (or `plan_published` `1.1.0` when no plan exists yet). Carry every existing
+obligation forward, and use the paused check's `result_frontier` as `expected_frontier`. Then replay
+the original check request unchanged, with the same `request_id`; do not open a new check or a new
+task, and do not request a receipt before that check reaches a terminal result.
 
 ```json
 {
   "protocol_version": "0.1",
   "schema_version": "1.0.0",
   "request_id": "req_00000000-0000-4000-8000-000000000020",
-  "mode": "attach",
   "session_id": "ses_00000000-0000-4000-8000-000000000001",
-  "task_title": "Replace with the bounded task title",
-  "task_statement": "Replace with the whole amended request, verbatim",
-  "requested_view": "compact",
+  "writer_id": "wri_00000000-0000-4000-8000-000000000001",
+  "expected_frontier": {
+    "sequence": "7",
+    "head_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "event_drafts": [
+    {
+      "event_id": "evt_00000000-0000-4000-8000-000000000020",
+      "schema": {"name": "plan_revised", "version": "1.1.0"},
+      "occurred_at": "2026-01-01T00:00:00.000Z",
+      "causal_parents": [],
+      "payload": {
+        "plan_version": 2,
+        "supersedes_plan_version": 1,
+        "reason": "Record the user's complete request for review.",
+        "summary": "Same plan; the task statement is now recorded.",
+        "obligation_changes": [
+          {"obligation_id": "obl_00000000-0000-4000-8000-000000000001", "change": "carried"}
+        ],
+        "task_statement": "Replace with the user's whole request, verbatim"
+      },
+      "artifact_refs": [],
+      "evidence_refs": []
+    }
+  ],
   "actor": {
     "actor_id": "harness:mcp-template",
     "actor_type": "harness"

@@ -709,7 +709,7 @@ VERIFIED_FIELD_GLOSSARY: Final[dict[str, str]] = {
     ),
     "snippet": (
         "One exact short quote copied verbatim from a provider-bound packet item; required for "
-        "supported or not_supported and absent for not_assessable."
+        "supported or not_supported, and null for not_assessable."
     ),
 }
 
@@ -871,8 +871,20 @@ def _apply_part2_requirements(schema: dict[str, JsonValue]) -> dict[str, JsonVal
         "minLength": 1,
         "type": "string",
     }
-    challenge_properties["snippet"] = strict_text
-    verified_properties["snippet"] = strict_text
+    # Keep the reviewer glossary on the tightened field: without it the provider is never told the
+    # quote must be verbatim, or when a verified row needs one, and its rows get dropped.
+    for properties in (challenge_properties, verified_properties):
+        existing = properties.get("snippet")
+        description = (
+            cast(dict[str, JsonValue], existing).get("description")
+            if type(existing) is dict
+            else None
+        )
+        properties["snippet"] = (
+            {**cast(dict[str, JsonValue], strict_text), "description": description}
+            if type(description) is str
+            else strict_text
+        )
     require("ProviderChallenge", ("snippet",))
     for branch_name in (
         "ProviderJudgmentNoDiscrepancy",
@@ -1330,9 +1342,11 @@ def normalize_judgment(parsed: JsonValue, *, require_part2: bool = False) -> Sem
         cast(dict[str, JsonValue], parsed)["judgment"] if envelope else cast(JsonValue, parsed)
     )
     kept, dropped = _separate_prior_verdicts(body)
+    verified_dropped = 0
     unnamed = False
     if type(body) is dict:
         body_object = cast(dict[str, JsonValue], body)
+        body_object, verified_dropped = _separate_verified(body_object)
         if require_part2 and body_object.get("conclusion") in {
             "no_material_discrepancy",
             "challenges_returned",
@@ -1393,7 +1407,43 @@ def normalize_judgment(parsed: JsonValue, *, require_part2: bool = False) -> Sem
         missing_for_assessment=missing,
         review_summary=model.review_summary,
         verified=verified,
+        verified_dropped=verified_dropped,
     )
+
+
+def _separate_verified(body: dict[str, JsonValue]) -> tuple[dict[str, JsonValue], int]:
+    """Make each verified row consistent with its verdict instead of failing the whole judgment.
+
+    Strict structured output cannot express the snippet/verdict coupling, so a provider may return
+    a not_assessable row with a quote or a supported/not_supported row without one. The quote on a
+    not_assessable row is dropped (that verdict never carries one); a supported/not_supported row
+    without a quote is dropped and counted, so one inconsistent row costs only itself and the check
+    discloses it through the snippet gap.
+    """
+
+    raw = body.get("verified")
+    if type(raw) is not list:
+        return body, 0
+    kept: list[JsonValue] = []
+    dropped = 0
+    for row in cast(list[JsonValue], raw):
+        if type(row) is not dict:
+            kept.append(row)  # shape errors stay the validator's to report
+            continue
+        item = cast(dict[str, JsonValue], row)
+        verdict = item.get("verdict")
+        snippet = item.get("snippet")
+        if verdict == "not_assessable" and snippet is not None:
+            kept.append({**item, "snippet": None})
+        elif verdict in {"supported", "not_supported"} and (
+            type(snippet) is not str or not snippet
+        ):
+            dropped += 1
+        else:
+            kept.append(item)
+    if dropped == 0 and kept == raw:
+        return body, 0
+    return {**body, "verified": kept}, dropped
 
 
 def _separate_prior_verdicts(body: JsonValue) -> tuple[list[JsonValue], int]:
