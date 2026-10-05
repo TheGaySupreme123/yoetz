@@ -60,9 +60,11 @@ from yoetz.protocol.coverage import PublicationChannel, coverage_for_channel, co
 from yoetz.protocol.models import (
     CheckAwaitingHumanModel,
     CheckContinuationModel,
+    CheckProjectedFindingModel,
     CheckRequest,
     CheckResultModel,
     CheckSuccessModel,
+    CheckVerifiedItemModel,
     ChildDependencySnapshotModel,
     ChildFindingSnapshotModel,
     DataCategory,
@@ -76,6 +78,7 @@ from yoetz.protocol.models import (
     StartSuccessModel,
     StatusAdviceItemModel,
     StatusClosureReadinessModel,
+    StatusCompactItemModel,
     StatusCompactObligationModel,
     StatusEvidenceItemModel,
     StatusFindingItemModel,
@@ -196,6 +199,11 @@ _RESULT_OPTIONAL_NON_NULL: tuple[tuple[type[BaseModel], frozenset[str]], ...] = 
                 "finding_checklist",
                 "semantic_withheld_items",
                 "review_input_manifest",
+                "semantic_conclusion",
+                "review_summary",
+                "verified",
+                "totals",
+                "overall_next",
             }
         ),
     ),
@@ -253,7 +261,13 @@ _RESULT_OPTIONAL_NON_NULL: tuple[tuple[type[BaseModel], frozenset[str]], ...] = 
         ),
     ),
     (StatusCompactObligationModel, frozenset({"acceptance_criteria"})),
-    (StatusFindingItemModel, frozenset({"todo_state", "review_rounds", "finding_frontier"})),
+    (
+        StatusFindingItemModel,
+        frozenset({"todo_state", "review_rounds", "finding_frontier", "challenge"}),
+    ),
+    (CheckProjectedFindingModel, frozenset({"challenge"})),
+    (CheckVerifiedItemModel, frozenset({"requirement_or_claim", "snippet"})),
+    (StatusCompactItemModel, frozenset({"latest_check_test_edits"})),
     (StatusFindingsPageModel, frozenset({"attempt_budget"})),
     (StatusHistoryItemV14Model, frozenset({"review_input_manifest"})),
     (StatusObligationItemModel, frozenset({"acceptance_criteria"})),
@@ -1059,10 +1073,23 @@ async def test_root_start_and_check_omit_unset_multi_agent_fields() -> None:
         assert "missing_for_assessment" not in projected_check
         assert "semantic_withheld_items" not in projected_check
         assert "review_input_manifest" not in projected_check
+        # Issue #961: reviewer output is absent on a deterministic check; frozen-work totals and
+        # the overall continuation are filled on every new check but stay optional for legacy rows.
+        assert not {"semantic_conclusion", "review_summary", "verified"} & projected_check.keys()
+        assert {"totals", "overall_next"} <= projected_check.keys()
         # Issue #905: the checklist is current context a ledger may not offer; unset, it is
         # absent rather than null, and an explicit null is refused.
         assert "finding_checklist" in projected_check
-        for field in ("finding_checklist", "semantic_withheld_items", "review_input_manifest"):
+        for field in (
+            "finding_checklist",
+            "semantic_withheld_items",
+            "review_input_manifest",
+            "semantic_conclusion",
+            "review_summary",
+            "verified",
+            "totals",
+            "overall_next",
+        ):
             unset = {key: value for key, value in projected_check.items() if key != field}
             model = CheckSuccessModel.model_validate(unset)
             assert field not in model.model_dump(mode="json", exclude_unset=True)
@@ -1187,7 +1214,60 @@ async def test_root_start_and_check_omit_unset_multi_agent_fields() -> None:
                 "waiver_scope": None,
                 "waiver_expiry": None,
             },
-            ("todo_state", "review_rounds"),
+            # Issue #961: a deterministic finding carries no reviewer challenge.
+            ("todo_state", "review_rounds", "challenge"),
+        ),
+        (
+            CheckProjectedFindingModel,
+            {
+                "finding_id": protocol_id("fnd_", 2930),
+                "kind": "result_without_action",
+                "origin": "deterministic",
+                "priority": 2,
+                "summary": "A result has no recorded action.",
+                "detail": "Record the action that produced the result.",
+                "subject_refs": (protocol_id("res_", 2931),),
+                "policy_id": "work-integrity",
+                "policy_version": "0.1.0",
+                "subject_frontier": {"sequence": "1", "head_digest": _DIGEST},
+                "coverage": dict(
+                    coverage_to_json(coverage_for_channel(PublicationChannel.COOPERATIVE_MCP))
+                ),
+                "provenance": None,
+            },
+            ("challenge",),
+        ),
+        (
+            CheckVerifiedItemModel,
+            {
+                # Only a not_assessable judgement omits its supporting snippet.
+                "requirement_or_claim": "The declared change is covered.",
+                "verdict": "not_assessable",
+                "cited_refs": (protocol_id("evd_", 2932),),
+            },
+            ("snippet",),
+        ),
+        (
+            StatusCompactItemModel,
+            {
+                "task_id": protocol_id("tsk_", 2933),
+                "session_id": protocol_id("ses_", 2934),
+                "task_title": "Compact item without a check",
+                "current_plan_event_id": None,
+                "declared_obligation_count": "0",
+                "no_obligations_reason": None,
+                "open_obligation_count": "0",
+                "unanswered_finding_count": "0",
+                "receipt_blocking_finding_count": "0",
+                "open_obligations": (),
+                "unanswered_findings": (),
+                "freshness": "current",
+                "coverage": dict(
+                    coverage_to_json(coverage_for_channel(PublicationChannel.COOPERATIVE_MCP))
+                ),
+                "gaps": (),
+            },
+            ("latest_check_test_edits",),
         ),
         (StatusFindingsPageModel, {"items": [], "next_cursor": None}, ("attempt_budget",)),
         (
@@ -1234,6 +1314,23 @@ def test_nested_multi_agent_results_omit_unset_fields(
     for field in absent:
         with pytest.raises(ValidationError, match="optional_field_must_not_be_null"):
             model_type.model_validate({**payload, field: None})
+
+
+def test_verified_item_refuses_null_reviewer_text() -> None:
+    """Issue #961: verified rows carry required reviewer text that can never be null."""
+
+    payload = {
+        "requirement_or_claim": "The declared change is covered.",
+        "verdict": "supported",
+        "cited_refs": (protocol_id("evd_", 2935),),
+        "snippet": "def covered() -> bool: return True",
+    }
+    assert "requirement_or_claim" in CheckVerifiedItemModel.model_validate(payload).model_dump(
+        mode="json", exclude_unset=True
+    )
+    for field in ("requirement_or_claim", "snippet"):
+        with pytest.raises(ValidationError, match="optional_field_must_not_be_null"):
+            CheckVerifiedItemModel.model_validate({**payload, field: None})
 
 
 def test_result_optional_non_null_inventory_is_complete() -> None:
@@ -1350,6 +1447,11 @@ def test_every_result_optional_non_null_field_has_an_unset_projection_case() -> 
                 "finding_checklist",
                 "semantic_withheld_items",
                 "review_input_manifest",
+                "semantic_conclusion",
+                "review_summary",
+                "verified",
+                "totals",
+                "overall_next",
             ),
         ),
     ):
@@ -1357,6 +1459,9 @@ def test_every_result_optional_non_null_field_has_an_unset_projection_case() -> 
             covered[model, field] = "test_root_start_and_check_omit_unset_multi_agent_fields"
     covered["CheckAwaitingHumanModel", "specification_preflight"] = (
         "test_nested_multi_agent_results_omit_unset_fields"
+    )
+    covered["CheckVerifiedItemModel", "requirement_or_claim"] = (
+        "test_verified_item_refuses_null_reviewer_text"
     )
     covered["StatusHistoryItemV14Model", "review_input_manifest"] = (
         "test_nested_multi_agent_results_omit_unset_fields"
@@ -1371,7 +1476,13 @@ def test_every_result_optional_non_null_field_has_an_unset_projection_case() -> 
             ("child_frontier", "child_check_id", "child_receipt_id", "membership_generation"),
         ),
         ("ProjectTextRefModel", ("envelope_digest",)),
-        ("StatusFindingItemModel", ("todo_state", "review_rounds", "finding_frontier")),
+        (
+            "StatusFindingItemModel",
+            ("todo_state", "review_rounds", "finding_frontier", "challenge"),
+        ),
+        ("CheckProjectedFindingModel", ("challenge",)),
+        ("CheckVerifiedItemModel", ("snippet",)),
+        ("StatusCompactItemModel", ("latest_check_test_edits",)),
         ("StatusFindingsPageModel", ("attempt_budget",)),
         ("StatusProjectPageModel", ("title", "description", "title_ref", "description_ref")),
         (
