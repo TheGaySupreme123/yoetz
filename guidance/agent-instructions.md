@@ -2,7 +2,7 @@
 
 Use Yoetz for material multi-step, delegated, resumable, or verification-heavy work. New session: read guidance/discover schemas, then `start` before substantive work. If startup fails, follow recovery first; if still blocked, ask for intro and guidance. Skip trivial questions or edits; never invent a ledger task. Cadence: `start` once, `publish_work` per material transition; `receipt` last. Never claim Yoetz is active until `start` returns. `yoetz://guidance/workflow.md`.
 
-This small core is required before `start`; retain one triggered topic through its operation. Schemas are wire authority. Yoetz is a local ledger/checker. Yoetz is not an enforcement system; a check is not correctness.
+This small core is required before `start`; retain one triggered topic through its operation. Read current guidance, never memory. Schemas are wire authority. Yoetz is a local ledger/checker. Yoetz is not an enforcement system; a check is not correctness.
 
 # Guidance catalog
 
@@ -34,4 +34,4 @@ Before delegating, read the multi-agent sections of `yoetz://guidance/workflow.m
 
 # Read more
 
-Index triggers: startup `yoetz://guidance/agent-instructions.md`; resume/recovery/delegation/capacity `yoetz://guidance/workflow.md`; publication `yoetz://guidance/publication-policy.md`; check/receipt `yoetz://guidance/coverage-and-receipts.md`; schema/setup/consent/import `yoetz://guidance/request-templates.md`. Read with `read_guidance`, never memory.
+Triggers: startup `yoetz://guidance/agent-instructions.md`; resume/recovery/delegation/capacity `yoetz://guidance/workflow.md`; publication `yoetz://guidance/publication-policy.md`; check/receipt `yoetz://guidance/coverage-and-receipts.md`; schema/setup/consent/import `yoetz://guidance/request-templates.md`. Read with `read_guidance`.
