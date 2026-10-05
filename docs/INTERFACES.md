@@ -301,7 +301,10 @@ For `claim_revision_mismatch`, `safe_details` carries an allowlisted `invariant`
 domain rule that rejected the draft, and both the MCP text projection and the CLI render an
 `Invariant:` plus `Correction:` clause from it. The corrective phrases live in the shared recovery
 registry beside the continuation directives (ADR-030), so the same rejection reads the same way on
-both surfaces; the CLI previously rendered no correction at all.
+both surfaces; the CLI previously rendered no correction at all. For `limitation_refs_complete` the
+rejection also names the missing live result ids: `safe_details.count` is their number and the
+message lists up to 32 of them in ascending order (structural ledger ids, never caller content),
+so an author can disclose hook-observed failures it never published without reading every result.
 
 The invariant vocabulary is closed and gated twice: `yoetz.protocol.errors` holds
 `ADMITTED_CLAIM_REVISION_INVARIANTS` literally because it is a dependency root, `yoetz.domain.events`
@@ -407,7 +410,12 @@ section, keeps the anchored URI in `document_id` and every continuation, and bou
 before paging. Runtime admission uses the closed topic catalog while the advertised schema uses a
 compact URI pattern so the full heading catalog is not repeated in every host tool declaration. A
 parent document remains available for fallback and full archival reads; a topic read is the normal
-continuation when one procedure is named.
+continuation when one procedure is named. An anchor outside the catalog on a registered document is
+rejected as `INVALID_REQUEST` with `safe_details.field = "/uri"` and a message listing that
+document's registered anchors plus the whole-document retry; an unregistered document lists the
+registered document and focused-topic URIs. Only catalog constants appear; the caller's URI is
+never echoed. `resources/list` omits `annotations.priority`, because Codex's rmcp client cannot
+decode a fractional number in that result (see the Codex integration runbook).
 
 Protocol reason
 `expected_frontier_required` marks a state-sensitive `publish_work` batch that omitted

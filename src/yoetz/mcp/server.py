@@ -80,6 +80,7 @@ from yoetz.mcp.semantic_destination import (
 from yoetz.mcp.summaries import (
     render_check_reviewer_output,
     render_safe_compact_summary,
+    summary_for_check_awaiting,
     summary_for_closure_prepare,
     summary_for_read_guidance,
 )
@@ -100,6 +101,11 @@ from yoetz.ports.integrations import YOETZ_MCP_TOOL_NAMES
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.consent import CONSENT_PENDING_TTL_SECONDS
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
+from yoetz.protocol.guidance_uris import (
+    FOCUSED_GUIDANCE_URIS,
+    GUIDANCE_DOCUMENT_URIS,
+    GUIDANCE_TOPIC_URIS,
+)
 from yoetz.protocol.ids import IdKind, new_id, safe_request_id_from
 from yoetz.protocol.models import (
     CheckRequest,
@@ -860,6 +866,10 @@ def _result_text(
     if wire.get("preparatory_only") is True:
         return summary_for_closure_prepare(wire)
     compact = render_safe_compact_summary(wire)
+    awaiting = summary_for_check_awaiting(wire)
+    if awaiting:
+        # A paused check has no verdict; its continuation is the only actionable fact, so it leads.
+        compact = f"{awaiting}\n{compact}" if compact else awaiting
     reviewer = render_check_reviewer_output(wire)
     totals = render_check_totals(wire.get("totals"))
     manifest = render_review_input_manifest_compact(wire.get("review_input_manifest"))
@@ -2890,6 +2900,11 @@ async def dispatch_read_guidance(
         request = ReadGuidanceRequest.model_validate(arguments)
     except ValidationError as exc:
         locations = safe_validation_locations(exc)
+        if any(
+            tuple(error.get("loc", ())) == ("uri",)
+            for error in exc.errors(include_url=False, include_context=False, include_input=False)
+        ):
+            return _unknown_guidance_uri_result(arguments.get("uri"), runtime=runtime)
         page_size_reason = next(
             (
                 location.get("reason")
@@ -2924,13 +2939,7 @@ async def dispatch_read_guidance(
         except GuidanceResourceError:
             resource = None
     if resource is None:
-        return structured_error_result(
-            PublicErrorCode.INVALID_REQUEST,
-            "read_guidance rejects an unknown guidance URI.",
-            safe_details={"argument_count": len(arguments)},
-            operation="read_guidance",
-            host_profile=runtime.host_profile,
-        )
+        return _unknown_guidance_uri_result(request.uri, runtime=runtime)
     paged = any(
         value is not None
         for value in (request.page, request.page_size, request.revision, request.digest)
@@ -2992,6 +3001,50 @@ async def dispatch_read_guidance(
         content=[types.TextContent(type="text", text=content_text)],
         structuredContent=cast(dict[str, object], wire),
         isError=False,
+    )
+
+
+def _guidance_topic_anchors(document_uri: str) -> tuple[str, ...]:
+    """Return the closed catalog's topic anchors for one registered guidance document."""
+
+    prefix = document_uri + "#"
+    return tuple(uri[len(prefix) :] for uri in GUIDANCE_TOPIC_URIS if uri.startswith(prefix))
+
+
+def _unknown_guidance_uri_result(
+    uri: object,
+    *,
+    runtime: BridgeRuntime,
+) -> types.CallToolResult:
+    """Reject an unregistered guidance URI with the exact registered alternatives.
+
+    Benchmark transcripts showed agents deriving topic anchors from heading text or tool names
+    (``#publish-work``, ``#publish_work-plan-revision``) and receiving a bare INVALID_REQUEST with
+    nothing to retry against. The retry options named here are closed-catalog constants: the caller's
+    URI is used only to select which registered document's catalog to list and is never echoed.
+    """
+
+    document = uri.partition("#")[0] if type(uri) is str else None
+    if document in GUIDANCE_DOCUMENT_URIS:
+        anchors = _guidance_topic_anchors(document)
+        message = (
+            f"read_guidance has no topic with that anchor in {document}. Topic anchors are exact "
+            "catalog entries; never derive one from a heading, tool, or event name. Retry with "
+            f"uri {document} to read the whole document, or {document}#<anchor> with one of these "
+            f"anchors: {', '.join(anchors)}."
+        )
+    else:
+        message = (
+            "read_guidance accepts only a registered guidance URI. Retry with one of these "
+            f"documents: {', '.join(GUIDANCE_DOCUMENT_URIS)}; or one focused topic: "
+            f"{', '.join(FOCUSED_GUIDANCE_URIS)}."
+        )
+    return structured_error_result(
+        PublicErrorCode.INVALID_REQUEST,
+        message,
+        safe_details={"field": "/uri"},
+        operation="read_guidance",
+        host_profile=runtime.host_profile,
     )
 
 
@@ -3204,7 +3257,16 @@ async def _handle_call_tool_request(
 
 
 async def list_resources(runtime: BridgeRuntime = BRIDGE_RUNTIME) -> list[types.Resource]:
-    """List only static manifest-verified guidance; never touch the service slot."""
+    """List only static manifest-verified guidance; never touch the service slot.
+
+    The wire listing carries no fractional number. Codex builds its rmcp client with serde_json's
+    ``arbitrary_precision`` feature, under which rmcp before modelcontextprotocol/rust-sdk#1300
+    cannot decode a buffered float such as ``annotations.priority: 0.9``; the whole
+    ``ListResourcesResult`` then falls through to ``CustomResult`` and Codex reports
+    ``resources/list failed: Unexpected response type`` (every Codex attempt in the full3
+    benchmark). The registry keeps its relative priority, and the listing order already carries
+    it, so ``priority`` is omitted for every host rather than advertised to some.
+    """
 
     return [
         types.Resource(
@@ -3216,7 +3278,6 @@ async def list_resources(runtime: BridgeRuntime = BRIDGE_RUNTIME) -> list[types.
             size=resource.size,
             annotations=types.Annotations(
                 audience=cast(list[types.Role], list(resource.annotations.audience)),
-                priority=resource.annotations.priority,
             ),
         )
         for resource in runtime.resources

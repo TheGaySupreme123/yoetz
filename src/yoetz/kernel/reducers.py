@@ -889,6 +889,7 @@ def _apply_claim(
                 "limitation_refs",
                 "limitation_refs_complete",
                 event.event_id,
+                missing_refs=tuple(required - supplied),
             )
         if payload.supersedes_claim_refs:
             for target in payload.supersedes_claim_refs:

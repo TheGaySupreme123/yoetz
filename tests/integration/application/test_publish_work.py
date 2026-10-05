@@ -1235,6 +1235,7 @@ async def test_partial_result_claim_repair_preflights_and_preserves_history() ->
             cast(Application, app), PublishWorkRequestModel.model_validate(incomplete_wire)
         )
     assert rejected.value.safe_details == {
+        "count": 1,
         "field": "/event_drafts/0/payload/limitation_refs",
         "invariant": "limitation_refs_complete",
         "reason_code": "claim_revision_mismatch",
@@ -1530,6 +1531,7 @@ async def test_claim_replacement_links_a_limitation_whose_action_is_unrecorded()
             cast(Application, app), PublishWorkRequestModel.model_validate(silent_wire)
         )
     assert rejected.value.safe_details == {
+        "count": 1,
         "field": "/event_drafts/0/payload/limitation_refs",
         "invariant": "limitation_refs_complete",
         "reason_code": "claim_revision_mismatch",

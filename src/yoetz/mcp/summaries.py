@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from enum import Enum
+from types import MappingProxyType
 from typing import Final, cast
 
 from pydantic import BaseModel
@@ -18,6 +19,7 @@ from yoetz.domain.review_input_render import (
 from yoetz.mcp.errors import VALIDATION_REASON_TOKENS
 from yoetz.protocol.canonical import JsonValue, ensure_canonical_value
 from yoetz.protocol.errors import PublicErrorCode, normalize_safe_details
+from yoetz.protocol.guidance_uris import ALL_GUIDANCE_URIS
 from yoetz.protocol.ids import IdKind, is_valid_id, validate_opaque_item_id
 from yoetz.protocol.readiness_text import READINESS_STATES, readiness_directive
 from yoetz.protocol.recovery import (
@@ -31,6 +33,7 @@ __all__ = [
     "render_safe_compact_summary",
     "render_check_reviewer_output",
     "summary_for_check",
+    "summary_for_check_awaiting",
     "summary_for_closure_prepare",
     "summary_for_public_error",
     "summary_for_read_guidance",
@@ -84,6 +87,7 @@ _CORRELATION_ID: Final = re.compile(
 _HEAD_DIGEST: Final = re.compile(r"^(?:genesis|sha256:[0-9a-f]{64})$", re.ASCII)
 # Closed shape of a packaged guidance URI, the only location a guidance pointer may name.
 _GUIDANCE_URI: Final = re.compile(r"^yoetz://guidance/[a-z0-9-]{1,64}\.md$", re.ASCII)
+_REGISTERED_GUIDANCE_URIS: Final = frozenset(ALL_GUIDANCE_URIS)
 
 
 def _failure_class_from_mapping(value: object) -> object | None:
@@ -1457,6 +1461,82 @@ def summary_for_receipt(envelope: object) -> str:
     return _bounded(prefix + obligation_clause + withheld_clause + gap_clause + suffix)
 
 
+_AWAITING_STATES: Final = MappingProxyType(
+    {
+        "awaiting_human": "human_approval_required",
+        "awaiting_input": "review_input_required",
+    }
+)
+_PENDING_ID: Final = re.compile(
+    r"^ppr_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.ASCII
+)
+_REPLAY_REQUEST_ID: Final = re.compile(
+    r"^req_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.ASCII
+)
+_CONTINUATION_TIMESTAMP: Final = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$", re.ASCII
+)
+
+
+def _awaiting_continuation_command(kind: object, command: object) -> str | None:
+    """Return the continuation command only when it is one of the closed schema shapes."""
+
+    if not isinstance(command, Sequence) or isinstance(command, str):
+        return None
+    parts = tuple(cast(Sequence[object], command))
+    if kind == "review_input_required" and parts == ("yoetz", "publish-work", "--input", "PATH"):
+        return "yoetz publish-work --input PATH"
+    if kind == "repository_privacy_setup" and parts == ("yoetz", "--privacy"):
+        return "yoetz --privacy"
+    if (
+        kind == "privacy_disclosure_decision"
+        and len(parts) == 4
+        and parts[:3] == ("yoetz", "privacy", "decide-disclosure")
+        and type(parts[3]) is str
+        and _PENDING_ID.fullmatch(parts[3]) is not None
+    ):
+        return f"yoetz privacy decide-disclosure {parts[3]}"
+    return None
+
+
+def summary_for_check_awaiting(envelope: object) -> str:
+    """Name the paused check state and its exact continuation on the text channel.
+
+    Hosts that read only ``content`` previously saw "Operation outcome: recorded" for a check that
+    had produced no verdict and was waiting on a command, so the one actionable fact was lost.
+    Every rendered value is re-gated against its closed schema shape; the free-text instruction is
+    never copied.
+    """
+
+    source = _mapping(envelope)
+    state = source.get("state")
+    if type(state) is not str or state not in _AWAITING_STATES:
+        return ""
+    continuation = source.get("continuation")
+    if not isinstance(continuation, Mapping):
+        return ""
+    typed = cast(Mapping[str, object], continuation)
+    command = _awaiting_continuation_command(typed.get("kind"), typed.get("command"))
+    replay = typed.get("replay_request_id")
+    if command is None or type(replay) is not str or _REPLAY_REQUEST_ID.fullmatch(replay) is None:
+        return _bounded(
+            f"Check state: {state} ({_AWAITING_STATES[state]}); no verdict yet. Read "
+            "structuredContent.continuation for the exact command and replay request_id."
+        )
+    if state == "awaiting_input":
+        who = "Supply the complete review input with"
+    else:
+        who = "Show the user this exact trusted local command to run"
+    pieces = [
+        f"Check state: {state} ({_AWAITING_STATES[state]}); no verdict yet. {who}: {command}."
+    ]
+    expires_at = typed.get("expires_at")
+    if type(expires_at) is str and _CONTINUATION_TIMESTAMP.fullmatch(expires_at) is not None:
+        pieces.append(f"Expires at {expires_at}.")
+    pieces.append(f"Then replay the same check with request_id {replay}; do not start a new check.")
+    return _bounded(" ".join(pieces))
+
+
 def summary_for_read_guidance(envelope: object) -> str:
     """Name where a guidance result's full text is, without repeating it (issue #918).
 
@@ -1466,7 +1546,11 @@ def summary_for_read_guidance(envelope: object) -> str:
 
     source = _mapping(envelope)
     uri = source.get("uri")
-    if type(uri) is not str or _GUIDANCE_URI.fullmatch(uri) is None:
+    # A registered heading topic (``workflow.md#start-and-resume``) is a closed-catalog constant
+    # too; labelling its successful read "unavailable" read as a failure to agents.
+    if type(uri) is not str or (
+        _GUIDANCE_URI.fullmatch(uri) is None and uri not in _REGISTERED_GUIDANCE_URIS
+    ):
         uri = "unavailable"
     if source.get("complete") is not None:
         page = _safe_count(source.get("page"))
