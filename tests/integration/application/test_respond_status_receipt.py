@@ -16,6 +16,7 @@ import pydantic
 import pytest
 
 from builders.ledger_adapters import FixedIds, MemoryObjects, ownership_fence
+from builders.review_manifests import provider_bound_manifest
 from builders.start_application import (
     MemoryStartRuntime,
     StartTestClock,
@@ -475,6 +476,7 @@ async def _semantic_succeeds(
             egress_authorization_id=protocol_id("aut_", 1492),
             request_commitment="hmac-sha256:" + "b" * 64,
         ),
+        provider_input_manifest=provider_bound_manifest(),
     )
 
 
@@ -4441,7 +4443,7 @@ async def test_command_gap_partition_preserves_receipt_coverage(
     )
     assert isinstance(status.page, StatusFindingsPageModel)
     current = next(row for row in status.page.items if row.finding_id == target.finding_id)
-    assert current.resolved is should_resolve
+    assert current.resolved is should_resolve, current.detail
     if overlap:
         assert "command_relation_overlaps_obligation:" + a in str(current.detail)
     ledger, _ = next(iter(runtime.resources.values()))
@@ -4721,9 +4723,11 @@ async def test_succeeded_review_records_assessable_conclusion_durably(
     ledger, _ = runtime.resources[started.task_id]
     records = tuple([row async for row in ledger.load_events(started.session_id)])
     row = next(row for row in reversed(records) if type(row.payload) is CheckRecordedPayload)
-    assert row.schema.version == "1.3.0"
+    # Every completed check now carries frozen-work totals, so the conclusion rides on 1.4.0.
+    assert row.schema.version == "1.4.0"
     assert type(row.payload) is CheckRecordedPayload
     assert row.payload.semantic_conclusion == "no_material_discrepancy"
+    assert row.payload.totals is not None
     rebuilt = replay(records)
     assert Frontier(rebuilt.frontier, rebuilt.head_digest) == checked.result_frontier
 
