@@ -24,13 +24,22 @@ earlier obligation with a visible reason. Do not make the material edit before t
 
 Decompose the user's request yourself: one obligation per stated requirement, reported symptom,
 constraint, or deliverable, including the ones that look hard or contradictory. Each obligation's
-`source_refs` names the event that recorded the task statement: the `session_opened` (or, on an
-attach that carried `task_statement`, `session_resumed`) event of your `start`, listed by
-`status view=history` with `filter.schema_name`. Put every file, command, or output the request
-names in `requested_items` (`item_kind` `file`, `command`, or `change`). Yoetz checks only that
-structural link, never the wording: a plan with obligations but none citing the statement returns
-an agent-actionable `task_requirement_unmet` finding, and the finding names the statement event id.
-Then run `check` once on the plan before editing, and again after each material milestone.
+`source_refs` names the event that recorded the task statement: the newest event that carried
+`task_statement` (`session_opened`, `session_resumed`, `plan_published` or `plan_revised`),
+listed by `status view=history` with `filter.schema_name`. An event that repeats the current
+statement unchanged does not replace it, and citing any event that carried that same statement
+counts; a changed statement must be mapped again. Put every file, command, or output
+the request names in `requested_items` (`item_kind` `file`, `command`, or `change`). Hooks record a
+command's keyed commitment, never its text, so a requested command stays disclosed as
+`command_attempt_uncorroborated` on the receipt (a standing limitation, not a finding): also cite
+the observed run's `res_` id (`status view=results`) as the obligation's resolution evidence.
+Yoetz checks only that structural link, never the wording: a plan with obligations but none citing
+the statement, or a completion claim on no plan or an explicit empty scope, returns an
+agent-actionable `task_requirement_unmet` finding naming the statement event id. When the request
+truly asks for no material work, answer it with a `decision_recorded` whose statement holds the
+exact line `yoetz-no-material-work:<statement event id>` and a rationale; it counts only while no
+edit is recorded. Then run `check` once on the plan before editing, and again after each material
+milestone.
 
 If `start` fails, retain its exact request and correlation identity. Follow the typed continuation
 and same-request recovery, including a named one-time repair, before asking the user for intro and

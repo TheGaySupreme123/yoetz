@@ -191,10 +191,13 @@ This is the first material publication. Name the requested outcome in `descripti
 routine file mechanics into obligations. The requested outcome is not an `item_kind`.
 Publish one such obligation per requirement, symptom, constraint, or deliverable the user's
 request states. Replace the `source_refs` placeholder with the id of the event that recorded the
-task statement (your `start`'s `session_opened`, or `session_resumed` when an attach carried the
-statement; `status view=history` lists it). A plan whose obligations never cite that event
-returns an agent-actionable `task_requirement_unmet` finding that names the id. A `file` item for
-an existing test the request asks you to change also justifies that test edit.
+task statement: the newest event that carried `task_statement` (`session_opened`,
+`session_resumed`, `plan_published` or `plan_revised`) whose statement differs from the one
+before it; `status view=history` lists it, and any event that carried the same statement counts. A plan whose obligations never cite that event returns an agent-actionable
+`task_requirement_unmet` finding that names the id. A `file` item for an existing test the request
+asks you to change also justifies that test edit. A `command` item is never byte-matched with a
+hook-observed run (hooks keep only a keyed commitment), so it stays a disclosed
+`command_attempt_uncorroborated` limitation; resolve the obligation citing the observed run.
 
 ```json
 {

@@ -300,7 +300,11 @@ AI-powered review, when it runs, compares the plan with the statement.
 An empty-scope reason clears the `no_obligations_declared` readiness blocker, but it does not buy a
 clean completion check. A completion claim over zero declared obligations remains
 coverage-incomplete: `completion_scope_undeclared` without a reason or
-`completion_scope_declared_none` with one.
+`completion_scope_declared_none` with one. With a task statement recorded, that completion claim
+also returns `task_requirement_unmet` until you either publish statement-sourced obligations or
+record a `decision_recorded` whose statement holds the exact line
+`yoetz-no-material-work:<statement event id>` with a rationale. The decision counts only while the
+task records no edit action; a task that edited files must map the work to obligations.
 
 ## Obligation resolution
 

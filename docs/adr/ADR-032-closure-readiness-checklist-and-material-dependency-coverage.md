@@ -225,3 +225,61 @@ check results replayed from the ledger, and results an earlier 0.3 service shape
 `"1"`, and the active 0.3 contracts admit both. A pack's versions form one lineage, so the finding
 issue key names the pack without its version and a later check at the same or a newer version can
 resolve a finding recorded before the upgrade. `docs/INTERFACES.md` records the contract details.
+
+## Amendment — an honest repair must clear (2026-10-05, pilot blockers)
+
+**Context.** Two verifiers of the TB4 amendment (`94531351`) reproduced end to end that a correctly
+repaired finding could stay unresolved forever, and that a completion claim could bypass the
+statement rule. The maintainer's priority: an agent must never claim completion without an
+answerable finding, and an honest agent doing the prescribed repair must be able to clear it. The
+maintainer approved these changes for the pilot (design-gated: check outcomes and closure).
+
+**Decisions.**
+
+1. *Tolerance follows the finding's basis, not its kind.* `finding_resolution` used to refuse every
+   test-edit accounting code for every `task_requirement_unmet` row. Now only the test-edit row
+   (fact `preexisting_test_edit_unjustified`) is bounded by `preexisting_test_baseline_unknown`; it
+   tolerates the informational counts once the unjustified code is gone. The statement-based rows
+   and every AI-powered row tolerate the accounting set. Command-attempt gaps no longer block local
+   rows whose rule never reads command attempts or command identity, a requested-item row whose
+   obligations request no command, nor AI-powered rows whose subjects name no command material; `obligation_evidence_stale_after_scope_edit` no longer blocks
+   an AI-powered row whose subjects name no stale obligation. An explicit empty-scope declaration
+   (`completion_scope_declared_none`) no longer blocks any row, and an answered statement row
+   also tolerates `completion_scope_undeclared`. Material that contradicts a repair
+   still blocks: a later `instruction_requirement_unmapped` blocks the statement row, the
+   unjustified-edit code blocks every row, and a returned issue is never resolved.
+2. *A repeated statement is not an amendment.* An obligation maps the request when it cites any
+   event that recorded the current statement content (`equivalent_event_ids`), and an event that
+   repeats the current statement byte for byte (a re-attach, or a plan event restating it) leaves
+   the earlier event current, so the finding subject and the review packet's source ref stay put.
+   The repeat is still recorded as history. An amended statement must be mapped again.
+3. *No completion on an undecomposed request.* Supersedes decision 1's empty-scope exception: with a
+   statement recorded and a completion claim, no plan or an explicit empty scope raises the same
+   `task_requirement_unmet` identity (fact `task_statement_scope_empty`). Its repair is
+   statement-sourced obligations, or a `decision_recorded` whose statement holds the exact line
+   `yoetz-no-material-work:<statement event>` with a rationale. That decision is a structural answer
+   the next check reads; it is contradicted, and ignored, while any edit is recorded. Mid-task
+   checks before a completion claim, and tasks with no statement, are unchanged.
+4. *Repair text is the full working sequence.* The test-edit finding names the statement event and
+   every step that makes the repair clear (new obligation with the test path, `plan_revised`, an
+   edit action attempting the path with its result, resolution with observed evidence, superseding claim).
+5. *Emission matches resolution.* Both research-evidence `task_requirement_unmet` rules are raised
+   only by a check whose research-evidence execution completed, the condition their resolution
+   requires; a recorded statement is a research-evidence root, so the pack runs before any claim.
+6. *Standing limits never become uncleared findings.* A hook records a keyed command commitment,
+   never command text, so a requested command item is always `command_attempt_uncorroborated`; it
+   stays in coverage and on the receipt but is no longer a `ledger_stale_or_incomplete` subject
+   (the #912 principle). A path-metadata capture cannot read skip markers; that is now its own
+   standing code `preexisting_test_skip_unknown` instead of an unknown baseline.
+7. *Corroboration is verification-class.* Only a hook-observed non-`exploration`/`vcs` command
+   result, or captured output such a result links, after the latest observed edit corroborates a
+   completion claim. A run whose host stated no outcome (a long run that outlived its yield)
+   corroborates that it ran but never triggers the rule.
+
+**Consequences.** Every finding these rules raise has a documented repair that clears it on the
+next check. The rules still check structural links, not adequacy. Pack identities stay
+`research-evidence`/`work-integrity` `0.2.0` and `gap_classification_version` `"2"`: the 0.3 line
+is untagged, and the new code `preexisting_test_skip_unknown` is classified standing in the same
+table. A Codex unified-exec follow-up (`write_stdin`) is still materialized as `other`, so a long
+run's final exit status reaches the ledger only through a session-stream outcome correction; the
+outcome-less run still corroborates.

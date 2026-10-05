@@ -1983,13 +1983,30 @@ obligation_evidence_stale_after_scope_edit|instruction_requirement_unmapped`) ar
 local rows only: they describe the planning trace, not ledger rows a local pack failed to read.
 The structural test-edit accounting codes (`preexisting_test_baseline_unknown|
 preexisting_test_modified|preexisting_test_renamed|preexisting_test_deleted|
-preexisting_test_skipped`) are tolerated by both proof classes for every kind except
-`task_requirement_unmet`, the one kind that accounting can raise; that kind still blocks on them.
-The actionable `preexisting_test_edit_unjustified` blocks every row. All of these codes stay on
-check, status and receipt coverage. Outside the narrow command-gap partition described below, any
-other gap — redacted or unavailable payloads, redacted objects,
-missing refs, unknown events, completion scope, import range, or a code not in the list — blocks
-both proof classes. A local-only check therefore never resolves an AI-powered finding, and a
+preexisting_test_skipped|preexisting_test_skip_unknown`) are decided by the finding's basis, not
+its kind (ADR-032 pilot-blocker amendment). Only the local test-edit finding (a
+`task_requirement_unmet` row whose summary is not a task-statement wording; an unknown summary
+reads as this stricter basis) is bounded by `preexisting_test_baseline_unknown`; it tolerates the
+informational codes and `preexisting_test_skip_unknown`. Every other row tolerates the whole set,
+including the statement-based `task_requirement_unmet` rows (summary in
+`TASK_STATEMENT_FINDING_SUMMARIES`) and AI-powered rows of any kind. A statement-based row is
+blocked by `instruction_requirement_unmapped` on the later check, the material that contradicts
+its repair; once that code is gone it also tolerates `completion_scope_undeclared`. Every row,
+local or AI-powered, tolerates `completion_scope_declared_none`, the agent's own recorded scope
+decision (a no-material-work task must still be able to clear a repaired finding). The actionable `preexisting_test_edit_unjustified` blocks every row. All of these codes
+stay on check, status and receipt coverage. The command-attempt codes
+(`command_attempt_uncorroborated|command_attempt_mismatch`) are tolerated by local rows of a kind
+whose rule never reads command attempts or command identity (`completion_with_open_obligations`,
+`claim_without_admissible_evidence`, `result_without_action`, `stale_evidence_for_changed_state`,
+`contradictory_claims_unresolved`, `weak_or_stale_response`, `task_requirement_unmet`), by a
+`requested_item_never_attempted` row whose obligations, read from the pre-check projection, request
+no command, and by an AI-powered row whose subjects, read from the pre-check projection, name no command obligation,
+command action or command result. `obligation_evidence_stale_after_scope_edit` is tolerated by an
+AI-powered row whose subjects name none of the stale resolved obligations
+(`kernel/plan_drift.stale_resolved_obligations`). Outside these and the narrow command-gap
+partition described below, any other gap — redacted or unavailable payloads, redacted objects,
+missing refs, unknown events, any other completion-scope code, import range, or a code not in the
+list — blocks both proof classes. A local-only check therefore never resolves an AI-powered finding, and a
 weakened AI-powered review never resolves one either. A check that returns a finding again clears
 that row's proof; a resolved row is excluded from finding-ID reuse (`prior_finding_ids`), so a
 re-fired issue is a successor under a fresh id that starts unresolved while the resolved row keeps
@@ -6471,6 +6488,10 @@ here or in the compact `unanswered_findings` preview, so it never sets `findings
 stays in `view=findings` with its own disposition and an explanation that names it a limitation,
 keeps its resolution requirements (it does not become resolvable), and stays on the receipt with
 its coverage; an optional acknowledgement is recorded like any response and carried there (#911).
+A readable finding that a later qualifying check already resolved, with no response, is
+`verified_resolved`, a final state `respond` refuses, so it is not response work either and never
+sets `findings_unanswered` (pilot blocker: otherwise repairing before answering left an item no
+action could clear).
 `kernel/projections.unanswered_finding_ids` is the single rule for the status counter, the compact
 preview, closure readiness, and the durable SQLite mirror. `receipt_blocking_finding_count` selects the
 newest readable finding per receipt issue key and counts the actionable ones that
@@ -7064,6 +7085,11 @@ At completion or resolved-obligation frontiers, asserted command relations contr
 `command_attempt_mismatch` or `command_attempt_uncorroborated` to the existing local-check
 case/receipt gap vector. This prevents uncorroborated accounting from becoming execution proof.
 The latter means unknown observation, not non-execution. Receipt capacity computes the same union.
+Hook observation records a keyed commitment (`omitted:hmac-sha256:…`) instead of command text, so a
+requested command item is never byte-compared with an observed run and stays
+`command_attempt_uncorroborated`. Like caller-asserted digest provenance (#912), that code is a
+standing limitation no agent action changes: the work-integrity ledger rule does not make it a
+`ledger_stale_or_incomplete` subject. `command_attempt_mismatch` keeps its finding.
 
 
 ### Observation drain control provenance
@@ -8027,19 +8053,51 @@ plan. Names and contracts:
   approval made before the section keeps its bytes and digest; a 1.0.0/1.1.0 row that names the
   section is `privacy_policy_row_corrupt`.
 - Statement-sourced obligations (ADR-032 amendment, TB4 pilot): an obligation maps the request
-  when its `source_refs` names the current statement event.
-  `kernel/plan_drift.task_statement_unmapped(projection, statement_event)` is the one predicate;
+  when its `source_refs` names an event that recorded the current statement content.
+  `RecordedTaskStatement.equivalent_event_ids` (from `current_task_statement`) lists every readable
+  `session_opened|session_resumed|plan_published|plan_revised` event whose statement is
+  byte-identical to the current one; the frozen case JSON carries the list only when it holds more
+  than one id. An event that repeats the current statement byte for byte (a re-attach whose
+  `task_statement` is unchanged, or a plan event restating it) is recorded but does not replace the
+  current statement event, so the finding subject, specification revision and packet source ref do
+  not move; an amended statement becomes current and must be mapped again.
+  `kernel/plan_drift.task_statement_unmapped(projection, statement)` is the one predicate;
   `instruction_requirement_unmapped` is `agent_actionable` and is excluded from
   `PLAN_DRIFT_ADVISORY_GAPS`. `kernel/deterministic_checks.build_task_statement_unmapped_assessment`
   raises `task_requirement_unmet` (facts `task_statement_unmapped` /
   `statement_sourced_obligation_absent`, subject: the statement event) on whole-case checks only.
-  `kernel/test_edit_visibility.preexisting_test_edits(..., task_statement_event_id=...)` treats a
-  test file listed as an `item_kind` `file` requested item of such an obligation as justified.
+  `kernel/test_edit_visibility.preexisting_test_edits(..., task_statement_event_id=...)` accepts the
+  equivalent ids and treats a test file listed as an `item_kind` `file` requested item of such an
+  obligation as justified.
+- Completion on an undecomposed request (pilot-blocker amendment): with a statement recorded and an
+  effective completion claim, a readable plan chain with no plan or an explicit empty scope raises
+  the same `task_requirement_unmet` identity with fact `task_statement_scope_empty` and summary
+  `TASK_STATEMENT_SCOPE_EMPTY_SUMMARY` (`kernel/plan_drift.task_statement_scope_empty_at_completion`;
+  it also adds `instruction_requirement_unmapped` to coverage). Mid-task checks before any completion
+  claim never raise it. It is answered by statement-sourced obligations, or by a readable,
+  unsuperseded `decision_recorded` whose statement holds the exact line
+  `yoetz-no-material-work:<statement event id>` (any equivalent id; `NO_MATERIAL_WORK_MARKER`);
+  that decision is contradicted, and does not count, while the projection holds any `edit` action.
+- Both research-evidence `task_requirement_unmet` rules (statement and test edit) are emitted only by
+  a check whose research-evidence execution is `run/completed`, the same condition their
+  resolution requires. A recorded statement is a research-evidence root, so the pack runs before
+  the first claim. The test-edit finding adds fact `task_statement_recorded` (the statement event)
+  when a statement is recorded, and its text spells out the complete repair: a new statement-sourced
+  obligation listing the test path as a `file` item, `plan_revised` carrying it, an `edit` action
+  whose `attempted_items` list the path (with its result), the resolved obligation with observed evidence, and a
+  superseding claim naming it.
+- Path-metadata test-edit captures carry no diff body: an edited pre-existing test whose skip
+  marker cannot be read is `preexisting_test_skip_unknown` (standing; not informational, so the
+  check stays coverage-incomplete) rather than `preexisting_test_baseline_unknown`, which now means
+  only an unknown task-start baseline or an omitted/truncated edit set.
 - Observed corroboration (same amendment): work-integrity `claim_without_admissible_evidence` with
   facts `observed_verification_uncited` / `observed_verification_absent` (subject: the completion
-  claim) fires when hooks observed an edit or verification run and the claim's support chain cites
-  no hook-observed, non-`exploration`/`vcs` command result with a recorded outcome (or hook-captured
-  evidence, or evidence such a result links) after the latest hook-observed edit.
+  claim) fires when hooks observed an edit or a verification run with a recorded outcome and the
+  claim's support chain cites no verification-class material after the latest hook-observed edit:
+  a hook-observed, non-`exploration`/`vcs` command result (an outcome-less result counts for
+  corroboration but never triggers the rule) or captured output such a result links, at that
+  result's frontier. Standalone captures, an edit's output and exploration or VCS output never
+  corroborate.
 - The unreleased local control 2.9.0 carries the fields in place and admits either
   privacy-policy wire version. A newer client meets an older running service at the schema-manifest
   digest in `control-hello` (`manifest_mismatch`, superseded through `yoetz service restart`), and a

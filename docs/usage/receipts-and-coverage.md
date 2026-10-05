@@ -119,8 +119,11 @@ or the plan is deliberately restated to match the intended scope.
 Two findings stop a completion from reading clean until the agent answers them:
 
 - `task_requirement_unmet` — a task statement is recorded and the plan declares obligations, but
-  none of them cites the statement. The agent decomposes your request into obligations that cite
-  it; Yoetz checks only that link, not that every requirement was captured.
+  none of them cites the statement, or the agent claims completion with no plan or an explicitly
+  empty one. The agent decomposes your request into obligations that cite it, or, when your request
+  needs no material work and nothing was edited, records that decision with a reason. Yoetz checks
+  only that link, not that every requirement was captured. Repeating your unchanged request when a
+  session resumes does not count as a new request.
 - `claim_without_admissible_evidence` (observed-verification form) — the hooks saw the agent edit
   or run checks, but the completion claim cites no observed verification run after the last edit.
   The agent reruns its verification and cites that observed run.
