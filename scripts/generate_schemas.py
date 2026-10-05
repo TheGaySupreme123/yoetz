@@ -6118,6 +6118,22 @@ def _control_v2_9_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
             "pattern": _CONTROL_COMMITMENT_PATTERN,
             "type": "string",
         }
+        # Every tool observation carries the command runner class the domain serializer derives;
+        # without it the hook's ingest frame failed client validation and command observations
+        # reached the ledger only through the delayed in-process sweep.
+        fields["runner_class"] = {
+            "enum": [
+                "build",
+                "compound",
+                "exploration",
+                "lint",
+                "other",
+                "test",
+                "typecheck",
+                "vcs",
+            ],
+            "type": "string",
+        }
     if entry.schema_name == "control-result":
         definitions = cast(dict[str, JsonValue], document["$defs"])
         runtime = definitions.get("observation_selection_runtime")

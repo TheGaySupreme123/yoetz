@@ -139,6 +139,9 @@ GAP_CLASSIFICATION: Final[Mapping[str, GapClass]] = MappingProxyType(
         "optional_observation_detail_omitted": _S,
         "drain_diagnostic_unavailable": _S,
         "host_outcome_unavailable": _S,  # the host did not state an outcome (#910)
+        # A piped or chained command reports one exit status for several commands, so the
+        # observer cannot attribute an outcome; no agent action rewrites the recorded row.
+        "compound_outcome_unavailable": _S,
         # -- Background observation advice: pipeline state, not an agent task (#923).
         "advice_coverage_gaps_truncated": _S,
         "advice_evidence_refs_truncated": _S,

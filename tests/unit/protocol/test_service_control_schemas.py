@@ -700,6 +700,8 @@ def test_v25_observation_wire_tracks_domain_structural_keys_without_rewriting_v2
             "lineage_parent_task_id",
             # The keyed command identity is additive on the unreleased 2.9 request wire (#909).
             "command_commitment",
+            # So is the command runner class every tool observation carries.
+            "runner_class",
         }
     )
     assert set(v25_properties) == expected_observation_keys
@@ -1351,11 +1353,15 @@ def _structural_properties(document: dict[str, Any]) -> dict[str, Any]:
 def _assert_v29_request_adds_only_command_commitment(
     v28: dict[str, Any], v29: dict[str, Any]
 ) -> None:
-    """The 2.9 request adds the keyed command identity and nothing else (#909)."""
+    """The 2.9 request adds the keyed command identity and runner class and nothing else (#909)."""
 
     v28_fields = _structural_properties(v28)
     v29_fields = _structural_properties(v29)
-    assert set(v29_fields) - set(v28_fields) == {"command_commitment"}
+    assert set(v29_fields) - set(v28_fields) == {"command_commitment", "runner_class"}
+    assert v29_fields["runner_class"] == {
+        "enum": ["build", "compound", "exploration", "lint", "other", "test", "typecheck", "vcs"],
+        "type": "string",
+    }
     assert v29_fields["command_commitment"] == {
         "maxLength": 76,
         "minLength": 76,
@@ -1364,6 +1370,7 @@ def _assert_v29_request_adds_only_command_commitment(
     }
     stripped = json.loads(json.dumps(v29))
     del _structural_properties(stripped)["command_commitment"]
+    del _structural_properties(stripped)["runner_class"]
     assert {k: v for k, v in v28.items() if k != "$id"} == {
         k: v for k, v in stripped.items() if k != "$id"
     }
