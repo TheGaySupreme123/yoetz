@@ -116,6 +116,18 @@ An explicit waiver removes an obligation from the current plan; it does not supe
 historical completion claim. The relation remains a coverage limitation until the claim is replaced
 or the plan is deliberately restated to match the intended scope.
 
+Two findings stop a completion from reading clean until the agent answers them:
+
+- `task_requirement_unmet` — a task statement is recorded and the plan declares obligations, but
+  none of them cites the statement. The agent decomposes your request into obligations that cite
+  it; Yoetz checks only that link, not that every requirement was captured.
+- `claim_without_admissible_evidence` (observed-verification form) — the hooks saw the agent edit
+  or run checks, but the completion claim cites no observed verification run after the last edit.
+  The agent reruns its verification and cites that observed run.
+
+Running the check again without changing the record returns the same finding. Neither finding
+means the work is wrong, and clearing them does not prove it right.
+
 ## Candidate findings are not a check
 
 `status` with `view=candidate_findings` is an advisory read. No verdict, no IDs, no receipt, and the

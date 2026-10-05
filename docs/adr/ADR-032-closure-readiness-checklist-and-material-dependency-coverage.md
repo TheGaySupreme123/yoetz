@@ -167,3 +167,50 @@ the check coverage, status and receipt. The receipt therefore continues to say t
 review did not run and retains its coverage-bounded conclusion; a scoped local verdict never means
 that the work is correct or that a provider reviewed it. Non-deterministic modes retain the prior
 completeness rules.
+
+## Amendment — completion needs an answerable signal (2026-10-05, TB4 pilot)
+
+**Context.** In the Terminal-Bench 4 pilot (Yoetz `d925fe46`, Codex), an agent missed a stated
+requirement, resolved three coarse self-written obligations with one shared bundle of its own
+evidence, and reached a receipt. The one relevant signal, `instruction_requirement_unmapped`, fired
+on all six Yoetz attempts but was a standing advisory, so nothing asked the agent to answer it. The
+maintainer requested these changes on 2026-10-05 (design-gated: check outcomes and closure).
+
+**Decisions.** Both rules are structural: they read recorded relations and closed host-derived
+tokens, never the statement, plan, obligation or command prose.
+
+1. *Unmapped task statement.* `instruction_requirement_unmapped` is reclassified from standing to
+   `agent_actionable` (`plan_unrefined_before_first_edit` and
+   `obligation_evidence_stale_after_scope_edit` stay standing; `PLAN_DRIFT_ADVISORY_GAPS` names
+   them). Every whole-case check also raises a local `task_requirement_unmet` finding
+   (research-evidence identity, fact `task_statement_unmapped`, missing fact
+   `statement_sourced_obligation_absent`) whose single subject is the current statement event,
+   while a task statement is recorded and the effective plan declares obligations of which none
+   cites that event in `source_refs`. The finding text names the event id and the repair: publish
+   statement-sourced obligations with `plan_revised`. No statement, an unreadable or absent plan,
+   and an explicit empty-scope declaration keep their earlier behaviour. The gap no longer counts as
+   advisory for check completeness, the scoped deterministic verdict, or the receipt conclusion.
+2. *Uncorroborated completion.* The work-integrity rule `claim_without_admissible_evidence` gains
+   a second trigger (facts `observed_verification_uncited` / `observed_verification_absent`): an
+   effective completion claim whose support chain (`supporting_refs`, `limitation_refs`, and the
+   resolution evidence of the obligations it names) cites no hook-observed verification result
+   recorded after the latest hook-observed edit. A verification result is a service-stamped
+   observed command result with a recorded outcome whose host runner class is not `exploration`
+   or `vcs`. The rule is silent when hooks observed neither an edit nor a verification run, so a
+   host without hooks keeps its coverage disclosure instead of an unanswerable finding. Repair:
+   replace the claim citing the observed `res_` id from `status view=results`.
+3. *Test-edit justification.* An edit to a pre-existing test file is also justified when an
+   effective obligation citing the statement event lists the file as a `requested_items` entry with
+   `item_kind` `file` (exact repository-relative path, `./` form, absolute path ending in the
+   path, or its digest). The decision marker remains accepted.
+
+**Consequences.** A check rerun with no new events returns these findings again; `respond` answers
+but never resolves them, and the receipt keeps `unresolved_findings_remain` until a later check
+proves them absent. The rules check presence of a link, not adequacy: one statement-sourced
+obligation clears the first rule however coarse the plan, and any observed non-exploration run
+after the last edit clears the second. They make an unmapped request or an uncorroborated claim
+visible and answerable; they do not prove the work correct. Both fired on every deterministic
+pilot attempt, including the two that passed the hidden tests, because no agent cited the
+statement or an observed run; the guidance now asks for both from the start. Policy pack versions
+stay `0.1.0` (the 0.3 line is unreleased); a persisted check replays through the text-contract
+digest.

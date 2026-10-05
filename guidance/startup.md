@@ -22,6 +22,16 @@ exploration and before the first material edit, publish one `plan_revised` refin
 instruction requirement to a testable obligation, and explicitly carry, supersede, or waive every
 earlier obligation with a visible reason. Do not make the material edit before that refinement.
 
+Decompose the user's request yourself: one obligation per stated requirement, reported symptom,
+constraint, or deliverable, including the ones that look hard or contradictory. Each obligation's
+`source_refs` names the event that recorded the task statement: the `session_opened` (or, on an
+attach that carried `task_statement`, `session_resumed`) event of your `start`, listed by
+`status view=history` with `filter.schema_name`. Put every file, command, or output the request
+names in `requested_items` (`item_kind` `file`, `command`, or `change`). Yoetz checks only that
+structural link, never the wording: a plan with obligations but none citing the statement returns
+an agent-actionable `task_requirement_unmet` finding, and the finding names the statement event id.
+Then run `check` once on the plan before editing, and again after each material milestone.
+
 If `start` fails, retain its exact request and correlation identity. Follow the typed continuation
 and same-request recovery, including a named one-time repair, before asking the user for intro and
 guidance. An unknown or pending write is not failure: read `status view=operation` with the exact

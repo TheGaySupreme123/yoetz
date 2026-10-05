@@ -7988,6 +7988,20 @@ plan. Names and contracts:
   `review_selection_policy_schema_version` (1.1.0 unless a 1.2.0-only section is selected), so an
   approval made before the section keeps its bytes and digest; a 1.0.0/1.1.0 row that names the
   section is `privacy_policy_row_corrupt`.
+- Statement-sourced obligations (ADR-032 amendment, TB4 pilot): an obligation maps the request
+  when its `source_refs` names the current statement event.
+  `kernel/plan_drift.task_statement_unmapped(projection, statement_event)` is the one predicate;
+  `instruction_requirement_unmapped` is `agent_actionable` and is excluded from
+  `PLAN_DRIFT_ADVISORY_GAPS`. `kernel/deterministic_checks.build_task_statement_unmapped_assessment`
+  raises `task_requirement_unmet` (facts `task_statement_unmapped` /
+  `statement_sourced_obligation_absent`, subject: the statement event) on whole-case checks only.
+  `kernel/test_edit_visibility.preexisting_test_edits(..., task_statement_event_id=...)` treats a
+  test file listed as an `item_kind` `file` requested item of such an obligation as justified.
+- Observed corroboration (same amendment): work-integrity `claim_without_admissible_evidence` with
+  facts `observed_verification_uncited` / `observed_verification_absent` (subject: the completion
+  claim) fires when hooks observed an edit or verification run and the claim's support chain cites
+  no hook-observed, non-`exploration`/`vcs` command result with a recorded outcome after the latest
+  hook-observed edit.
 - The unreleased local control 2.9.0 carries the fields in place and admits either
   privacy-policy wire version. A newer client meets an older running service at the schema-manifest
   digest in `control-hello` (`manifest_mismatch`, superseded through `yoetz service restart`), and a
