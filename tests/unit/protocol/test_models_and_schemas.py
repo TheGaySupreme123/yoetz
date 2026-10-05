@@ -309,7 +309,7 @@ _STATUS_PAGE_DEF_BY_VIEW_FOR_TEST: tuple[tuple[str, str], ...] = (
     ("versions", "versions_page"),
 )
 _EXPECTED_RESULT_PATTERN_COUNTS: dict[tuple[str, str | None], int] = {
-    ("check", None): 296,
+    ("check", None): 363,
     ("publish_work", None): 57,
     ("receipt", None): 276,
     ("respond", None): 53,
@@ -320,7 +320,7 @@ _EXPECTED_RESULT_PATTERN_COUNTS: dict[tuple[str, str | None], int] = {
     ("status", "candidate_findings"): 32,
     ("status", "compact"): 57,
     ("status", "evidence"): 19,
-    ("status", "findings"): 108,
+    ("status", "findings"): 125,
     ("status", "history"): 61,
     ("status", "lineage"): 16,
     ("status", "obligations"): 33,
@@ -359,7 +359,7 @@ _RESULT_SUPPORT_MODEL_SPECS: tuple[tuple[str, str, str], ...] = (
         "operations/publish-work-result-1.0.0.schema.json",
         "version_slice",
     ),
-    ("CheckSuccessModel", "operations/check-result-1.3.0.schema.json", "success"),
+    ("CheckSuccessModel", "operations/check-result-1.4.0.schema.json", "success"),
     (
         "CheckPolicyExecutionModel",
         "operations/check-result-1.0.0.schema.json",
@@ -367,7 +367,7 @@ _RESULT_SUPPORT_MODEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "CheckProjectedFindingModel",
-        "operations/check-result-1.0.0.schema.json",
+        "operations/check-result-1.4.0.schema.json",
         "projected_finding",
     ),
     ("CheckVersionSliceModel", "operations/check-result-1.0.0.schema.json", "version_slice"),
@@ -416,7 +416,7 @@ _RESULT_SUPPORT_MODEL_SPECS: tuple[tuple[str, str, str], ...] = (
         "candidate_findings_page",
     ),
     ("StatusCompactFindingModel", "operations/status-result-1.1.0.schema.json", "compact_finding"),
-    ("StatusCompactItemModel", "operations/status-result-1.1.0.schema.json", "compact_item"),
+    ("StatusCompactItemModel", "operations/status-result-1.4.0.schema.json", "compact_item"),
     (
         "StatusLatestCheckTestEditsModel",
         "operations/status-result-1.4.0.schema.json",
@@ -1287,7 +1287,8 @@ def test_protocol_models_public_exports_are_closed() -> None:
         GrantState LineageRollupState LineageReadGapReason LineageProvenanceRestriction
         AttachHandleModel ChildFindingSnapshotModel ChildDependencySnapshotModel
         ChildDependenciesModel CheckChildPreviewItemModel CheckChildrenPreviewModel
-        CheckAdvisoryNoteModel StatusLineageChildModel StatusLineageAnnotationModel
+        CheckAdvisoryNoteModel CheckFindingChallengeModel CheckVerifiedItemModel
+        ProviderVerifiedItemModel StatusLineageChildModel StatusLineageAnnotationModel
         StatusLineagePageModel ProjectTextRefModel StatusProjectMemberModel
         StatusProjectCoverageModel StatusProjectDetectionModel StatusProjectReceiptModel
         StatusProjectPageModel
@@ -2482,7 +2483,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     rules = cast(tuple[Any, ...], getattr(models, "_RESULT_LEAF_RULES"))
 
     derived_patterns = _derived_result_success_patterns(catalog)
-    assert len(derived_patterns) == 1288
+    assert len(derived_patterns) == 1383
 
     derived_counts = {
         context: sum(1 for method, view, _ in derived_patterns if (method, view) == context)
@@ -2491,7 +2492,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert derived_counts == _EXPECTED_RESULT_PATTERN_COUNTS
 
     assert type(rules) is tuple
-    assert len(rules) == 1313
+    assert len(rules) == 1410
     assert rules == tuple(sorted(rules, key=_test_rule_sort_key))
 
     rule_keys = {
@@ -2500,7 +2501,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert len(rule_keys) == len(rules)
 
     registry_patterns = {(rule.method, rule.status_view, rule.segments) for rule in rules}
-    assert len(registry_patterns) == 1288
+    assert len(registry_patterns) == 1383
     assert registry_patterns == derived_patterns
 
     content_rules = _expected_nonpublish_content_rules(models)
@@ -2512,7 +2513,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
         for rule in rules
         if rule.method == "publish_work" and rule.segments == publish_summary_segments
     )
-    assert len(publish_summary_rules) == 26
+    assert len(publish_summary_rules) == 28
     assert all(rule.status_view is None for rule in publish_summary_rules)
 
     expected_publish = _expected_publish_summary_rules(models)
@@ -2869,6 +2870,14 @@ def _expected_nonpublish_content_rules(
     rows: tuple[tuple[str, str | None, str, object], ...] = (
         ("check", None, "/findings/*/detail", finding_summary),
         ("check", None, "/findings/*/summary", finding_summary),
+        # Reviewer-authored challenge prose, summary, and verified items (issue #961).
+        ("check", None, "/findings/*/challenge/alternative_interpretation", finding_summary),
+        ("check", None, "/findings/*/challenge/discrepancy", finding_summary),
+        ("check", None, "/findings/*/challenge/snippet", finding_summary),
+        ("check", None, "/findings/*/challenge/uncertainty", finding_summary),
+        ("check", None, "/review_summary", finding_summary),
+        ("check", None, "/verified/*/requirement_or_claim", finding_summary),
+        ("check", None, "/verified/*/snippet", finding_summary),
         ("respond", None, "/response/evidence/*/description", evidence_excerpt),
         ("respond", None, "/response/reason", finding_summary),
         ("status", "advice", "/page/items/*/coordination_resource_paths/*", repository_excerpt),
@@ -2918,6 +2927,15 @@ def _expected_nonpublish_content_rules(
         ),
         ("status", "evidence", "/page/items/*/description", evidence_excerpt),
         ("status", "evidence", "/page/items/*/reference", evidence_excerpt),
+        (
+            "status",
+            "findings",
+            "/page/items/*/challenge/alternative_interpretation",
+            finding_summary,
+        ),
+        ("status", "findings", "/page/items/*/challenge/discrepancy", finding_summary),
+        ("status", "findings", "/page/items/*/challenge/snippet", finding_summary),
+        ("status", "findings", "/page/items/*/challenge/uncertainty", finding_summary),
         ("status", "findings", "/page/items/*/detail", finding_summary),
         ("status", "findings", "/page/items/*/reason", finding_summary),
         ("status", "findings", "/page/items/*/summary", finding_summary),
@@ -2979,6 +2997,7 @@ def _expected_publish_summary_rules(models: Any) -> dict[object, object]:
         ("check_recorded", "1.1.0"): "public_structural",
         ("check_recorded", "1.2.0"): "public_structural",
         ("check_recorded", "1.3.0"): "public_structural",
+        ("check_recorded", "1.4.0"): "public_structural",
         ("coordination_context_recorded", "1.0.0"): "public_structural",
         ("coordination_obligation_declared", "1.0.0"): "public_structural",
         ("coordination_disposition_recorded", "1.0.0"): "public_structural",
@@ -2989,6 +3008,7 @@ def _expected_publish_summary_rules(models: Any) -> dict[object, object]:
         ("finding_recorded", "1.1.0"): models.DataCategory.FINDING_SUMMARY,
         ("finding_recorded", "1.2.0"): models.DataCategory.FINDING_SUMMARY,
         ("finding_recorded", "1.3.0"): models.DataCategory.FINDING_SUMMARY,
+        ("finding_recorded", "1.4.0"): models.DataCategory.FINDING_SUMMARY,
         ("obligation_published", "1.0.0"): models.DataCategory.TASK_DESCRIPTION,
         ("plan_published", "1.0.0"): models.DataCategory.TASK_DESCRIPTION,
         ("plan_revised", "1.0.0"): models.DataCategory.TASK_DESCRIPTION,
@@ -3088,7 +3108,7 @@ def test_schema_catalog_reports_complete_registry() -> None:
     assert SCHEMA_NAMESPACE == "https://schemas.yoetz.dev/0.1/"
     assert SCHEMA_MANIFEST_SCHEMA == "yoetz.schema-manifest/1.0.0"
     assert SCHEMA_MANIFEST_VERSION == "1.0.0"
-    assert SCHEMA_MEMBER_COUNT == 221
+    assert SCHEMA_MEMBER_COUNT == 226
     assert len(catalog.documents) == SCHEMA_MEMBER_COUNT
 
     paths = tuple(document.relative_path for document in catalog.documents)
@@ -3172,7 +3192,7 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     root = resources.files("yoetz").joinpath("resources", "schemas")
     manifest_bytes = root.joinpath("manifest.json").read_bytes()
     assert catalog.manifest_digest == f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
-    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 7_310
+    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 7_568
 
 
 def test_schema_name_derivation_and_version_maps_are_exact() -> None:
@@ -3195,12 +3215,12 @@ def test_schema_name_derivation_and_version_maps_are_exact() -> None:
         "7.0.0",
         "1.4.0",
     }
-    assert set(event_versions.values()) == {"1.0.0", "1.1.0", "1.2.0", "1.3.0"}
+    assert set(event_versions.values()) == {"1.0.0", "1.1.0", "1.2.0", "1.4.0"}
     assert event_versions["action_recorded"] == "1.0.0"
     assert event_versions["evidence_recorded"] == "1.2.0"
-    assert event_versions["check_recorded"] == "1.3.0"
+    assert event_versions["check_recorded"] == "1.4.0"
     assert event_versions["claim_recorded"] == "1.1.0"
-    assert event_versions["finding_recorded"] == "1.3.0"
+    assert event_versions["finding_recorded"] == "1.4.0"
     # The task-statement versions (issue #908).
     assert event_versions["session_opened"] == "1.2.0"
     assert event_versions["session_resumed"] == "1.2.0"
