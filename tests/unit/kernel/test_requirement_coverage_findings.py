@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from builders.policy_cases import (
     BASE_COVERAGE,
     act,
@@ -31,6 +33,7 @@ from yoetz.domain.events import (
     ActionRecordedPayload,
     ClaimKind,
     ClaimRecordedPayloadV1_1,
+    DecisionRecordedPayload,
     EvidenceKind,
     EvidenceRecordedPayload,
     NoObligationsReason,
@@ -39,10 +42,14 @@ from yoetz.domain.events import (
     PlanPublishedPayload,
     ResultOutcome,
     ResultRecordedPayload,
+    encode_payload,
 )
 from yoetz.domain.findings import FindingKind
-from yoetz.domain.task_statement import RecordedTaskStatement
-from yoetz.domain.values import ResultId, object_id, timestamp_from_string
+from yoetz.domain.task_statement import (
+    TASK_STATEMENT_SCOPE_EMPTY_SUMMARY,
+    RecordedTaskStatement,
+)
+from yoetz.domain.values import ResultId, actor_id, object_id, timestamp_from_string
 from yoetz.kernel.closure_readiness import GapClass, classify_gap
 from yoetz.kernel.deterministic_checks import (
     DeterministicCase,
@@ -56,7 +63,8 @@ from yoetz.kernel.plan_drift import (
     PLAN_UNREFINED_BEFORE_FIRST_EDIT_GAP,
 )
 from yoetz.kernel.policies.work_integrity import work_integrity_findings
-from yoetz.kernel.projections import ProjectionRecord
+from yoetz.kernel.projections import DecisionProjectionRecord, ProjectionRecord
+from yoetz.protocol.canonical import canonical_digest
 from yoetz.protocol.coverage import Coverage, EvidenceImmutability, PublicationChannel
 
 _STATEMENT_EVENT = evt(1)
@@ -130,12 +138,126 @@ def test_one_statement_sourced_obligation_clears_the_unmapped_finding() -> None:
     assert build_task_statement_unmapped_assessment(case) is None
 
 
-def test_no_statement_and_explicit_empty_scope_keep_their_existing_behaviour() -> None:
+def test_no_statement_keeps_its_behaviour_and_empty_scope_is_quiet_mid_task() -> None:
+    """No statement never raises; an empty or undeclared scope raises only at completion (D3)."""
+
     without_statement = replace(_statement_case(_obligation(1, cites=False)), task_statement=None)
     empty_scope = _statement_case(empty_reason=True)
+    no_plan = replace(make_case(extra_refs=(_STATEMENT_EVENT,)), task_statement=_statement())
 
     assert build_task_statement_unmapped_assessment(without_statement) is None
+    # Mid-task, before any completion claim: neither form fires.
     assert build_task_statement_unmapped_assessment(empty_scope) is None
+    assert build_task_statement_unmapped_assessment(no_plan) is None
+    # No statement stays quiet even at completion.
+    assert (
+        build_task_statement_unmapped_assessment(
+            replace(_with_completion(_statement_case(empty_reason=True)), task_statement=None)
+        )
+        is None
+    )
+
+
+def _with_completion(case: DeterministicCase, *, edit: bool = False) -> DeterministicCase:
+    claims = {clm(1): claim_record(_claim(), 90)}
+    actions = (
+        {act(70): record(ActionRecordedPayload(act(70), ActionKind.EDIT, "Edit"), 70)}
+        if edit
+        else {}
+    )
+    rebuilt = make_case(
+        plans=dict(case.projection.plans),
+        obligations=dict(case.projection.obligations),
+        actions=actions,
+        claims=claims,
+        extra_refs=(_STATEMENT_EVENT,),
+    )
+    return replace(rebuilt, task_statement=case.task_statement)
+
+
+def _with_decision(case: DeterministicCase, statement: str) -> DeterministicCase:
+    decision = DecisionRecordedPayload(
+        statement, "The user asked a question only.", actor_id("agent:1")
+    )
+    row = DecisionProjectionRecord(
+        payload=decision,
+        payload_digest=canonical_digest(encode_payload(decision)),
+        redacted=False,
+        source_event_id=evt(95),
+        source_frontier=95,
+    )
+    return replace(case, projection=replace(case.projection, decisions={evt(95): row}))
+
+
+@pytest.mark.parametrize("empty_reason", (True, False))
+def test_completion_on_an_empty_or_undeclared_scope_raises_an_answerable_finding(
+    empty_reason: bool,
+) -> None:
+    """The core guarantee: a completion claim never stands on an undecomposed request (D3)."""
+
+    base = (
+        _statement_case(empty_reason=True)
+        if empty_reason
+        else replace(make_case(extra_refs=(_STATEMENT_EVENT,)), task_statement=_statement())
+    )
+    assessment = build_task_statement_unmapped_assessment(_with_completion(base))
+
+    assert assessment is not None
+    candidate = assessment.candidate
+    assert candidate.kind is FindingKind.TASK_REQUIREMENT_UNMET
+    assert candidate.subject_refs == (_STATEMENT_EVENT,)
+    assert candidate.summary == TASK_STATEMENT_SCOPE_EMPTY_SUMMARY
+    assert f"source_refs [{_STATEMENT_EVENT}]" in candidate.detail
+    assert f"yoetz-no-material-work:{_STATEMENT_EVENT}" in candidate.detail
+    assert "over-limit" not in candidate.detail
+
+
+def test_a_no_material_work_decision_answers_the_empty_scope_unless_work_was_edited() -> None:
+    marker = f"No material work.\nyoetz-no-material-work:{_STATEMENT_EVENT}"
+    decided = _with_decision(_with_completion(_statement_case(empty_reason=True)), marker)
+    contradicted = _with_decision(
+        _with_completion(_statement_case(empty_reason=True), edit=True), marker
+    )
+    wrong_event = _with_decision(
+        _with_completion(_statement_case(empty_reason=True)),
+        f"yoetz-no-material-work:{evt(2)}",
+    )
+    prose_only = _with_decision(
+        _with_completion(_statement_case(empty_reason=True)),
+        f"The request needs no material work (yoetz-no-material-work:{_STATEMENT_EVENT}).",
+    )
+
+    assert build_task_statement_unmapped_assessment(decided) is None
+    # A task that edited files did material work: the decision is contradicted.
+    assert build_task_statement_unmapped_assessment(contradicted) is not None
+    assert build_task_statement_unmapped_assessment(wrong_event) is not None
+    assert build_task_statement_unmapped_assessment(prose_only) is not None
+
+
+def test_an_obligation_citing_an_equivalent_statement_event_maps_the_statement() -> None:
+    """A re-attach repeating the unchanged statement must not orphan earlier mappings (D2)."""
+
+    resumed = evt(3)
+    obligation = ObligationPublishedPayload(
+        obl(1), "Requirement", "A result", ObligationStatus.OPEN, source_refs=(_STATEMENT_EVENT,)
+    )
+    case = make_case(
+        plans={1: plan_record(PlanPublishedPayload(1, "Plan", (obl(1),)), 2)},
+        obligations={obl(1): obligation_record(obligation, 10)},
+        extra_refs=(_STATEMENT_EVENT, resumed),
+    )
+    text = _statement().text
+    equivalent = RecordedTaskStatement(
+        text, resumed, "session_resumed", 3, equivalent_event_ids=(_STATEMENT_EVENT, resumed)
+    )
+    amended = RecordedTaskStatement("A different request.", resumed, "session_resumed", 3)
+
+    assert (
+        build_task_statement_unmapped_assessment(replace(case, task_statement=equivalent)) is None
+    )
+    assert (
+        build_task_statement_unmapped_assessment(replace(case, task_statement=amended)) is not None
+    )
 
 
 def test_only_the_unmapped_statement_gap_is_agent_actionable() -> None:

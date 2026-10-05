@@ -347,9 +347,12 @@ def test_templates_are_complete_exact_and_structural() -> None:
 def test_text_contract_digest_pins_every_rendered_wording_branch() -> None:
     corpus = deterministic_checks._text_contract_corpus()  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
     assert canonical_digest(corpus) == DETERMINISTIC_TEXT_CONTRACT_DIGEST
-    assert len(corpus) == len(FindingKind) + 8
+    assert len(corpus) == len(FindingKind) + 10
     rendered = canonical_encode(corpus).decode("utf-8")
     assert "No obligation in the current plan cites the recorded task statement." in rendered
+    assert "plan declares no obligation for the recorded task statement" in rendered
+    assert "yoetz-no-material-work:evt_" in rendered
+    assert "publish a NEW obligation_published" in rendered
     assert "cites no hook-observed verification run" in rendered
     assert "Observed run: result res_" in rendered
     assert "Gaps: missing_ref." in rendered

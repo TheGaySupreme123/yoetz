@@ -190,6 +190,7 @@ GAP_CLASSIFICATION: Final[Mapping[str, GapClass]] = MappingProxyType(
         "preexisting_test_renamed": _S,
         "preexisting_test_deleted": _S,
         "preexisting_test_skipped": _S,
+        "preexisting_test_skip_unknown": _S,  # path metadata only: skip markers unreadable
         "preexisting_test_edit_unjustified": _A,
         "semantic_review_not_configured": _S,
         "semantic_relevance_review_not_run": _S,  # provider or evaluator failure

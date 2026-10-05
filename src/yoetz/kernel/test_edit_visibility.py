@@ -4,8 +4,9 @@ The only input that can name a changed path is the encrypted, bounded repository
 module reads those names in process, reduces them to fixed counters and coverage codes, and never
 returns a path.  Two structural relations justify an edit; unrelated prose never does:
 
-* an effective obligation whose ``source_refs`` cite the current task-statement event lists the
-  test file as a ``requested_items`` entry with ``item_kind`` ``file`` (the request asked for it);
+* an effective obligation whose ``source_refs`` cite an event that recorded the current task
+  statement content lists the test file as a ``requested_items`` entry with ``item_kind`` ``file``
+  (the request asked for it);
 * a later decision cites the exact edit action and a digest of the exact path.
 """
 
@@ -13,7 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final, Literal, cast
 
@@ -29,6 +30,7 @@ from yoetz.domain.receipts import (
     PREEXISTING_TEST_EDIT_UNJUSTIFIED_GAP,
     PREEXISTING_TEST_MODIFIED_GAP,
     PREEXISTING_TEST_RENAMED_GAP,
+    PREEXISTING_TEST_SKIP_UNKNOWN_GAP,
     PREEXISTING_TEST_SKIPPED_GAP,
 )
 from yoetz.domain.values import EventId
@@ -70,6 +72,10 @@ class PreExistingTestEdits:
     unjustified: int = 0
     unknown: int = 0
     unjustified_action_event_ids: tuple[EventId, ...] = ()
+    # How many of ``unknown`` are only an unreadable skip marker: the edited pre-existing test was
+    # seen and its justification read, but path metadata carries no diff body, so whether it gained
+    # a skip marker is unknown. That never hides an edit, so it is not a baseline gap.
+    skip_unknown: int = 0
 
     def __post_init__(self) -> None:
         for value in (
@@ -79,12 +85,15 @@ class PreExistingTestEdits:
             self.skipped,
             self.unjustified,
             self.unknown,
+            self.skip_unknown,
         ):
             if type(value) is not int or value < 0 or value > 1_000_000:
                 raise ValueError("preexisting_test_edits_invalid")
         if type(self.baseline_known) is not bool:
             raise ValueError("preexisting_test_edits_invalid")
         if self.unjustified > self.modified + self.renamed + self.deleted + self.skipped:
+            raise ValueError("preexisting_test_edits_invalid")
+        if self.skip_unknown > self.unknown:
             raise ValueError("preexisting_test_edits_invalid")
         if (
             type(self.unjustified_action_event_ids) is not tuple
@@ -103,8 +112,10 @@ class PreExistingTestEdits:
         codes: set[str] = set()
         if not self.baseline_known:
             codes.add(PREEXISTING_TEST_BASELINE_UNKNOWN_GAP)
-        if self.unknown:
+        if self.unknown > self.skip_unknown:
             codes.add(PREEXISTING_TEST_BASELINE_UNKNOWN_GAP)
+        if self.skip_unknown:
+            codes.add(PREEXISTING_TEST_SKIP_UNKNOWN_GAP)
         if self.modified:
             codes.add(PREEXISTING_TEST_MODIFIED_GAP)
         if self.renamed:
@@ -395,19 +406,33 @@ def _header_entries(capture: CheckChangeCapture) -> tuple[tuple[str, str | None]
     return tuple(entries)
 
 
+def _statement_events(
+    statement_event_id: EventId | Iterable[EventId] | None,
+) -> frozenset[EventId]:
+    if statement_event_id is None:
+        return frozenset()
+    if isinstance(statement_event_id, str):
+        return frozenset({statement_event_id})
+    return frozenset(statement_event_id)
+
+
 def _statement_requested_files(
-    projection: ProjectionState | None, statement_event_id: EventId | None
+    projection: ProjectionState | None, statement_event_id: EventId | Iterable[EventId] | None
 ) -> frozenset[str]:
     """File items requested by effective obligations that cite the current task statement.
 
-    An obligation whose ``source_refs`` names the statement event is the agent's recorded mapping
+    ``statement_event_id`` is the current statement event or every event that recorded the same
+    statement content (``RecordedTaskStatement.equivalent_event_ids``): a re-attach that repeats
+    the unchanged statement does not orphan an obligation citing the earlier event.
+    An obligation whose ``source_refs`` names a statement event is the agent's recorded mapping
     of the user's request (TB4 pilot). When it lists a test file in ``requested_items`` with
     ``item_kind`` ``file``, the request asked for that file to change, so the edit is attributable
     without the decision marker. Only that exact structural relation counts; obligation prose,
     plan text and the statement itself are never read.
     """
 
-    if projection is None or statement_event_id is None:
+    events = _statement_events(statement_event_id)
+    if projection is None or not events:
         return frozenset()
     scope = current_plan_scope(projection.plans, projection.coverage_gaps)
     if not scope.readable or not scope.effective_obligation_refs:
@@ -416,7 +441,7 @@ def _statement_requested_files(
     for obligation in scope.effective_obligation_refs:
         row = projection.obligations.get(obligation)
         payload = None if row is None else row.payload
-        if payload is None or statement_event_id not in payload.source_refs:
+        if payload is None or events.isdisjoint(payload.source_refs):
             continue
         values.update(
             item.value
@@ -513,7 +538,7 @@ def preexisting_test_edits(
     capture: CheckChangeCapture | CheckChangeMetadata,
     projection: ProjectionState | None = None,
     *,
-    task_statement_event_id: EventId | None = None,
+    task_statement_event_id: EventId | Iterable[EventId] | None = None,
 ) -> PreExistingTestEdits:
     """Reduce one bounded change capture to privacy-safe pre-existing-test edit facts.
 
@@ -611,7 +636,7 @@ def _preexisting_test_edits_from_metadata(
     capture: CheckChangeMetadata,
     projection: ProjectionState | None,
     *,
-    task_statement_event_id: EventId | None = None,
+    task_statement_event_id: EventId | Iterable[EventId] | None = None,
 ) -> PreExistingTestEdits:
     """Reduce path/status metadata without treating missing content as a clean skip result."""
 
@@ -657,9 +682,13 @@ def _preexisting_test_edits_from_metadata(
                 _, action_event_ids = _edit_action_refs(candidate, actions)
                 unjustified_action_event_ids.update(action_event_ids)
     # Metadata intentionally contains no diff body.  A pre-existing test may therefore have
-    # acquired a skip marker that cannot be observed on this path; keep that uncertainty visible.
+    # acquired a skip marker that cannot be observed on this path; keep that uncertainty visible
+    # as its own code. The edit set and each edit's justification were read in full, so this is
+    # not a baseline gap and never hides an unjustified edit.
+    skip_unknown = 0
     if test_edit_present and not capture.content_available:
-        unknown = max(unknown, 1)
+        skip_unknown = 1
+        unknown += 1
     return PreExistingTestEdits(
         modified=counts["modified"],
         renamed=counts["renamed"],
@@ -669,4 +698,5 @@ def _preexisting_test_edits_from_metadata(
         unjustified=len(unjustified_paths),
         unknown=unknown,
         unjustified_action_event_ids=tuple(sorted(unjustified_action_event_ids, key=str.encode)),
+        skip_unknown=skip_unknown,
     )

@@ -86,6 +86,7 @@ __all__ = [
     "PREEXISTING_TEST_MODIFIED_GAP",
     "PREEXISTING_TEST_RENAMED_GAP",
     "PREEXISTING_TEST_SKIPPED_GAP",
+    "PREEXISTING_TEST_SKIP_UNKNOWN_GAP",
     "PREEXISTING_TEST_INFORMATIONAL_GAPS",
     "OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP",
     "OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP",
@@ -160,6 +161,10 @@ PREEXISTING_TEST_RENAMED_GAP: Final = "preexisting_test_renamed"
 PREEXISTING_TEST_DELETED_GAP: Final = "preexisting_test_deleted"
 PREEXISTING_TEST_SKIPPED_GAP: Final = "preexisting_test_skipped"
 PREEXISTING_TEST_EDIT_UNJUSTIFIED_GAP: Final = "preexisting_test_edit_unjustified"
+# The edited pre-existing tests and their justification were read, but only path metadata was
+# captured (no diff body), so whether any of them gained a skip marker is unknown. A standing
+# coverage limit, deliberately not informational: it still keeps the check from reading complete.
+PREEXISTING_TEST_SKIP_UNKNOWN_GAP: Final = "preexisting_test_skip_unknown"
 PREEXISTING_TEST_INFORMATIONAL_GAPS: Final = frozenset(
     {
         PREEXISTING_TEST_MODIFIED_GAP,

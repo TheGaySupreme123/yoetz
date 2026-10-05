@@ -624,6 +624,96 @@ async def test_unmapped_task_statement_is_an_actionable_check_finding(mapped: bo
         assert "source_refs [" + statement_event + "]" in unmet[0].detail
 
 
+def _unmapped_statement_case() -> DeterministicCase:
+    from yoetz.domain.task_statement import RecordedTaskStatement
+
+    statement_event = evt(1)
+    obligation = ObligationPublishedPayload(
+        obl(1), "Repair the planner", "The planner output is correct", ObligationStatus.OPEN
+    )
+    base = make_case(
+        plans={1: plan_record(PlanPublishedPayload(1, "Plan", (obl(1),)), 2)},
+        obligations={obl(1): obligation_record(obligation, 3)},
+        extra_refs=(statement_event,),
+    )
+    return replace(
+        base,
+        task_statement=RecordedTaskStatement("Fix it.", statement_event, "session_opened", 1),
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("research_selected", (True, False))
+async def test_requirement_findings_follow_the_research_pack_execution(
+    research_selected: bool,
+) -> None:
+    """Pilot blocker R4: emission and resolution share one condition.
+
+    The statement finding is recorded under research-evidence and only a check that completed
+    that pack can resolve it, so only such a check raises it. A recorded statement is a pack root,
+    so the pack runs on a plan-only case before any claim exists.
+    """
+
+    app = _App()
+    app.ledger.frozen = FrozenCase(_unmapped_statement_case(), app.ledger.frozen.lease)
+    request = _request(max_findings="4")
+    if not research_selected:
+        request = request.model_copy(update={"policy_packs": ("work-integrity/0.2.0",)})
+
+    checked = await execute_check_commit(app, request)
+
+    unmet = [item for item in checked.findings if item.kind is FindingKind.TASK_REQUIREMENT_UNMET]
+    research = [item for item in checked.policy_executions if item.policy_id == "research-evidence"]
+    if research_selected:
+        assert [(item.outcome, item.reason) for item in research] == [("run", "completed")]
+        assert len(unmet) == 1
+    else:
+        assert research == []
+        assert unmet == []
+
+
+@pytest.mark.anyio
+async def test_completion_on_an_empty_scope_with_a_statement_is_an_actionable_finding() -> None:
+    """Pilot blocker D3: a completion claim never stands on an undecomposed request."""
+
+    from yoetz.domain.events import ClaimKind, ClaimRecordedPayloadV1_1
+    from yoetz.domain.task_statement import (
+        TASK_STATEMENT_SCOPE_EMPTY_SUMMARY,
+        RecordedTaskStatement,
+    )
+
+    statement_event = evt(1)
+    plan = PlanPublishedPayload(1, "Plan", (), (), NoObligationsReason.SINGLE_ATOMIC_CHANGE)
+    claim = ClaimRecordedPayloadV1_1(
+        claim_id=clm(1),
+        claim_kind=ClaimKind.COMPLETION,
+        statement="Done.",
+        supporting_refs=(),
+        obligation_refs=(),
+        limitation_refs=(),
+        supersedes_claim_refs=(),
+    )
+    base = make_case(
+        plans={1: plan_record(plan, 2)},
+        claims={clm(1): claim_record(claim, 4)},
+        extra_refs=(statement_event,),
+    )
+    case = replace(
+        base,
+        task_statement=RecordedTaskStatement("Fix it.", statement_event, "session_opened", 1),
+    )
+    app = _App()
+    app.ledger.frozen = FrozenCase(case, app.ledger.frozen.lease)
+
+    checked = await execute_check_commit(app, _request(max_findings="8"))
+
+    unmet = [item for item in checked.findings if item.kind is FindingKind.TASK_REQUIREMENT_UNMET]
+    assert [item.summary for item in unmet] == [TASK_STATEMENT_SCOPE_EMPTY_SUMMARY]
+    assert unmet[0].subject_refs == (statement_event,)
+    assert "yoetz-no-material-work:" + statement_event in unmet[0].detail
+    assert checked.verdict.value == "action_required"
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("mode", ("deterministic_only", "semantic_required"))
 @pytest.mark.parametrize(

@@ -7014,6 +7014,50 @@ async def test_a_finding_raised_before_the_task_statement_is_not_trapped_by_its_
             )
         )
         frontier = attached.frontier
+    drafts: list[dict[str, object]] = [
+        {
+            "event_id": protocol_id("evt_", seed + 32),
+            "schema": {"name": "evidence_recorded", "version": "1.0.0"},
+            "occurred_at": "2026-07-19T12:00:03.000Z",
+            "causal_parents": (),
+            "payload": {
+                "evidence_id": protocol_id("evd_", seed + 30),
+                "evidence_kind": "artifact",
+                "strength": "mutable_reference",
+                "observed_at": "2026-07-19T12:00:03.000Z",
+                "reference": "repair-evidence",
+            },
+            "artifact_refs": (),
+            "evidence_refs": (),
+        }
+    ]
+    if statement == "after_finding":
+        # The statement now recorded beside a completion claim on no plan raises the
+        # undecomposed-request finding (pilot blocker D3), whose open gap would bound this
+        # AI-powered proof too. This fixture edits nothing, so its documented answer, the
+        # no-material-work decision, keeps the test on the task-statement gaps it is about.
+        from yoetz.domain.task_statement import current_task_statement
+
+        ledger, _objects = _runtime.resources[started.task_id]
+        recorded = current_task_statement(
+            tuple([row async for row in ledger.load_events(started.session_id)])
+        )
+        assert recorded is not None
+        drafts.append(
+            {
+                "event_id": protocol_id("evt_", seed + 33),
+                "schema": {"name": "decision_recorded", "version": "1.0.0"},
+                "occurred_at": "2026-07-19T12:00:03.000Z",
+                "causal_parents": (),
+                "payload": {
+                    "statement": f"yoetz-no-material-work:{recorded.source_event_id}",
+                    "rationale": "The fixture asks for no file change.",
+                    "authority": "harness:test",
+                },
+                "artifact_refs": (),
+                "evidence_refs": (),
+            }
+        )
     published = await app.publish_work(
         PublishWorkRequest.model_validate(
             {
@@ -7021,23 +7065,7 @@ async def test_a_finding_raised_before_the_task_statement_is_not_trapped_by_its_
                 "session_id": started.session_id,
                 "writer_id": started.writer_id,
                 "expected_frontier": _frontier(cast(Frontier, frontier)),
-                "event_drafts": (
-                    {
-                        "event_id": protocol_id("evt_", seed + 32),
-                        "schema": {"name": "evidence_recorded", "version": "1.0.0"},
-                        "occurred_at": "2026-07-19T12:00:03.000Z",
-                        "causal_parents": (),
-                        "payload": {
-                            "evidence_id": protocol_id("evd_", seed + 30),
-                            "evidence_kind": "artifact",
-                            "strength": "mutable_reference",
-                            "observed_at": "2026-07-19T12:00:03.000Z",
-                            "reference": "repair-evidence",
-                        },
-                        "artifact_refs": (),
-                        "evidence_refs": (),
-                    },
-                ),
+                "event_drafts": tuple(drafts),
             }
         )
     )
@@ -8250,3 +8278,60 @@ async def test_a_long_session_repair_that_evicted_the_subjects_resolves_the_find
     stored = await ledger.load_projection(started.session_id, ProjectionView.CANDIDATE_FINDINGS)
     assert stored is not None and stored.state == rebuilt
     await _assert_reduced_scope_disclosed(app, started, seed + 70, third.result_frontier)
+
+
+async def test_reattach_with_an_unchanged_statement_keeps_the_statement_event() -> None:
+    """Pilot blocker D2: repeating the unchanged statement on re-attach is not an amendment.
+
+    The resume still records the statement it was given (the ledger keeps the history), but
+    the earlier event stays the current statement event, so the finding subject and every
+    obligation citing it stay put; both events count as equivalent. An amended statement moves it.
+    """
+
+    from yoetz.domain.events import SessionResumedPayload
+    from yoetz.domain.task_statement import current_task_statement
+
+    seed = 9800
+    statement = "The user's request, verbatim."
+    app, runtime, _ = _build_app(seed_offset=98)
+
+    def attach(offset: int, text: str) -> StartRequest:
+        return StartRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + offset)),
+                "mode": "create_or_attach",
+                "workspace_ref": "workspace-A",
+                "external_ref": "external-A",
+                "task_title": "Respond/status/receipt exercise",
+                "requested_view": "compact",
+                "task_statement": text,
+            }
+        )
+
+    started = await app.start(attach(1, statement))
+    assert started.outcome == "created"
+    ledger, _objects = runtime.resources[started.task_id]
+
+    async def records() -> tuple[LedgerRecord, ...]:
+        return tuple([row async for row in ledger.load_events(started.session_id)])
+
+    opened = current_task_statement(await records())
+    assert opened is not None and opened.source_family == "session_opened"
+
+    same = await app.start(attach(2, statement))
+    assert same.outcome == "attached"
+    after_same = await records()
+    resumed = [row for row in after_same if type(row.payload) is SessionResumedPayload]
+    assert len(resumed) == 1
+    assert cast(SessionResumedPayload, resumed[0].payload).task_statement == statement
+    current = current_task_statement(after_same)
+    assert current is not None and current.source_event_id == opened.source_event_id
+    assert set(current.equivalent_event_ids) == {opened.source_event_id, resumed[0].event_id}
+
+    amended = await app.start(attach(3, "A different request."))
+    assert amended.outcome == "attached"
+    current = current_task_statement(await records())
+    assert current is not None
+    assert current.source_family == "session_resumed"
+    assert current.text == "A different request."
+    assert current.equivalent_event_ids == (current.source_event_id,)

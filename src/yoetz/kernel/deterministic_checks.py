@@ -34,6 +34,9 @@ from yoetz.domain.receipts import (
     COMPLETION_SCOPE_UNDECLARED_GAP,
 )
 from yoetz.domain.task_statement import (
+    NO_MATERIAL_WORK_MARKER,
+    TASK_STATEMENT_SCOPE_EMPTY_SUMMARY,
+    TASK_STATEMENT_UNMAPPED_SUMMARY,
     RecordedTaskStatement,
     current_task_statement,
     recorded_task_title,
@@ -122,7 +125,10 @@ __all__ = [
     "OBSERVED_FAILURE_LIVE_FACT",
     "OBSERVED_VERIFICATION_ABSENT_FACT",
     "OBSERVED_VERIFICATION_UNCITED_FACT",
+    "PREEXISTING_TEST_EDIT_UNJUSTIFIED_FACT",
     "STATEMENT_SOURCED_OBLIGATION_ABSENT_FACT",
+    "TASK_STATEMENT_RECORDED_FACT",
+    "TASK_STATEMENT_SCOPE_EMPTY_FACT",
     "TASK_STATEMENT_UNMAPPED_FACT",
     "PolicyPack",
     "UnavailableCapturedObject",
@@ -153,6 +159,12 @@ OBSERVED_FAILURE_LIVE_FACT: Final = "observed_failure_live"
 # The recorded task statement has no effective obligation citing it in source_refs (TB4 pilot).
 TASK_STATEMENT_UNMAPPED_FACT: Final = "task_statement_unmapped"
 STATEMENT_SOURCED_OBLIGATION_ABSENT_FACT: Final = "statement_sourced_obligation_absent"
+# A completion claim stands on no plan or an explicit empty scope while a task statement is
+# recorded and no no-material-work decision answers it (TB4 pilot).
+TASK_STATEMENT_SCOPE_EMPTY_FACT: Final = "task_statement_scope_empty"
+# The unjustified pre-existing test edit (ADR-032), and the statement event its repair must cite.
+PREEXISTING_TEST_EDIT_UNJUSTIFIED_FACT: Final = "preexisting_test_edit_unjustified"
+TASK_STATEMENT_RECORDED_FACT: Final = "task_statement_recorded"
 # A completion claim cites no hook-observed verification run made after the latest observed edit.
 OBSERVED_VERIFICATION_UNCITED_FACT: Final = "observed_verification_uncited"
 OBSERVED_VERIFICATION_ABSENT_FACT: Final = "observed_verification_absent"
@@ -410,6 +422,29 @@ class DeterministicFindingTemplate:
             raise _invalid_policy()
 
 
+def _test_edit_repair(statement_refs: str) -> str:
+    """The complete working repair for an unjustified pre-existing test edit (ADR-032).
+
+    Every step is needed: ``source_refs`` cannot change on an existing obligation, the requested
+    file needs an attributable attempt, and the claim must name the new obligation.
+    """
+
+    return (
+        "If the user's request asks for this test change, do all of these, then check again:"
+        " (1) publish a NEW obligation_published (source_refs cannot change on an existing"
+        f" obligation) whose source_refs cite {statement_refs} and whose requested_items list"
+        " the test file's repository-relative path with item_kind file; (2) add it to the plan"
+        " with plan_revised, change=carried for it and for every obligation you keep; (3) record"
+        " an action_recorded (action_kind edit) whose attempted_items list that same path, with"
+        " its result_recorded;"
+        " (4) republish the new obligation with status resolved and resolution_evidence_refs"
+        " naming the observed verification result after your last edit; (5) replace the"
+        " completion claim with claim_recorded/1.1.0 supersedes_claim_refs naming the old claim"
+        " and obligation_refs including the new obligation. Otherwise revert the test change and"
+        " check again."
+    )
+
+
 DETERMINISTIC_FINDING_TEMPLATES: Final[
     MappingProxyType[FindingKind, DeterministicFindingTemplate]
 ] = MappingProxyType(
@@ -480,9 +515,10 @@ DETERMINISTIC_FINDING_TEMPLATES: Final[
         ),
         FindingKind.TASK_REQUIREMENT_UNMET: DeterministicFindingTemplate(
             "An existing test file was edited without a recorded justification.",
-            "If the user's request asks for this test change, list the file's path as a"
-            " requested_items entry (item_kind file) of an obligation whose source_refs cite"
-            " the task-statement event, then check again; otherwise revert the test change.",
+            _test_edit_repair(
+                "the task-statement event (the newest event that carried task_statement:"
+                " session_opened, session_resumed, plan_published or plan_revised)"
+            ),
         ),
     }
 )
@@ -575,14 +611,51 @@ def render_deterministic_finding_text(
     ):
         statement_refs = ", ".join(ref for ref in refs if ref.startswith("evt_"))
         return (
-            "No obligation in the current plan cites the recorded task statement.",
+            TASK_STATEMENT_UNMAPPED_SUMMARY,
             f"Subjects: {', '.join(refs)}. Main agent: Decompose the user's request into"
             " obligations, one per stated requirement, symptom, constraint, or deliverable."
-            f" Give each source_refs [{statement_refs}], observable acceptance_criteria, and"
-            " requested_items for every file, command, or output the request names. Add them"
-            " with plan_revised (change=carried) and resolve each with its own evidence. A"
-            " check rerun without that plan change returns this finding again. If the request"
-            " asks for no material work, revise the plan to an explicit empty scope instead.",
+            " Publish each as a NEW obligation_published (source_refs cannot change on an"
+            f" existing obligation) with source_refs [{statement_refs}], observable"
+            " acceptance_criteria, and requested_items for every file or output the request"
+            " names. Add them with plan_revised (change=carried for them and for every"
+            " obligation you keep), resolve each with its own evidence, and replace the"
+            " completion claim with claim_recorded/1.1.0 supersedes_claim_refs naming them in"
+            " obligation_refs. A check rerun without that plan change returns this finding"
+            " again. If the request asks for no material work, revise the plan to an explicit"
+            " empty scope and record a decision_recorded whose statement holds the exact line"
+            f" {NO_MATERIAL_WORK_MARKER}:{statement_refs} and whose rationale says why; that"
+            " decision counts only while the task records no edit.",
+        )
+    if kind is FindingKind.TASK_REQUIREMENT_UNMET and any(
+        fact.fact_code == TASK_STATEMENT_SCOPE_EMPTY_FACT for fact in observed_facts
+    ):
+        statement_refs = ", ".join(ref for ref in refs if ref.startswith("evt_"))
+        return (
+            TASK_STATEMENT_SCOPE_EMPTY_SUMMARY,
+            f"Subjects: {', '.join(refs)}. Main agent: The completion claim stands on no plan or"
+            " an explicit empty scope, so the user's request was never decomposed. Either"
+            " publish one obligation per stated requirement, symptom, constraint, or deliverable"
+            f" with source_refs [{statement_refs}], add them with plan_published (or plan_revised"
+            " from the empty-scope plan, change=carried), resolve each with its own evidence,"
+            " and replace the completion claim with claim_recorded/1.1.0 supersedes_claim_refs"
+            " naming them in obligation_refs; or, if the request asks for no material work,"
+            " record a decision_recorded whose statement holds the exact line"
+            f" {NO_MATERIAL_WORK_MARKER}:{statement_refs} and whose rationale says why. That"
+            " decision counts only while the task records no edit. Then check again; a rerun"
+            " without one of these returns this finding again.",
+        )
+    if kind is FindingKind.TASK_REQUIREMENT_UNMET and any(
+        fact.fact_code == TASK_STATEMENT_RECORDED_FACT for fact in observed_facts
+    ):
+        statement_refs = ", ".join(
+            ref
+            for fact in observed_facts
+            if fact.fact_code == TASK_STATEMENT_RECORDED_FACT
+            for ref in fact.subject_refs
+        )
+        return (
+            template.summary,
+            f"Subjects: {', '.join(refs)}. Main agent: " + _test_edit_repair(f"[{statement_refs}]"),
         )
     if kind is FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE and any(
         fact.fact_code == OBSERVED_VERIFICATION_UNCITED_FACT for fact in observed_facts
@@ -743,6 +816,24 @@ def _text_contract_corpus() -> tuple[JsonValue, ...]:
             FindingKind.TASK_REQUIREMENT_UNMET,
             (),
             (FindingFact(TASK_STATEMENT_UNMAPPED_FACT, subject),),
+        ),
+        (
+            "task_statement_scope_empty",
+            FindingKind.TASK_REQUIREMENT_UNMET,
+            (),
+            (FindingFact(TASK_STATEMENT_SCOPE_EMPTY_FACT, subject),),
+        ),
+        (
+            "test_edit_with_statement",
+            FindingKind.TASK_REQUIREMENT_UNMET,
+            (),
+            (
+                FindingFact(PREEXISTING_TEST_EDIT_UNJUSTIFIED_FACT, subject),
+                FindingFact(
+                    TASK_STATEMENT_RECORDED_FACT,
+                    (event_id("evt_00000000-0000-4000-8000-000000000001"),),
+                ),
+            ),
         ),
     )
     failed_subjects = (failed_claim, *subject)
@@ -1066,19 +1157,24 @@ _OBSERVATION_TASK_CONTEXT_CASE_JSON_KEYS: Final = _OBSERVATION_CASE_JSON_KEYS | 
 )
 
 
+def _task_statement_to_json(statement: RecordedTaskStatement) -> dict[str, JsonValue]:
+    value: dict[str, JsonValue] = {
+        "ingestion_sequence": statement.ingestion_sequence,
+        "source_event_id": statement.source_event_id,
+        "source_family": statement.source_family,
+        "text": statement.text,
+    }
+    if statement.equivalent_event_ids != (statement.source_event_id,):
+        # Emitted only when an unchanged statement was recorded more than once, so every case
+        # frozen with a single statement event keeps its exact bytes.
+        value["equivalent_event_ids"] = list(statement.equivalent_event_ids)
+    return value
+
+
 def _task_context_to_json(case: DeterministicCase) -> dict[str, JsonValue]:
     statement = case.task_statement
     return {
-        "task_statement": (
-            None
-            if statement is None
-            else {
-                "ingestion_sequence": statement.ingestion_sequence,
-                "source_event_id": statement.source_event_id,
-                "source_family": statement.source_family,
-                "text": statement.text,
-            }
-        ),
+        "task_statement": None if statement is None else _task_statement_to_json(statement),
         "task_title": case.task_title,
     }
 
@@ -1091,19 +1187,27 @@ def _task_context_from_json(value: JsonValue) -> tuple[RecordedTaskStatement | N
     raw_statement = source["task_statement"]
     if raw_statement is None:
         return None, title
-    statement = _case_json_object(
-        raw_statement,
-        required=frozenset({"ingestion_sequence", "source_event_id", "source_family", "text"}),
+    base_keys = frozenset({"ingestion_sequence", "source_event_id", "source_family", "text"})
+    statement = _case_json_object(raw_statement)
+    keys = frozenset(statement)
+    if keys not in {base_keys, base_keys | {"equivalent_event_ids"}}:
+        raise _invalid_case()
+    equivalent: tuple[EventId, ...] = ()
+    if "equivalent_event_ids" in keys:
+        raw_equivalent = _case_json_array(statement["equivalent_event_ids"])
+        if len(raw_equivalent) < 2 or any(type(item) is not str for item in raw_equivalent):
+            raise _invalid_case()
+        equivalent = tuple(cast(EventId, item) for item in raw_equivalent)
+    parsed = RecordedTaskStatement(
+        text=cast(str, statement["text"]),
+        source_event_id=cast(EventId, statement["source_event_id"]),
+        source_family=cast(str, statement["source_family"]),
+        ingestion_sequence=cast(int, statement["ingestion_sequence"]),
+        equivalent_event_ids=equivalent,
     )
-    return (
-        RecordedTaskStatement(
-            text=cast(str, statement["text"]),
-            source_event_id=cast(EventId, statement["source_event_id"]),
-            source_family=cast(str, statement["source_family"]),
-            ingestion_sequence=cast(int, statement["ingestion_sequence"]),
-        ),
-        title,
-    )
+    if equivalent and parsed.equivalent_event_ids != equivalent:
+        raise _invalid_case()
+    return parsed, title
 
 
 def _case_json_object(
@@ -2339,33 +2443,52 @@ def build_test_edit_integrity_assessment(
 
     if not source_event_refs or not support_refs:
         raise _invalid_policy()
+    facts = [FindingFact(PREEXISTING_TEST_EDIT_UNJUSTIFIED_FACT, support_refs)]
+    statement = case.task_statement
+    if statement is not None and statement.source_event_id in case.allowed_ids:
+        # Name the statement event the repair obligation must cite, so the finding text spells
+        # out the whole working sequence instead of sending the agent to look it up.
+        facts.append(FindingFact(TASK_STATEMENT_RECORDED_FACT, (statement.source_event_id,)))
     return build_policy_assessment(
         case,
         PolicyPack(RESEARCH_EVIDENCE_POLICY_ID, RESEARCH_EVIDENCE_POLICY_VERSION),
         FindingKind.TASK_REQUIREMENT_UNMET,
         source_event_refs,
-        (FindingFact("preexisting_test_edit_unjustified", support_refs),),
+        tuple(facts),
     )
 
 
 def build_task_statement_unmapped_assessment(
     case: DeterministicCase,
 ) -> DeterministicAssessment | None:
-    """Raise the local finding for a task statement no effective obligation cites (TB4 pilot).
+    """Raise the local finding for a task statement the plan does not decompose (TB4 pilot).
 
-    The rule reads one exact relation: whether an obligation in the effective plan scope names the
-    current statement event in ``source_refs``. It never reads the statement, plan or obligation
-    prose. No statement, an unreadable or absent plan, and an explicit empty-scope declaration
-    raise nothing. The single public subject is the statement event, so the finding keeps its
-    identity across plan revisions until a statement-sourced obligation exists.
+    The rule reads exact relations only, never statement, plan or obligation prose:
+
+    * the effective plan declares obligations, none of which names an event that recorded the
+      current statement content in ``source_refs`` (``task_statement_unmapped``); or
+    * a completion claim stands on no plan or an explicit empty scope and no recorded
+      no-material-work decision answers it (``task_statement_scope_empty``). Mid-task checks
+      before any completion claim never raise this form.
+
+    No statement and an unreadable plan raise nothing. The single public subject is the current
+    statement event, so both forms share one issue identity across plan revisions until the
+    request is mapped (or, for the empty form, answered by the decision).
     """
 
-    from yoetz.kernel.plan_drift import task_statement_unmapped
+    from yoetz.kernel.plan_drift import (
+        task_statement_scope_empty_at_completion,
+        task_statement_unmapped,
+    )
 
     statement = case.task_statement
     if statement is None or statement.source_event_id not in case.allowed_ids:
         return None
-    if not task_statement_unmapped(case.projection, statement.source_event_id):
+    if task_statement_unmapped(case.projection, statement):
+        fact = TASK_STATEMENT_UNMAPPED_FACT
+    elif task_statement_scope_empty_at_completion(case.projection, statement):
+        fact = TASK_STATEMENT_SCOPE_EMPTY_FACT
+    else:
         return None
     subject = (statement.source_event_id,)
     return build_policy_assessment(
@@ -2373,7 +2496,7 @@ def build_task_statement_unmapped_assessment(
         PolicyPack(RESEARCH_EVIDENCE_POLICY_ID, RESEARCH_EVIDENCE_POLICY_VERSION),
         FindingKind.TASK_REQUIREMENT_UNMET,
         subject,
-        (FindingFact(TASK_STATEMENT_UNMAPPED_FACT, subject),),
+        (FindingFact(fact, subject),),
         (FindingFact(STATEMENT_SOURCED_OBLIGATION_ABSENT_FACT, subject),),
     )
 

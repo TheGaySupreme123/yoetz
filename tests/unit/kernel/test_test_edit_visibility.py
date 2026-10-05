@@ -202,7 +202,30 @@ def test_metadata_rename_keeps_original_test_path_in_structural_accounting() -> 
     assert facts.renamed == 1
     assert facts.skipped == 0
     assert facts.unknown == 1
+    # Path metadata reads the whole edit set but no diff body: only the skip marker is unknown,
+    # so the baseline is known and the uncertainty has its own standing code (TB4 pilot).
+    assert facts.skip_unknown == 1
+    assert "preexisting_test_baseline_unknown" not in facts.gaps
+    assert "preexisting_test_skip_unknown" in facts.gaps
+
+
+def test_metadata_with_omitted_files_keeps_the_baseline_unknown() -> None:
+    metadata = CheckChangeMetadata(
+        base="task_start",
+        entries=(ChangeMetadataEntry("M", "tests/skip_test.py"),),
+        tracked_files=2,
+        untracked_files=0,
+        omitted_files=1,
+        truncated=True,
+        base_commit="a" * 40,
+    )
+
+    facts = preexisting_test_edits(metadata)
+
+    assert facts.unknown == 2
+    assert facts.skip_unknown == 1
     assert "preexisting_test_baseline_unknown" in facts.gaps
+    assert "preexisting_test_skip_unknown" in facts.gaps
 
 
 def test_js_skip_marker_and_unquoted_spaces_are_scoped_to_the_added_file() -> None:
@@ -396,3 +419,24 @@ def test_statement_sourced_file_item_also_justifies_a_metadata_only_edit() -> No
     )
     assert justified.unjustified == 0
     assert preexisting_test_edits(metadata, projection).unjustified == 1
+
+
+def test_an_obligation_citing_an_equivalent_statement_event_justifies_the_edit() -> None:
+    """A re-attach that repeats the unchanged statement must not orphan the mapping (TB4 D2)."""
+
+    projection = _with_statement_obligation(
+        _projection(justified=False), value="tests/skip_test.py"
+    )
+    resumed = event_id("evt_10000000-0000-4000-8000-000000000099")
+
+    equivalent = preexisting_test_edits(
+        _capture(include_ordinary=False),
+        projection,
+        task_statement_event_id=(_STATEMENT_EVENT, resumed),
+    )
+    only_newer = preexisting_test_edits(
+        _capture(include_ordinary=False), projection, task_statement_event_id=resumed
+    )
+
+    assert equivalent.unjustified == 0
+    assert only_newer.unjustified == 1

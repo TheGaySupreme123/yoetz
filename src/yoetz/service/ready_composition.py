@@ -4811,7 +4811,7 @@ def _privacy_gated_semantic_evaluator(
                     task_statement_event_id=(
                         None
                         if frozen.case.task_statement is None
-                        else frozen.case.task_statement.source_event_id
+                        else frozen.case.task_statement.equivalent_event_ids
                     ),
                 ).gaps
             )

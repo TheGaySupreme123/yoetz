@@ -266,6 +266,7 @@ SEMANTIC_CASE_CONTENT_GAPS: Final = frozenset(
         "preexisting_test_renamed",
         "preexisting_test_deleted",
         "preexisting_test_skipped",
+        "preexisting_test_skip_unknown",
         "preexisting_test_edit_unjustified",
     }
 )
@@ -1960,7 +1961,12 @@ def _pack_roots(case: DeterministicCase, pack: str) -> frozenset[str]:
             case.projection.coordination_declarations,
             case.projection.coordination_dispositions,
         )
-    return frozenset(str(value) for collection in collections for value in collection)
+    roots = frozenset(str(value) for collection in collections for value in collection)
+    if pack == _RESEARCH_PACK and case.task_statement is not None:
+        # The research-evidence pack owns the statement finding, so a recorded statement is one of
+        # its roots: the pack runs (and can resolve that finding) before the first claim exists.
+        roots = roots | {str(case.task_statement.source_event_id)}
+    return roots
 
 
 def _scope_execution(
@@ -2081,6 +2087,46 @@ def _task_statement_assessments(
         return ()
     assessment = build_task_statement_unmapped_assessment(case)
     return () if assessment is None else (assessment,)
+
+
+def _research_pack_completed(executions: tuple[CheckPolicyExecution, ...]) -> bool:
+    policy_id, version = _pack_identity(_RESEARCH_PACK)
+    return any(
+        execution.policy_id == policy_id
+        and execution.policy_version == version
+        and execution.outcome == "run"
+        and execution.reason == "completed"
+        for execution in executions
+    )
+
+
+def _requirement_assessments(
+    case: DeterministicCase,
+    scope: CheckScope,
+    executions: tuple[CheckPolicyExecution, ...],
+    test_edit_support_refs: tuple[EventId, ...],
+) -> tuple[DeterministicAssessment, ...]:
+    """The research-evidence ``task_requirement_unmet`` findings computed beside the pack run.
+
+    Both the unjustified test edit and the undecomposed task statement are recorded under the
+    research-evidence pack, and only a check that ran that pack to completion can resolve them.
+    Emission follows the same rule (TB4 pilot): a check that did not complete the pack neither
+    raises nor resolves them, so a finding is never raised that its own repair cannot clear. A
+    recorded statement makes the pack applicable (``_pack_roots``), so ordinary checks still raise
+    the statement finding before the first claim.
+    """
+
+    if not _research_pack_completed(executions):
+        return ()
+    output: list[DeterministicAssessment] = []
+    if test_edit_support_refs and completion_claim_present(case.projection):
+        output.append(
+            build_test_edit_integrity_assessment(
+                case, test_edit_support_refs, test_edit_support_refs
+            )
+        )
+    output.extend(_task_statement_assessments(case, scope))
+    return tuple(output)
 
 
 def run_deterministic_policies(
@@ -3518,7 +3564,7 @@ async def execute_check_commit(
                         task_statement_event_id=(
                             None
                             if frozen.case.task_statement is None
-                            else frozen.case.task_statement.source_event_id
+                            else frozen.case.task_statement.equivalent_event_ids
                         ),
                     )
                     deterministic_test_edit_facts = (
@@ -3586,17 +3632,9 @@ async def execute_check_commit(
                 scope,
                 packs,
             )
-            if deterministic_test_edit_support_refs and completion_claim_present(
-                frozen.case.projection
-            ):
-                assessments = assessments + (
-                    build_test_edit_integrity_assessment(
-                        frozen.case,
-                        deterministic_test_edit_support_refs,
-                        deterministic_test_edit_support_refs,
-                    ),
-                )
-            assessments = assessments + _task_statement_assessments(frozen.case, scope)
+            assessments = assessments + _requirement_assessments(
+                frozen.case, scope, executions, deterministic_test_edit_support_refs
+            )
             deterministic = allocate_findings(
                 app.ids,
                 tuple(item.candidate for item in assessments),
@@ -3641,17 +3679,9 @@ async def execute_check_commit(
                     scope,
                     packs,
                 )
-                if deterministic_test_edit_support_refs and completion_claim_present(
-                    frozen.case.projection
-                ):
-                    assessments = assessments + (
-                        build_test_edit_integrity_assessment(
-                            frozen.case,
-                            deterministic_test_edit_support_refs,
-                            deterministic_test_edit_support_refs,
-                        ),
-                    )
-                assessments = assessments + _task_statement_assessments(frozen.case, scope)
+                assessments = assessments + _requirement_assessments(
+                    frozen.case, scope, executions, deterministic_test_edit_support_refs
+                )
                 deterministic = allocate_findings(
                     app.ids,
                     tuple(item.candidate for item in assessments),
