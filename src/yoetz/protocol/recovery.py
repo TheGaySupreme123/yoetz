@@ -528,9 +528,9 @@ _DIRECTIVES: Final = (
     RecoveryDirective(
         token="semantic_privacy_blocked",
         directive=(
-            "Required review blocked before dispatch. Do not resend this case. Supply a new safe "
-            "replacement, let Yoetz rescan it, then run one check under a NEW request_id. If none "
-            "exists, report review unmet; local-only does not satisfy it."
+            "Blocked before dispatch; never resend this case. Supply a safe replacement for Yoetz "
+            "to rescan, then run one check under a NEW request_id. If none exists, for optional "
+            "review go local-only and disclose; required review is unmet."
         ),
         guidance_uri=_SEMANTIC_COVERAGE,
         nudge="Never reuse the blocked bytes or case identity.",

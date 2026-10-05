@@ -22,6 +22,7 @@ from builders.projection_workflow import (
     project_case,
     request_base,
 )
+from builders.review_manifests import provider_bound_manifest
 from builders.start_application import protocol_id, start_request
 from yoetz.application.check import FinalSemanticEvaluation, check_internal_json
 from yoetz.application.semantic_case import build_semantic_case, semantic_case_packet_view
@@ -154,6 +155,7 @@ class _Reviewer:
             case_prior_finding_refs=view.prior_finding_refs,
             case_citable_refs=view.citable_refs,
             case_content_gaps=self.content_gaps.get(len(self.cases) - 1, ()),
+            provider_input_manifest=provider_bound_manifest(),
         )
 
 
@@ -418,7 +420,7 @@ async def test_a_cited_fixed_ruling_closes_a_repaired_finding_under_an_insuffici
     live = _live_projection(session.app)
     resolved_by = live.findings[raised.finding_id].resolved_by_check_event_id
     if cite_repair:
-        assert check_rows[-1].schema == EventSchema("check_recorded", "1.3.0")
+        assert check_rows[-1].schema == EventSchema("check_recorded", "1.4.0")
         assert [item.verdict for item in recorded.prior_finding_verdicts] == ["fixed"]
         assert resolved_by == check_rows[-1].event_id
         explanation = finding_resolution_explanation(live, raised.finding_id, _records(session.app))
@@ -735,7 +737,13 @@ async def test_an_assessable_withdrawn_ruling_on_a_rejection_reads_rejection_acc
     assert row.todo_state == "rejection_accepted"
     assert (checklist.counts.rejection_accepted, checklist.counts.verified_resolved) == (1, 0)
     wire = check_internal_json(second)
-    assert "verified 0, not done 0, rejection accepted 1" in summary_for_check(wire)
+    # The bounded MCP text leads with the task continuation (#963); it agrees with the finding-only
+    # checklist, and the to-do counts ride along only while the summary has room for them.
+    summary = summary_for_check(wire)
+    assert cast(Mapping[str, JsonValue], wire["finding_checklist"])["next"] == "request_receipt"
+    assert "overall next: request_receipt" in summary
+    if "to-do:" in summary:
+        assert "verified 0, not done 0, rejection accepted 1" in summary
     # CLI text of the same checklist wire (the rest of the check is not under test here).
     checked = CheckSuccessModel.model_construct(
         verdict="no_issue_detected",

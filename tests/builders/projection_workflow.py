@@ -25,6 +25,7 @@ from typing import Literal, cast
 
 import yoetz.service.ready_composition as ready_composition
 from builders.ledger_adapters import MemoryObjects, ownership_fence
+from builders.review_manifests import provider_bound_manifest
 from builders.start_application import (
     MemoryStartRuntime,
     StartTestLookup,
@@ -265,6 +266,7 @@ async def _semantic_succeeds(
             egress_authorization_id=protocol_id("aut_", 1492),
             request_commitment="hmac-sha256:" + "b" * 64,
         ),
+        provider_input_manifest=provider_bound_manifest(),
     )
 
 

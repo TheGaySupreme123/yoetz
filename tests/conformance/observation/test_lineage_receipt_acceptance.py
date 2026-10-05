@@ -19,6 +19,7 @@ from typing import cast
 import pytest
 
 from builders.multi_agent import multi_agent_service, private_service_root
+from builders.review_manifests import provider_bound_manifest
 from yoetz.adapters.sqlite.connection import open_read_only
 from yoetz.adapters.sqlite.repository import SqliteLedger
 from yoetz.application.check import FinalSemanticEvaluation
@@ -116,6 +117,7 @@ async def _semantic_succeeds(
             egress_authorization_id=new_id(IdKind.EGRESS_AUTHORIZATION),
             request_commitment="hmac-sha256:" + "8" * 64,
         ),
+        provider_input_manifest=provider_bound_manifest(),
     )
 
 

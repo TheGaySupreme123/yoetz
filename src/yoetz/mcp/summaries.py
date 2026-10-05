@@ -227,6 +227,16 @@ def _checklist_clause(rows: object, budget: object, next_step: object | None) ->
     return clause
 
 
+def _checklist_budget_cue(budget: object, next_step: object) -> str:
+    """The finding checklist's at-budget decision cue alone, for a summary without room."""
+
+    if next_step != "decide_at_budget":
+        return ""
+    budget_text = budget if type(budget) is str and _BUDGET.fullmatch(budget) else None
+    suffix = "" if budget_text is None else f" (at budget {budget_text})"
+    return f"finding checklist next: decide_at_budget{suffix}; "
+
+
 def _checklist_counts_clause(
     counts: object,
     budget: object,
@@ -974,8 +984,24 @@ def summary_for_check(envelope: object) -> str:
     if isinstance(notes, (list, tuple)) and notes:
         prefix += f"project advice (non-verdict): {len(notes)}; "
     input_action_required = has_agent_suppliable_missing(source.get("missing_for_assessment"))
+    checklist = source.get("finding_checklist")
+    checklist_source = (
+        cast(Mapping[str, JsonValue], checklist) if isinstance(checklist, Mapping) else None
+    )
+    # An item at its attempt budget needs a decision rather than another repair round (#905).
+    # Reserve room for that cue before the continuation spends the budget on target refs.
+    budget_cue = (
+        ""
+        if checklist_source is None
+        else _checklist_budget_cue(
+            checklist_source.get("attempt_budget"), checklist_source.get("next")
+        )
+    )
     overall_clause = _overall_next_clause(
-        source, byte_budget=_MAX_SUMMARY_BYTES - len(prefix.encode("ascii"))
+        source,
+        byte_budget=_MAX_SUMMARY_BYTES
+        - len(prefix.encode("ascii"))
+        - len(budget_cue.encode("ascii")),
     )
     if overall_clause:
         prefix += overall_clause
@@ -984,10 +1010,8 @@ def summary_for_check(envelope: object) -> str:
         # large finding list must never consume the bounded summary budget and leave only the
         # finding-only ``request_receipt`` token (#963).
         prefix = _with_room(prefix, "overall next: supply_missing_input before ordinary receipt; ")
-    checklist = source.get("finding_checklist")
-    if isinstance(checklist, Mapping):
-        checklist_source = cast(Mapping[str, JsonValue], checklist)
-        prefix = _with_room(
+    if checklist_source is not None:
+        with_checklist = _with_room(
             prefix,
             _checklist_counts_clause(
                 checklist_source.get("counts"),
@@ -996,6 +1020,11 @@ def summary_for_check(envelope: object) -> str:
                 input_action_required=input_action_required or bool(overall_clause),
             ),
         )
+        if with_checklist == prefix:
+            # The task continuation leaves no room for the whole to-do clause; the at-budget cue
+            # must still not disappear behind ``work_open_findings``, so keep it compactly.
+            with_checklist = _with_room(prefix, budget_cue)
+        prefix = with_checklist
     manifest_clause = render_review_input_manifest_compact(source.get("review_input_manifest"))
     if manifest_clause:
         prefix = _with_room(prefix, manifest_clause + " ")

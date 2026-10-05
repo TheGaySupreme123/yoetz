@@ -4841,14 +4841,17 @@ def _validate_event_schema_payload(
             or bool(payload.verified)
             or payload.totals is not None
         )
-        expected_check_version = (
-            REVIEW_CHECK_EVENT_SCHEMA_VERSION
-            if has_review_output
-            else CHECK_EVENT_SCHEMA_VERSION
-            if payload.semantic_conclusion is not None
-            else SEMANTIC_EVENT_SCHEMA_VERSION
-        )
-        if schema.version != expected_check_version:
+        if has_review_output:
+            if schema.version != REVIEW_CHECK_EVENT_SCHEMA_VERSION:
+                raise ProtocolValueError("invalid_event_schema")
+        elif payload.semantic_conclusion is not None:
+            if schema.version != CHECK_EVENT_SCHEMA_VERSION:
+                raise ProtocolValueError("invalid_event_schema")
+        elif schema.version in {CHECK_EVENT_SCHEMA_VERSION, REVIEW_CHECK_EVENT_SCHEMA_VERSION}:
+            # Plain checks written by older builds legally use the released 1.0.0 shape or the
+            # semantic 1.1.0/1.2.0 additions, so every one of those stays replayable after an
+            # upgrade. The writer mints 1.2.0 for a new plain check; 1.3.0 and 1.4.0 are reserved
+            # for the semantic-conclusion and review-output payloads they introduced.
             raise ProtocolValueError("invalid_event_schema")
     if type(payload) is Finding and schema.name == "finding_recorded":
         has_snippet = payload.challenge is not None and payload.challenge.snippet is not None

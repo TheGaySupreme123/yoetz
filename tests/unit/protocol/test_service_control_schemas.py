@@ -1450,8 +1450,9 @@ def test_v29_changes_only_the_selection_runtime_and_keeps_frozen_v28() -> None:
         assert (_ROOT / f"{name}-2.9.0.schema.json").read_bytes() == _PACKAGE_ROOT.joinpath(
             f"{name}-2.9.0.schema.json"
         ).read_bytes()
-        # 2.9.0 (unreleased) also moves to the respond 1.1.0 pair (issue #905); undo that one
-        # retarget before comparing, so every other byte must still match frozen 2.8.
+        # 2.9.0 (unreleased) also moves to the respond 1.1.0 pair (issue #905) and to the
+        # check-result 1.4.0 review output (issue #961); undo those retargets before comparing,
+        # so every other byte must still match frozen 2.8.
         v29 = cast(
             dict[str, Any],
             _without_policy_v12(
@@ -1460,6 +1461,7 @@ def test_v29_changes_only_the_selection_runtime_and_keeps_frozen_v28() -> None:
                     .read_bytes()
                     .replace(b"respond-request-1.1.0", b"respond-request-1.0.0")
                     .replace(b"respond-result-1.1.0", b"respond-result-1.0.0")
+                    .replace(b"check-result-1.4.0", b"check-result-1.3.0")
                 )
             ),
         )
