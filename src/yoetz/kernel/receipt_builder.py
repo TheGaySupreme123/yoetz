@@ -113,7 +113,7 @@ from yoetz.kernel.observed_failures import (
     observed_event_ids_from_records,
     observed_failure_states,
 )
-from yoetz.kernel.plan_drift import PLAN_DRIFT_GAPS
+from yoetz.kernel.plan_drift import PLAN_DRIFT_ADVISORY_GAPS
 from yoetz.kernel.plan_scope import CurrentPlanScope, current_plan_scope
 from yoetz.kernel.projections import ObligationProjectionRecord, ProjectionRecord, ProjectionState
 from yoetz.kernel.reducers import is_material_event_family
@@ -902,7 +902,7 @@ def _conclusion(
     context: ReceiptBuildContext,
     unresolved_actionable: tuple[Finding, ...],
 ) -> ReceiptConclusion:
-    advisory_gaps = PLAN_DRIFT_GAPS | PREEXISTING_TEST_INFORMATIONAL_GAPS
+    advisory_gaps = PLAN_DRIFT_ADVISORY_GAPS | PREEXISTING_TEST_INFORMATIONAL_GAPS
     if _COMPLETION_SCOPE_GAPS & set(context.coverage.known_gaps):
         # These two closed gaps bound completion itself. Findings remain visible and actionable,
         # but they cannot make an empty completion scope read as sufficiently covered.

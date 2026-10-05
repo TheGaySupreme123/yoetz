@@ -95,6 +95,7 @@ from yoetz.kernel.deterministic_checks import (
     DeterministicAssessment,
     DeterministicCase,
     FindingBasisRef,
+    build_task_statement_unmapped_assessment,
     build_test_edit_integrity_assessment,
     case_coverage,
     finding_basis_from_json,
@@ -120,7 +121,7 @@ from yoetz.kernel.observed_failures import (
     observed_event_ids_from_coverage,
     observed_failure_states,
 )
-from yoetz.kernel.plan_drift import PLAN_DRIFT_GAPS
+from yoetz.kernel.plan_drift import PLAN_DRIFT_ADVISORY_GAPS
 from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.policies.research_evidence import research_evidence_findings
 from yoetz.kernel.policies.response_support import (
@@ -2074,6 +2075,23 @@ def _collapse_failed_work_overlap(
     )
 
 
+def _task_statement_assessments(
+    case: DeterministicCase,
+    scope: CheckScope,
+) -> tuple[DeterministicAssessment, ...]:
+    """The unmapped-task-statement finding for a whole-case check (TB4 pilot).
+
+    The statement bounds the whole task, so a claim- or obligation-scoped check neither raises nor
+    resolves it. Like the test-edit integrity finding it runs in every check mode: the agent must
+    decompose the request into statement-sourced obligations before completion can read clean.
+    """
+
+    if not scope.whole_case:
+        return ()
+    assessment = build_task_statement_unmapped_assessment(case)
+    return () if assessment is None else (assessment,)
+
+
 def run_deterministic_policies(
     case: DeterministicCase,
     scope: CheckScope,
@@ -3588,6 +3606,7 @@ async def execute_check_commit(
                         deterministic_test_edit_support_refs,
                     ),
                 )
+            assessments = assessments + _task_statement_assessments(frozen.case, scope)
             deterministic = allocate_findings(
                 app.ids,
                 tuple(item.candidate for item in assessments),
@@ -3642,6 +3661,7 @@ async def execute_check_commit(
                             deterministic_test_edit_support_refs,
                         ),
                     )
+                assessments = assessments + _task_statement_assessments(frozen.case, scope)
                 deterministic = allocate_findings(
                     app.ids,
                     tuple(item.candidate for item in assessments),
@@ -3892,7 +3912,9 @@ async def execute_check_commit(
         elif scoped_local_clean:
             completeness = CheckCompleteness.SCOPED_COMPLETE
         elif (
-            set(coverage.known_gaps) - PLAN_DRIFT_GAPS - PREEXISTING_TEST_INFORMATIONAL_GAPS
+            set(coverage.known_gaps)
+            - PLAN_DRIFT_ADVISORY_GAPS
+            - PREEXISTING_TEST_INFORMATIONAL_GAPS
         ) or semantic_failed:
             completeness = CheckCompleteness.COVERAGE_INCOMPLETE
         else:

@@ -17,7 +17,7 @@ from yoetz.domain.receipts import (
     PREEXISTING_TEST_INFORMATIONAL_GAPS,
     SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
 )
-from yoetz.kernel.plan_drift import PLAN_DRIFT_GAPS
+from yoetz.kernel.plan_drift import PLAN_DRIFT_ADVISORY_GAPS
 from yoetz.protocol.coverage import Coverage
 
 __all__ = [
@@ -31,7 +31,7 @@ __all__ = [
 DETERMINISTIC_SCOPED_STANDING_GAPS: Final = frozenset(
     {
         SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
-        *PLAN_DRIFT_GAPS,
+        *PLAN_DRIFT_ADVISORY_GAPS,
         *PREEXISTING_TEST_INFORMATIONAL_GAPS,
     }
 )
