@@ -410,7 +410,12 @@ section, keeps the anchored URI in `document_id` and every continuation, and bou
 before paging. Runtime admission uses the closed topic catalog while the advertised schema uses a
 compact URI pattern so the full heading catalog is not repeated in every host tool declaration. A
 parent document remains available for fallback and full archival reads; a topic read is the normal
-continuation when one procedure is named.
+continuation when one procedure is named. An anchor outside the catalog on a registered document is
+rejected as `INVALID_REQUEST` with `safe_details.field = "/uri"` and a message listing that
+document's registered anchors plus the whole-document retry; an unregistered document lists the
+registered document and focused-topic URIs. Only catalog constants appear; the caller's URI is
+never echoed. `resources/list` omits `annotations.priority`, because Codex's rmcp client cannot
+decode a fractional number in that result (see the Codex integration runbook).
 
 Protocol reason
 `expected_frontier_required` marks a state-sensitive `publish_work` batch that omitted
