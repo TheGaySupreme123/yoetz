@@ -333,17 +333,40 @@ _TEST_EDIT_ACCOUNTING = (
     "preexisting_test_deleted",
     "preexisting_test_modified",
     "preexisting_test_renamed",
+    "preexisting_test_skip_unknown",
     "preexisting_test_skipped",
 )
 
 
-@pytest.mark.parametrize("gap", _TEST_EDIT_ACCOUNTING)
-def test_test_edit_accounting_limits_only_the_test_edit_requirement(gap: str) -> None:
-    """Structural test-edit accounting (ADR-032) bounds only the rule that reads it.
+def _test_edit_finding() -> Finding:
+    return replace(
+        _finding(kind=FindingKind.TASK_REQUIREMENT_UNMET, policy_id="research-evidence"),
+        summary="An existing test file was edited without a recorded justification.",
+    )
 
-    A check that recorded an edit without a change capture carries an unknown test-edit baseline.
-    That standing limit must not make an unrelated repaired issue unresolvable, local or
-    AI-powered, while a ``task_requirement_unmet`` finding the accounting can raise stays open.
+
+def _statement_finding() -> Finding:
+    from yoetz.domain.task_statement import TASK_STATEMENT_UNMAPPED_SUMMARY
+
+    return replace(
+        _finding(
+            kind=FindingKind.TASK_REQUIREMENT_UNMET,
+            policy_id="research-evidence",
+            subject_refs=(evt(1),),
+        ),
+        summary=TASK_STATEMENT_UNMAPPED_SUMMARY,
+    )
+
+
+@pytest.mark.parametrize("gap", _TEST_EDIT_ACCOUNTING)
+def test_test_edit_accounting_limits_only_the_test_edit_finding_by_basis(gap: str) -> None:
+    """Structural test-edit accounting (ADR-032) bounds only the rule that reads it (TB4 D1).
+
+    Tolerance follows the finding's basis, not its kind. Only the unjustified test-edit finding
+    is bounded by an unknown edit baseline; its informational counts never hide an unjustified
+    edit. The statement-based requirement finding and an AI-powered requirement finding judge
+    material the accounting never touches, so a standing accounting limit must not make their
+    repair permanently unresolvable.
     """
 
     local = _coverage(gaps=("semantic_review_not_requested", gap))
@@ -351,15 +374,123 @@ def test_test_edit_accounting_limits_only_the_test_edit_requirement(gap: str) ->
     reviewed = _coverage(gaps=(gap,), semantic=True)
     semantic = _finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
     assert _resolves(semantic, _check(semantic=_SEMANTIC_OK, coverage=reviewed)) is True
-    requirement = _finding(kind=FindingKind.TASK_REQUIREMENT_UNMET, policy_id="research-evidence")
-    assert _resolves(requirement, _check(coverage=local)) is False
+    test_edit_bounded = gap == "preexisting_test_baseline_unknown"
+    assert _resolves(_test_edit_finding(), _check(coverage=local)) is not test_edit_bounded
+    assert _resolves(_statement_finding(), _check(coverage=local)) is True
     semantic_requirement = _finding(
         kind=FindingKind.TASK_REQUIREMENT_UNMET,
         origin=FindingOrigin.SEMANTIC_MODEL_DERIVED,
         policy_id="research-evidence",
     )
-    assert (
-        _resolves(semantic_requirement, _check(semantic=_SEMANTIC_OK, coverage=reviewed)) is False
+    assert _resolves(semantic_requirement, _check(semantic=_SEMANTIC_OK, coverage=reviewed)) is True
+
+
+def test_an_unknown_requirement_summary_reads_as_the_strict_test_edit_basis() -> None:
+    """A summary that is not a statement wording fails closed to the test-edit basis."""
+
+    local = _coverage(gaps=("semantic_review_not_requested", "preexisting_test_baseline_unknown"))
+    unknown = _finding(kind=FindingKind.TASK_REQUIREMENT_UNMET, policy_id="research-evidence")
+    assert _resolves(unknown, _check(coverage=local)) is False
+
+
+def test_a_declared_empty_scope_never_traps_a_repaired_finding() -> None:
+    """A no-material-work task keeps its scope disclosure but can clear repaired findings."""
+
+    declared = _coverage(gaps=("completion_scope_declared_none", "semantic_review_not_requested"))
+    undeclared = _coverage(gaps=("completion_scope_undeclared", "semantic_review_not_requested"))
+    assert _resolves(_finding(), _check(coverage=declared)) is True
+    assert _resolves(_statement_finding(), _check(coverage=declared)) is True
+    reviewed = _coverage(gaps=("completion_scope_declared_none",), semantic=True)
+    semantic = _finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
+    assert _resolves(semantic, _check(semantic=_SEMANTIC_OK, coverage=reviewed)) is True
+    # An undeclared scope stays agent work for every row except the answered statement finding.
+    assert _resolves(_statement_finding(), _check(coverage=undeclared)) is True
+    assert _resolves(_finding(), _check(coverage=undeclared)) is False
+
+
+def test_a_still_unmapped_statement_blocks_the_statement_finding() -> None:
+    """Material that contradicts the repair keeps the statement finding open (TB4 D1)."""
+
+    from yoetz.kernel.finding_resolution import resolution_blockers
+
+    gaps = ("instruction_requirement_unmapped", "semantic_review_not_requested")
+    check = _check(coverage=_coverage(gaps=gaps))
+    assert resolution_blockers(_statement_finding(), 4, check, frozenset()) == (
+        "coverage:instruction_requirement_unmapped",
+    )
+    # Plan drift stays a tolerated diagnostic for every other local finding.
+    assert _resolves(_finding(), check) is True
+
+
+@pytest.mark.parametrize("gap", ("command_attempt_uncorroborated", "command_attempt_mismatch"))
+def test_command_gaps_do_not_bound_findings_whose_basis_ignores_commands(gap: str) -> None:
+    """A requested-command corroboration gap bounds only rules that read commands (TB4 D1).
+
+    Hook observation records a keyed commitment instead of command text, so a requested command
+    item stays uncorroborated for the whole task. The statement and test-edit findings and the
+    other command-independent local rules must still resolve once repaired; rules that read
+    command attempts keep the strict treatment.
+    """
+
+    from yoetz.kernel.finding_resolution import resolution_blockers
+
+    check = _check(coverage=_coverage(gaps=(gap, "semantic_review_not_requested")))
+    for finding in (
+        _statement_finding(),
+        _test_edit_finding(),
+        _finding(),
+        _finding(kind=FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE, subject_refs=(clm(1),)),
+    ):
+        assert resolution_blockers(finding, 4, check, frozenset()) == (), finding.kind
+    requested = _finding(kind=FindingKind.REQUESTED_ITEM_NEVER_ATTEMPTED)
+    assert resolution_blockers(requested, 4, check, frozenset()) == (
+        "command_relation_independence_unproven",
+        "coverage:" + gap,
+    )
+    # A requested-item finding whose obligation requests no command is not about commands; one
+    # whose obligation requests a command keeps the strict treatment.
+    state = _command_proof_state()
+    assert resolution_blockers(requested, 4, check, frozenset(), proof_state=state) == ()
+    command_requested = replace(requested, subject_refs=(obl(2),))
+    assert resolution_blockers(command_requested, 4, check, frozenset(), proof_state=state)
+
+
+def test_semantic_findings_tolerate_command_gaps_only_off_command_material() -> None:
+    from builders.policy_cases import record, res
+    from yoetz.domain.events import (
+        ActionKind,
+        ActionRecordedPayload,
+        ResultOutcome,
+        ResultRecordedPayload,
+    )
+    from yoetz.kernel.finding_resolution import resolution_blockers
+
+    state = _command_proof_state()
+    coverage = _coverage(gaps=("command_attempt_uncorroborated",), semantic=True)
+    check = _assessed(_check(tested=100, semantic=_SEMANTIC_OK, coverage=coverage))
+    command_action = ActionRecordedPayload(act(2), ActionKind.COMMAND, "Ran tests", command="x")
+    state = replace(
+        state,
+        actions={**state.actions, act(2): record(command_action, 30)},
+        results={
+            **state.results,
+            res(2): record(ResultRecordedPayload(res(2), act(2), ResultOutcome.SUCCESS), 31),
+        },
+    )
+    off = replace(_finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED), subject_refs=(obl(1),))
+    on_obligation = replace(off, subject_refs=(obl(2),))
+    on_action = replace(off, subject_refs=(evt(30),))
+    on_result = replace(off, subject_refs=(evt(31),))
+    assert "coverage:command_attempt_uncorroborated" not in resolution_blockers(
+        off, 4, check, frozenset(), proof_state=state
+    )
+    for finding in (on_obligation, on_action, on_result):
+        assert "coverage:command_attempt_uncorroborated" in resolution_blockers(
+            finding, 4, check, frozenset(), proof_state=state
+        ), finding.subject_refs
+    # Without the pre-check projection nothing is proven.
+    assert "coverage:command_attempt_uncorroborated" in resolution_blockers(
+        off, 4, check, frozenset()
     )
 
 
@@ -910,7 +1041,7 @@ def test_command_partition_never_upgrades_weak_or_overlapping_proof(weakness: st
             origin=FindingOrigin.SEMANTIC_MODEL_DERIVED,
         )
     elif weakness == "other_kind":
-        finding = _finding()
+        finding = _finding(kind=FindingKind.REQUESTED_ITEM_NEVER_ATTEMPTED, subject_refs=(obl(2),))
     elif weakness == "refired":
         keys = frozenset({issue_key(finding)})
     elif weakness == "suppressed":
@@ -2669,7 +2800,7 @@ _DRIZZLE_LATER_REVIEW = (
 
 @pytest.mark.parametrize(
     "beyond_baseline",
-    ["completion_plan_not_claimed", "content_redacted", "command_attempt_uncorroborated"],
+    ["completion_plan_not_claimed", "content_redacted", "missing_ref"],
 )
 def test_a_lapsed_limit_beyond_the_baseline_makes_the_baseline_readable(
     beyond_baseline: str,
@@ -2784,6 +2915,7 @@ def test_selection_and_capture_failure_classes_are_disjoint_and_closed() -> None
         "preexisting_test_deleted",
         "preexisting_test_modified",
         "preexisting_test_renamed",
+        "preexisting_test_skip_unknown",
         "preexisting_test_skipped",
     }
     test_edit_actionable = {"preexisting_test_edit_unjustified"}
@@ -2793,14 +2925,16 @@ def test_selection_and_capture_failure_classes_are_disjoint_and_closed() -> None
     }
     assert packet_codes == set(decided) | test_edit_accounting | test_edit_actionable
     requirement = replace(
-        _finding(kind=FindingKind.TASK_REQUIREMENT_UNMET, policy_id="research-evidence"),
+        _test_edit_finding(),
         coverage=_coverage(semantic=True, freshness=LedgerFreshness.PARTIAL),
     )
     for code in sorted(test_edit_accounting):
         later = _review_check(code)
         assert _blockers(_finding(), later) == (), code
         assert _blockers(_semantic_finding(), later) == (), code
-        assert _blockers(requirement, later) == ("coverage:" + code,), code
+        # Only the test-edit finding is bounded, and only by an unknown edit baseline.
+        expected = ("coverage:" + code,) if code == "preexisting_test_baseline_unknown" else ()
+        assert _blockers(requirement, later) == expected, code
     for code in sorted(test_edit_actionable):
         later = _review_check(code)
         assert _blockers(_finding(), later) == ("coverage:" + code,), code

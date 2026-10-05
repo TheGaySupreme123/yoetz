@@ -26,6 +26,7 @@ from yoetz.domain.events import (
     MAX_PRIOR_FINDING_LISTED_REFS,
     SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP,
     SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP,
+    ActionKind,
     CheckChangeShownFiles,
     CheckRecordedPayload,
     ClaimKind,
@@ -38,10 +39,13 @@ from yoetz.domain.receipts import (
     CHECK_TIME_CHANGE_GAPS,
     CHECK_TIME_CHANGE_UNAVAILABLE_GAP,
     CHECK_TIME_CHANGE_UNAVAILABLE_REASON_GAPS,
+    COMPLETION_SCOPE_DECLARED_NONE_GAP,
+    COMPLETION_SCOPE_UNDECLARED_GAP,
     OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
     OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP,
     PREEXISTING_TEST_BASELINE_UNKNOWN_GAP,
     PREEXISTING_TEST_INFORMATIONAL_GAPS,
+    PREEXISTING_TEST_SKIP_UNKNOWN_GAP,
     SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
     SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
     SEMANTIC_CHALLENGES_REJECTED_GAP,
@@ -65,10 +69,19 @@ from yoetz.domain.receipts import (
     SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
     SEMANTIC_REVIEW_SNIPPET_INVALID_GAP,
 )
-from yoetz.domain.task_statement import TASK_STATEMENT_GAPS, may_carry_task_statement
-from yoetz.domain.values import ClaimId, EventId, EvidenceId, FindingId, ResultId
+from yoetz.domain.task_statement import (
+    TASK_STATEMENT_FINDING_SUMMARIES,
+    TASK_STATEMENT_GAPS,
+    may_carry_task_statement,
+)
+from yoetz.domain.values import ClaimId, EventId, EvidenceId, FindingId, ObligationId, ResultId
 from yoetz.kernel.claims import effective_claim_items
-from yoetz.kernel.plan_drift import PLAN_DRIFT_GAPS
+from yoetz.kernel.plan_drift import (
+    INSTRUCTION_REQUIREMENT_UNMAPPED_GAP,
+    OBLIGATION_EVIDENCE_STALE_AFTER_SCOPE_EDIT_GAP,
+    PLAN_DRIFT_GAPS,
+    stale_resolved_obligations,
+)
 from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.projections import (
     MAX_CHECK_CHANGE_RAISING_CHECKS,
@@ -241,14 +254,23 @@ _DETERMINISTIC_PROOF_TOLERATED_GAPS: Final = (
 )
 _SEMANTIC_PROOF_TOLERATED_GAPS: Final = _EVIDENCE_STRENGTH_GAPS | _REVIEW_DIALOGUE_DISCLOSURE_GAPS
 # Structural test-edit accounting (ADR-032) is read by exactly one local rule: the unjustified
-# pre-existing test edit, which raises ``task_requirement_unmet``. It is local accounting, never
-# review-packet input. An unknown edit baseline or an informational edit count therefore bounds
-# only that kind's proof; every other local pack judges ledger rows the accounting never touches,
-# and an AI-powered review of another issue did not see it, so these standing limits must not make
-# an unrelated repaired finding permanently unresolvable. The actionable ``preexisting_test_edit_unjustified`` code is
-# deliberately not here, and a ``task_requirement_unmet`` finding never tolerates any of them.
+# pre-existing test edit, which raises ``task_requirement_unmet`` with the fact
+# ``preexisting_test_edit_unjustified``. It is local accounting, never a basis of any other rule.
+# Tolerance is therefore decided by the finding's basis, not its kind (TB4 pilot):
+#
+# * the test-edit finding is bounded by an unknown edit baseline (an edit set it could not read may
+#   hide the same unjustified edit), but its informational counts and the unreadable skip marker
+#   never hide an unjustified edit, so it tolerates those once ``preexisting_test_edit_unjustified``
+#   is gone (that actionable code is never tolerated by any proof);
+# * every other finding, local or AI-powered, including the statement-based
+#   ``task_requirement_unmet`` finding and an AI-powered requirement finding, judges material the
+#   accounting never touches, so the standing accounting limits must not make a repaired issue
+#   permanently unresolvable.
+_TEST_EDIT_INFORMATIONAL_GAPS: Final = frozenset(
+    {*PREEXISTING_TEST_INFORMATIONAL_GAPS, PREEXISTING_TEST_SKIP_UNKNOWN_GAP}
+)
 _TEST_EDIT_ACCOUNTING_GAPS: Final = frozenset(
-    {PREEXISTING_TEST_BASELINE_UNKNOWN_GAP, *PREEXISTING_TEST_INFORMATIONAL_GAPS}
+    {PREEXISTING_TEST_BASELINE_UNKNOWN_GAP, *_TEST_EDIT_INFORMATIONAL_GAPS}
 )
 # These native capture limits may be compared with the readable original finding's baseline.
 # The check stamps the ones its review ran under onto every semantic finding it raises, so the
@@ -277,6 +299,23 @@ _UNPROVEN_FRESHNESS: Final = frozenset(
     }
 )
 _COMMAND_GAPS: Final = frozenset({"command_attempt_uncorroborated", "command_attempt_mismatch"})
+# Local rules whose basis never reads the requested-command attempt relation, command bytes or a
+# command identity (TB4 pilot). A command-attempt gap describes a requested command item of some
+# obligation; it cannot weaken an absence proof for these rules, so it stays a disclosure for them.
+# Rules that do read attempts or commands (requested items, failed-work supersession by command
+# identity, the ledger finding that carries the gap itself, research rules that read coverage
+# records) keep the strict treatment, and ``action_without_result`` keeps its proven partition.
+_COMMAND_INDEPENDENT_KINDS: Final = frozenset(
+    {
+        FindingKind.COMPLETION_WITH_OPEN_OBLIGATIONS,
+        FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE,
+        FindingKind.RESULT_WITHOUT_ACTION,
+        FindingKind.STALE_EVIDENCE_FOR_CHANGED_STATE,
+        FindingKind.CONTRADICTORY_CLAIMS_UNRESOLVED,
+        FindingKind.WEAK_OR_STALE_RESPONSE,
+        FindingKind.TASK_REQUIREMENT_UNMET,
+    }
+)
 # Keep this local to avoid importing the policy module while reducers import this module. If the
 # work-integrity pack changes version, its action-result exception must be reviewed explicitly.
 # Reviewed for 0.2.0: the ``action_without_result`` rule did not change, so both versions qualify.
@@ -884,6 +923,113 @@ def _raises_under_reduced_scope(check: CheckRecordedPayload, finding: Finding) -
     )
 
 
+def _requirement_basis(finding: Finding) -> Literal["statement", "test_edit"] | None:
+    """The basis of a local ``task_requirement_unmet`` finding, or None for any other finding.
+
+    Two local rules raise this kind: the task statement the plan does not decompose, and the
+    unjustified pre-existing test edit. Their summaries are fixed service wording; any summary
+    other than a statement one reads as the stricter test-edit basis, so drift fails closed.
+    """
+
+    if (
+        finding.origin is not FindingOrigin.DETERMINISTIC
+        or finding.kind is not FindingKind.TASK_REQUIREMENT_UNMET
+    ):
+        return None
+    return "statement" if finding.summary in TASK_STATEMENT_FINDING_SUMMARIES else "test_edit"
+
+
+def _command_subject(ref: str, state: ProjectionState) -> bool:
+    """Whether one finding subject names command material (a command obligation, action or result)."""
+
+    for key, row in state.obligations.items():
+        if ref in {str(key), str(row.source_event_id)}:
+            payload = row.payload
+            if payload is None or any(
+                item.item_kind is RequestedItemKind.COMMAND for item in payload.requested_items
+            ):
+                return True
+    for key, row in state.actions.items():
+        if ref in {str(key), str(row.source_event_id)}:
+            if row.payload is None or row.payload.action_kind is ActionKind.COMMAND:
+                return True
+    for key, row in state.results.items():
+        if ref in {str(key), str(row.source_event_id)}:
+            if row.payload is None:
+                return True
+            action = state.actions.get(row.payload.action_id)
+            if (
+                action is None
+                or action.payload is None
+                or action.payload.action_kind is ActionKind.COMMAND
+            ):
+                return True
+    return False
+
+
+def _requested_items_without_commands(finding: Finding, state: ProjectionState | None) -> bool:
+    """Whether a local requested-item finding names only obligations that request no command.
+
+    The requested-item rule reads ``attempted_items`` assertions; a command-attempt gap says a
+    requested command item lacks observed corroboration. When every obligation the finding names
+    is readable in the pre-check projection and requests no command, that gap is about other
+    obligations and cannot bound this proof. Without the projection nothing is proven.
+    """
+
+    if (
+        state is None
+        or finding.origin is not FindingOrigin.DETERMINISTIC
+        or finding.kind is not FindingKind.REQUESTED_ITEM_NEVER_ATTEMPTED
+        or not finding.subject_refs
+    ):
+        return False
+    for ref in finding.subject_refs:
+        row = state.obligations.get(cast(ObligationId, str(ref)))
+        if row is None or row.payload is None:
+            return False
+        if any(item.item_kind is RequestedItemKind.COMMAND for item in row.payload.requested_items):
+            return False
+    return True
+
+
+def _semantic_command_independent(finding: Finding, state: ProjectionState | None) -> bool:
+    """Whether an AI-powered finding's subjects are provably not command material.
+
+    A requested-command corroboration gap is about a command item and the commands that might
+    satisfy it. A reviewer finding whose subjects name none of those (no command obligation,
+    command action or its result, read from the pre-check projection) is not about commands, so
+    the gap does not bound its absence proof. Without that projection nothing is proven.
+    """
+
+    if state is None:
+        return False
+    return not any(_command_subject(str(ref), state) for ref in finding.subject_refs)
+
+
+def _stale_obligations_unrelated(finding: Finding, state: ProjectionState | None) -> bool:
+    """Whether the stale-evidence diagnostic names none of this AI-powered finding's subjects.
+
+    ``obligation_evidence_stale_after_scope_edit`` says a resolved obligation's evidence predates
+    a later edit; an unscoped edit makes it apply to every resolved obligation until each is
+    re-resolved. It bounds a review finding only when the finding is about one of those
+    obligations (by id or recording event). Read from the pre-check projection; without it, or
+    while any stale obligation is unreadable, nothing is proven.
+    """
+
+    if state is None:
+        return False
+    stale = stale_resolved_obligations(state)
+    if not stale:
+        return False
+    names: set[str] = set()
+    for obligation in stale:
+        row = state.obligations.get(obligation)
+        if row is None:
+            return False
+        names.update({str(obligation), str(row.source_event_id)})
+    return not any(str(ref) in names for ref in finding.subject_refs)
+
+
 def resolution_blockers(
     finding: Finding,
     finding_source_frontier: int,
@@ -914,11 +1060,19 @@ def resolution_blockers(
         reasons.append("subject_outside_checked_scope")
     gaps = frozenset(check.coverage.known_gaps)
     if finding.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED:
-        tolerated = _SEMANTIC_PROOF_TOLERATED_GAPS
-        if finding.kind is not FindingKind.TASK_REQUIREMENT_UNMET:
-            # Local test-edit accounting is never review input, so it cannot bound what the
-            # reviewer saw of an unrelated issue (see ``_TEST_EDIT_ACCOUNTING_GAPS``).
-            tolerated = tolerated | _TEST_EDIT_ACCOUNTING_GAPS
+        # Local test-edit accounting is never the basis of a review finding, including an
+        # AI-powered requirement finding, so its standing limits cannot bound this proof (see
+        # ``_TEST_EDIT_ACCOUNTING_GAPS``). The actionable unjustified-edit code still blocks.
+        tolerated = _SEMANTIC_PROOF_TOLERATED_GAPS | _TEST_EDIT_ACCOUNTING_GAPS
+        # The agent's explicit empty-scope declaration is a recorded decision the review packet
+        # shows as the plan itself, never a limit on what the reviewer could see.
+        tolerated = tolerated | {COMPLETION_SCOPE_DECLARED_NONE_GAP}
+        if gaps & _COMMAND_GAPS and _semantic_command_independent(finding, proof_state):
+            tolerated = tolerated | _COMMAND_GAPS
+        if OBLIGATION_EVIDENCE_STALE_AFTER_SCOPE_EDIT_GAP in gaps and _stale_obligations_unrelated(
+            finding, proof_state
+        ):
+            tolerated = tolerated | {OBLIGATION_EVIDENCE_STALE_AFTER_SCOPE_EDIT_GAP}
         ruled_fixed, verdict_reasons, verdict_tolerated = _prior_verdict_effect(finding, check)
         reasons.extend(verdict_reasons)
         tolerated |= verdict_tolerated
@@ -991,11 +1145,40 @@ def resolution_blockers(
             reasons.append("semantic_review_not_completed")
     else:
         tolerated = _DETERMINISTIC_PROOF_TOLERATED_GAPS
-        freshness_gaps = gaps
-        if finding.kind is not FindingKind.TASK_REQUIREMENT_UNMET:
-            tolerated = tolerated | _TEST_EDIT_ACCOUNTING_GAPS
-            freshness_gaps = freshness_gaps - _TEST_EDIT_ACCOUNTING_GAPS
-        if gaps & _COMMAND_GAPS:
+        basis = _requirement_basis(finding)
+        # Decide test-edit accounting by the finding's basis (see ``_TEST_EDIT_ACCOUNTING_GAPS``):
+        # only the test-edit finding is bounded by an unknown edit baseline.
+        accounting = (
+            _TEST_EDIT_INFORMATIONAL_GAPS if basis == "test_edit" else _TEST_EDIT_ACCOUNTING_GAPS
+        )
+        tolerated = tolerated | accounting
+        freshness_gaps = gaps - accounting
+        # An explicit empty-scope declaration is the agent's recorded scope decision. It stays a
+        # standing disclosure on every receipt, but no local pack fails to read its rows because
+        # of it, so it must not make a repaired local finding in a no-material-work task
+        # permanently unresolvable.
+        tolerated = tolerated | {COMPLETION_SCOPE_DECLARED_NONE_GAP}
+        freshness_gaps = freshness_gaps - {COMPLETION_SCOPE_DECLARED_NONE_GAP}
+        if basis == "statement":
+            # A check that still records the unmapped statement contradicts this finding's
+            # absence, whichever rule raised the copy it returned; plan drift is otherwise a
+            # tolerated diagnostic, but never for the finding it describes. Once that code is gone
+            # the empty or undeclared completion scope is answered (by statement-sourced
+            # obligations or a no-material-work decision), so the scope codes only disclose.
+            tolerated = (tolerated - {INSTRUCTION_REQUIREMENT_UNMAPPED_GAP}) | {
+                COMPLETION_SCOPE_UNDECLARED_GAP
+            }
+            freshness_gaps = freshness_gaps - {COMPLETION_SCOPE_UNDECLARED_GAP}
+        if gaps & _COMMAND_GAPS and (
+            finding.kind in _COMMAND_INDEPENDENT_KINDS
+            or _requested_items_without_commands(finding, proof_state)
+        ):
+            # The rule that raised this finding never reads the command-attempt relation, or (a
+            # requested-item finding) its obligations request no command for that relation to be
+            # about.
+            tolerated = tolerated | _COMMAND_GAPS
+            freshness_gaps = freshness_gaps - _COMMAND_GAPS
+        elif gaps & _COMMAND_GAPS:
             partition = _command_gap_partition(finding, check, proof_state)
             if partition == ():
                 tolerated = tolerated | _COMMAND_GAPS
@@ -1276,9 +1459,14 @@ def _finding_resolution_explanation(
         issue_key(row.payload) for row in returned if row is not None and row.payload is not None
     )
     proof_state = None
-    if finding_record.payload.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED or (
-        _command_partition_candidate(
+    if (
+        finding_record.payload.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+        or _command_partition_candidate(
             finding_record.payload, finding_record.source_frontier, check, keys
+        )
+        or (
+            finding_record.payload.kind is FindingKind.REQUESTED_ITEM_NEVER_ATTEMPTED
+            and bool(set(check.coverage.known_gaps) & _COMMAND_GAPS)
         )
     ):
         proof_state = _historical_proof_state(
