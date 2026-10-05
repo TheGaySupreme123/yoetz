@@ -28,6 +28,7 @@ from yoetz.adapters.providers.openai_responses import (
     JUDGMENT_JSON_SCHEMA,
     MISSING_ITEM_FIELD_GLOSSARY,
     MISSING_ITEM_KIND_GLOSSARY,
+    STRICT_JUDGMENT_JSON_SCHEMA,
     VERDICT_FIELD_GLOSSARY,
     VERIFIED_FIELD_GLOSSARY,
     JudgmentValidationError,
@@ -295,6 +296,77 @@ def test_request_schema_root_is_an_object_never_a_union() -> None:
                 _walk(item, f"{path}[{index}]")
 
     _walk(JUDGMENT_JSON_SCHEMA, "$")
+
+
+def test_strict_wire_schema_uses_only_the_strict_structured_output_subset() -> None:
+    """Every provider request sends a schema that ``strict: true`` structured output admits.
+
+    Regression guard: provider-judgment 1.2.0 expressed the verified-row snippet rule with
+    ``allOf``/``if``/``then``/``not`` and Pydantic ``default`` values. gpt-6-luna rejected that
+    request schema with a 400 before generation, which the Codex runtime surfaced only as an
+    opaque failed turn, so every semantic review failed. The wire form must carry none of the
+    rejected keywords and list every property of every object as required.
+    """
+
+    rejected = {"allOf", "default", "if", "not", "then", "uniqueItems"}
+
+    def _walk(node: object, path: str) -> None:
+        if type(node) is dict:
+            source = cast(dict[str, Any], node)
+            assert not rejected & set(source), path
+            if source.get("type") == "object":
+                assert source.get("additionalProperties") is False, path
+                properties = cast(dict[str, Any], source.get("properties", {}))
+                assert set(properties) == set(cast(list[str], source.get("required", []))), path
+            for key, value in source.items():
+                if key in {"properties", "$defs"}:
+                    for name, child in cast(dict[str, Any], value).items():
+                        _walk(child, f"{path}.{key}.{name}")
+                else:
+                    _walk(value, f"{path}.{key}")
+        elif type(node) is list:
+            for index, item in enumerate(cast(list[Any], node)):
+                _walk(item, f"{path}[{index}]")
+
+    _walk(STRICT_JUDGMENT_JSON_SCHEMA, "$")
+    verified = cast(dict[str, Any], STRICT_JUDGMENT_JSON_SCHEMA["$defs"])["ProviderVerifiedItem"]
+    assert verified["properties"]["snippet"]["type"] == ["string", "null"]
+    # The owning contract keeps the conditional rule; only the wire form drops it.
+    assert "allOf" in cast(dict[str, Any], JUDGMENT_JSON_SCHEMA["$defs"])["ProviderVerifiedItem"]
+
+
+def test_strict_wire_output_with_null_snippet_decodes_under_the_contract() -> None:
+    ref = "evt_00000000-0000-4000-8000-000000000001"
+    body: dict[str, Any] = {
+        "judgment": {
+            "conclusion": "no_material_discrepancy",
+            "review_summary": "Checked both rows.",
+            "prior_finding_verdicts": [],
+            "reviewer_challenges": [],
+            "verified": [
+                {
+                    "requirement_or_claim": "Supported row",
+                    "verdict": "supported",
+                    "cited_refs": [ref],
+                    "snippet": "quoted",
+                },
+                {
+                    "requirement_or_claim": "Unassessable row",
+                    "verdict": "not_assessable",
+                    "cited_refs": [ref],
+                    "snippet": None,
+                },
+            ],
+        }
+    }
+    cast(Any, Draft202012Validator(STRICT_JUDGMENT_JSON_SCHEMA)).validate(body)
+    judgment = normalize_judgment(cast(JsonValue, body), require_part2=True)
+    assert judgment.conclusion == "no_material_discrepancy"
+
+    missing_quote = json.loads(json.dumps(body))
+    missing_quote["judgment"]["verified"][0]["snippet"] = None
+    with pytest.raises(JudgmentValidationError):
+        normalize_judgment(cast(JsonValue, missing_quote), require_part2=True)
 
 
 def test_request_schema_carries_no_docstring_commentary() -> None:

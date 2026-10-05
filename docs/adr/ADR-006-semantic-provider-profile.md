@@ -21,7 +21,13 @@ and AI-powered review/privacy capability and conformance tests.
    repository-privacy commitment beneath the machine ceiling. A missing or mismatched repository
    grant fails before provider construction, credential-handle minting, authorization, or dispatch.
 2. **First external adapter:** official `openai` Python SDK (pinned `2.46.0`), Responses API with
-   structured outputs (`responses.parse` + frozen `ProviderJudgmentModel` schema). A release names
+   structured outputs (`responses.parse` + frozen `ProviderJudgmentModel` schema). Every
+   constrained-output request (Responses, Chat Completions, and the Codex app-server
+   `outputSchema`) sends the strict wire form of that schema: `allOf`/`if`/`then`/`not`,
+   `default`, and `uniqueItems` are dropped and every optional property is sent as required and
+   nullable, because `strict: true` rejects the whole request before generation otherwise
+   (observed as a 400 on provider-judgment 1.2.0, surfaced by Codex only as a failed turn). The
+   decoder still enforces the dropped constraints, so the owning contract is unchanged. A release names
    an exact tested provider/model/endpoint-profile tuple. A generic or merely
    "OpenAI-compatible" URL is never trusted as an ambient override. One exact, versioned profile
    kind — `owner-declared-openai-responses` (ADR-014) — may bind an owner-supplied constrained

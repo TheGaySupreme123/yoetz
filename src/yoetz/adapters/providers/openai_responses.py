@@ -78,6 +78,7 @@ __all__ = [
     "OFFICIAL_OPENAI_PORT",
     "OPENAI_CREDENTIAL_MAX_BYTES",
     "OPENAI_CREDENTIAL_MIN_BYTES",
+    "STRICT_JUDGMENT_JSON_SCHEMA",
     "OPENAI_MAX_OUTPUT_TOKENS",
     "OPENAI_MAX_RESPONSE_BODY_BYTES",
     "PACKET_GAP_GLOSSARY",
@@ -930,6 +931,57 @@ def build_judgment_json_schema() -> dict[str, JsonValue]:
 
 JUDGMENT_JSON_SCHEMA: Final[dict[str, JsonValue]] = build_judgment_json_schema()
 
+# Keywords that ``strict: true`` structured output rejects outright. Observed from gpt-6-luna as a
+# 400 before generation ("'allOf' is not permitted", "'uniqueItems' is not permitted"), which the
+# Codex runtime surfaces only as an opaque failed turn.
+_STRICT_UNSUPPORTED_KEYWORDS: Final = frozenset(
+    {"allOf", "default", "if", "not", "then", "uniqueItems"}
+)
+
+
+def _strict_nullable(schema: JsonValue) -> JsonValue:
+    if type(schema) is dict and type(cast(dict[str, JsonValue], schema).get("type")) is str:
+        source = cast(dict[str, JsonValue], schema)
+        return {**source, "type": [source["type"], "null"]}
+    return {"anyOf": [schema, {"type": "null"}]}
+
+
+def strict_output_schema(value: JsonValue) -> JsonValue:
+    """Return the provider-wire form of a schema for ``strict: true`` structured output.
+
+    Strict structured output admits a JSON Schema subset: it rejects the conditional and
+    combinator keywords above and requires every object property to be listed in ``required``.
+    The owning contract keeps those constraints, and the decoder enforces them after generation
+    (uniqueness, the verified-row snippet rule in ``ProviderVerifiedItemModel`` and the Part 2
+    gate), so the wire form drops them and sends each optional property as required and nullable.
+    """
+
+    if type(value) is dict:
+        result: dict[str, JsonValue] = {
+            key: strict_output_schema(item)
+            for key, item in cast(dict[str, JsonValue], value).items()
+            if key not in _STRICT_UNSUPPORTED_KEYWORDS
+        }
+        properties = result.get("properties")
+        required = result.get("required")
+        if type(properties) is dict and type(required) is list:
+            named = cast(dict[str, JsonValue], properties)
+            listed = cast(list[JsonValue], required)
+            for name in sorted(named, key=lambda item: item.encode("ascii")):
+                if name not in listed:
+                    named[name] = _strict_nullable(named[name])
+                    listed.append(name)
+            listed.sort(key=lambda item: str(item).encode("ascii"))
+        return result
+    if type(value) is list:
+        return [strict_output_schema(item) for item in cast(list[JsonValue], value)]
+    return value
+
+
+STRICT_JUDGMENT_JSON_SCHEMA: Final = cast(
+    dict[str, JsonValue], strict_output_schema(cast(JsonValue, JUDGMENT_JSON_SCHEMA))
+)
+
 
 def validate_openai_credential(view: memoryview) -> None:
     """Byte-exact, non-normalizing, offline token68 validator for the OpenAI credential profile.
@@ -1102,7 +1154,7 @@ def _build_body_object(case: ApprovedOutboundCase) -> dict[str, JsonValue]:
                     "type": "json_schema",
                     "name": "yoetz_semantic_judgment",
                     "strict": True,
-                    "schema": JUDGMENT_JSON_SCHEMA,
+                    "schema": STRICT_JUDGMENT_JSON_SCHEMA,
                 }
             },
         }
@@ -1115,7 +1167,7 @@ def _build_body_object(case: ApprovedOutboundCase) -> dict[str, JsonValue]:
 
 
 _PROMPT_DIGEST: Final = "sha256:" + hashlib.sha256(_SYSTEM_INSTRUCTION.encode("utf-8")).hexdigest()
-_SCHEMA_DIGEST: Final = canonical_digest(JUDGMENT_JSON_SCHEMA)
+_SCHEMA_DIGEST: Final = canonical_digest(STRICT_JUDGMENT_JSON_SCHEMA)
 
 
 def render_case(case: ApprovedOutboundCase) -> RenderedOpenAIRequest:
