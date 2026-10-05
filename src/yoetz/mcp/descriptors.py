@@ -1952,7 +1952,9 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "Read guidance",
         "Reads one registered Yoetz guidance URI and returns its full markdown as tool text, or a "
         "bounded UTF-8-safe page when `page` or `page_size` is supplied. Catalogued heading topics "
-        "use the document URI plus a lowercase hyphen anchor and return one bounded procedure. "
+        "return one bounded procedure; use only an anchor guidance names verbatim, never one "
+        "derived from a heading, tool, or event name. An unknown anchor's rejection lists that "
+        "document's registered anchors; the whole-document URI always works. "
         "`page_size` is a canonical "
         "UTF-8 byte budget from 4 through 16384 inclusive; use 4096 by default. An invalid size "
         "returns a field-local page_size correction with the permitted range and retry shape. "
@@ -2039,7 +2041,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "respond": "sha256:191f69e1592bd6bb23f7173725645dc339441b12eaa91c08cc3da4e9feaf0b85",
                 "status": "sha256:7e77f753244eee59b711cb7ee77c8f09970ef1b61c91b548b6f4a821b3541969",
                 "receipt": "sha256:c7676e1ca9afd96d9d7e74503edd5b31a758a05d7e7e1cf0d62c763611ffcecb",
-                "read_guidance": "sha256:4502f6d3154d3e0c49283f9c9b81c0380b19f10918fc0080443a1c811b9102ff",
+                "read_guidance": "sha256:2d99f8dce9f7dca0f92d51550d2cf8585baed276f13f638103cba61a122bba23",
                 "closure_prepare": "sha256:9cbf97d6a668de25cd80bdf79a75c50dcbeef256ba4abf4b6abc86405a6627d5",
             }
         ),
@@ -2051,7 +2053,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "respond": "sha256:191f69e1592bd6bb23f7173725645dc339441b12eaa91c08cc3da4e9feaf0b85",
                 "status": "sha256:7e77f753244eee59b711cb7ee77c8f09970ef1b61c91b548b6f4a821b3541969",
                 "receipt": "sha256:c7676e1ca9afd96d9d7e74503edd5b31a758a05d7e7e1cf0d62c763611ffcecb",
-                "read_guidance": "sha256:4502f6d3154d3e0c49283f9c9b81c0380b19f10918fc0080443a1c811b9102ff",
+                "read_guidance": "sha256:2d99f8dce9f7dca0f92d51550d2cf8585baed276f13f638103cba61a122bba23",
                 "closure_prepare": "sha256:9cbf97d6a668de25cd80bdf79a75c50dcbeef256ba4abf4b6abc86405a6627d5",
             }
         ),
@@ -2059,8 +2061,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:7de117f8bc28b3970e8ef5ab2ab11074683e7adb59d156cea6a465f952342b33",
-        "strict": "sha256:3ef47b80d54b8313e2376575d671444d7952c8909e42ece7b84424616731ffaa",
+        "policy": "sha256:ee712bf56cc573404919139a3ca2a88c79d2bd3c19005b2ae8a0dbb67390f729",
+        "strict": "sha256:401ae8093136d2a5f4d2961cd021cd4d2abef9fa77c139ed601fb77d1fc81572",
     }
 )
 

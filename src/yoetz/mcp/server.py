@@ -100,6 +100,11 @@ from yoetz.ports.integrations import YOETZ_MCP_TOOL_NAMES
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.consent import CONSENT_PENDING_TTL_SECONDS
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
+from yoetz.protocol.guidance_uris import (
+    FOCUSED_GUIDANCE_URIS,
+    GUIDANCE_DOCUMENT_URIS,
+    GUIDANCE_TOPIC_URIS,
+)
 from yoetz.protocol.ids import IdKind, new_id, safe_request_id_from
 from yoetz.protocol.models import (
     CheckRequest,
@@ -2890,6 +2895,11 @@ async def dispatch_read_guidance(
         request = ReadGuidanceRequest.model_validate(arguments)
     except ValidationError as exc:
         locations = safe_validation_locations(exc)
+        if any(
+            tuple(error.get("loc", ())) == ("uri",)
+            for error in exc.errors(include_url=False, include_context=False, include_input=False)
+        ):
+            return _unknown_guidance_uri_result(arguments.get("uri"), runtime=runtime)
         page_size_reason = next(
             (
                 location.get("reason")
@@ -2924,13 +2934,7 @@ async def dispatch_read_guidance(
         except GuidanceResourceError:
             resource = None
     if resource is None:
-        return structured_error_result(
-            PublicErrorCode.INVALID_REQUEST,
-            "read_guidance rejects an unknown guidance URI.",
-            safe_details={"argument_count": len(arguments)},
-            operation="read_guidance",
-            host_profile=runtime.host_profile,
-        )
+        return _unknown_guidance_uri_result(request.uri, runtime=runtime)
     paged = any(
         value is not None
         for value in (request.page, request.page_size, request.revision, request.digest)
@@ -2992,6 +2996,50 @@ async def dispatch_read_guidance(
         content=[types.TextContent(type="text", text=content_text)],
         structuredContent=cast(dict[str, object], wire),
         isError=False,
+    )
+
+
+def _guidance_topic_anchors(document_uri: str) -> tuple[str, ...]:
+    """Return the closed catalog's topic anchors for one registered guidance document."""
+
+    prefix = document_uri + "#"
+    return tuple(uri[len(prefix) :] for uri in GUIDANCE_TOPIC_URIS if uri.startswith(prefix))
+
+
+def _unknown_guidance_uri_result(
+    uri: object,
+    *,
+    runtime: BridgeRuntime,
+) -> types.CallToolResult:
+    """Reject an unregistered guidance URI with the exact registered alternatives.
+
+    Benchmark transcripts showed agents deriving topic anchors from heading text or tool names
+    (``#publish-work``, ``#publish_work-plan-revision``) and receiving a bare INVALID_REQUEST with
+    nothing to retry against. The retry options named here are closed-catalog constants: the caller's
+    URI is used only to select which registered document's catalog to list and is never echoed.
+    """
+
+    document = uri.partition("#")[0] if type(uri) is str else None
+    if document in GUIDANCE_DOCUMENT_URIS:
+        anchors = _guidance_topic_anchors(document)
+        message = (
+            f"read_guidance has no topic with that anchor in {document}. Topic anchors are exact "
+            "catalog entries; never derive one from a heading, tool, or event name. Retry with "
+            f"uri {document} to read the whole document, or {document}#<anchor> with one of these "
+            f"anchors: {', '.join(anchors)}."
+        )
+    else:
+        message = (
+            "read_guidance accepts only a registered guidance URI. Retry with one of these "
+            f"documents: {', '.join(GUIDANCE_DOCUMENT_URIS)}; or one focused topic: "
+            f"{', '.join(FOCUSED_GUIDANCE_URIS)}."
+        )
+    return structured_error_result(
+        PublicErrorCode.INVALID_REQUEST,
+        message,
+        safe_details={"field": "/uri"},
+        operation="read_guidance",
+        host_profile=runtime.host_profile,
     )
 
 

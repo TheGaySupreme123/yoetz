@@ -18,6 +18,7 @@ from yoetz.domain.review_input_render import (
 from yoetz.mcp.errors import VALIDATION_REASON_TOKENS
 from yoetz.protocol.canonical import JsonValue, ensure_canonical_value
 from yoetz.protocol.errors import PublicErrorCode, normalize_safe_details
+from yoetz.protocol.guidance_uris import ALL_GUIDANCE_URIS
 from yoetz.protocol.ids import IdKind, is_valid_id, validate_opaque_item_id
 from yoetz.protocol.readiness_text import READINESS_STATES, readiness_directive
 from yoetz.protocol.recovery import (
@@ -84,6 +85,7 @@ _CORRELATION_ID: Final = re.compile(
 _HEAD_DIGEST: Final = re.compile(r"^(?:genesis|sha256:[0-9a-f]{64})$", re.ASCII)
 # Closed shape of a packaged guidance URI, the only location a guidance pointer may name.
 _GUIDANCE_URI: Final = re.compile(r"^yoetz://guidance/[a-z0-9-]{1,64}\.md$", re.ASCII)
+_REGISTERED_GUIDANCE_URIS: Final = frozenset(ALL_GUIDANCE_URIS)
 
 
 def _failure_class_from_mapping(value: object) -> object | None:
@@ -1437,7 +1439,11 @@ def summary_for_read_guidance(envelope: object) -> str:
 
     source = _mapping(envelope)
     uri = source.get("uri")
-    if type(uri) is not str or _GUIDANCE_URI.fullmatch(uri) is None:
+    # A registered heading topic (``workflow.md#start-and-resume``) is a closed-catalog constant
+    # too; labelling its successful read "unavailable" read as a failure to agents.
+    if type(uri) is not str or (
+        _GUIDANCE_URI.fullmatch(uri) is None and uri not in _REGISTERED_GUIDANCE_URIS
+    ):
         uri = "unavailable"
     if source.get("complete") is not None:
         page = _safe_count(source.get("page"))
