@@ -58,6 +58,7 @@ from yoetz.kernel.policies.response_support import (
     WORK_RESPONSE_PRESENT_FACT,
     response_support_admissible,
 )
+from yoetz.protocol.policy_packs import WORK_INTEGRITY_POLICY_ID, WORK_INTEGRITY_POLICY_VERSION
 
 __all__ = [
     "WORK_INTEGRITY_FACT_CODES",
@@ -67,8 +68,6 @@ __all__ = [
     "work_integrity_findings",
 ]
 
-WORK_INTEGRITY_POLICY_ID: Final = "work-integrity"
-WORK_INTEGRITY_POLICY_VERSION: Final = "0.1.0"
 WORK_INTEGRITY_POLICY_PACK: Final = PolicyPack(
     WORK_INTEGRITY_POLICY_ID,
     WORK_INTEGRITY_POLICY_VERSION,

@@ -148,7 +148,7 @@ def _app() -> tuple[Application, _WorkflowRuntime]:
         waiver_authorizer=lambda _: False,
         import_publication_authorizer=lambda _: False,
         profile=RuntimeProfile.TEST_FAKE,
-        policy_packs=("research-evidence/0.1.0", "work-integrity/0.1.0"),
+        policy_packs=("research-evidence/0.2.0", "work-integrity/0.2.0"),
         version_manifest=start_app.version_manifest,
         enforce_repository_identity=False,
     )

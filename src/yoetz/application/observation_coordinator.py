@@ -203,6 +203,7 @@ from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_
 from yoetz.protocol.coverage import EvidenceImmutability, PublicationChannel, coverage_for_channel
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, is_valid_id
+from yoetz.protocol.policy_packs import CURRENT_POLICY_VERSIONS
 
 _ADVICE_FINDING_KIND_BY_RULE: Final = MappingProxyType(
     {
@@ -6655,7 +6656,7 @@ class ObservationCoordinator:
                     item.detail,
                     subject_refs,
                     policy_id,
-                    "0.1.0",
+                    CURRENT_POLICY_VERSIONS[policy_id],
                     frontier,
                     item.coverage,
                     None,

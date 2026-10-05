@@ -47,6 +47,13 @@ from yoetz.protocol.models import (
     SemanticStatus,
     validate_semantic_outcome,
 )
+from yoetz.protocol.policy_packs import (
+    COORDINATION_POLICY_ID,
+    CURRENT_POLICY_VERSIONS,
+    RESEARCH_EVIDENCE_POLICY_ID,
+    WORK_INTEGRITY_POLICY_ID,
+    is_recorded_policy_identity,
+)
 
 __all__ = [
     "EXTERNAL_SEMANTIC_FINDING_KINDS",
@@ -82,6 +89,7 @@ __all__ = [
     "finding_event_to_json",
     "finding_from_json",
     "finding_has_dialogue_fields",
+    "finding_policy_identity",
     "finding_to_json",
     "rank_key",
     "semantic_fallback_origin_to_json",
@@ -376,18 +384,31 @@ _WORK_INTEGRITY_KINDS: Final = frozenset(
         FindingKind.WEAK_OR_STALE_RESPONSE,
     }
 )
+# The pack that owns each kind and the current version new findings carry. A recorded finding may
+# carry any earlier version of the same pack (``yoetz.protocol.policy_packs``).
 _POLICY_IDENTITY_BY_KIND: Final[MappingProxyType[FindingKind, tuple[str, str]]] = MappingProxyType(
     {
         kind: (
-            ("work-integrity", "0.1.0")
-            if kind in _WORK_INTEGRITY_KINDS
-            else ("research-evidence", "0.1.0")
-            if kind is not FindingKind.COORDINATION_OVERLAP
-            else ("coordination", "0.1.0")
+            policy_id,
+            CURRENT_POLICY_VERSIONS[policy_id],
         )
         for kind in FindingKind
+        for policy_id in (
+            WORK_INTEGRITY_POLICY_ID
+            if kind in _WORK_INTEGRITY_KINDS
+            else RESEARCH_EVIDENCE_POLICY_ID
+            if kind is not FindingKind.COORDINATION_OVERLAP
+            else COORDINATION_POLICY_ID,
+        )
     }
 )
+
+
+def finding_policy_identity(kind: FindingKind) -> tuple[str, str]:
+    """The ``(policy_id, policy_version)`` a newly raised finding of ``kind`` carries."""
+
+    return _POLICY_IDENTITY_BY_KIND[kind]
+
 
 _TERMINAL_SEMANTIC_STATUSES: Final = frozenset(
     {
@@ -751,12 +772,11 @@ def _validate_finding_fields(
     _validate_bounded_text(detail)
     validated_refs = _validate_subject_refs(subject_refs)
 
-    expected_policy_id, expected_policy_version = _POLICY_IDENTITY_BY_KIND[validated_kind]
+    expected_policy_id, _ = _POLICY_IDENTITY_BY_KIND[validated_kind]
     if (
         type(policy_id) is not str
-        or type(policy_version) is not str
         or policy_id != expected_policy_id
-        or policy_version != expected_policy_version
+        or not is_recorded_policy_identity(policy_id, policy_version)
     ):
         raise ProtocolValueError("invalid_finding_policy_identity")
     if type(subject_frontier) is not Frontier:

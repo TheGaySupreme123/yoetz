@@ -69,6 +69,7 @@ from yoetz.protocol.models import (
     validate_semantic_outcome,
     validate_semantic_provenance_binding,
 )
+from yoetz.protocol.policy_packs import RECORDED_POLICY_PACKS
 
 __all__ = [
     "CheckChecklistItem",
@@ -294,11 +295,8 @@ type QueryableProjectionView = Literal[
 _MAX_SAFE_INTEGER: Final = 2**53 - 1
 _MAX_SQLITE_SIGNED_INTEGER: Final = 2**63 - 1
 _IDENTITY_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$", re.ASCII)
-_POLICY_IDS: Final = (
-    "coordination/0.1.0",
-    "research-evidence/0.1.0",
-    "work-integrity/0.1.0",
-)
+# A replayed check reports the pack versions it recorded, which may predate the current ones.
+_POLICY_IDS: Final = RECORDED_POLICY_PACKS
 
 
 def _invalid() -> ValueError:

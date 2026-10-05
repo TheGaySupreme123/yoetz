@@ -3247,3 +3247,69 @@ def test_the_explanation_reads_the_newest_check_that_could_resolve_the_finding()
     assert f"in check {evt(8)}" in explanation
     assert "subject_outside_checked_scope" in explanation
     assert "Later check" not in explanation
+
+
+_WORK_CURRENT = ("work-integrity", "0.2.0")
+_RESEARCH_CURRENT = ("research-evidence", "0.2.0")
+
+
+def _current_check(**overrides: object) -> CheckRecordedPayload:
+    """A check the upgraded build records: every execution at the current pack versions."""
+
+    check = _check(**overrides)  # type: ignore[arg-type]
+    return replace(
+        check,
+        policies=(PolicyVersion(*_RESEARCH_CURRENT), PolicyVersion(*_WORK_CURRENT)),
+        policy_executions=tuple(
+            _execution(
+                (execution.policy_id, "0.2.0"),
+                execution.outcome,
+                execution.reason,
+            )
+            for execution in check.policy_executions
+        ),
+    )
+
+
+def test_a_finding_recorded_before_the_pack_upgrade_stays_resolvable() -> None:
+    """A 0.1.0 finding is resolved by a later check that ran the same pack at 0.2.0."""
+
+    assert _resolves(_finding(), _current_check()) is True
+
+
+def test_a_newer_finding_is_never_resolved_by_an_older_pack_version() -> None:
+    newer = replace(_finding(), policy_version="0.2.0")
+    assert _resolves(newer, _check()) is False
+    assert _resolves(newer, _current_check()) is True
+
+
+def test_an_issue_re_raised_by_the_upgraded_pack_is_the_same_issue() -> None:
+    """The issue key names the pack lineage, so a 0.2.0 re-raise refires the 0.1.0 row."""
+
+    legacy = _finding()
+    successor = replace(_finding(2), policy_version="0.2.0")
+    assert issue_key(successor) == issue_key(legacy)
+    keys = frozenset({issue_key(successor)})
+    check = _current_check(returned=(fnd(2),))
+    assert qualifying_check_resolves(legacy, 4, check, keys) is False
+
+
+def test_a_check_mixing_pack_generations_is_not_a_recorded_selection() -> None:
+    with pytest.raises(ValueError):
+        replace(
+            _check(),
+            policies=(PolicyVersion(*_RESEARCH), PolicyVersion(*_WORK_CURRENT)),
+            policy_executions=(
+                _execution(_RESEARCH, "run", "completed"),
+                _execution(_WORK_CURRENT, "run", "completed"),
+            ),
+        )
+
+
+def test_an_unknown_pack_version_is_not_decodable() -> None:
+    with pytest.raises(ValueError):
+        PolicyVersion("work-integrity", "0.3.0")
+    with pytest.raises(ValueError):
+        PolicyVersion("coordination", "0.2.0")
+    with pytest.raises(ValueError):
+        replace(_finding(), policy_version="0.3.0")

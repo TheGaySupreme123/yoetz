@@ -76,10 +76,18 @@ from yoetz.protocol.models import (
     SemanticReason,
     SemanticStatus,
 )
+from yoetz.protocol.policy_packs import (
+    RESEARCH_EVIDENCE_POLICY_ID,
+    WORK_INTEGRITY_POLICY_ID,
+    current_policy_pack,
+)
 
 __all__ = ["Application", "RespondInternalResult", "execute_respond"]
 
-_POLICY_PACKS = ("research-evidence/0.1.0", "work-integrity/0.1.0")
+_POLICY_PACKS = (
+    current_policy_pack(RESEARCH_EVIDENCE_POLICY_ID),
+    current_policy_pack(WORK_INTEGRITY_POLICY_ID),
+)
 
 
 class Application(Protocol):

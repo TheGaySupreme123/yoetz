@@ -72,6 +72,7 @@ _TOOL_OUTPUT_SCHEMA_VERSIONS: Final = MappingProxyType(
         "start": "1.1.0",
         "check": "1.4.0",
         "respond": "1.1.0",
+        "publish_work": "1.1.0",
         "status": "1.4.0",
         "receipt": "1.3.0",
         "closure_prepare": "1.0.0",
@@ -2036,7 +2037,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "policy": MappingProxyType(
             {
                 "start": "sha256:d74368f4c375bd9f1f32bf6a99fa28c1cfd2f8366048e8dd617df54d9f606fe4",
-                "publish_work": "sha256:a8dd06954e2f2ff65d3fb269a143b13745342e973e270179dc8b952fde7df115",
+                "publish_work": "sha256:7c11f3c51242386f32f69dd85fc787da2223df1e23b5fa0314887a73172ac574",
                 "check": "sha256:f4e91ea5ae6138ca381d3a990340067b6e28a545340eec9c0ca4737a18f06166",
                 "respond": "sha256:191f69e1592bd6bb23f7173725645dc339441b12eaa91c08cc3da4e9feaf0b85",
                 "status": "sha256:7e77f753244eee59b711cb7ee77c8f09970ef1b61c91b548b6f4a821b3541969",
@@ -2048,7 +2049,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "strict": MappingProxyType(
             {
                 "start": "sha256:d74368f4c375bd9f1f32bf6a99fa28c1cfd2f8366048e8dd617df54d9f606fe4",
-                "publish_work": "sha256:a8dd06954e2f2ff65d3fb269a143b13745342e973e270179dc8b952fde7df115",
+                "publish_work": "sha256:7c11f3c51242386f32f69dd85fc787da2223df1e23b5fa0314887a73172ac574",
                 "check": "sha256:3cd2326917a550c0a24f3e94c6141f41b1549107030154c3e5b29f46bfaef78b",
                 "respond": "sha256:191f69e1592bd6bb23f7173725645dc339441b12eaa91c08cc3da4e9feaf0b85",
                 "status": "sha256:7e77f753244eee59b711cb7ee77c8f09970ef1b61c91b548b6f4a821b3541969",
@@ -2061,8 +2062,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:ee712bf56cc573404919139a3ca2a88c79d2bd3c19005b2ae8a0dbb67390f729",
-        "strict": "sha256:401ae8093136d2a5f4d2961cd021cd4d2abef9fa77c139ed601fb77d1fc81572",
+        "policy": "sha256:73505630e519e9578e1c1167921f17a20941a8cc555e1b8dbccf5af5cb8b236f",
+        "strict": "sha256:f880217802aafc98b76e93c3cdbb125bea0531c5430e3b88e62b9c8d0925c39f",
     }
 )
 

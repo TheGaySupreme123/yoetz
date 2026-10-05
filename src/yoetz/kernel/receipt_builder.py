@@ -105,6 +105,7 @@ from yoetz.kernel.deterministic_checks import (
 )
 from yoetz.kernel.finding_resolution import (
     finding_resolution_explanation,
+    issue_key,
     unverified_resolution_finding_ids,
 )
 from yoetz.kernel.lineage import LineageEvaluation, LineageRollupState
@@ -202,13 +203,7 @@ class ReceiptFindingState:
 
 
 def _issue_key(finding: Finding) -> tuple[object, ...]:
-    return (
-        finding.origin,
-        finding.policy_id,
-        finding.policy_version,
-        finding.kind,
-        finding.subject_refs,
-    )
+    return issue_key(finding)
 
 
 def _projection_records(projection: ProjectionState) -> tuple[ProjectionRecord[object], ...]:

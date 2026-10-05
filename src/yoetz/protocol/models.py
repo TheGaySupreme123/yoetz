@@ -884,6 +884,26 @@ EvidenceImmutabilityWire = Annotated[
 ]
 LedgerFreshnessWire = Annotated[LedgerFreshness, BeforeValidator(_ledger_freshness_from_wire)]
 CheckTypeWire = Annotated[CheckType, BeforeValidator(_check_type_from_wire)]
+# Built-in policy-pack identities (``yoetz.protocol.policy_packs``). Requests select only current
+# packs; results and recorded rows also admit the earlier identities a ledger or an older 0.3
+# service may still carry.
+RecordedPolicyVersionWire = Literal["0.1.0", "0.2.0"]
+CurrentPolicyPackWire = Literal[
+    "coordination/0.1.0", "research-evidence/0.2.0", "work-integrity/0.2.0"
+]
+RecordedPolicyPackWire = Literal[
+    "coordination/0.1.0",
+    "research-evidence/0.1.0",
+    "research-evidence/0.2.0",
+    "work-integrity/0.1.0",
+    "work-integrity/0.2.0",
+]
+RecordedVersionSlicePackWire = Literal[
+    "research-evidence/0.1.0",
+    "research-evidence/0.2.0",
+    "work-integrity/0.1.0",
+    "work-integrity/0.2.0",
+]
 DataCategoryWire = Annotated[DataCategory, BeforeValidator(_data_category_from_wire)]
 WorkStateWire = Annotated[WorkState, BeforeValidator(_work_state_from_wire)]
 SessionHealthWire = Annotated[SessionHealth, BeforeValidator(_session_health_from_wire)]
@@ -1638,10 +1658,7 @@ class CheckRequestModel(PublicRequestModel):
     mode: Literal["deterministic_only", "semantic_if_configured", "semantic_required"] | None = None
     scope: CheckScopeModel | None = None
     max_findings: Literal["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"] | None = None
-    policy_packs: (
-        tuple[Literal["coordination/0.1.0", "research-evidence/0.1.0", "work-integrity/0.1.0"], ...]
-        | None
-    ) = None
+    policy_packs: tuple[CurrentPolicyPackWire, ...] | None = None
 
     @model_validator(mode="after")
     def _validate_check_request(self) -> CheckRequestModel:
@@ -2382,7 +2399,7 @@ class StartVersionSliceModel(_ClosedModel):
     protocol_version: Literal["0.1"]
     engine_version: VersionWire
     projection_version: VersionWire
-    policy_packs: tuple[Literal["research-evidence/0.1.0", "work-integrity/0.1.0"], ...]
+    policy_packs: tuple[RecordedVersionSlicePackWire, ...]
 
     @model_validator(mode="after")
     def _validate_start_version_packs(self) -> StartVersionSliceModel:
@@ -2629,7 +2646,7 @@ class PublishWorkVersionSliceModel(_ClosedModel):
     protocol_version: Literal["0.1"]
     engine_version: VersionWire
     projection_version: VersionWire
-    policy_packs: tuple[Literal["research-evidence/0.1.0", "work-integrity/0.1.0"], ...]
+    policy_packs: tuple[RecordedVersionSlicePackWire, ...]
 
     @model_validator(mode="after")
     def _validate_publish_version_packs(self) -> PublishWorkVersionSliceModel:
@@ -2852,7 +2869,7 @@ class PublishWorkResultModel(PublicResultModel[PublishWorkResultBranch]):
 
 class CheckPolicyExecutionModel(_ClosedModel):
     policy_id: Literal["coordination", "research-evidence", "work-integrity"]
-    policy_version: Literal["0.1.0"]
+    policy_version: RecordedPolicyVersionWire
     outcome: Literal["failed", "run", "skipped"]
     reason: Literal[
         "completed",
@@ -2928,7 +2945,7 @@ class CheckProjectedFindingModel(_ClosedModel):
     detail: String1To8192 | OmittedContentModel
     subject_refs: tuple[SubjectIdWire, ...]
     policy_id: Literal["coordination", "research-evidence", "work-integrity"]
-    policy_version: Literal["0.1.0"]
+    policy_version: RecordedPolicyVersionWire
     subject_frontier: FrontierModel
     coverage: CoverageModel
     provenance: JsonValue | None
@@ -3053,9 +3070,7 @@ class CheckVersionSliceModel(_ClosedModel):
     protocol_version: Literal["0.1"]
     engine_version: VersionWire
     projection_version: VersionWire
-    policy_packs: tuple[
-        Literal["coordination/0.1.0", "research-evidence/0.1.0", "work-integrity/0.1.0"], ...
-    ]
+    policy_packs: tuple[RecordedPolicyPackWire, ...]
 
     @model_validator(mode="after")
     def _validate_check_version_packs(self) -> CheckVersionSliceModel:
@@ -3573,7 +3588,7 @@ class RespondVersionSliceModel(_ClosedModel):
     protocol_version: Literal["0.1"]
     engine_version: VersionWire
     projection_version: VersionWire
-    policy_packs: tuple[Literal["research-evidence/0.1.0", "work-integrity/0.1.0"], ...]
+    policy_packs: tuple[RecordedVersionSlicePackWire, ...]
 
     @model_validator(mode="after")
     def _validate_respond_version_packs(self) -> RespondVersionSliceModel:
@@ -3670,7 +3685,7 @@ class StatusCandidateFindingItemModel(_ClosedModel):
     detail: String1To8192 | OmittedContentModel
     subject_refs: tuple[SubjectIdWire, ...]
     policy_id: Literal["coordination", "research-evidence", "work-integrity"]
-    policy_version: Literal["0.1.0"]
+    policy_version: RecordedPolicyVersionWire
     subject_frontier: FrontierModel
     coverage: CoverageModel
     basis: StatusFindingBasisModel
@@ -3928,7 +3943,7 @@ class StatusFindingItemModel(_ClosedModel):
     detail: String1To8192 | OmittedContentModel
     subject_refs: tuple[SubjectIdWire, ...]
     policy_id: Literal["coordination", "research-evidence", "work-integrity"]
-    policy_version: Literal["0.1.0"]
+    policy_version: RecordedPolicyVersionWire
     subject_frontier: FrontierModel
     coverage: CoverageModel
     provenance: JsonValue | None
@@ -4144,7 +4159,7 @@ class StatusClosureReadinessModel(_ClosedModel):
     # on the unreleased 1.4.0 wire so a result shaped by an earlier 0.3 build still validates; it
     # is then absent as a whole, never partially present and never null.
     state: Literal["action_required", "ready", "ready_with_limitations", "unknown"] | None = None
-    gap_classification_version: Literal["1"] | None = None
+    gap_classification_version: Literal["1", "2"] | None = None
     agent_actionable: tuple[ReadinessItemWire, ...] | None = None
     standing_limitations: tuple[CodeWire, ...] | None = None
     acknowledged_not_done: tuple[AcknowledgedItemIdWire, ...] | None = None
@@ -4653,7 +4668,7 @@ class StatusVersionSliceModel(_ClosedModel):
     apsw_version: VersionWire
     sqlite_version: VersionWire
     sqlite_source_id: AsciiString1To160
-    policy_packs: tuple[Literal["research-evidence/0.1.0", "work-integrity/0.1.0"], ...]
+    policy_packs: tuple[RecordedVersionSlicePackWire, ...]
     provider_profiles: tuple[ProfileIdWire, ...]
     route_profile: Literal["policy", "strict"] | None = None
 

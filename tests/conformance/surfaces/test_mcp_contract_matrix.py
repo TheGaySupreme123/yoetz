@@ -302,8 +302,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:ee712bf56cc573404919139a3ca2a88c79d2bd3c19005b2ae8a0dbb67390f729",
-        "strict": "sha256:401ae8093136d2a5f4d2961cd021cd4d2abef9fa77c139ed601fb77d1fc81572",
+        "policy": "sha256:73505630e519e9578e1c1167921f17a20941a8cc555e1b8dbccf5af5cb8b236f",
+        "strict": "sha256:f880217802aafc98b76e93c3cdbb125bea0531c5430e3b88e62b9c8d0925c39f",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -351,7 +351,7 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert "unsorted_set_field" in description
     publish_descriptor = descriptor_for("publish_work")
     assert publish_descriptor.input_schema_ref.endswith("publish-work-request-1.2.0.schema.json")
-    assert publish_descriptor.output_schema_ref.endswith("publish-work-result-1.0.0.schema.json")
+    assert publish_descriptor.output_schema_ref.endswith("publish-work-result-1.1.0.schema.json")
     check_descriptor = descriptor_for("check")
     assert check_descriptor.output_schema_ref.endswith("check-result-1.4.0.schema.json")
     status_descriptor = descriptor_for("status")
@@ -601,7 +601,7 @@ def _subscription_check_result() -> dict[str, Any]:
             "protocol_version": "0.1",
             "engine_version": "0.1.0",
             "projection_version": "0.1.0",
-            "policy_packs": ["work-integrity/0.1.0"],
+            "policy_packs": ["work-integrity/0.2.0"],
         },
         "privacy_projection": _subscription_privacy_projection(),
     }

@@ -126,6 +126,11 @@ from yoetz.protocol.models import (
     StatusVersionSliceModel,
     StatusVersionsPageModel,
 )
+from yoetz.protocol.policy_packs import (
+    RESEARCH_EVIDENCE_POLICY_ID,
+    WORK_INTEGRITY_POLICY_ID,
+    current_policy_pack,
+)
 
 __all__ = [
     "Application",
@@ -134,7 +139,10 @@ __all__ = [
     "semantic_progress_wire",
 ]
 
-_PACKS = ("research-evidence/0.1.0", "work-integrity/0.1.0")
+_PACKS = (
+    current_policy_pack(RESEARCH_EVIDENCE_POLICY_ID),
+    current_policy_pack(WORK_INTEGRITY_POLICY_ID),
+)
 _CURSOR_VERSION = "1"
 
 

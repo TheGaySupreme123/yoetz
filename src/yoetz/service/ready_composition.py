@@ -358,6 +358,11 @@ from yoetz.protocol.models import (
     SemanticStatus,
     validate_semantic_provenance_binding,
 )
+from yoetz.protocol.policy_packs import (
+    RESEARCH_EVIDENCE_POLICY_ID,
+    WORK_INTEGRITY_POLICY_ID,
+    current_policy_pack,
+)
 from yoetz.service.bundle_upgrade import (
     BUNDLE_UPGRADE_SOURCE_VERSION,
     BUNDLE_UPGRADE_SOURCE_VERSIONS,
@@ -5508,9 +5513,11 @@ def _policy_packs(manifest: Mapping[str, CanonicalJsonValue]) -> tuple[str, ...]
     # authority.  Start/receipt version slices carry the two user-facing verification packs;
     # exposing the coordination authority here violates their closed wire contract.
     packs = tuple(cast(list[str], values))
-    return tuple(
-        item for item in packs if item in {"research-evidence/0.1.0", "work-integrity/0.1.0"}
-    )
+    user_facing = {
+        current_policy_pack(RESEARCH_EVIDENCE_POLICY_ID),
+        current_policy_pack(WORK_INTEGRITY_POLICY_ID),
+    }
+    return tuple(item for item in packs if item in user_facing)
 
 
 def _record_external_runtime_state(state: Callable[[], str | None] | None, request_id: str) -> None:

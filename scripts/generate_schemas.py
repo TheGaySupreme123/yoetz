@@ -2052,6 +2052,74 @@ def _finding_recorded_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]
     return document
 
 
+def _policy_lineage(policy_id: str) -> list[JsonValue]:
+    from yoetz.protocol.policy_packs import CURRENT_POLICY_VERSIONS, LEGACY_POLICY_VERSIONS
+
+    return [*LEGACY_POLICY_VERSIONS[policy_id], CURRENT_POLICY_VERSIONS[policy_id]]
+
+
+def _admit_recorded_policy_identities(document: dict[str, JsonValue]) -> None:
+    """Admit every recorded version of each built-in pack the active contract names.
+
+    The unreleased 0.3 contracts first pinned every pack at ``0.1.0``. New checks run only the
+    current versions (``yoetz.protocol.policy_packs``), but a recorded check or finding, a check
+    result replayed from the ledger, and a result an earlier 0.3 service shaped keep the identity
+    they were written with, so the active result and event contracts admit both. A pack named by
+    a constant ``policy_id`` admits only its own lineage; a shared definition admits the union.
+    """
+
+    from yoetz.protocol.policy_packs import RECORDED_POLICY_PACKS, RECORDED_POLICY_VERSION_VALUES
+
+    def admit(node: JsonValue) -> None:
+        if isinstance(node, list):
+            for item in node:
+                admit(item)
+            return
+        if not isinstance(node, dict):
+            return
+        properties = node.get("properties")
+        if isinstance(properties, dict):
+            version = properties.get("policy_version")
+            if isinstance(version, dict) and version.get("const") == "0.1.0":
+                policy = properties.get("policy_id")
+                values: list[JsonValue] = (
+                    _policy_lineage(cast(str, policy["const"]))
+                    if isinstance(policy, dict) and type(policy.get("const")) is str
+                    else list(RECORDED_POLICY_VERSION_VALUES)
+                )
+                version.pop("const")
+                if len(values) == 1:
+                    version["const"] = values[0]
+                else:
+                    version["enum"] = values
+            packs = properties.get("policy_packs")
+            if isinstance(packs, dict) and isinstance(items := packs.get("items"), dict):
+                listed = items.get("enum")
+                if isinstance(listed, list):
+                    policy_ids = {str(value).split("/", 1)[0] for value in listed}
+                    items["enum"] = [
+                        pack
+                        for pack in RECORDED_POLICY_PACKS
+                        if pack.split("/", 1)[0] in policy_ids
+                    ]
+        for value in node.values():
+            admit(value)
+
+    admit(document)
+
+
+def _select_current_policy_packs(document: dict[str, JsonValue]) -> None:
+    """A check request selects only the pack versions new checks run."""
+
+    from yoetz.protocol.policy_packs import CURRENT_POLICY_PACKS
+
+    properties = cast(dict[str, JsonValue], document["properties"])
+    policy_packs = cast(dict[str, JsonValue], properties["policy_packs"])
+    items = cast(dict[str, JsonValue], policy_packs["items"])
+    items["enum"] = list(CURRENT_POLICY_PACKS)
+    policy_packs["maxItems"] = len(CURRENT_POLICY_PACKS)
+
+
 def _check_totals_schema() -> dict[str, JsonValue]:
     """Closed structural counters; prose and caller-defined keys are never admitted."""
 
@@ -2150,23 +2218,17 @@ def _check_recorded_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         "type": "array",
         "uniqueItems": True,
     }
+    _admit_recorded_policy_identities(document)
     document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
     document["title"] = f"Yoetz check recorded {entry.schema_version}"
     return document
 
 
 def _check_request_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
-    """Allow the dedicated coordination deterministic policy in the current check request."""
+    """Select the current built-in packs, including the dedicated coordination policy."""
 
     document = _load_versioned_template(entry, "operations/check-request-1.0.0.schema.json")
-    properties = cast(dict[str, JsonValue], document["properties"])
-    policy_packs = cast(dict[str, JsonValue], properties["policy_packs"])
-    items = cast(dict[str, JsonValue], policy_packs["items"])
-    enum_values = cast(list[JsonValue], items["enum"])
-    if "coordination/0.1.0" not in enum_values:
-        enum_values.append("coordination/0.1.0")
-        enum_values.sort(key=lambda item: str(item).encode("ascii"))
-    policy_packs["maxItems"] = 3
+    _select_current_policy_packs(document)
     document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
     document["title"] = f"Yoetz check request {entry.schema_version}"
     return document
@@ -2907,6 +2969,7 @@ def _start_result_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         "type": "object",
     }
     document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    _admit_recorded_policy_identities(document)
     document["title"] = f"Yoetz start result {entry.schema_version}"
     return document
 
@@ -3380,6 +3443,7 @@ def _check_result_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
             values.append(value)
     values.sort(key=lambda item: str(item).encode("ascii"))
     document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    _admit_recorded_policy_identities(document)
     document["title"] = f"Yoetz check result {entry.schema_version}"
     return document
 
@@ -4151,6 +4215,7 @@ def _status_result_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     _add_status_finding_frontier(definitions)
     _add_review_input_continuation(definitions)
     document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    _admit_recorded_policy_identities(document)
     document["title"] = f"Yoetz status result {entry.schema_version}"
     return document
 
@@ -4184,7 +4249,8 @@ def _add_status_closure_checklist(definitions: dict[str, JsonValue]) -> None:
                 "type": "array",
                 "uniqueItems": True,
             },
-            "gap_classification_version": {"const": "1", "type": "string"},
+            # "2" is the current table; "1" stays admitted for a result an earlier 0.3 build shaped.
+            "gap_classification_version": {"enum": ["1", "2"], "type": "string"},
             "standing_limitations": {
                 "items": {"$ref": "#/$defs/code"},
                 "maxItems": 128,
@@ -6028,12 +6094,15 @@ def _control_v2_9_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     # 2.9.0 is unreleased on the 0.3 line: it also carries the respond 1.1.0 pair that admits the
     # terminal ``acknowledged_not_done`` disposition (#905).  Every earlier control version (the
     # released ones through 2.6.1 and the unreleased 2.7.0/2.8.0) keeps the frozen 1.0.0 pair, so
-    # an older service refuses the new disposition at its own schema boundary.
+    # an older service refuses the new disposition at its own schema boundary.  It likewise carries
+    # the publish-work 1.1.0 result whose version slice names the current policy-pack versions.
     respond_replacements = {
         SCHEMA_NAMESPACE + "operations/respond-request-1.0.0.schema.json": SCHEMA_NAMESPACE
         + "operations/respond-request-1.1.0.schema.json",
         SCHEMA_NAMESPACE + "operations/respond-result-1.0.0.schema.json": SCHEMA_NAMESPACE
         + "operations/respond-result-1.1.0.schema.json",
+        SCHEMA_NAMESPACE + "operations/publish-work-result-1.0.0.schema.json": SCHEMA_NAMESPACE
+        + "operations/publish-work-result-1.1.0.schema.json",
         SCHEMA_NAMESPACE + "privacy/egress-receipt-1.0.0.schema.json": SCHEMA_NAMESPACE
         + "privacy/egress-receipt-1.1.0.schema.json",
     }
@@ -6565,6 +6634,17 @@ def _publish_work_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         raise SchemaGenerationError(
             "publish_work_result_schema_template_invalid", entries=(entry.relative_path,)
         ) from exc
+
+
+def _publish_work_result_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Report the current built-in pack versions in the publish result's version slice.
+
+    The released 1.0.0 result pins both packs at ``0.1.0``; an older service keeps it.
+    """
+
+    document = _load_versioned_template(entry, "operations/publish-work-result-1.0.0.schema.json")
+    _admit_recorded_policy_identities(document)
+    return document
 
 
 def _status_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
@@ -7120,6 +7200,7 @@ def _respond_result_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         ) from exc
     _admit_acknowledged_not_done(disposition)
     rules.insert(1, _acknowledged_not_done_condition())
+    _admit_recorded_policy_identities(document)
     document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
     if "title" in document:
         document["title"] = f"Yoetz respond result {entry.schema_version}"
@@ -8467,6 +8548,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "operations/publish-work-result-1.1.0.schema.json",
+        "publish-work-result",
+        "1.1.0",
+        "request_result",
+        "MCP output",
+        lambda: (
+            __import__(
+                "yoetz.protocol.models", fromlist=["PublishWorkResultModel"]
+            ).PublishWorkResultModel
+        ),
+    ),
+    _RegistryEntry(
         "operations/read-guidance-request-1.0.0.schema.json",
         "read-guidance-request",
         "1.0.0",
@@ -9396,6 +9489,7 @@ _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
         "operations/receipt-result-1.3.0.schema.json",
         "operations/respond-request-1.1.0.schema.json",
         "operations/respond-result-1.1.0.schema.json",
+        "operations/publish-work-result-1.1.0.schema.json",
         "operations/start-request-1.1.0.schema.json",
         "operations/start-result-1.1.0.schema.json",
         "operations/status-request-1.2.0.schema.json",
@@ -9799,6 +9893,8 @@ def build_schema_documents(
             normalized = _respond_request_v1_1_schema(entry)
         elif entry.relative_path == "operations/respond-result-1.1.0.schema.json":
             normalized = _respond_result_v1_1_schema(entry)
+        elif entry.relative_path == "operations/publish-work-result-1.1.0.schema.json":
+            normalized = _publish_work_result_v1_1_schema(entry)
         elif entry.relative_path in {
             "operations/status-request-1.0.0.schema.json",
             "operations/status-request-1.1.0.schema.json",

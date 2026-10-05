@@ -81,6 +81,10 @@ from yoetz.kernel.projections import (
 )
 from yoetz.protocol.coverage import LedgerFreshness
 from yoetz.protocol.models import SemanticReason, SemanticStatus
+from yoetz.protocol.policy_packs import (
+    WORK_INTEGRITY_POLICY_ID,
+    policy_version_supersedes_or_equals,
+)
 
 __all__ = [
     "CAPTURE_FAILURE_GAPS",
@@ -275,7 +279,10 @@ _UNPROVEN_FRESHNESS: Final = frozenset(
 _COMMAND_GAPS: Final = frozenset({"command_attempt_uncorroborated", "command_attempt_mismatch"})
 # Keep this local to avoid importing the policy module while reducers import this module. If the
 # work-integrity pack changes version, its action-result exception must be reviewed explicitly.
-_ACTION_WITHOUT_RESULT_POLICY: Final = ("work-integrity", "0.1.0")
+# Reviewed for 0.2.0: the ``action_without_result`` rule did not change, so both versions qualify.
+_ACTION_WITHOUT_RESULT_POLICIES: Final = frozenset(
+    {(WORK_INTEGRITY_POLICY_ID, "0.1.0"), (WORK_INTEGRITY_POLICY_ID, "0.2.0")}
+)
 ProofStateCache = MutableMapping[tuple[int, int, str], ProjectionState | None]
 
 
@@ -294,7 +301,7 @@ def _command_gap_partition(
         or state.frontier < check.subject_frontier.sequence
         or finding.origin is not FindingOrigin.DETERMINISTIC
         or finding.kind is not FindingKind.ACTION_WITHOUT_RESULT
-        or (finding.policy_id, finding.policy_version) != _ACTION_WITHOUT_RESULT_POLICY
+        or (finding.policy_id, finding.policy_version) not in _ACTION_WITHOUT_RESULT_POLICIES
         or finding.coverage.ledger_freshness in _UNPROVEN_FRESHNESS
         or not set(finding.coverage.known_gaps) <= _DETERMINISTIC_PROOF_TOLERATED_GAPS
         or state.coverage_gaps
@@ -372,13 +379,14 @@ def issue_key(finding: Finding) -> IssueKey:
     """The durable identity of the issue a finding reports.
 
     Two findings with the same key are the same issue at different times: the newer row
-    supersedes the older one and starts unresolved.
+    supersedes the older one and starts unresolved. The key names the pack, not its version: the
+    versions of one pack form one lineage, so an issue a newer version re-raises after an upgrade
+    supersedes the row an earlier version recorded instead of standing beside it.
     """
 
     return (
         finding.origin,
         finding.policy_id,
-        finding.policy_version,
         finding.kind,
         finding.subject_refs,
     )
@@ -395,9 +403,13 @@ def _scope_covers(check: CheckRecordedPayload, finding: Finding) -> bool:
 
 
 def _policy_completed(check: CheckRecordedPayload, finding: Finding) -> bool:
+    # The finding's pack at the version that raised it, or a later version of the same pack: a
+    # finding recorded before an upgrade stays resolvable by a check the upgraded build runs.
     return any(
         execution.policy_id == finding.policy_id
-        and execution.policy_version == finding.policy_version
+        and policy_version_supersedes_or_equals(
+            finding.policy_id, execution.policy_version, finding.policy_version
+        )
         and execution.outcome == "run"
         and execution.reason == "completed"
         for execution in check.policy_executions
@@ -1015,7 +1027,7 @@ def _command_partition_candidate(
         bool(set(check.coverage.known_gaps) & _COMMAND_GAPS)
         and finding.origin is FindingOrigin.DETERMINISTIC
         and finding.kind is FindingKind.ACTION_WITHOUT_RESULT
-        and (finding.policy_id, finding.policy_version) == _ACTION_WITHOUT_RESULT_POLICY
+        and (finding.policy_id, finding.policy_version) in _ACTION_WITHOUT_RESULT_POLICIES
         and finding_source_frontier <= check.subject_frontier.sequence
         and issue_key(finding) not in returned_issue_keys
         and check.suppressed_count == 0

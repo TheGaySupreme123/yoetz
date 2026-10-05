@@ -36,6 +36,7 @@ from yoetz.domain.findings import (
     ResponseDisposition,
     SemanticProvenance,
     finding_from_json,
+    finding_policy_identity,
     finding_to_json,
     semantic_provenance_to_json,
 )
@@ -196,6 +197,12 @@ from yoetz.protocol.models import (
     validate_semantic_outcome,
     validate_semantic_provenance_binding,
 )
+from yoetz.protocol.policy_packs import (
+    COORDINATION_POLICY_ID,
+    RESEARCH_EVIDENCE_POLICY_ID,
+    WORK_INTEGRITY_POLICY_ID,
+    current_policy_pack,
+)
 from yoetz.version import ENGINE_VERSION
 
 __all__ = [
@@ -225,9 +232,9 @@ __all__ = [
     "validate_semantic_judgment",
 ]
 
-_RESEARCH_PACK = "research-evidence/0.1.0"
-_WORK_PACK = "work-integrity/0.1.0"
-_COORDINATION_PACK = "coordination/0.1.0"
+_RESEARCH_PACK = current_policy_pack(RESEARCH_EVIDENCE_POLICY_ID)
+_WORK_PACK = current_policy_pack(WORK_INTEGRITY_POLICY_ID)
+_COORDINATION_PACK = current_policy_pack(COORDINATION_POLICY_ID)
 _CANONICAL_PACKS = (_RESEARCH_PACK, _WORK_PACK, _COORDINATION_PACK)
 _UNAVAILABLE_GAPS = frozenset(
     {
@@ -239,22 +246,6 @@ _UNAVAILABLE_GAPS = frozenset(
         "unknown_event",
     }
 )
-_WORK_KINDS = frozenset(
-    {
-        FindingKind.ACTION_WITHOUT_RESULT,
-        FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE,
-        FindingKind.COMPLETION_WITH_OPEN_OBLIGATIONS,
-        FindingKind.CONTRADICTORY_CLAIMS_UNRESOLVED,
-        FindingKind.FAILED_WORK_OMITTED,
-        FindingKind.LEDGER_STALE_OR_INCOMPLETE,
-        FindingKind.REQUESTED_ITEM_NEVER_ATTEMPTED,
-        FindingKind.RESULT_WITHOUT_ACTION,
-        FindingKind.STALE_EVIDENCE_FOR_CHANGED_STATE,
-        FindingKind.WEAK_OR_STALE_RESPONSE,
-    }
-)
-
-
 SEMANTIC_REJECTED_REF_OUTSIDE_CASE: Final = "ref_outside_case"
 SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM: Final = "hidden_source_claim"
 SEMANTIC_REJECTED_SNIPPET: Final = "snippet_invalid"
@@ -2398,16 +2389,7 @@ async def _publish_deterministic_result(
 
 
 def _policy_identity(kind: FindingKind) -> tuple[str, str]:
-    return (
-        ("work-integrity", "0.1.0")
-        if kind in _WORK_KINDS
-        else ("coordination", "0.1.0")
-        if kind is FindingKind.COORDINATION_OVERLAP
-        else (
-            "research-evidence",
-            "0.1.0",
-        )
-    )
+    return finding_policy_identity(kind)
 
 
 @dataclass(frozen=True, slots=True)

@@ -149,6 +149,11 @@ from yoetz.protocol.models import (
     MAX_SEMANTIC_ITEM_BYTES,
     DataCategory,
 )
+from yoetz.protocol.policy_packs import (
+    RESEARCH_EVIDENCE_POLICY_ID,
+    WORK_INTEGRITY_POLICY_ID,
+    current_policy_pack,
+)
 
 __all__ = [
     "MAX_TASK_STATEMENT_ITEM_BYTES",
@@ -226,7 +231,10 @@ MAX_PRIOR_FINDINGS: Final = 8
 MAX_PRIOR_FINDING_SECTION_BYTES: Final = 48 * 1024
 # Refs listed per structural row; the full counts travel beside them.
 _MAX_PRIOR_FINDING_LISTED_REFS: Final = MAX_PRIOR_FINDING_LISTED_REFS
-_CANONICAL_PACKS: Final = ("research-evidence/0.1.0", "work-integrity/0.1.0")
+_CANONICAL_PACKS: Final = (
+    current_policy_pack(RESEARCH_EVIDENCE_POLICY_ID),
+    current_policy_pack(WORK_INTEGRITY_POLICY_ID),
+)
 # The question set leads with the review phase, taken from the same pure selector that picks the
 # check's budget profile, so the reviewer judges in-progress work as in progress and a completion
 # claim as a completion claim (issue #906). No question presupposes a defect or asks for the

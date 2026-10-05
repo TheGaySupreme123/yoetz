@@ -219,6 +219,7 @@ from yoetz.protocol.models import (
     CoverageModel,
     FreshnessWire,
     FrontierModel,
+    RecordedPolicyVersionWire,
     ReviewInputManifestModel,
     SemanticProgressPhase,
     SemanticReason,
@@ -1658,7 +1659,7 @@ def _projection_items(
                 "policy_id": cast(
                     Literal["research-evidence", "work-integrity"], finding.policy_id
                 ),
-                "policy_version": cast(Literal["0.1.0"], finding.policy_version),
+                "policy_version": cast(RecordedPolicyVersionWire, finding.policy_version),
                 "subject_frontier": FrontierModel.model_validate(
                     dict(finding.subject_frontier.as_wire())
                 ),

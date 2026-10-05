@@ -1078,8 +1078,8 @@ materially unavailable, or fails, `weak_or_stale_response` stands, so a hollow r
 lost to a pack that did not run. Selecting a single pack therefore yields that pack's own view.
 
 The ownership partition is exhaustive and disjoint: the first ten kinds belong to the built-in
-`work-integrity/0.1.0` pack, and the latter four belong to the built-in
-`research-evidence/0.1.0` pack. `coordination_overlap` belongs to the local coordination runtime,
+`work-integrity` pack (current version `0.2.0`), and the latter four belong to the built-in
+`research-evidence` pack (current version `0.2.0`). `coordination_overlap` belongs to the local coordination runtime,
 not either built-in pack. `semantic-review` is only a review-context / recipe label; it is not a
 `PolicyPack` value and it never appears as `Finding.policy_id`.
 
@@ -1583,10 +1583,29 @@ material and never revoke a check.
   obligations are all resolved.” The interpolation is the bounded closed enum value, never
   caller-controlled plan summary, revision reason, or other prose.
 - `PolicyPack` is the frozen data-only selector `(policy_id, policy_version)`; it contains no
-  callback or dynamic rule source. Its ids are `work-integrity/0.1.0`,
-  `research-evidence/0.1.0`
+  callback or dynamic rule source. Its ids are `work-integrity/0.2.0`,
+  `research-evidence/0.2.0`
   (`kernel/policies/work_integrity.py`, `kernel/policies/research_evidence.py`).
-  No third `semantic-review` pack exists.
+  No third `semantic-review` pack exists. The local coordination runtime runs
+  `coordination/0.1.0`.
+- Pack versions (`yoetz.protocol.policy_packs`). A pack's version names the rule table that
+  produced a check execution or a local finding, and moves whenever a rule changes meaning, so
+  check results produced under new rules carry a new identity. `0.2.0` of both built-in packs
+  (0.3 line): research-evidence raises `task_requirement_unmet` when no effective obligation cites
+  the task statement and accepts statement-sourced file items as test-edit justification;
+  work-integrity reports a completion that no observed run backs as
+  `claim_without_admissible_evidence`, and only observed edits or runs trigger that corroboration
+  rule. New checks run, and a check request may select, only the current versions
+  (`check-request` 1.1.0). Every earlier version stays decodable: `PolicyVersion`, `Finding`, and
+  the active `check_recorded` 1.4.0, `check-result` 1.4.0, `status-result` 1.4.0,
+  `start-result` 1.1.0, `respond-result` 1.1.0 and `publish-work-result` 1.1.0 contracts admit
+  `0.1.0` beside `0.2.0`, because a recorded check or finding, a check result replayed from the
+  ledger, and a result an earlier 0.3 service shaped keep the identity they were written with. A
+  recorded check carries one generation: every execution it records is either `0.1.0` or current.
+  The released `publish-work-result` 1.0.0 still pins `0.1.0`; control 2.9.0 carries 1.1.0.
+  The versions of one pack form one lineage: the finding issue key names the pack, not its
+  version, and a later check that ran the pack at the finding's version or a later one can resolve
+  it, so open findings recorded before an upgrade are neither stranded nor duplicated.
 
 ## 10. Ports (`ports/`)
 
@@ -1908,8 +1927,9 @@ coverage reported in the same item, so the summary line an agent reads can never
 is cleaner than the coverage vector beside it. `StatusCompactItemModel` rejects the inverse
 (issue #307).
 
-Finding response does not resolve. The issue key is `(origin, policy_id, policy_version, kind,
-complete canonical subject_refs)`. A later same-key row supersedes the old and starts unresolved.
+Finding response does not resolve. The issue key is `(origin, policy_id, kind, complete canonical
+subject_refs)`; it omits `policy_version`, so a row a newer version of the same pack re-raises is
+the same issue. A later same-key row supersedes the old and starts unresolved.
 Resolution is proof-based and replay-derived, owned by `kernel/finding_resolution.py`: the reducer
 folds every readable `check_recorded` event into each finding's projection record as
 `resolved_by_check_event_id` (`FindingProjectionRecord`; the snapshot key is emitted only when set,
@@ -1921,8 +1941,8 @@ qualified only through that recorded scope, `resolution_raising_check_event_id` 
 when set) names the same check, and redacting it reopens the row like redacting the proving check.
 A check resolves a current row only when all of these hold: its recorded `subject_frontier` is at or
 after the finding's ingestion sequence; every finding it returned is readable and none shares the
-row's issue key; `suppressed_count` is zero; the execution for the row's `(policy_id,
-policy_version)` is `run/completed`; its normalized `scope` is whole-case or names one of the row's
+row's issue key; `suppressed_count` is zero; an execution of the row's `policy_id` at the row's
+`policy_version` or a later version of that pack is `run/completed`; its normalized `scope` is whole-case or names one of the row's
 `subject_refs`; its coverage `ledger_freshness` is not `stale_after_material_change|unknown`; and
 its `known_gaps` lie within the proof class's closed tolerated set. `redacted_gap` also blocks by
 default. One local-only exception admits it when the finding's own recorded coverage was readable
@@ -6490,7 +6510,8 @@ project views keep their own documented coverage.
 status success; on the unreleased status-result 1.4.0 wire the six checklist fields are optional
 as a whole (absent for a result shaped by an earlier 0.3 build, never partial or null). Beside the
 unchanged `blocking_conditions` it carries `state` (`action_required|ready|ready_with_limitations|unknown`),
-`gap_classification_version` (`"1"`), and three groups. `agent_actionable` lists, in order, the
+`gap_classification_version` (`"2"`; the wire still admits `"1"` from an earlier 0.3 build),
+and three groups. `agent_actionable` lists, in order, the
 agent conditions present (`obligations_open`, `findings_unanswered`, `receipt_findings_unresolved`
 unless every receipt-blocking finding's latest response is `acknowledged_not_done`,
 `no_plan_published`, `no_obligations_declared`, `projection_stale`), then `check_in_progress`

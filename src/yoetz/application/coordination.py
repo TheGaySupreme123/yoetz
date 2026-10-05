@@ -83,6 +83,7 @@ from yoetz.ports.start_catalog import TaskRoute, TaskRouteState, TaskSourceProve
 from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
 from yoetz.protocol.coverage import PublicationChannel, coverage_for_channel
 from yoetz.protocol.ids import IdKind, validate_id
+from yoetz.protocol.policy_packs import COORDINATION_POLICY_ID, COORDINATION_POLICY_VERSION
 
 if TYPE_CHECKING:
     from yoetz.kernel.projections import ProjectionState
@@ -2278,8 +2279,8 @@ class CoordinationRuntime:
                 summary,
                 detail,
                 subject,
-                "coordination",
-                "0.1.0",
+                COORDINATION_POLICY_ID,
+                COORDINATION_POLICY_VERSION,
                 case.frontier,
                 coverage,
             )

@@ -70,8 +70,10 @@ __all__ = [
 ]
 
 # Bump when any assignment below changes meaning. Status responses carry the version so a reader
-# can tell which table classified a recorded readiness answer.
-GAP_CLASSIFICATION_VERSION: Final = "1"
+# can tell which table classified a recorded readiness answer. "2": the task-statement gap
+# ``instruction_requirement_unmapped`` became agent-actionable and the previously unclassified
+# ``compound_outcome_unavailable`` became a standing limitation.
+GAP_CLASSIFICATION_VERSION: Final = "2"
 UNCLASSIFIED_GAP_PREFIX: Final = "unclassified_gap:"
 
 _CODE_RE: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$", re.ASCII)

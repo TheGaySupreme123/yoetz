@@ -94,6 +94,12 @@ from yoetz.protocol.coverage import (
     coverage_to_json,
     weakest,
 )
+from yoetz.protocol.policy_packs import (
+    RESEARCH_EVIDENCE_POLICY_ID,
+    RESEARCH_EVIDENCE_POLICY_VERSION,
+    WORK_INTEGRITY_POLICY_ID,
+    WORK_INTEGRITY_POLICY_VERSION,
+)
 
 __all__ = [
     "CALLER_DIGEST_PROVENANCE_GAPS",
@@ -2335,7 +2341,7 @@ def build_test_edit_integrity_assessment(
         raise _invalid_policy()
     return build_policy_assessment(
         case,
-        PolicyPack("research-evidence", "0.1.0"),
+        PolicyPack(RESEARCH_EVIDENCE_POLICY_ID, RESEARCH_EVIDENCE_POLICY_VERSION),
         FindingKind.TASK_REQUIREMENT_UNMET,
         source_event_refs,
         (FindingFact("preexisting_test_edit_unjustified", support_refs),),
@@ -2364,7 +2370,7 @@ def build_task_statement_unmapped_assessment(
     subject = (statement.source_event_id,)
     return build_policy_assessment(
         case,
-        PolicyPack("research-evidence", "0.1.0"),
+        PolicyPack(RESEARCH_EVIDENCE_POLICY_ID, RESEARCH_EVIDENCE_POLICY_VERSION),
         FindingKind.TASK_REQUIREMENT_UNMET,
         subject,
         (FindingFact(TASK_STATEMENT_UNMAPPED_FACT, subject),),
@@ -2380,12 +2386,13 @@ def run_deterministic_policies(
 
     if type(case) is not DeterministicCase or type(policy) is not PolicyPack:
         raise _invalid_policy()
-    if (policy.policy_id, policy.policy_version) == ("work-integrity", "0.1.0"):
+    if (policy.policy_id, policy.policy_version) == (
+        WORK_INTEGRITY_POLICY_ID,
+        WORK_INTEGRITY_POLICY_VERSION,
+    ):
         from yoetz.kernel.policies.work_integrity import (
             WORK_INTEGRITY_FACT_CODES,
-            WORK_INTEGRITY_POLICY_ID,
             WORK_INTEGRITY_POLICY_PACK,
-            WORK_INTEGRITY_POLICY_VERSION,
             work_integrity_findings,
         )
 
@@ -2409,12 +2416,13 @@ def run_deterministic_policies(
             FindingKind.WEAK_OR_STALE_RESPONSE,
         )
         assessments = work_integrity_findings(case)
-    elif (policy.policy_id, policy.policy_version) == ("research-evidence", "0.1.0"):
+    elif (policy.policy_id, policy.policy_version) == (
+        RESEARCH_EVIDENCE_POLICY_ID,
+        RESEARCH_EVIDENCE_POLICY_VERSION,
+    ):
         from yoetz.kernel.policies.research_evidence import (
             RESEARCH_EVIDENCE_FACT_CODES,
-            RESEARCH_EVIDENCE_POLICY_ID,
             RESEARCH_EVIDENCE_POLICY_PACK,
-            RESEARCH_EVIDENCE_POLICY_VERSION,
             research_evidence_findings,
         )
 

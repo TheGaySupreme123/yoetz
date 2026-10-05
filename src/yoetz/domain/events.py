@@ -121,6 +121,13 @@ from yoetz.protocol.models import (
     SemanticStatus,
     validate_semantic_provenance_binding,
 )
+from yoetz.protocol.policy_packs import (
+    COORDINATION_POLICY_ID,
+    POLICY_PACK_GENERATIONS,
+    RESEARCH_EVIDENCE_POLICY_ID,
+    WORK_INTEGRITY_POLICY_ID,
+    is_recorded_policy_identity,
+)
 
 __all__ = [
     "EVENT_FAMILIES",
@@ -782,12 +789,10 @@ class PolicyVersion:
 
     def __post_init__(self) -> None:
         policy_id_value = _bounded_text(self.policy_id, 128, minimum=1)
-        if policy_id_value not in {"coordination", "research-evidence", "work-integrity"}:
-            raise ProtocolValueError("invalid_event_value_type")
-        if type(self.policy_version) is not str or self.policy_version != "0.1.0":
+        # Earlier pack versions stay decodable: a recorded check keeps the identity it ran.
+        if not is_recorded_policy_identity(policy_id_value, self.policy_version):
             raise ProtocolValueError("invalid_event_value_type")
         object.__setattr__(self, "policy_id", policy_id_value)
-        object.__setattr__(self, "policy_version", "0.1.0")
 
 
 @dataclass(frozen=True, slots=True)
@@ -2355,19 +2360,20 @@ class RedactionRecordedPayload:
         )
 
 
-_RESEARCH_POLICY: Final = PolicyVersion("research-evidence", "0.1.0")
-_WORK_POLICY: Final = PolicyVersion("work-integrity", "0.1.0")
-_COORDINATION_POLICY: Final = PolicyVersion("coordination", "0.1.0")
+_POLICY_SELECTION_ORDER: Final = (
+    COORDINATION_POLICY_ID,
+    RESEARCH_EVIDENCE_POLICY_ID,
+    WORK_INTEGRITY_POLICY_ID,
+)
+# A check records a non-empty, ordered selection from one generation of the built-in packs.
 _VALID_POLICY_SELECTIONS: Final = frozenset(
-    {
-        (_RESEARCH_POLICY,),
-        (_WORK_POLICY,),
-        (_RESEARCH_POLICY, _WORK_POLICY),
-        (_COORDINATION_POLICY,),
-        (_COORDINATION_POLICY, _RESEARCH_POLICY),
-        (_COORDINATION_POLICY, _WORK_POLICY),
-        (_COORDINATION_POLICY, _RESEARCH_POLICY, _WORK_POLICY),
-    }
+    tuple(
+        PolicyVersion(policy_id, generation[policy_id])
+        for index, policy_id in enumerate(_POLICY_SELECTION_ORDER)
+        if mask & (1 << index)
+    )
+    for generation in POLICY_PACK_GENERATIONS
+    for mask in range(1, 1 << len(_POLICY_SELECTION_ORDER))
 )
 
 

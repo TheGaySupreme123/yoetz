@@ -53,7 +53,7 @@ names what the receipt will disclose.
 
 2. **A closed, versioned classification table.** `yoetz.kernel.closure_readiness` assigns every gap
    code the product emits exactly once to `agent_actionable` or `standing_limitation`, and
-   `gap_classification_version` (currently `"1"`) names the table that classified a response. The
+   `gap_classification_version` (currently `"2"`) names the table that classified a response. The
    classification test: a code is standing when no agent action available under the current host,
    profile and privacy policy removes it; it is actionable when a documented agent action (publish,
    respond, revise a claim or plan, recheck after a material change, re-read status once the
@@ -213,6 +213,15 @@ obligation clears the first rule however coarse the plan, and any observed non-e
 after the last edit clears the second. They make an unmapped request or an uncorroborated claim
 visible and answerable; they do not prove the work correct. Both fired on every deterministic
 pilot attempt, including the two that passed the hidden tests, because no agent cited the
-statement or an observed run; the guidance now asks for both from the start. Policy pack versions
-stay `0.1.0` (the 0.3 line is unreleased); a persisted check replays through the text-contract
-digest.
+statement or an observed run; the guidance now asks for both from the start. A persisted check
+replays through the text-contract digest.
+
+**Versions (maintainer-approved 2026-10-05).** Check results produced under these rules carry new
+identifiers: `research-evidence` and `work-integrity` move to `0.2.0` (`coordination` stays
+`0.1.0`), and `gap_classification_version` moves to `"2"` (the reclassification in decision 1 and
+the earlier standing classification of `compound_outcome_unavailable`). New checks run and select
+only the current pack versions. Earlier identities stay readable: recorded checks and findings,
+check results replayed from the ledger, and results an earlier 0.3 service shaped keep `0.1.0` or
+`"1"`, and the active 0.3 contracts admit both. A pack's versions form one lineage, so the finding
+issue key names the pack without its version and a later check at the same or a newer version can
+resolve a finding recorded before the upgrade. `docs/INTERFACES.md` records the contract details.

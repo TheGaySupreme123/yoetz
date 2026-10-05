@@ -109,6 +109,12 @@ reverse-chronological released versions.
 
 ### Changed
 
+- Checks run the `research-evidence/0.2.0` and `work-integrity/0.2.0` policy packs, and status
+  reports `gap_classification_version` `"2"`, so results produced under the new task-statement,
+  observed-run corroboration and test-edit rules carry their own identifiers. Checks and findings
+  recorded under `0.1.0` stay readable, and a later check can still resolve a finding recorded
+  before the upgrade. A check request that names a pack must name its current version. The
+  publish-work result moves to schema 1.1.0 (control 2.9.0); the released 1.0.0 keeps `0.1.0`.
 - Codex and Cursor now receive a compact initialize instructions body (at most 2,048 bytes)
   instead of the 19.8 KB `agent-instructions.md` document, which Codex code mode copied into
   every Yoetz tool description. The body keeps when to call `start`, the no-false-activation,

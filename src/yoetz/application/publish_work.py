@@ -139,6 +139,12 @@ from yoetz.protocol.models import (
     PublishWorkResult,
     PublishWorkResultModel,
     PublishWorkVersionSliceModel,
+    RecordedVersionSlicePackWire,
+)
+from yoetz.protocol.policy_packs import (
+    RESEARCH_EVIDENCE_POLICY_ID,
+    WORK_INTEGRITY_POLICY_ID,
+    current_policy_pack,
 )
 
 __all__ = [
@@ -203,7 +209,13 @@ _STATE_SENSITIVE_FAMILIES = frozenset(
     }
 )
 _UNKNOWN_GAP = "unknown_event_schema_preserved"
-_POLICY_PACKS = ("research-evidence/0.1.0", "work-integrity/0.1.0")
+_POLICY_PACKS = cast(
+    tuple[RecordedVersionSlicePackWire, ...],
+    (
+        current_policy_pack(RESEARCH_EVIDENCE_POLICY_ID),
+        current_policy_pack(WORK_INTEGRITY_POLICY_ID),
+    ),
+)
 
 
 class Application(Protocol):

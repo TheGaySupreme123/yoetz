@@ -330,7 +330,7 @@ class _Ledger:
                 "0.1",
                 "0.1.0",
                 "0.1.0",
-                ("research-evidence/0.1.0", "work-integrity/0.1.0"),
+                ("research-evidence/0.2.0", "work-integrity/0.2.0"),
             ),
             missing_for_assessment=missing_for_assessment,
         )
@@ -671,8 +671,8 @@ async def test_empty_completion_scope_gap_reaches_check_verdict(
     assert expected_gap in checked.coverage.known_gaps
     assert checked.policy_executions == (
         CheckPolicyExecution("coordination", "0.1.0", "skipped", "not_applicable"),
-        CheckPolicyExecution("research-evidence", "0.1.0", "run", "completed"),
-        CheckPolicyExecution("work-integrity", "0.1.0", "run", "completed"),
+        CheckPolicyExecution("research-evidence", "0.2.0", "run", "completed"),
+        CheckPolicyExecution("work-integrity", "0.2.0", "run", "completed"),
     )
 
 

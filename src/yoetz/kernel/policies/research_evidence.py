@@ -50,6 +50,10 @@ from yoetz.kernel.policies.response_support import (
 )
 from yoetz.kernel.projections import ClaimProjectionRecord
 from yoetz.protocol.coverage import PublicationChannel
+from yoetz.protocol.policy_packs import (
+    RESEARCH_EVIDENCE_POLICY_ID,
+    RESEARCH_EVIDENCE_POLICY_VERSION,
+)
 
 __all__ = [
     "RESEARCH_EVIDENCE_FACT_CODES",
@@ -59,8 +63,6 @@ __all__ = [
     "research_evidence_findings",
 ]
 
-RESEARCH_EVIDENCE_POLICY_ID: Final = "research-evidence"
-RESEARCH_EVIDENCE_POLICY_VERSION: Final = "0.1.0"
 RESEARCH_EVIDENCE_POLICY_PACK: Final = PolicyPack(
     RESEARCH_EVIDENCE_POLICY_ID,
     RESEARCH_EVIDENCE_POLICY_VERSION,

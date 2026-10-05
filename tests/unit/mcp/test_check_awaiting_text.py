@@ -54,7 +54,7 @@ def _body(state: str, continuation: dict[str, Any]) -> dict[str, Any]:
             "protocol_version": "0.1",
             "engine_version": "0.1.0",
             "projection_version": "yoetz/0.1.0",
-            "policy_packs": ["research-evidence/0.1.0", "work-integrity/0.1.0"],
+            "policy_packs": ["research-evidence/0.2.0", "work-integrity/0.2.0"],
         },
     }
 

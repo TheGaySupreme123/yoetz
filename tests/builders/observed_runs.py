@@ -108,7 +108,7 @@ _ACTION = EventSchema("action_recorded", "1.0.0")
 _RESULT = EventSchema("result_recorded", "1.0.0")
 _CLAIM_V1 = EventSchema("claim_recorded", "1.0.0")
 _CLAIM_V1_1 = EventSchema("claim_recorded", "1.1.0")
-_PACKS = ("research-evidence/0.1.0", "work-integrity/0.1.0")
+_PACKS = ("research-evidence/0.2.0", "work-integrity/0.2.0")
 OMISSION_KINDS = frozenset(
     {FindingKind.FAILED_WORK_OMITTED, FindingKind.MATERIAL_LIMITATION_OMITTED}
 )

@@ -378,7 +378,7 @@ async def test_awaiting_human_replays_the_exact_request_even_if_picker_mode_chan
                             "protocol_version": "0.1",
                             "engine_version": "0.1.0",
                             "projection_version": "yoetz/0.1.0",
-                            "policy_packs": ["research-evidence/0.1.0", "work-integrity/0.1.0"],
+                            "policy_packs": ["research-evidence/0.2.0", "work-integrity/0.2.0"],
                         },
                     }
                 )
