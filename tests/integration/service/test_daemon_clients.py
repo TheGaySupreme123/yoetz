@@ -1067,7 +1067,7 @@ def _publish_work_internal(request: PublishWorkRequest) -> PublishWorkInternalRe
             protocol_version="0.1",
             engine_version="0.1.0",
             projection_version="0.1.0",
-            policy_packs=("research-evidence/0.2.0", "work-integrity/0.2.0"),
+            policy_packs=("research-evidence/0.2.0", "work-integrity/0.3.0"),
         ),
     )
 

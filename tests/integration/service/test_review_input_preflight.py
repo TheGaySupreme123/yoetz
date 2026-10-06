@@ -550,7 +550,7 @@ async def test_durable_same_request_recovery_after_statement_event_refreshes_cas
             "expected_frontier": created.frontier.model_dump(mode="json"),
             "mode": "semantic_required",
             "max_findings": "3",
-            "policy_packs": ["work-integrity/0.2.0"],
+            "policy_packs": ["work-integrity/0.3.0"],
         }
     )
 
@@ -715,7 +715,7 @@ async def test_ready_same_request_recovery_after_statement_plan_amendment(
                 "expected_frontier": started.frontier.model_dump(mode="json"),
                 "mode": "semantic_required",
                 "max_findings": "3",
-                "policy_packs": ["work-integrity/0.2.0"],
+                "policy_packs": ["work-integrity/0.3.0"],
             }
         )
         first = await service.app.check(request, repository_privacy_context=repository)
@@ -1109,7 +1109,7 @@ async def test_paused_and_recovered_check_project_for_mcp_clients(
                 "expected_frontier": started.frontier.model_dump(mode="json"),
                 "mode": "semantic_required",
                 "max_findings": "3",
-                "policy_packs": ["work-integrity/0.2.0"],
+                "policy_packs": ["work-integrity/0.3.0"],
             }
         )
         first = await service.app.check(request, repository_privacy_context=repository)
@@ -1423,7 +1423,7 @@ async def test_review_after_statement_revision_with_carried_obligation_commits(
                 "expected_frontier": planned_frontier,
                 "mode": "semantic_required",
                 "max_findings": "3",
-                "policy_packs": ["work-integrity/0.2.0"],
+                "policy_packs": ["work-integrity/0.3.0"],
             }
         )
         first = await service.app.check(request, repository_privacy_context=repository)

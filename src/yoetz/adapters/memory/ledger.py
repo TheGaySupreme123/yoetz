@@ -136,6 +136,7 @@ from yoetz.kernel.reducers import (
     replay_extension_with_index,
     replay_with_index,
 )
+from yoetz.kernel.task_facts import task_fact_signals
 from yoetz.observability.logging import record_unexpected_exception_without_raising
 from yoetz.ports.change_capture import TASK_CHANGE_BASE_MEDIA_TYPE
 from yoetz.ports.clock import ClockPort
@@ -2717,7 +2718,9 @@ class MemoryLedgerAdapter:
         )
         status_gaps = tuple(
             sorted(
-                set(status_gaps) | set(plan_drift_signals(effective_projection, prefix).codes),
+                set(status_gaps)
+                | set(plan_drift_signals(effective_projection, prefix).codes)
+                | set(task_fact_signals(effective_projection, prefix).codes),
                 key=str.encode,
             )
         )

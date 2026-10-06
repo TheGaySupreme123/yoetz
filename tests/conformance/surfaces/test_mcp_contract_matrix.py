@@ -601,7 +601,7 @@ def _subscription_check_result() -> dict[str, Any]:
             "protocol_version": "0.1",
             "engine_version": "0.1.0",
             "projection_version": "0.1.0",
-            "policy_packs": ["work-integrity/0.2.0"],
+            "policy_packs": ["work-integrity/0.3.0"],
         },
         "privacy_projection": _subscription_privacy_projection(),
     }

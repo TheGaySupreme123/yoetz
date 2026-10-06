@@ -132,7 +132,9 @@ each status read and never cached across frontiers:
   AI-powered review (`semantic_reference_scope_reduced`, `semantic_packet_insufficient`,
   `truncated_payload`). They are disclosed on the receipt, never instructions.
 - `acknowledged_not_done`: findings answered `acknowledged_not_done`, with the required reason.
-  An obligation cannot be recorded as not done yet: one you cannot finish stays in
+  An obligation cannot be recorded as not done. One that a recorded blocker decision names
+  (`yoetz-blocker:<kind>`, see below) reads as the standing
+  `obligation_blocked_outside_agent_control`; any other unfinished obligation stays in
   `agent_actionable`, and you disclose it in your final answer.
 
 A closed, versioned table (`gap_classification_version`) assigns every gap code the product
@@ -658,11 +660,17 @@ relevant test/doctest/lint check, or repair the named defect. Select the target 
 changed files and existing project checks, never invent a command. Record the action and its
 result; put exact requested items on an obligation in the effective plan and record their
 `attempted_items` on the action. Do not resolve an obligation while its requested items remain
-unattempted. If authority or an unavailable dependency prevents the attempt, record that exact
-blocker instead of widening disclosure, credentials or runtime authority. Only then report the
-remaining limitation or narrow the claim. `respond` rejects an `acknowledged` answer to an
+unattempted. If something outside your control prevents the attempt (authority, consent,
+credentials, or a dependency you cannot obtain), record it as a blocker instead of widening
+disclosure, credentials or runtime authority: publish `decision_recorded` naming the obligation in
+`affected_obligation_ids` with the exact statement line
+`yoetz-blocker:<authority|consent|credential|dependency_unavailable>` and a rationale. Missing or
+inconsistent data the task says is recoverable, a failing test, or a result that looks infeasible
+is not a blocker: deliver a best-effort result in the requested form and disclose the assumption.
+Only then report the remaining limitation or narrow the claim. `respond` rejects an `acknowledged` answer to an
 AI-powered review finding unless `evidence_refs` cites evidence or a result recorded after the
-finding (`resolution_attempt_required`); a recorded blocked result counts. An acknowledgement or
+finding (`resolution_attempt_required`); the result of the blocked attempt counts (outcome
+`failure` or `partial`: there is no `blocked` outcome). An acknowledgement or
 “limitation accepted” is not a repair, a verification result, or a finding resolution. After an
 `insufficient_packet` result with no material repair to publish, go to the receipt and disclose
 `semantic_packet_insufficient` (never a `deterministic_only` fallback).
@@ -672,7 +680,7 @@ The reviewer verifies from what its packet carries. When a completed review othe
 do not re-run or re-publish it while the work it verified is unchanged; answer a finding by
 repairing the defect or supplying the exact artifact it names. A reviewer request never authorizes
 installing or downloading a toolchain or package, network access, or another environment change:
-record the unavailable runtime or package as the blocker. A `ledger_stale_or_incomplete` finding
+record the unavailable runtime or package as a `yoetz-blocker:dependency_unavailable` decision. A `ledger_stale_or_incomplete` finding
 whose only subjects are Yoetz check records, or earlier findings of that kind only about such
 records, is answered by the completed review recorded after it, so `acknowledged` needs no new
 attempt; any other kind, even one citing only a check, and a finding naming any obligation, claim,

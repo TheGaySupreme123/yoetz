@@ -48,6 +48,12 @@ from yoetz.adapters.integrations.observation_local import (
 )
 from yoetz.adapters.workspace_binding import canonical_workspace_locator, resolve_workspace_locator
 from yoetz.cli import hook_io
+from yoetz.cli.closure_gate import (
+    ClosureGate,
+    closure_gate_already_delivered,
+    read_closure_gate,
+    record_closure_gate_delivered,
+)
 from yoetz.cli.hook_diagnostics import (
     record_hook_diagnostic,
     record_hook_timing,
@@ -73,6 +79,7 @@ from yoetz.cli.hook_io import (
     stderr_line as _stderr_line,
 )
 from yoetz.cli.hook_timing import HookPassTiming, record_hook_pass_timing
+from yoetz.cli.runtime_facts import runtime_structural_facts
 from yoetz.domain.observation import (
     OBSERVATION_CONTENT_CAPTURE_PENDING_REASON,
     ObservationContentChunk,
@@ -3603,6 +3610,80 @@ def _report_session_end_unrecorded(event: str, *, _state: Path | None) -> None:
     record_hook_diagnostic("session_end_unrecorded", event, _state=_state)
 
 
+def _decide_closure_gate(
+    mapping: LifecycleMapping,
+    *,
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    workspace_locator: str | None,
+    payload: Mapping[str, JsonValue],
+    connect: ServiceConnector | None,
+    run: AsyncRunner,
+    harness_id: str,
+    remaining_seconds: float,
+    _state: Path | None,
+) -> ClosureGate | None:
+    """Decide the Stop-time closure gate for one mapped session (#977). Never raises.
+
+    Reads the service's compact status for the mapped session; the gate fires at most once per
+    session and ledger frontier. Every outcome lands in the bounded hook diagnostics so an
+    operator (or a benchmark export of ``yoetz observe status``) can see what the gate decided.
+    """
+
+    reason = "closure_gate_unavailable"
+    gate: ClosureGate | None = None
+    try:
+        if remaining_seconds < 5.0:
+            reason = "closure_gate_budget_exhausted"
+            return None
+        from yoetz.cli.hooks import bound_connector, resolve_session_workspace
+
+        locator = (
+            workspace_locator
+            if workspace_locator is not None
+            else resolve_session_workspace(None, payload).locator
+        )
+        connector = (
+            connect
+            if connect is not None
+            else bound_connector(
+                cast(Callable[..., Awaitable[object]], _connect_service()), locator
+            )
+        )
+        try:
+            pending = store.pending_outbox_count(workspace_commitment) > 0
+        except Exception:
+            pending = True
+
+        async def _read() -> ClosureGate | None:
+            return await read_closure_gate(
+                session_id=mapping.yoetz_session_id,
+                writer_id=mapping.yoetz_writer_id,
+                connect=cast(Callable[..., Awaitable[object]], connector),
+                actor_id=f"yoetz:{harness_id}-hooks",
+                observation_pending=pending,
+            )
+
+        decided = cast(ClosureGate | None, run(_read))
+        if decided is None:
+            reason = "closure_gate_not_required"
+            return None
+        if closure_gate_already_delivered(
+            mapping.yoetz_session_id, decided.identity, _state=_state
+        ):
+            reason = "closure_gate_repeat_suppressed"
+            return None
+        gate = decided
+        reason = ""
+        return gate
+    except Exception:
+        return None
+    finally:
+        if reason:
+            with contextlib.suppress(Exception):
+                record_hook_diagnostic(reason, "Stop", _state=_state)
+
+
 def handle_observe(
     *,
     event_name: str | None,
@@ -3732,6 +3813,9 @@ def handle_observe(
                     sys.stdout.close()
             return emitted
 
+        # Assigned only by the Stop-time closure gate below (#977); every earlier render sees None.
+        closure_gate: ClosureGate | None = None
+
         def _render_context(additional_context: str) -> dict[str, JsonValue]:
             """Render advice in the receiving host's own stdout contract.
 
@@ -3743,6 +3827,11 @@ def handle_observe(
                 raw_cursor_event = _output_event_name
                 if raw_cursor_event is None:
                     return {}
+                if closure_gate is not None and raw_cursor_event == "stop":
+                    # The closure gate is the one Stop text Cursor may auto-submit (#977).
+                    return _cursor_context_output(
+                        raw_cursor_event, additional_context, allow_stop_followup=True
+                    )
                 return _cursor_context_output(raw_cursor_event, additional_context)
             if source is ObservationSource.CLAUDE_HOOK:
                 # Claude requires hookSpecificOutput.hookEventName to name the
@@ -4228,6 +4317,26 @@ def handle_observe(
                         {**envelope.structural_payload, "runner_class": _derived_runner_class}
                     ),
                 )
+            if resolved_event in {"PreToolUse", "PostToolUse"}:
+                # Closed runtime facts (#977): install target, write scope, effective user.
+                # Read from the host's own tool input in this process; only tokens persist.
+                with contextlib.suppress(Exception):
+                    tool_token = envelope.structural_payload.get("tool_name")
+                    runtime_facts = runtime_structural_facts(
+                        _content_payload if _content_payload is not None else payload,
+                        tool_name=tool_token if type(tool_token) is str else None,
+                        workspace_locator=workspace_locator,
+                        inside=lambda value: (
+                            workspace_relative_edit_path(value, workspace_locator) is not None
+                        ),
+                    )
+                    if runtime_facts:
+                        envelope = replace(
+                            envelope,
+                            structural_payload=JsonObject(
+                                {**envelope.structural_payload, **runtime_facts}
+                            ),
+                        )
             if not selected_focused and envelope.structural_payload.get("action") == "routine_read":
                 envelope = replace(
                     envelope,
@@ -4985,12 +5094,43 @@ def handle_observe(
         # continued this turn. Blocking again would loop; leave advice for a
         # later turn or SessionStart instead of consuming it here.
         stop_already_active = payload.get("stop_hook_active") is True
+        if (
+            resolved_event == "Stop"
+            and not stop_already_active
+            and not child_attribution_gap
+            and not skip_service
+            and not pending_mapping_deferred
+            and mapping is not None
+        ):
+            closure_gate = _decide_closure_gate(
+                mapping,
+                store=store,
+                workspace_commitment=workspace_commitment,
+                workspace_locator=workspace_locator,
+                payload=payload,
+                connect=connect,
+                run=_resolve_runner(),
+                harness_id=harness_id,
+                remaining_seconds=(
+                    _hook_host_window_seconds(source, resolved_event)
+                    - (_monotonic() - entry_started)
+                ),
+                _state=_state,
+            )
+            if closure_gate is not None:
+                # The gate is the whole Stop message: it names what remains, and ordinary
+                # advice waits for a later event rather than diluting it.
+                additional = closure_gate.text
+        elif resolved_event == "Stop" and stop_already_active and mapping is not None:
+            with contextlib.suppress(Exception):
+                record_hook_diagnostic("closure_gate_loop_guard", resolved_event, _state=_state)
         # Task/receipt context always wins this shared channel outright, with one exception:
         # the static attach advisory carries no advice of its own, so pending advice joins it
         # (the delivery text is appended below) instead of being silently starved at the very
         # SessionStart that bootstraps an unmapped session (issues #241, #280).
         delivery_eligible = (
             not child_attribution_gap
+            and closure_gate is None
             and (not additional or attach_advisory_only)
             and resolved_event in ADVICE_SAFE_EVENTS
             and not skip_advice_loop
@@ -5079,6 +5219,12 @@ def handle_observe(
                 emitted = _stdout_json(rendered_output, stdout)
             else:
                 emitted = _stdout_json({}, stdout)
+            if emitted and host_consumable and closure_gate is not None and mapping is not None:
+                with contextlib.suppress(BaseException):
+                    record_closure_gate_delivered(
+                        mapping.yoetz_session_id, closure_gate.identity, _state=_state
+                    )
+                    record_hook_diagnostic("closure_gate_continued", resolved_event, _state=_state)
             if emitted and host_consumable and pending_delivery is not None:
                 # Strictly after the write: delivered-but-unrecorded costs one
                 # redelivery, recorded-but-undelivered would cost the advice.
@@ -6545,6 +6691,11 @@ def _handle_cursor_observe(
             structural["capability_profile_id"] = capability_profile_id
         if ordinary_profile:
             structural["mapping_hint"] = CURSOR_ORDINARY_HOOK_MAPPING_VERSION
+        loop_count = payload.get("loop_count")
+        if raw_event == "stop" and type(loop_count) is int and loop_count > 0:
+            # Cursor's own loop guard: this stop follows an earlier follow-up message. The
+            # closure gate continues an agent at most once, exactly like stop_hook_active (#977).
+            structural["stop_hook_active"] = True
         identity_fields = (
             (
                 ("cursor_version", "cursor_version"),

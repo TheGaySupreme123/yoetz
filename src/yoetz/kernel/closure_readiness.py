@@ -45,6 +45,13 @@ from yoetz.kernel.plan_drift import PLAN_DRIFT_ADVISORY_GAPS, PLAN_DRIFT_GAPS
 from yoetz.kernel.projections import ProjectionState, observation_limitation_finding_ids
 from yoetz.kernel.receipt_capacity import current_receipt_findings
 from yoetz.kernel.reducers import invalidates_recorded_check
+from yoetz.kernel.task_facts import (
+    AGENT_ACTIONABLE_TASK_FACT_GAPS,
+    OBLIGATION_BLOCKED_GAP,
+    STANDING_TASK_FACT_GAPS,
+    blocked_obligations,
+    open_effective_obligations,
+)
 from yoetz.protocol.models import SemanticStatus
 
 __all__ = [
@@ -309,6 +316,14 @@ GAP_CLASSIFICATION: Final[Mapping[str, GapClass]] = MappingProxyType(
         "unsupported_codex_profile": _S,
         "web_results_not_captured": _S,
         "wrapper_shape_unsupported": _S,
+        # -- Task facts (#977): what hook observations, the ledger and the check-time workspace
+        # read establish about the task's own work. A planned verification that was not observed,
+        # failed, or ran before the last edit, an edit after the last verification run, and a
+        # requested output Git would not deliver are removed by the agent's own action. Installs,
+        # writes and the user a run had are recorded history, an unmatched or unread item is a
+        # bound on what Yoetz could see, and a declared blocker is the agent's recorded position.
+        **{code: _A for code in sorted(AGENT_ACTIONABLE_TASK_FACT_GAPS)},
+        **{code: _S for code in sorted(STANDING_TASK_FACT_GAPS)},
     }
 )
 if not PLAN_DRIFT_GAPS <= set(GAP_CLASSIFICATION):  # pragma: no cover - closed drift vocabulary
@@ -458,6 +473,9 @@ class ClosureReadinessFacts:
     receipt_blocking_finding_ids: tuple[FindingId, ...]
     acknowledged_finding_ids: tuple[FindingId, ...]
     acknowledged_obligation_ids: tuple[ObligationId, ...]
+    # Open effective obligations, and the subset a recorded blocker decision names (#977).
+    open_obligation_ids: tuple[ObligationId, ...] = ()
+    blocked_obligation_ids: tuple[ObligationId, ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -475,6 +493,8 @@ class ClosureReadinessFacts:
             self.receipt_blocking_finding_ids,
             self.acknowledged_finding_ids,
             self.acknowledged_obligation_ids,
+            self.open_obligation_ids,
+            self.blocked_obligation_ids,
         ):
             if type(values) is not tuple or values != tuple(sorted(set(values), key=str.encode)):
                 raise ValueError("closure_readiness_facts_invalid")
@@ -617,12 +637,18 @@ def closure_readiness_facts(
     }
     # The receipt's applicability rule reads the same observation-limitation set (issue #911).
     limitations = observation_limitation_finding_ids(state, records)
+    open_obligations = open_effective_obligations(state)
+    blocked = blocked_obligations(state)
     return ClosureReadinessFacts(
         check_applicability=_check_applicability(state, records, limitations),
         semantic_review_current=_semantic_review_current(records, limitations),
         receipt_blocking_finding_ids=tuple(sorted(blocking, key=str.encode)),
         acknowledged_finding_ids=tuple(sorted(acknowledged, key=str.encode)),
         acknowledged_obligation_ids=_acknowledged_obligation_ids(state),
+        open_obligation_ids=tuple(sorted(set(open_obligations), key=str.encode)),
+        blocked_obligation_ids=tuple(
+            sorted({item for item in open_obligations if item in blocked}, key=str.encode)
+        ),
     )
 
 
@@ -660,6 +686,7 @@ def derive_closure_readiness(
 
     conditions = tuple(blocking_conditions)
     actionable: list[str] = []
+    blocked_only = False
     for condition in AGENT_READINESS_CONDITIONS:
         if condition not in conditions:
             continue
@@ -667,8 +694,21 @@ def derive_closure_readiness(
             blocking = set(facts.receipt_blocking_finding_ids)
             if blocking and blocking <= set(facts.acknowledged_finding_ids):
                 continue
+        if (
+            condition == "obligations_open"
+            and facts is not None
+            and facts.open_obligation_ids
+            and set(facts.open_obligation_ids) <= set(facts.blocked_obligation_ids)
+        ):
+            # Every open obligation is named by a recorded blocker outside the agent's control
+            # (authority, consent, credential, an unobtainable dependency; #977). Nothing the
+            # agent can do removes it, so it is disclosed rather than listed as work.
+            blocked_only = True
+            continue
         actionable.append(condition)
     standing: set[str] = set()
+    if blocked_only:
+        standing.add(OBLIGATION_BLOCKED_GAP)
     if check_in_flight:
         actionable.append("check_in_progress")
     if facts is not None:

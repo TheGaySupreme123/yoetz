@@ -45,7 +45,10 @@ COORDINATION_POLICY_VERSION: Final = "0.1.0"
 RESEARCH_EVIDENCE_POLICY_VERSION: Final = "0.2.0"
 # 0.2.0: ``claim_without_admissible_evidence`` names a completion no observed run backs, and only
 # observed edits or runs trigger the corroboration rule.
-WORK_INTEGRITY_POLICY_VERSION: Final = "0.2.0"
+# 0.3.0 (#977): ``requested_item_never_attempted`` waits until the agent has started acting, names
+# a requested file the check-time workspace read found absent whatever was published, and skips
+# obligations a recorded blocker decision names.
+WORK_INTEGRITY_POLICY_VERSION: Final = "0.3.0"
 
 CURRENT_POLICY_VERSIONS: Final = MappingProxyType(
     {
@@ -59,7 +62,7 @@ LEGACY_POLICY_VERSIONS: Final = MappingProxyType(
     {
         COORDINATION_POLICY_ID: (),
         RESEARCH_EVIDENCE_POLICY_ID: ("0.1.0",),
-        WORK_INTEGRITY_POLICY_ID: ("0.1.0",),
+        WORK_INTEGRITY_POLICY_ID: ("0.1.0", "0.2.0"),
     }
 )
 # Every recorded check ran one consistent generation of the built-in packs, oldest first.
@@ -69,6 +72,13 @@ POLICY_PACK_GENERATIONS: Final = (
             COORDINATION_POLICY_ID: "0.1.0",
             RESEARCH_EVIDENCE_POLICY_ID: "0.1.0",
             WORK_INTEGRITY_POLICY_ID: "0.1.0",
+        }
+    ),
+    MappingProxyType(
+        {
+            COORDINATION_POLICY_ID: "0.1.0",
+            RESEARCH_EVIDENCE_POLICY_ID: "0.2.0",
+            WORK_INTEGRITY_POLICY_ID: "0.2.0",
         }
     ),
     CURRENT_POLICY_VERSIONS,

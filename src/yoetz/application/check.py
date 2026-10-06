@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 from typing import Any, Final, Literal, Protocol, cast
 
@@ -133,12 +134,17 @@ from yoetz.kernel.policies.work_integrity import work_integrity_findings
 from yoetz.kernel.projections import PROJECTION_VERSION, ProjectionState
 from yoetz.kernel.ranking import CheckCompleteness, RankingContext, rank_findings
 from yoetz.kernel.receipt_capacity import current_receipt_findings
+from yoetz.kernel.task_facts import STANDING_TASK_FACT_GAPS, requested_output_facts
 from yoetz.kernel.test_edit_visibility import PreExistingTestEdits, preexisting_test_edits
 from yoetz.observability.logging import (
     record_bounded_counts_without_raising,
     record_unexpected_exception_without_raising,
 )
-from yoetz.ports.change_capture import current_check_workspace_source
+from yoetz.ports.change_capture import (
+    CheckChangeMetadata,
+    CheckWorkspaceSource,
+    current_check_workspace_source,
+)
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.control import McpHostProfile
 from yoetz.ports.diagnostics import RuntimeCapability
@@ -2133,6 +2139,29 @@ def _requirement_assessments(
     return tuple(output)
 
 
+async def _requested_output_inputs(
+    case: DeterministicCase,
+    capture: CheckChangeMetadata | None,
+    source: CheckWorkspaceSource | None,
+    port: object | None,
+    request_id: str,
+) -> tuple[_PolicyEvaluator, tuple[str, ...]]:
+    """The work-integrity evaluator and gap codes for requested files at check time (#977)."""
+
+    from yoetz.application.check_change import requested_output_states
+
+    states = await requested_output_states(
+        projection=case.projection,
+        capture=capture,
+        source=source,
+        port=port,
+        request_id=request_id,
+    )
+    absent, markers = requested_output_facts(case.projection, states)
+    gaps = tuple(sorted({code for code, _obligation in markers}, key=str.encode))
+    return partial(work_integrity_findings, absent_outputs=frozenset(absent)), gaps
+
+
 def run_deterministic_policies(
     case: DeterministicCase,
     scope: CheckScope,
@@ -3531,6 +3560,9 @@ async def execute_check_commit(
         # ran. A no-material-work decision counts only on an observed ``False`` (fail closed):
         # hosts record shell writes as command actions, so edit actions alone cannot prove it.
         workspace_changed: bool | None = None
+        # Requested-file facts (#977) read beside the structural capture, through the same fence.
+        structural_capture: CheckChangeMetadata | None = None
+        structural_source: CheckWorkspaceSource | None = None
         change_capture = getattr(app, "change_capture", None)
         start_catalog = getattr(app, "start_catalog", None)
         recorded_edit = any(
@@ -3566,6 +3598,8 @@ async def execute_check_commit(
                     request_id=request.request_id,
                 )
                 if capture is not None:
+                    structural_capture = capture
+                    structural_source = source
                     workspace_changed = bool(
                         capture.entries or capture.tracked_files or capture.untracked_files
                     )
@@ -3634,8 +3668,17 @@ async def execute_check_commit(
                 PREEXISTING_TEST_BASELINE_UNKNOWN_GAP,
                 CHECK_TIME_CHANGE_UNAVAILABLE_GAP,
             )
+        work_evaluator, deterministic_output_gaps = await _requested_output_inputs(
+            frozen.case,
+            structural_capture,
+            structural_source,
+            change_capture,
+            request.request_id,
+        )
         if frozen.lease.phase is CheckPhase.RESERVED:
-            assessments, executions = run_deterministic_policies(frozen.case, scope, packs)
+            assessments, executions = run_deterministic_policies(
+                frozen.case, scope, packs, evaluators={_WORK_PACK: work_evaluator}
+            )
             assessments = assessments + await _coordination_assessments_for_frozen_case(
                 app,
                 runtime,
@@ -3686,7 +3729,9 @@ async def execute_check_commit(
                     request_id=request.request_id,
                     counts={"superseded_checkpoints": 1},
                 )
-                assessments, executions = run_deterministic_policies(frozen.case, scope, packs)
+                assessments, executions = run_deterministic_policies(
+                    frozen.case, scope, packs, evaluators={_WORK_PACK: work_evaluator}
+                )
                 assessments = assessments + await _coordination_assessments_for_frozen_case(
                     app,
                     runtime,
@@ -3827,6 +3872,7 @@ async def execute_check_commit(
         semantic_gap = semantic_coverage_gap_code(semantic_result.status, semantic_result.reason)
         declared_gaps: set[str] = set() if semantic_gap is None else {semantic_gap}
         declared_gaps.update(deterministic_test_edit_gaps)
+        declared_gaps.update(deterministic_output_gaps)
         missing = _EMPTY_MISSING_ITEMS
         if (
             semantic_result.status is SemanticStatus.SUCCEEDED
@@ -3954,6 +4000,7 @@ async def execute_check_commit(
             set(coverage.known_gaps)
             - PLAN_DRIFT_ADVISORY_GAPS
             - PREEXISTING_TEST_INFORMATIONAL_GAPS
+            - STANDING_TASK_FACT_GAPS
         ) or semantic_failed:
             completeness = CheckCompleteness.COVERAGE_INCOMPLETE
         else:

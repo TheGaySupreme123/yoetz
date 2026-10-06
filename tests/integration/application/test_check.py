@@ -330,7 +330,7 @@ class _Ledger:
                 "0.1",
                 "0.1.0",
                 "0.1.0",
-                ("research-evidence/0.2.0", "work-integrity/0.2.0"),
+                ("research-evidence/0.2.0", "work-integrity/0.3.0"),
             ),
             missing_for_assessment=missing_for_assessment,
         )
@@ -658,7 +658,7 @@ async def test_requirement_findings_follow_the_research_pack_execution(
     app.ledger.frozen = FrozenCase(_unmapped_statement_case(), app.ledger.frozen.lease)
     request = _request(max_findings="4")
     if not research_selected:
-        request = request.model_copy(update={"policy_packs": ("work-integrity/0.2.0",)})
+        request = request.model_copy(update={"policy_packs": ("work-integrity/0.3.0",)})
 
     checked = await execute_check_commit(app, request)
 
@@ -863,7 +863,7 @@ async def test_empty_completion_scope_gap_reaches_check_verdict(
     assert checked.policy_executions == (
         CheckPolicyExecution("coordination", "0.1.0", "skipped", "not_applicable"),
         CheckPolicyExecution("research-evidence", "0.2.0", "run", "completed"),
-        CheckPolicyExecution("work-integrity", "0.2.0", "run", "completed"),
+        CheckPolicyExecution("work-integrity", "0.3.0", "run", "completed"),
     )
 
 

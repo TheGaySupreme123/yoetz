@@ -64,7 +64,10 @@ __all__ = [
     "observed_action_description",
     "observed_action_is_exploratory",
     "observed_action_runner_class",
+    "observed_action_runtime_tokens",
     "observed_action_tool",
+    "INSTALL_TARGET_CLASSES",
+    "RUNTIME_SUFFIX_TOKENS",
     "observed_run_facts",
 ]
 
@@ -83,6 +86,21 @@ _RUNNER_SUFFIX_RE: Final = re.compile(
 )
 _RUNNER_CLASSES: Final = frozenset(
     {"exploration", "test", "build", "lint", "typecheck", "vcs", "other", "compound"}
+)
+# Hook-derived runtime facts (#977), appended after the runner suffix in this closed order:
+# where a package install resolved its interpreter, an edit outside the workspace root, and the
+# effective user the hook process ran as. Closed tokens only; never a path or command text.
+INSTALL_TARGET_CLASSES: Final = frozenset(
+    {"yoetz_runtime", "workspace_env", "private_env", "system", "unresolved"}
+)
+_RUNTIME_SUFFIX_RE: Final = re.compile(
+    r" \((install (?:yoetz_runtime|workspace_env|private_env|system|unresolved)"
+    r"|write outside_workspace|user (?:root|non_root))\)\Z",
+    re.ASCII,
+)
+RUNTIME_SUFFIX_TOKENS: Final = frozenset(
+    {f"install {name}" for name in INSTALL_TARGET_CLASSES}
+    | {"write outside_workspace", "user root", "user non_root"}
 )
 
 
@@ -280,24 +298,60 @@ def observed_failure_states(
 
 
 def observed_action_description(
-    base: str, tool: str | None, runner_class: str | None = None
+    base: str,
+    tool: str | None,
+    runner_class: str | None = None,
+    *,
+    install_target: str | None = None,
+    write_outside_workspace: bool = False,
+    effective_user: str | None = None,
 ) -> str:
-    """Append bounded host facts to an observed action description, when known."""
+    """Append bounded host facts to an observed action description, when known.
+
+    The suffix order is fixed (tool, runner, install, write, user) so each reader can strip the
+    later suffixes before parsing an earlier one. Every value is a closed token.
+    """
 
     result = base
     if tool is not None and _TOOL_TOKEN_RE.fullmatch(tool) is not None:
         result = f"{result} (tool {tool})"
     if runner_class in _RUNNER_CLASSES:
         result = f"{result} (runner {runner_class})"
+    if install_target in INSTALL_TARGET_CLASSES:
+        result = f"{result} (install {install_target})"
+    if write_outside_workspace is True:
+        result = f"{result} (write outside_workspace)"
+    if effective_user in {"root", "non_root"}:
+        result = f"{result} (user {effective_user})"
     return result
+
+
+def _split_runtime_suffixes(description: str) -> tuple[str, frozenset[str]]:
+    tokens: set[str] = set()
+    remaining = description
+    for _ in range(3):
+        match = _RUNTIME_SUFFIX_RE.search(remaining)
+        if match is None:
+            break
+        tokens.add(match.group(1))
+        remaining = remaining[: match.start()]
+    return remaining, frozenset(tokens)
+
+
+def observed_action_runtime_tokens(description: str) -> frozenset[str]:
+    """Read back the closed runtime suffixes (``install <class>``, ``write outside_workspace``,
+    ``user root|non_root``) ``observed_action_description`` wrote."""
+
+    return _split_runtime_suffixes(description)[1]
 
 
 def observed_action_tool(description: str) -> str | None:
     """Read back the tool name ``observed_action_description`` wrote, or ``None``."""
 
-    # Runner classification is appended after the tool suffix. Strip that bounded suffix before
-    # applying the existing anchored tool parser so adding the class cannot make tool lookup fail.
-    without_runner = _RUNNER_SUFFIX_RE.sub("", description)
+    # Runner and runtime suffixes are appended after the tool suffix. Strip those bounded
+    # suffixes before applying the anchored tool parser so adding them cannot break lookup.
+    without_runtime, _tokens = _split_runtime_suffixes(description)
+    without_runner = _RUNNER_SUFFIX_RE.sub("", without_runtime)
     match = _TOOL_SUFFIX_RE.search(without_runner)
     return None if match is None else match.group(1)
 
@@ -305,7 +359,8 @@ def observed_action_tool(description: str) -> str | None:
 def observed_action_runner_class(description: str) -> str | None:
     """Read the bounded command class derived at the host boundary, or ``None``."""
 
-    match = _RUNNER_SUFFIX_RE.search(description)
+    without_runtime, _tokens = _split_runtime_suffixes(description)
+    match = _RUNNER_SUFFIX_RE.search(without_runtime)
     return None if match is None else match.group(1)
 
 

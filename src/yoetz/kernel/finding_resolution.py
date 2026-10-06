@@ -92,6 +92,7 @@ from yoetz.kernel.projections import (
     is_observation_limitation_kind,
     observation_finding_event_ids,
 )
+from yoetz.kernel.task_facts import TASK_FACT_GAPS
 from yoetz.protocol.coverage import LedgerFreshness
 from yoetz.protocol.models import SemanticReason, SemanticStatus
 from yoetz.protocol.policy_packs import (
@@ -246,6 +247,9 @@ _BASE_DETERMINISTIC_PROOF_TOLERATED_GAPS: Final = (
     | _EVIDENCE_STRENGTH_GAPS
     | _REVIEW_DIALOGUE_DISCLOSURE_GAPS
     | PLAN_DRIFT_GAPS
+    # Task facts (#977) describe the work, never whether the rows a local pack judges were
+    # readable, so they never veto a local absence proof either; they stay on the receipt.
+    | TASK_FACT_GAPS
 )
 # A reduced AI-powered review scope bounds the review packet only; the local-check case is not
 # reduced (ADR-006), so review selection never weakens a local absence proof (issue #904).
@@ -318,9 +322,14 @@ _COMMAND_INDEPENDENT_KINDS: Final = frozenset(
 )
 # Keep this local to avoid importing the policy module while reducers import this module. If the
 # work-integrity pack changes version, its action-result exception must be reviewed explicitly.
-# Reviewed for 0.2.0: the ``action_without_result`` rule did not change, so both versions qualify.
+# Reviewed for 0.2.0 and 0.3.0 (#977): the ``action_without_result`` rule did not change, so every
+# version qualifies.
 _ACTION_WITHOUT_RESULT_POLICIES: Final = frozenset(
-    {(WORK_INTEGRITY_POLICY_ID, "0.1.0"), (WORK_INTEGRITY_POLICY_ID, "0.2.0")}
+    {
+        (WORK_INTEGRITY_POLICY_ID, "0.1.0"),
+        (WORK_INTEGRITY_POLICY_ID, "0.2.0"),
+        (WORK_INTEGRITY_POLICY_ID, "0.3.0"),
+    }
 )
 ProofStateCache = MutableMapping[tuple[int, int, str], ProjectionState | None]
 

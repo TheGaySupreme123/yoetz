@@ -117,7 +117,7 @@ def _version_slice_payload() -> dict[str, object]:
         "apsw_version": "3.53.3.1",
         "sqlite_version": "3.53.3",
         "sqlite_source_id": "sqlite-source",
-        "policy_packs": ("work-integrity/0.2.0",),
+        "policy_packs": ("work-integrity/0.3.0",),
         "provider_profiles": (),
     }
 
@@ -162,7 +162,7 @@ def _check_awaiting_human_payload() -> dict[str, object]:
             "protocol_version": "0.1",
             "engine_version": "0.1.0",
             "projection_version": "yoetz/0.1.0",
-            "policy_packs": ["work-integrity/0.2.0"],
+            "policy_packs": ["work-integrity/0.3.0"],
         },
         "privacy_projection": _privacy_projection_payload(),
     }
@@ -554,7 +554,7 @@ async def test_project_result_for_client_routes_awaiting_input_as_nonterminal() 
                 "0.1",
                 "0.1.0",
                 "0.1.0",
-                ("research-evidence/0.2.0", "work-integrity/0.2.0"),
+                ("research-evidence/0.2.0", "work-integrity/0.3.0"),
             ),
             state="awaiting_input",
         )

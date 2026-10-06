@@ -29,6 +29,7 @@ from yoetz.domain.events import (
     ClaimKind,
     ClaimRecordedPayload,
     ClaimRecordedPayloadV1_1,
+    DecisionRecordedPayload,
     EvidenceKind,
     EvidenceRecordedPayload,
     ObligationChange,
@@ -54,22 +55,44 @@ from yoetz.domain.findings import (
 )
 from yoetz.domain.values import (
     SubjectStateRef,
+    actor_id,
     object_id,
     timestamp_from_string,
 )
 from yoetz.kernel.deterministic_checks import (
+    REQUESTED_OUTPUT_ABSENT_FACT,
     CaseGap,
     render_deterministic_finding_text,
     run_deterministic_policies,
 )
-from yoetz.kernel.policies.work_integrity import WORK_INTEGRITY_POLICY_PACK
-from yoetz.kernel.projections import ContradictionKey, ContradictionRecord
+from yoetz.kernel.policies.work_integrity import (
+    WORK_INTEGRITY_POLICY_PACK,
+    work_integrity_findings,
+)
+from yoetz.kernel.projections import (
+    ContradictionKey,
+    ContradictionRecord,
+    DecisionProjectionRecord,
+)
 from yoetz.protocol.coverage import EvidenceImmutability
 from yoetz.protocol.models import SemanticReason, SemanticStatus
 
 _NOW = timestamp_from_string("2026-01-01T00:00:00.000Z")
 _DIGEST_A = "sha256:" + "1" * 64
 _DIGEST_B = "sha256:" + "2" * 64
+
+
+def _decision_record(payload: DecisionRecordedPayload) -> DecisionProjectionRecord:
+    from yoetz.domain.events import encode_payload
+    from yoetz.protocol.canonical import canonical_digest
+
+    return DecisionProjectionRecord(
+        payload=payload,
+        payload_digest=canonical_digest(encode_payload(payload)),
+        redacted=False,
+        source_event_id=evt(50),
+        source_frontier=4,
+    )
 
 
 def _kinds(case: object) -> tuple[FindingKind, ...]:
@@ -162,12 +185,25 @@ def test_completion_with_open_obligations_and_waiver_nontrigger() -> None:
     assert FindingKind.COMPLETION_WITH_OPEN_OBLIGATIONS not in _kinds(waived)
 
 
+def _unrelated_action(number: int) -> ActionRecordedPayload:
+    """A published action on another obligation: the agent has started acting (#977)."""
+
+    return ActionRecordedPayload(
+        action_id=act(number),
+        action_kind=ActionKind.EDIT,
+        description="Work on another obligation",
+        obligation_refs=(obl(99),),
+        attempted_items=("other-item",),
+    )
+
+
 def test_requested_item_never_attempted_and_exact_attempt_nontrigger() -> None:
     obligation = _open_obligation(1, requested="item-1")
     plan = PlanPublishedPayload(1, "Plan", (obl(1),))
     trigger = make_case(
         plans={1: plan_record(plan, 1)},
         obligations={obl(1): obligation_record(obligation, 2)},
+        actions={act(9): record(_unrelated_action(9), 3)},
     )
     assert FindingKind.REQUESTED_ITEM_NEVER_ATTEMPTED in _kinds(trigger)
     attempted = make_case(
@@ -219,9 +255,89 @@ def test_requested_item_on_carried_revision_uses_effective_plan_scope() -> None:
     case = make_case(
         plans={1: plan_record(initial, 1), 2: plan_record(revision, 2)},
         obligations={obl(2): obligation_record(obligation, 3)},
+        actions={act(9): record(_unrelated_action(9), 4)},
     )
 
     assert FindingKind.REQUESTED_ITEM_NEVER_ATTEMPTED in _kinds(case)
+
+
+def test_requested_item_is_not_reported_before_the_agent_starts_acting() -> None:
+    """TB4 tb4f1: 86% of all findings were this notice raised against a fresh plan (#977)."""
+
+    obligation = _open_obligation(1, requested="item-1")
+    plan = PlanPublishedPayload(1, "Plan", (obl(1),))
+    plan_only = make_case(
+        plans={1: plan_record(plan, 1)},
+        obligations={obl(1): obligation_record(obligation, 2)},
+    )
+    assert FindingKind.REQUESTED_ITEM_NEVER_ATTEMPTED not in _kinds(plan_only)
+
+
+def test_absent_requested_output_is_reported_even_when_an_action_names_it() -> None:
+    """atrx-vep-crispr: naming the report in attempted_items never wrote it (#977)."""
+
+    obligation = ObligationPublishedPayload(
+        obligation_id=obl(1),
+        description="Write the report",
+        evidence_expectation="The file",
+        status=ObligationStatus.OPEN,
+        requested_items=(RequestedItem(RequestedItemKind.FILE, "out/report.json"),),
+    )
+    named = ActionRecordedPayload(
+        action_id=act(1),
+        action_kind=ActionKind.OTHER,
+        description="Attempted the report",
+        obligation_refs=(obl(1),),
+        attempted_items=("out/report.json",),
+    )
+    plan = PlanPublishedPayload(1, "Plan", (obl(1),))
+    case = make_case(
+        plans={1: plan_record(plan, 1)},
+        obligations={obl(1): obligation_record(obligation, 2)},
+        actions={act(1): record(named, 3)},
+    )
+    assert FindingKind.REQUESTED_ITEM_NEVER_ATTEMPTED not in _kinds(case)
+    assessments = work_integrity_findings(case, absent_outputs=frozenset({(obl(1), 0)}))
+    found = [
+        item
+        for item in assessments
+        if item.candidate.kind is FindingKind.REQUESTED_ITEM_NEVER_ATTEMPTED
+    ]
+    assert len(found) == 1
+    facts = {fact.fact_code for fact in found[0].basis.observed_facts}
+    assert REQUESTED_OUTPUT_ABSENT_FACT in facts
+    assert found[0].basis.required_but_missing_facts == ()
+    detail = found[0].candidate.detail
+    assert "best-effort artifact" in detail
+    assert "revise" not in found[0].candidate.detail.lower()
+
+
+def test_blocked_obligation_raises_no_requested_item_finding() -> None:
+    obligation = _open_obligation(1, requested="item-1")
+    plan = PlanPublishedPayload(1, "Plan", (obl(1),))
+    blocker = DecisionRecordedPayload(
+        statement="yoetz-blocker:credential",
+        rationale="The registry token is the operator's.",
+        authority=actor_id("agt_codex"),
+        affected_obligation_ids=(obl(1),),
+    )
+    case = make_case(
+        plans={1: plan_record(plan, 1)},
+        obligations={obl(1): obligation_record(obligation, 2)},
+        actions={act(9): record(_unrelated_action(9), 3)},
+    )
+    case = replace(
+        case,
+        projection=replace(
+            case.projection,
+            decisions={evt(50): _decision_record(blocker)},
+        ),
+    )
+    assert FindingKind.REQUESTED_ITEM_NEVER_ATTEMPTED not in _kinds(case)
+    absent = work_integrity_findings(case, absent_outputs=frozenset({(obl(1), 0)}))
+    assert FindingKind.REQUESTED_ITEM_NEVER_ATTEMPTED not in {
+        item.candidate.kind for item in absent
+    }
 
 
 def test_failed_work_omitted_and_exact_disclosure_nontrigger() -> None:

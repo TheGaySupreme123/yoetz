@@ -32,7 +32,7 @@ def test_current_pack_versions_are_the_bumped_identities() -> None:
     assert CURRENT_POLICY_PACKS == (
         "coordination/0.1.0",
         "research-evidence/0.2.0",
-        "work-integrity/0.2.0",
+        "work-integrity/0.3.0",
     )
     assert (
         COORDINATION_POLICY_VERSION,
@@ -48,10 +48,13 @@ def test_earlier_versions_stay_recorded_but_not_current() -> None:
         "research-evidence/0.2.0",
         "work-integrity/0.1.0",
         "work-integrity/0.2.0",
+        "work-integrity/0.3.0",
     )
     assert is_recorded_policy_identity("work-integrity", "0.1.0")
     assert not is_current_policy_identity("work-integrity", "0.1.0")
-    assert is_current_policy_identity("work-integrity", "0.2.0")
+    assert is_recorded_policy_identity("work-integrity", "0.2.0")
+    assert not is_current_policy_identity("work-integrity", "0.2.0")
+    assert is_current_policy_identity("work-integrity", "0.3.0")
     assert not is_recorded_policy_identity("coordination", "0.2.0")
     assert not is_recorded_policy_identity("semantic-review", "0.1.0")
 
@@ -60,7 +63,8 @@ def test_a_pack_lineage_orders_its_versions() -> None:
     assert policy_version_supersedes_or_equals("work-integrity", "0.2.0", "0.1.0")
     assert policy_version_supersedes_or_equals("work-integrity", "0.1.0", "0.1.0")
     assert not policy_version_supersedes_or_equals("work-integrity", "0.1.0", "0.2.0")
-    assert not policy_version_supersedes_or_equals("work-integrity", "0.3.0", "0.1.0")
+    assert policy_version_supersedes_or_equals("work-integrity", "0.3.0", "0.2.0")
+    assert not policy_version_supersedes_or_equals("work-integrity", "0.4.0", "0.1.0")
 
 
 def test_wire_literals_match_the_registry() -> None:
@@ -79,7 +83,7 @@ def test_new_findings_carry_the_current_version_of_their_pack() -> None:
     )
     assert finding_policy_identity(FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE) == (
         "work-integrity",
-        "0.2.0",
+        "0.3.0",
     )
     assert finding_policy_identity(FindingKind.COORDINATION_OVERLAP) == ("coordination", "0.1.0")
 
@@ -105,11 +109,12 @@ def test_requests_select_current_packs_and_results_admit_recorded_ones() -> None
         result, "$defs", "policy_execution", "properties", "policy_version", "enum"
     ) == list(RECORDED_POLICY_VERSION_VALUES)
     event = schema_document_for("check-recorded", "1.4.0").json_schema
-    for name in ("research_evidence_policy", "work_integrity_policy"):
-        assert _path(event, "$defs", name, "properties", "policy_version", "enum") == [
-            "0.1.0",
-            "0.2.0",
-        ]
+    assert _path(
+        event, "$defs", "research_evidence_policy", "properties", "policy_version", "enum"
+    ) == ["0.1.0", "0.2.0"]
+    assert _path(
+        event, "$defs", "work_integrity_policy", "properties", "policy_version", "enum"
+    ) == ["0.1.0", "0.2.0", "0.3.0"]
     # The released publish result keeps its frozen identities; 1.1.0 names the current ones.
     released = schema_document_for("publish-work-result", "1.0.0").json_schema
     assert _path(

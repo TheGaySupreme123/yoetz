@@ -887,9 +887,9 @@ CheckTypeWire = Annotated[CheckType, BeforeValidator(_check_type_from_wire)]
 # Built-in policy-pack identities (``yoetz.protocol.policy_packs``). Requests select only current
 # packs; results and recorded rows also admit the earlier identities a ledger or an older 0.3
 # service may still carry.
-RecordedPolicyVersionWire = Literal["0.1.0", "0.2.0"]
+RecordedPolicyVersionWire = Literal["0.1.0", "0.2.0", "0.3.0"]
 CurrentPolicyPackWire = Literal[
-    "coordination/0.1.0", "research-evidence/0.2.0", "work-integrity/0.2.0"
+    "coordination/0.1.0", "research-evidence/0.2.0", "work-integrity/0.3.0"
 ]
 RecordedPolicyPackWire = Literal[
     "coordination/0.1.0",
@@ -897,12 +897,14 @@ RecordedPolicyPackWire = Literal[
     "research-evidence/0.2.0",
     "work-integrity/0.1.0",
     "work-integrity/0.2.0",
+    "work-integrity/0.3.0",
 ]
 RecordedVersionSlicePackWire = Literal[
     "research-evidence/0.1.0",
     "research-evidence/0.2.0",
     "work-integrity/0.1.0",
     "work-integrity/0.2.0",
+    "work-integrity/0.3.0",
 ]
 DataCategoryWire = Annotated[DataCategory, BeforeValidator(_data_category_from_wire)]
 WorkStateWire = Annotated[WorkState, BeforeValidator(_work_state_from_wire)]

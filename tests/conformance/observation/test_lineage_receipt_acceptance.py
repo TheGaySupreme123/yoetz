@@ -237,7 +237,7 @@ async def _check(
                 "expected_frontier": _frontier_json(frontier),
                 "mode": mode,
                 "max_findings": "10",
-                "policy_packs": ["research-evidence/0.2.0", "work-integrity/0.2.0"],
+                "policy_packs": ["research-evidence/0.2.0", "work-integrity/0.3.0"],
             }
         ),
         repository_privacy_context=_REPOSITORY,

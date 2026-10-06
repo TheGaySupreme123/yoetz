@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Final, cast
@@ -22,9 +23,13 @@ from yoetz.domain.events import (
     MAX_CHECK_CHANGE_SHOWN_FILES,
     CheckChangePartialFile,
     CheckChangeShownFiles,
+    RequestedItemKind,
 )
 from yoetz.domain.privacy import ReviewSelectionPolicy
 from yoetz.domain.receipts import CHECK_TIME_CHANGE_UNAVAILABLE_REASONS
+from yoetz.domain.values import ObligationId
+from yoetz.kernel.projections import ProjectionState
+from yoetz.kernel.task_facts import RequestedOutputState, effective_obligations
 from yoetz.observability.logging import (
     record_bounded_event_without_raising,
     record_unexpected_exception_without_raising,
@@ -39,6 +44,7 @@ from yoetz.ports.change_capture import (
     CheckChangeCapture,
     CheckChangeMetadata,
     CheckWorkspaceSource,
+    RequestedPathProbe,
     TaskChangeBase,
     decode_check_change,
     decode_task_change_base,
@@ -497,3 +503,111 @@ async def record_task_change_base(
             request_id=request_id,
         )
     return False
+
+
+_MAX_REQUESTED_OUTPUT_PROBES: Final = 64
+_NOT_A_PLAIN_PATH: Final = re.compile(r"[\s*?\[\]{}~$`]|://")
+
+
+def _plain_path(value: str) -> bool:
+    """Whether a requested file value is one literal path Yoetz can locate.
+
+    A value with whitespace (trailing prose), a glob or brace pattern, a home or variable
+    expansion, or a URL names no single path, so it is never reported absent; it is left out of
+    the read entirely rather than guessed at.
+    """
+
+    return bool(value) and _NOT_A_PLAIN_PATH.search(value) is None
+
+
+async def requested_output_states(
+    *,
+    projection: ProjectionState,
+    capture: CheckChangeMetadata | None,
+    source: CheckWorkspaceSource | None,
+    port: object | None,
+    request_id: str,
+) -> dict[tuple[ObligationId, int], RequestedOutputState]:
+    """Read where each requested file of an effective obligation stands at check time (#977).
+
+    Metadata only, through the same hardened Git seam as the structural change capture, and only
+    after that capture succeeded for this check's own repository (so the repository fence already
+    held). A requested file is ``changed`` when the check-time change lists it, ``deleted`` when
+    the change deletes it, and ``unverified`` when no read could be made. Nothing here is stored:
+    the result becomes closed gap codes and a finding fact, never a path.
+    """
+
+    items: list[tuple[ObligationId, int, str]] = []
+    for obligation in effective_obligations(projection):
+        payload = projection.obligations[obligation].payload
+        if payload is None:
+            continue
+        for index, item in enumerate(payload.requested_items):
+            if item.item_kind is RequestedItemKind.FILE and _plain_path(item.value):
+                items.append((obligation, index, item.value))
+    if not items:
+        return {}
+    unverified = {
+        (obligation, index): RequestedOutputState("unverified") for obligation, index, _ in items
+    }
+    probe = getattr(port, "probe_requested_paths", None)
+    if capture is None or source is None or not callable(probe):
+        return unverified
+    bounded = items[:_MAX_REQUESTED_OUTPUT_PROBES]
+    try:
+        raw_probes: object = await asyncio.to_thread(
+            cast(Callable[[str, tuple[str, ...]], object], probe),
+            source.workspace,
+            tuple(v for _, _, v in bounded),
+        )
+        if type(raw_probes) is not tuple:
+            raise TypeError("requested_path_probe_invalid")
+        probes = cast(tuple[object, ...], raw_probes)
+        if len(probes) != len(bounded):
+            raise TypeError("requested_path_probe_invalid")
+    except ChangeCaptureUnavailable:
+        return unverified
+    except Exception as exc:
+        record_unexpected_exception_without_raising(
+            exc,
+            component=_COMPONENT,
+            operation="requested_output_probe_failed",
+            request_id=request_id,
+        )
+        return unverified
+    changed = {entry.path for entry in capture.entries if not entry.status.startswith("D")}
+    deleted = {entry.path for entry in capture.entries if entry.status.startswith("D")}
+    deleted.update(
+        entry.original_path
+        for entry in capture.entries
+        if entry.original_path is not None and entry.status.startswith("R")
+    )
+    created = {
+        entry.path for entry in capture.entries if entry.untracked or entry.status.startswith("A")
+    }
+    states = dict(unverified)
+    for (obligation, index, _value), result in zip(bounded, probes, strict=True):
+        if type(result) is not RequestedPathProbe:
+            continue
+        if result.location == "outside" or result.relative is None:
+            states[(obligation, index)] = RequestedOutputState("outside")
+            continue
+        listed = result.relative in changed
+        states[(obligation, index)] = RequestedOutputState(
+            "inside",
+            exists=result.exists,
+            ignored=result.ignored,
+            # Local excludes are not delivered with the repository; a .gitignore the task's own
+            # change created is the work's. A pre-existing .gitignore the task merely edited is
+            # never attributed to it: the matching rule may be the repository's own.
+            ignored_by_task=result.ignore_source == "info_exclude"
+            or (
+                result.ignore_source == "repository_file"
+                and result.ignore_file is not None
+                and result.ignore_file in created
+            ),
+            # A truncated listing cannot prove a path unchanged.
+            changed=True if listed else (None if capture.truncated else False),
+            deleted=result.relative in deleted,
+        )
+    return states

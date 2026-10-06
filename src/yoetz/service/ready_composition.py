@@ -259,6 +259,7 @@ from yoetz.domain.values import (
 from yoetz.kernel.lineage import LineageEvaluation
 from yoetz.kernel.policies.observation_advice import ObservationCompositionFact
 from yoetz.kernel.projections import ProjectionState
+from yoetz.kernel.task_facts import register_command_identity_key
 from yoetz.kernel.test_edit_visibility import preexisting_test_edits
 from yoetz.observability.logging import (
     record_bounded_counts_without_raising,
@@ -6188,6 +6189,10 @@ async def provide_service_ready_context(
     # retained bytes. The owner-private store is also the authoritative consent
     # fence while task-bundle propagation is still catching up.
     local_observation.set_runtime_enabled(config.observation.enabled)
+    # Planned-verification facts (#977) compare a requested command with observed runs through
+    # the same installation-keyed commitment the hooks compute; without the key they are omitted.
+    with contextlib.suppress(Exception):
+        register_command_identity_key(local_observation.key_material())
     require_capture_bootstrap = getattr(
         local_observation, "set_capture_reservation_bootstrap_required", None
     )
