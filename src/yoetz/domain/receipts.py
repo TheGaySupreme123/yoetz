@@ -394,10 +394,12 @@ TASK_FACT_GAP_SENTENCES: Final[Mapping[str, str]] = MappingProxyType(
             " diff-based delivery would omit it."
         ),
         "requested_output_unchanged": (
-            "A requested output file exists but is unchanged from the task base."
+            "A requested file the record says was edited exists but is unchanged from the task"
+            " base."
         ),
         "requested_output_outside_workspace": (
-            "A requested output path lies outside the checked repository; Yoetz did not read it."
+            "A requested file the record says was edited lies outside the checked repository;"
+            " Yoetz did not read it."
         ),
         "requested_output_unverified": ("Requested output files could not be read at check time."),
         "install_into_yoetz_runtime": (

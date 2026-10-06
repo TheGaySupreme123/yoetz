@@ -220,7 +220,8 @@ at all, and `unknown` means read status again once it is readable.
 Local checks also report facts about the task's own work: a planned verification command (an
 obligation's requested command) that was never seen running exactly as recorded, failed on its
 latest run, or last ran before your latest edit; a requested output file that is missing (a
-receipt-blocking finding, even if an action named it), excluded from Git, or unchanged; and
+receipt-blocking finding, even if an action named it) or excluded from Git; one you recorded
+editing (an `edit` action naming it) that is still unchanged or lies outside the repository; and
 installs or writes that went outside the task's workspace. If you stop while open obligations, a
 receipt-blocking finding, or one of those planned-verification or excluded-output facts remains,
 the stop is continued once with the list. When something outside your control blocks an

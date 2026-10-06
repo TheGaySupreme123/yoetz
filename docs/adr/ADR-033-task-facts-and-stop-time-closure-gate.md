@@ -77,8 +77,20 @@ agent must not be able to stop silently with known work left.
    `requested_output_git_ignored` (agent-actionable: diff-based delivery omits it; in shadow-relay
    the agent added the exclude); one ignored by a pre-existing `.gitignore`, even one the task
    edited, or by a global excludes file is the
-   standing `requested_output_ignored_by_repository`; an unchanged tracked output, an output
-   outside the repository, and an unread one are standing disclosures. No path is stored, returned
+   standing `requested_output_ignored_by_repository`; an unread one is the standing
+   `requested_output_unverified`. A `file` item names any file the request names, read-only
+   inputs included, and an existing file the change leaves untouched or a path outside the
+   repository is exactly what an input looks like. So `requested_output_unchanged` and
+   `requested_output_outside_workspace` are standing disclosures only for an item the record
+   asserts was written: an `edit` action whose `attempted_items` names that exact value (attributed
+   to obligations as `attempted_items_for_obligation` does). Validation run tb4v1 reported both
+   for task inputs (`/app/data` files tracked and unchanged; `/app/packet` inputs outside a
+   `/workspace` repository); requested items carry no input/output role, and the record's edit
+   assertion is the narrowest existing signal. The cost is accepted: an output written only by a
+   `command` action (a script writing a report) is not checked for these two codes, because a
+   command that reads an input looks the same; the value match is exact, as for
+   `requested_item_never_attempted`, so a differently spelled path marks nothing. Both failures
+   are silence on a standing disclosure, never a false fact; an absent output is still found. No path is stored, returned
    or sent. The same check's AI-powered review packet (including the closing review, ADR-006)
    carries these requested-output codes, and `requested_output_absent` when a requested file is
    missing, in its coverage `known_gaps`, so the reviewer judges the work beside them.

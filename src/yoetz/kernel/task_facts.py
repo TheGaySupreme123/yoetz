@@ -53,6 +53,7 @@ from yoetz.domain.events import (
 )
 from yoetz.domain.observation import normalize_observed_command, observed_command_commitment
 from yoetz.domain.values import EventId, ObligationId
+from yoetz.kernel.command_attempts import attempted_items_for_obligation
 from yoetz.kernel.observed_failures import (
     command_identity,
     observed_action_runner_class,
@@ -580,9 +581,16 @@ def requested_output_facts(
     ``markers`` the ``(code, obligation)`` gap pairs. Obligations a blocker decision names are
     skipped. A deleted tracked file is the change the request may have asked for, so it is never
     reported as missing.
+
+    A requested ``file`` item names any file the request names, inputs included (the task's data,
+    a policy to read). An existing file the change leaves untouched, or a path outside the
+    checked repository, is exactly what such an input looks like, so ``requested_output_unchanged``
+    and ``requested_output_outside_workspace`` are reported only for an item the record asserts
+    was written: an ``edit`` action whose ``attempted_items`` names that exact value (#977, tb4v1).
     """
 
     blocked = blocked_obligations(projection)
+    edited: dict[ObligationId, frozenset[str]] = {}
     absent: list[tuple[ObligationId, int]] = []
     markers: set[tuple[str, ObligationId]] = set()
     for (obligation, index), state in sorted(
@@ -590,8 +598,15 @@ def requested_output_facts(
     ):
         if obligation in blocked:
             continue
+        if obligation not in edited:
+            edited[obligation] = attempted_items_for_obligation(
+                projection, obligation, action_kind=ActionKind.EDIT
+            )
+        # Exact value match, as for requested_item_never_attempted: no path normalization.
+        written = _requested_value(projection, obligation, index) in edited[obligation]
         if state.location == "outside":
-            markers.add((REQUESTED_OUTPUT_OUTSIDE_WORKSPACE_GAP, obligation))
+            if written:
+                markers.add((REQUESTED_OUTPUT_OUTSIDE_WORKSPACE_GAP, obligation))
             continue
         if state.location == "unverified" or state.exists is None:
             markers.add((REQUESTED_OUTPUT_UNVERIFIED_GAP, obligation))
@@ -606,8 +621,18 @@ def requested_output_facts(
             # The repository already ignores it (a build or checkpoint directory, say): delivery
             # by diff would omit it, but the task did not choose that, so it is a disclosure.
             markers.add((REQUESTED_OUTPUT_IGNORED_BY_REPOSITORY_GAP, obligation))
-        elif state.changed is False:
+        elif state.changed is False and written:
             markers.add((REQUESTED_OUTPUT_UNCHANGED_GAP, obligation))
     return tuple(absent), tuple(
         sorted(markers, key=lambda item: (item[0].encode(), item[1].encode()))
     )
+
+
+def _requested_value(
+    projection: ProjectionState, obligation: ObligationId, index: int
+) -> str | None:
+    row = projection.obligations.get(obligation)
+    payload = None if row is None else row.payload
+    if payload is None or not 0 <= index < len(payload.requested_items):
+        return None
+    return payload.requested_items[index].value

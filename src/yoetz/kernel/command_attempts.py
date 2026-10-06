@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-from yoetz.domain.events import LedgerRecord, is_observation_authored
+from yoetz.domain.events import ActionKind, LedgerRecord, is_observation_authored
 from yoetz.domain.values import ActionId, EventId, ObligationId, ResultId
 from yoetz.kernel.projections import ProjectionState
 from yoetz.protocol.models import StatusCommandAttemptModel
 
 
 def attempted_items_for_obligation(
-    state: ProjectionState, obligation_id: ObligationId
+    state: ProjectionState,
+    obligation_id: ObligationId,
+    *,
+    action_kind: ActionKind | None = None,
 ) -> frozenset[str]:
     """Return action assertions attributable to one obligation.
 
@@ -17,12 +20,14 @@ def attempted_items_for_obligation(
     cover every obligation.  Once an action names obligations, its attempted items
     belong only to those exact ids.  Keeping this rule in one helper makes the
     status projection and deterministic requested-item policy agree (#967).
+    ``action_kind`` keeps only actions of that kind (the requested-output facts read edits).
     """
 
     return frozenset(
         item
         for record in state.actions.values()
         if record.payload is not None
+        and (action_kind is None or record.payload.action_kind is action_kind)
         and (not record.payload.obligation_refs or obligation_id in record.payload.obligation_refs)
         for item in record.payload.attempted_items
     )

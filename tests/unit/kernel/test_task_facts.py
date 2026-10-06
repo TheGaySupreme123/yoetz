@@ -398,10 +398,37 @@ def test_acting_starts_with_an_edit_a_published_action_or_a_verification_run() -
     assert started(edited)
 
 
+def _file(value: str) -> RequestedItem:
+    return RequestedItem(RequestedItemKind.FILE, value)
+
+
+def _attempt(
+    ledger: ObservedLedger,
+    kind: ActionKind,
+    *items: str,
+    number: int,
+    obligations: tuple[ObligationId, ...] = (),
+) -> None:
+    ledger.append(
+        _ACTION_SCHEMA,
+        ActionRecordedPayload(
+            action_id(f"act_00000000-0000-4000-8000-{number:012d}"),
+            kind,
+            "Attempted requested items.",
+            command="python work/make_report.py" if kind is ActionKind.COMMAND else None,
+            obligation_refs=obligations,
+            attempted_items=tuple(sorted(items)),
+        ),
+        observed=False,
+    )
+
+
 def test_requested_output_facts_split_absent_from_gap_markers() -> None:
     ledger = ObservedLedger()
-    _planned(ledger, RequestedItem(RequestedItemKind.FILE, "x"))
+    _planned(ledger, *(_file(f"out/{index}") for index in range(8)))
     _plan(ledger, _OBLIGATION)
+    # Unchanged and outside are facts about an item the record says was written.
+    _attempt(ledger, ActionKind.EDIT, "out/3", "out/4", number=901)
     projection = replay(ledger.prefix)
     states = {
         (_OBLIGATION, 0): RequestedOutputState("inside", exists=False),
@@ -429,6 +456,138 @@ def test_requested_output_facts_split_absent_from_gap_markers() -> None:
     blocked_absent, blocked_markers = requested_output_facts(replay(ledger.prefix), states)
     assert blocked_absent == ()
     assert blocked_markers == ()
+
+
+def test_tb4v1_atrx_read_only_inputs_are_not_unchanged_outputs() -> None:
+    """tb4v1 atrx-vep-crispr: tracked /app/data inputs listed as file items, attempted by commands.
+
+    The workspace is /app; the inputs are tracked and never change, and the requested report is a
+    new untracked file. Only the report is an output: no ``requested_output_unchanged``.
+    """
+
+    inputs = (
+        "/app/data/CDS-information.txt",
+        "/app/data/InterPro-domain-information.tsv",
+        "/app/data/ensembl-vep-release-115/",
+        "/app/data/genomic-locus.fa",
+        "/app/data/mutated-transcripts.txt",
+    )
+    ledger = ObservedLedger()
+    _planned(ledger, *(_file(value) for value in inputs))
+    _planned(ledger, _file("/app/output/mutation.report.json"), obligation=_OTHER)
+    _plan(ledger, _OBLIGATION, _OTHER)
+    _attempt(ledger, ActionKind.COMMAND, *inputs, "/app/output/mutation.report.json", number=902)
+    states = {
+        (_OBLIGATION, index): RequestedOutputState(
+            "inside", exists=True, ignored=False, changed=False
+        )
+        for index in range(len(inputs))
+    }
+    states[(_OTHER, 0)] = RequestedOutputState("inside", exists=True, ignored=False, changed=True)
+    assert requested_output_facts(replay(ledger.prefix), states) == ((), ())
+
+    # Before the report exists it is still the receipt-blocking absent output.
+    states[(_OTHER, 0)] = RequestedOutputState("inside", exists=False, ignored=False)
+    assert requested_output_facts(replay(ledger.prefix), states) == (((_OTHER, 0),), ())
+
+    # An item the record says was edited and that is still unchanged keeps the disclosure.
+    _attempt(ledger, ActionKind.EDIT, inputs[1], number=903, obligations=(_OBLIGATION,))
+    _, markers = requested_output_facts(replay(ledger.prefix), states)
+    assert markers == ((REQUESTED_OUTPUT_UNCHANGED_GAP, _OBLIGATION),)
+
+
+def test_tb4v1_heat_pump_inputs_outside_the_workspace_are_not_outputs() -> None:
+    """tb4v1 heat-pump-warranty: workspace /workspace, inputs read from /app/packet.
+
+    Read-only inputs outside the checked repository are not requested outputs, so no
+    ``requested_output_outside_workspace``; an outside path the record says was edited is.
+    """
+
+    packet = (
+        "/app/packet/API.md",
+        "/app/packet/POLICY.md",
+        "/app/packet/source_precedence.yaml",
+    )
+    ledger = ObservedLedger()
+    _planned(ledger, *(_file(value) for value in packet))
+    _planned(ledger, _file("/app/packet/claim_export.csv"), obligation=_OTHER)
+    _plan(ledger, _OBLIGATION, _OTHER)
+    _attempt(ledger, ActionKind.RESEARCH, *packet, "/app/packet/claim_export.csv", number=904)
+    states = {(_OBLIGATION, index): RequestedOutputState("outside") for index in range(3)}
+    states[(_OTHER, 0)] = RequestedOutputState("outside")
+    assert requested_output_facts(replay(ledger.prefix), states) == ((), ())
+
+    # A global edit action covers every obligation that lists the value.
+    _attempt(ledger, ActionKind.EDIT, "/app/packet/claim_export.csv", number=905)
+    _, markers = requested_output_facts(replay(ledger.prefix), states)
+    assert markers == ((REQUESTED_OUTPUT_OUTSIDE_WORKSPACE_GAP, _OTHER),)
+
+    # An edit scoped to another obligation does not mark this one.
+    scoped = ObservedLedger()
+    _planned(scoped, _file("/app/packet/API.md"))
+    _planned(scoped, _file("/app/packet/API.md"), obligation=_OTHER)
+    _plan(scoped, _OBLIGATION, _OTHER)
+    _attempt(scoped, ActionKind.EDIT, "/app/packet/API.md", number=906, obligations=(_OTHER,))
+    both = {
+        (_OBLIGATION, 0): RequestedOutputState("outside"),
+        (_OTHER, 0): RequestedOutputState("outside"),
+    }
+    _, markers = requested_output_facts(replay(scoped.prefix), both)
+    assert markers == ((REQUESTED_OUTPUT_OUTSIDE_WORKSPACE_GAP, _OTHER),)
+
+
+_UNCHANGED = RequestedOutputState("inside", exists=True, ignored=False, changed=False)
+
+
+@pytest.mark.parametrize("kind", [kind for kind in ActionKind if kind is not ActionKind.EDIT])
+def test_only_an_edit_action_marks_an_output_unchanged_or_outside(kind: ActionKind) -> None:
+    ledger = ObservedLedger()
+    _planned(ledger, _file("a.txt"), _file("/elsewhere/a.txt"))
+    _plan(ledger, _OBLIGATION)
+    _attempt(ledger, kind, "/elsewhere/a.txt", "a.txt", number=910)
+    states = {(_OBLIGATION, 0): _UNCHANGED, (_OBLIGATION, 1): RequestedOutputState("outside")}
+    assert requested_output_facts(replay(ledger.prefix), states) == ((), ())
+
+
+def test_ungated_output_facts_need_no_edit_and_matching_is_exact() -> None:
+    ledger = ObservedLedger()
+    _planned(
+        ledger,
+        _file("u.txt"),
+        _file("ignored.txt"),
+        _file("repo-ignored.txt"),
+        _file("a.txt"),
+        _file("/app/data/vep/"),
+        _file("missing.txt"),
+    )
+    _plan(ledger, _OBLIGATION)
+    # An edit naming other values, or the same paths spelled differently, marks nothing.
+    _attempt(ledger, ActionKind.EDIT, "./a.txt", "/app/data/vep", "b.txt", number=911)
+    states = {
+        (_OBLIGATION, 0): RequestedOutputState("inside", exists=None),
+        (_OBLIGATION, 1): RequestedOutputState(
+            "inside", exists=True, ignored=True, ignored_by_task=True
+        ),
+        (_OBLIGATION, 2): RequestedOutputState("inside", exists=True, ignored=True),
+        (_OBLIGATION, 3): _UNCHANGED,
+        (_OBLIGATION, 4): _UNCHANGED,
+        (_OBLIGATION, 5): RequestedOutputState("inside", exists=False, ignored=False),
+    }
+    absent, markers = requested_output_facts(replay(ledger.prefix), states)
+    assert absent == ((_OBLIGATION, 5),)
+    assert {code for code, _ in markers} == {
+        REQUESTED_OUTPUT_UNVERIFIED_GAP,
+        REQUESTED_OUTPUT_GIT_IGNORED_GAP,
+        REQUESTED_OUTPUT_IGNORED_BY_REPOSITORY_GAP,
+    }
+
+    _attempt(ledger, ActionKind.EDIT, "/app/data/vep/", number=912)
+    _, markers = requested_output_facts(replay(ledger.prefix), states)
+    assert (REQUESTED_OUTPUT_UNCHANGED_GAP, _OBLIGATION) in markers
+
+    # A blocker on the obligation still suppresses every output fact, edited or not.
+    _decision(ledger, "yoetz-blocker:consent", _OBLIGATION)
+    assert requested_output_facts(replay(ledger.prefix), states) == ((), ())
 
 
 def test_every_task_fact_code_has_one_fixed_sentence() -> None:
