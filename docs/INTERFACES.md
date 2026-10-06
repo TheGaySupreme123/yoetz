@@ -4484,6 +4484,16 @@ Independent verification support (local control, not MCP):
 - `.yoetz/checks.toml` — fixed schema `yoetz.approved-check-policy/1`; raw bytes produce the trust
   digest. Repository content proposes no authority. One trusted-local exact-digest confirmation is
   retained as an encrypted workspace-scoped record. Any byte change is untrusted.
+  A missing `.yoetz/checks.toml` (or missing `.yoetz/`) raises `ObservationCheckPolicyAbsent`, a
+  subclass of the `invalid_approved_check_policy` failure, so trust gates still fail closed while
+  reporting surfaces distinguish it: `yoetz observe checks status` emits `state: not_configured`
+  with exit 0, `preview`/`trust`/`run` emit `observation_checks_<op>_failed:policy_not_configured`,
+  and the verification worker records no coverage gap. The `not_configured` status object carries
+  the same keys as `trusted`/`untrusted` (`policy_digest: null`, `sandbox`, empty
+  `executable_checks`, `network_check_state: not_requested`) plus a fixed `note`. Any other policy
+  read or parse fault stays `invalid_policy`; workspace or store faults report `unavailable`. Each
+  policy failure line is followed by a fixed continuation stating that the route is optional owner
+  configuration and never a `yoetz-blocker`.
 - `ObservationVerificationWorker` plus its repository — one generation-fenced lease per task
   bundle/workspace lane; newer subject digests stale older pending work, identical
   workspace/policy/approval/state tuples are cached, abandoned running work returns to pending,

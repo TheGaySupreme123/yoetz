@@ -188,6 +188,11 @@ reverse-chronological released versions.
   whose only remaining gap is such a blocker no longer fails internally with
   `invalid_ranked_findings`; standing task facts are disclosures, not `ledger_stale_or_incomplete`
   findings (#977).
+- `yoetz observe checks status` no longer reports a workspace without `.yoetz/checks.toml` as
+  `invalid_policy` (exit 20). Approved checks are optional: it now reports `state: not_configured`
+  and exits successfully; `preview`, `trust` and `run` say `policy_not_configured`, and only a
+  real read or parse fault says `invalid_policy`. Every such failure, and the guidance, now states
+  that this is Yoetz configuration, never a `yoetz-blocker` (#977).
 
 - A repaired AI-powered finding can now resolve in a long session. A recheck over a bounded review
   scope used to require every item the reviewer cited to be shown again, but the repair's own work
