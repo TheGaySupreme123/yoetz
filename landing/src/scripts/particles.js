@@ -384,7 +384,7 @@ export function mountParticles(canvas, options = {}) {
           }
           if (f >= 0.52) {
             // the benchmark score, rising with the sun: one figure per stop
-            if (narrowLayout) fromSet(i, digits, 0.5, 0.02, sy - 0.62, 0.1, 0);
+            if (narrowLayout) fromSet(i, digits, 0.5, 0.02, sy - 0.5, 0.1, 0);
             else fromSet(i, digits, 0.6, -0.72, Math.min(sy, 0.55), 0.1, 0);
             continue;
           }

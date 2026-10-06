@@ -192,21 +192,6 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
         const update = () => {
           raf = 0;
           const vh = window.innerHeight || 900;
-          if (slot) {
-            const r = slot.getBoundingClientRect();
-            const c = canvas.getBoundingClientRect();
-            art.setAnchor(r.left + r.width / 2 - c.left, r.top + r.height / 2 - c.top);
-          }
-          if (tiers.length) {
-            // the tier slot nearest the middle of the viewport is the one being read
-            const c = canvas.getBoundingClientRect();
-            let best: DOMRect | null = null;
-            for (const el of tiers) {
-              const r = el.getBoundingClientRect();
-              if (!best || Math.abs(r.top + r.height / 2 - vh / 2) < Math.abs(best.top + best.height / 2 - vh / 2)) best = r;
-            }
-            if (best) art.setTier(best.left + best.width / 2 - c.left, best.top + best.height / 2 - c.top, best.width, best.height);
-          }
           const top = -story.getBoundingClientRect().top;
           const screens = (top + vh * 0.5) / vh;
           let acc = 0;
@@ -241,6 +226,26 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
             art.setScroll(screens);
           }
         };
+        // the slots the artwork draws into move as fonts load and copy fades, so they are
+        // measured every frame (reads only, no layout writes)
+        const measure = () => {
+          const c = canvas.getBoundingClientRect();
+          if (slot) {
+            const r = slot.getBoundingClientRect();
+            art.setAnchor(r.left + r.width / 2 - c.left, r.top + r.height / 2 - c.top);
+          }
+          if (tiers.length) {
+            const vh = window.innerHeight || 900;
+            let best: DOMRect | null = null;
+            for (const el of tiers) {
+              const r = el.getBoundingClientRect();
+              if (!best || Math.abs(r.top + r.height / 2 - vh / 2) < Math.abs(best.top + best.height / 2 - vh / 2)) best = r;
+            }
+            if (best) art.setTier(best.left + best.width / 2 - c.left, best.top + best.height / 2 - c.top, best.width, best.height);
+          }
+          requestAnimationFrame(measure);
+        };
+        measure();
         const onScroll = () => {
           if (!raf) raf = requestAnimationFrame(update);
         };
