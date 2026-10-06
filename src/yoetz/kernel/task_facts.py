@@ -88,8 +88,10 @@ __all__ = [
     "WRITE_OUTSIDE_WORKSPACE_GAP",
     "RequestedOutputState",
     "TaskFactSignals",
+    "BlockerDeclaration",
     "acting_started",
     "blocked_obligations",
+    "blocker_declarations",
     "cooperative_event_ids_from_coverage",
     "cooperative_event_ids_from_records",
     "command_identity_key_registered",
@@ -222,16 +224,30 @@ def requested_command_identity(value: str) -> str | None:
 # ---------------------------------------------------------------------------------------------
 
 
-def blocked_obligations(projection: ProjectionState) -> Mapping[ObligationId, str]:
-    """Obligations a readable, unsuperseded blocker decision names, with the blocker kind.
+@dataclass(frozen=True, slots=True)
+class BlockerDeclaration:
+    """One obligation's recorded blocker: the closed kind and the decision that declared it."""
+
+    kind: str
+    decision_event_id: EventId
+
+    def __post_init__(self) -> None:
+        if self.kind not in BLOCKER_KINDS:
+            raise ValueError("blocker_kind_invalid")
+
+
+def blocker_declarations(projection: ProjectionState) -> Mapping[ObligationId, BlockerDeclaration]:
+    """Obligations a readable, unsuperseded blocker decision names, with its kind and event id.
 
     Only the exact statement line ``yoetz-blocker:<kind>`` for a closed kind counts, and only for
     the ids in ``affected_obligation_ids``. The first kind in ``BLOCKER_KINDS`` order wins when a
-    decision names more than one.
+    decision names more than one; the earliest such decision in ledger order wins when several
+    name the same obligation. Yoetz cannot verify the claim: the Stop gate re-asks it once and the
+    closing review checks it against the task (#977, #976).
     """
 
-    blocked: dict[ObligationId, str] = {}
-    for row in projection.decisions.values():
+    blocked: dict[ObligationId, BlockerDeclaration] = {}
+    for event_id, row in projection.decisions.items():
         payload = row.payload
         if type(payload) is not DecisionRecordedPayload or row.superseded_by_event_id is not None:
             continue
@@ -244,8 +260,16 @@ def blocked_obligations(projection: ProjectionState) -> Mapping[ObligationId, st
             continue
         kind = next(item for item in BLOCKER_KINDS if item in kinds)
         for obligation in payload.affected_obligation_ids:
-            blocked.setdefault(obligation, kind)
+            blocked.setdefault(obligation, BlockerDeclaration(kind, event_id))
     return MappingProxyType(blocked)
+
+
+def blocked_obligations(projection: ProjectionState) -> Mapping[ObligationId, str]:
+    """Obligations a readable, unsuperseded blocker decision names, with the blocker kind."""
+
+    return MappingProxyType(
+        {obligation: item.kind for obligation, item in blocker_declarations(projection).items()}
+    )
 
 
 def effective_obligations(projection: ProjectionState) -> tuple[ObligationId, ...]:

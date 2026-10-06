@@ -672,7 +672,8 @@ disclosure, credentials or runtime authority: publish `decision_recorded` naming
 `yoetz-blocker:<authority|consent|credential|dependency_unavailable>` and a rationale. Missing or
 inconsistent data the task says is recoverable, a failing test, or a result that looks infeasible
 is not a blocker: deliver a best-effort result in the requested form and disclose the assumption.
-Only then report the remaining limitation or narrow the claim. `respond` rejects an `acknowledged` answer to an
+Yoetz cannot verify a blocker: the next Stop asks you once to re-confirm it, and the closing review
+checks it against the task and may challenge it. Only then report the remaining limitation or narrow the claim. `respond` rejects an `acknowledged` answer to an
 AI-powered review finding unless `evidence_refs` cites evidence or a result recorded after the
 finding (`resolution_attempt_required`); the result of the blocked attempt counts (outcome
 `failure` or `partial`: there is no `blocked` outcome). An acknowledgement or

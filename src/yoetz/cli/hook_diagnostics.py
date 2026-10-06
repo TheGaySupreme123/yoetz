@@ -185,6 +185,10 @@ _REASONS: Final = frozenset(
         "closure_gate_loop_guard",
         "closure_gate_budget_exhausted",
         "closure_gate_unavailable",
+        # The delivered continuation also re-asked a recorded blocker once (#977), or its
+        # once-per-frontier/once-per-blocker memory could not be written.
+        "closure_gate_blocker_rechecked",
+        "closure_gate_memory_unwritten",
         "hook_slo_breached",
         # A host's automatic tool-call reviewer (Claude Code auto mode) denied a
         # scoped AI-powered ``check`` before Yoetz received it, or a permission

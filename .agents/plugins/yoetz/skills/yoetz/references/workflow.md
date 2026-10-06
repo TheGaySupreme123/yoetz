@@ -227,7 +227,9 @@ Closure is a checklist. `closure_readiness.state` names the next move:
 If you stop while `agent_actionable` still names open obligations, an unrepaired receipt-blocking
 finding, a planned verification that was not observed, failed, or ran before your last edit, or a
 git-ignored requested output, the Stop hook continues you once with that list. Finish the work, or
-record a blocker outside your control as above; then stop.
+record a blocker outside your control as above; then stop. The first Stop after you record a
+blocker also asks you once to confirm it: if the task says the data or dependency is recoverable,
+continue the work; if it is genuinely outside your control, stop again and Yoetz honours it.
 
 `blocking_conditions` still names everything that bounds the conclusion; `coverage_gaps_declared`
 there is a disclosure, not a task. Never treat a standing limitation as work, and never describe
@@ -625,7 +627,8 @@ disclosure, credentials or runtime authority: publish `decision_recorded` naming
 `yoetz-blocker:<authority|consent|credential|dependency_unavailable>` and a rationale. Missing or
 inconsistent data the task says is recoverable, a failing test, or a result that looks infeasible
 is not a blocker: deliver a best-effort result in the requested form and disclose the assumption.
-Only then report the remaining limitation or narrow the claim. `respond` rejects an `acknowledged` answer to an
+Yoetz cannot verify a blocker: the next Stop asks you once to re-confirm it, and the closing review
+checks it against the task and may challenge it. Only then report the remaining limitation or narrow the claim. `respond` rejects an `acknowledged` answer to an
 AI-powered review finding unless `evidence_refs` cites evidence or a result recorded after the
 finding (`resolution_attempt_required`); the result of the blocked attempt counts (outcome
 `failure` or `partial`: there is no `blocked` outcome). An acknowledgement or

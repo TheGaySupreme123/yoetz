@@ -409,8 +409,9 @@ TASK_FACT_GAP_SENTENCES: Final[Mapping[str, str]] = MappingProxyType(
             "Every observed test, lint, typecheck or build run ran as root."
         ),
         "obligation_blocked_outside_agent_control": (
-            "An open obligation is named by a recorded blocker outside the agent's control"
-            " (authority, consent, credentials, or an unobtainable dependency)."
+            "An open obligation is named by a blocker the agent recorded as outside its control"
+            " (authority, consent, credentials, or an unobtainable dependency); Yoetz did not"
+            " verify the claim."
         ),
     }
 )

@@ -98,6 +98,7 @@ from yoetz.protocol.models import (
     StatusAdvicePageModel,
     StatusAssignmentFilterModel,
     StatusAssignmentPageModel,
+    StatusBlockedObligationModel,
     StatusCandidateFindingItemModel,
     StatusCandidateFindingsFilterModel,
     StatusCandidateFindingsPageModel,
@@ -1221,6 +1222,7 @@ def _readiness_unknown() -> StatusClosureReadinessModel:
         standing_limitations=(),
         acknowledged_not_done=(),
         acknowledged_not_done_count="0",
+        blocked_obligations=(),
     )
 
 
@@ -1362,6 +1364,16 @@ async def _closure_readiness(
         standing_limitations=checklist.standing_limitations,
         acknowledged_not_done=checklist.acknowledged_not_done,
         acknowledged_not_done_count=str(checklist.acknowledged_not_done_count),
+        blocked_obligations=tuple(
+            StatusBlockedObligationModel(
+                obligation_id=obligation,
+                blocker_kind=cast(
+                    Literal["authority", "consent", "credential", "dependency_unavailable"], kind
+                ),
+                decision_event_id=decision,
+            )
+            for obligation, kind, decision in facts.blocked_obligation_details[:64]
+        ),
         blocking_conditions=cast(
             tuple[
                 Literal[

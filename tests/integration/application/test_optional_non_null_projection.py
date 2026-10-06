@@ -258,6 +258,7 @@ _RESULT_OPTIONAL_NON_NULL: tuple[tuple[type[BaseModel], frozenset[str]], ...] = 
                 "standing_limitations",
                 "acknowledged_not_done",
                 "acknowledged_not_done_count",
+                "blocked_obligations",
             }
         ),
     ),
@@ -1462,6 +1463,8 @@ def test_every_result_optional_non_null_field_has_an_unset_projection_case() -> 
         "standing_limitations",
         "acknowledged_not_done",
         "acknowledged_not_done_count",
+        # Issue #977: absent from a readiness an earlier 0.3 build shaped.
+        "blocked_obligations",
     ):
         # Issue #913: the checklist is absent as a whole on an earlier 0.3 build's readiness.
         covered["StatusClosureReadinessModel", field] = (

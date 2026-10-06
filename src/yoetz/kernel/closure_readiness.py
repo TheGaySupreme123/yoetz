@@ -38,7 +38,7 @@ from typing import Final, Literal
 
 from yoetz.domain.events import CheckRecordedPayload, LedgerRecord
 from yoetz.domain.receipts import CHECK_TIME_CHANGE_UNAVAILABLE_REASON_GAPS
-from yoetz.domain.values import FindingId, ObligationId
+from yoetz.domain.values import EventId, FindingId, ObligationId
 from yoetz.kernel.claims import completion_claim_present
 from yoetz.kernel.finding_resolution import finding_is_resolved
 from yoetz.kernel.finding_todo import finding_blocks_receipt
@@ -50,7 +50,7 @@ from yoetz.kernel.task_facts import (
     AGENT_ACTIONABLE_TASK_FACT_GAPS,
     OBLIGATION_BLOCKED_GAP,
     STANDING_TASK_FACT_GAPS,
-    blocked_obligations,
+    blocker_declarations,
     open_effective_obligations,
 )
 from yoetz.protocol.models import SemanticStatus
@@ -482,6 +482,9 @@ class ClosureReadinessFacts:
     # Open effective obligations, and the subset a recorded blocker decision names (#977).
     open_obligation_ids: tuple[ObligationId, ...] = ()
     blocked_obligation_ids: tuple[ObligationId, ...] = ()
+    # ``(obligation, blocker kind, decision event id)`` for each blocked open obligation, in
+    # obligation order: what the Stop gate names when it re-asks a blocker once (#977).
+    blocked_obligation_details: tuple[tuple[ObligationId, str, EventId], ...] = ()
     # Issue #976. Whether a closing review (final phase) is current since the last material
     # change, or a review attempt since then could not complete for a reason the agent cannot
     # remove; and whether any AI-powered review completed on this task. The defaults keep a
@@ -512,6 +515,12 @@ class ClosureReadinessFacts:
         ):
             if type(values) is not tuple or values != tuple(sorted(set(values), key=str.encode)):
                 raise ValueError("closure_readiness_facts_invalid")
+        if (
+            type(self.blocked_obligation_details) is not tuple
+            or tuple(item[0] for item in self.blocked_obligation_details)
+            != self.blocked_obligation_ids
+        ):
+            raise ValueError("closure_readiness_facts_invalid")
 
 
 def live_lineage_blockers(tokens: Iterable[str], recorded_gaps: Iterable[str]) -> tuple[str, ...]:
@@ -719,7 +728,10 @@ def closure_readiness_facts(
     # The receipt's applicability rule reads the same observation-limitation set (issue #911).
     limitations = observation_limitation_finding_ids(state, records)
     open_obligations = open_effective_obligations(state)
-    blocked = blocked_obligations(state)
+    blocked = blocker_declarations(state)
+    blocked_open = tuple(
+        sorted({item for item in open_obligations if item in blocked}, key=str.encode)
+    )
     closing_current, review_used = _closing_review_facts(state, records, limitations)
     return ClosureReadinessFacts(
         check_applicability=_check_applicability(state, records, limitations),
@@ -728,8 +740,9 @@ def closure_readiness_facts(
         acknowledged_finding_ids=tuple(sorted(acknowledged, key=str.encode)),
         acknowledged_obligation_ids=_acknowledged_obligation_ids(state),
         open_obligation_ids=tuple(sorted(set(open_obligations), key=str.encode)),
-        blocked_obligation_ids=tuple(
-            sorted({item for item in open_obligations if item in blocked}, key=str.encode)
+        blocked_obligation_ids=blocked_open,
+        blocked_obligation_details=tuple(
+            (item, blocked[item].kind, blocked[item].decision_event_id) for item in blocked_open
         ),
         closing_review_current=closing_current,
         semantic_review_used=review_used,

@@ -96,8 +96,9 @@ agent must not be able to stop silently with known work left.
    changes (the same marker pattern as `yoetz-no-material-work`). Yoetz cannot verify the claim:
    it honours it and discloses it. Readiness reports open obligations that are all so named as the
    standing `obligation_blocked_outside_agent_control` instead of `obligations_open`; their
-   requested items raise no never-attempted or absent-output finding; the Stop gate does not fire
-   for them. A blocker never waives the closing review (ADR-006, #976): the receipt is the final
+   requested items raise no never-attempted or absent-output finding; the Stop gate does not list
+   them as work, but re-asks each recorded blocker once (see the 2026-10-06 amendment).
+   A blocker never waives the closing review (ADR-006, #976): the receipt is the final
    step after a final review, recording the blocker is itself a material change, and running
    `check` with `final_review: true` stays within the agent's control, so
    `closing_review_required` stays agent-actionable and keeps the gate armed until that review
@@ -121,6 +122,7 @@ agent must not be able to stop silently with known work left.
    - any read failure, or less than five seconds of the Stop budget left, lets the agent stop.
 
    Every outcome is a bounded hook diagnostic (`closure_gate_continued`,
+   `closure_gate_blocker_rechecked`, `closure_gate_memory_unwritten` (amendment),
    `closure_gate_not_required`, `closure_gate_repeat_suppressed`, `closure_gate_loop_guard`,
    `closure_gate_budget_exhausted`, `closure_gate_unavailable`) visible in `yoetz observe status`.
 6. **Per-host delivery.** Codex: `decision: block` with `reason` (its only model-visible Stop
@@ -178,3 +180,55 @@ agent must not be able to stop silently with known work left.
   budget before its own envelope reaches the service, so a gate computed there would often miss.
 - **Make planned-verification facts receipt-blocking findings.** Rejected: the exact-identity match
   can miss a reformatted run, so they are agent-actionable readiness codes, not findings.
+
+## Amendment (2026-10-06): a recorded blocker is re-asked once and checked once
+
+TB4 validation run tb4v1 found a loophole in decision 4. A deterministic agent on
+pretrain-shard-corruption recorded `yoetz-blocker:dependency_unavailable` for "no original snapshot
+found", although the task said the data was recoverable. Any well-formed line was honoured, the
+obligation became the standing `obligation_blocked_outside_agent_control`, and the Stop gate went
+quiet. The owner decided the following, with no prerequisite such as a prior failed attempt:
+
+1. **Deterministic: re-ask once, then honour.** Status `closure_readiness` gains the optional
+   `blocked_obligations` list (`obligation_id`, closed `blocker_kind`, `decision_event_id`; ids
+   and the closed kind only, on the unreleased status-result 1.4.0). At a mapped Stop, the gate
+   also fires when this list names an `(obligation, kind)` pair the session has not yet been asked
+   about. This includes `ready_with_limitations`, where nothing else is left. The continuation
+   names each obligation and the claimed kind and asks the agent to confirm each is outside its
+   control (authority, consent, a credential, a dependency it cannot obtain). It says that missing
+   or inconsistent data the task says is recoverable, a failing test, or an infeasible-looking
+   result is not a blocker, and it tells the agent to continue the work otherwise. The gate item is
+   `blocker_recheck`, and the extra diagnostic is `closure_gate_blocker_rechecked`
+   (`closure_gate_memory_unwritten` when the memory below cannot be written). Nothing judges the
+   claim here.
+2. **"Re-confirmed" means the agent stopped again, with no new protocol field.** Once the gate
+   that named a pair is delivered, the hook remembers `<obligation id>:<kind>` for that Yoetz
+   session in a second owner-only file (`observation/closure-gate-blockers.json`, at most 64
+   keys per session and 128 sessions). The pair is then honoured at every later Stop, whatever the
+   frontier. A second Stop, or recording the same blocker again, is the re-confirmation. A
+   different kind for the same obligation is a new claim and is re-asked once. A new session is
+   asked again once. The re-check cannot loop: each pair is asked at most once per session, and
+   the host loop guard, once-per-frontier memory, budget and read-failure rules of decision 5
+   still apply first. If the memory write fails, the agent may be asked once more at a later Stop,
+   which is bounded by the same guards.
+3. **Semantic: the closing review verifies each blocker once.** A final-phase review case adds one
+   question (`recorded_blockers`) that lists each blocker decision, its kind and its open
+   obligations, using ids and closed tokens only. Blocker decisions lead the decision section, so
+   the 16-item cap never drops them. Statement and rationale (agent text) reach the reviewer only
+   through the decision excerpt, which privacy enforcement classifies and span-redacts like any
+   other item. The reviewer instruction asks for one verification per blocker against the task
+   statement and the work. If either contradicts the blocker, the reviewer raises one challenge
+   that cites the decision or obligation. That challenge is an ordinary AI-powered finding, and the
+   agent answers it with `respond`. A genuine blocker stays a disclosed limitation and is not
+   challenged. The routine phase does not judge blockers.
+4. **Fixes found on the way.** Readiness in which every open obligation is blocked
+   (`obligations_open` in `blocking_conditions`, disclosed as
+   `obligation_blocked_outside_agent_control` rather than listed as work) failed the status
+   model's own validation, so status failed and the gate read nothing. The validator now admits
+   exactly that shape. Work-integrity also turned standing task facts into
+   `ledger_stale_or_incomplete` findings, which made a check whose only gap was a blocker fail
+   internally (`invalid_ranked_findings`). Standing task facts are now disclosures only, as decision
+   4 intended.
+
+The receipt still discloses blocked obligations as standing limitations, and the reviewer's
+verdict on a blocker appears as a normal finding.

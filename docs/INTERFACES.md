@@ -8342,9 +8342,25 @@ is withheld whole), recorded as a bounded `semantic_composition/check_time_chang
   readable, unsuperseded `decision_recorded` events whose statement holds the exact line
   `yoetz-blocker:<kind>` (`BLOCKER_MARKER`; `BLOCKER_KINDS` = `authority`, `consent`,
   `credential`, `dependency_unavailable`) for their `affected_obligation_ids`.
-  `ClosureReadinessFacts` gains `open_obligation_ids` and `blocked_obligation_ids`;
-  `derive_closure_readiness` replaces `obligations_open` with the standing
-  `obligation_blocked_outside_agent_control` when every open effective obligation is blocked.
+  `blocker_declarations(projection) -> Mapping[ObligationId, BlockerDeclaration(kind,
+  decision_event_id)]` is the same read with the declaring decision (the earliest in ledger order
+  wins). `ClosureReadinessFacts` gains `open_obligation_ids`, `blocked_obligation_ids` and
+  `blocked_obligation_details` (`(obligation, kind, decision event id)` per blocked open
+  obligation); `derive_closure_readiness` replaces `obligations_open` with the standing
+  `obligation_blocked_outside_agent_control` when every open effective obligation is blocked, and
+  `StatusClosureReadinessModel` admits exactly that shape. Status `closure_readiness` carries the
+  optional `blocked_obligations` list (`obligation_id`, `blocker_kind`, `decision_event_id`; at most
+  64, ids and the closed kind only, absent from an earlier 0.3 build), and the CLI/terminal status
+  renders it as "Recorded blockers (agent-declared, unverified)". Standing task facts never become
+  `ledger_stale_or_incomplete` findings.
+- **Closing review of blockers (#976).** `semantic_case.recorded_blockers(projection)` returns
+  `(decision event id, kind, open obligation ids)` per blocker decision, and
+  `review_question_set(phase, blockers)` adds one final-phase question that lists them (at most
+  16, ids and closed kinds) and asks the reviewer to verify each once against the task statement
+  and the work. The reviewer should challenge a contradicted blocker by citing the decision or
+  obligation; that challenge becomes an ordinary AI-powered finding. Blocker decisions lead the
+  decision section, and their statement and rationale travel only as the privacy-gated decision
+  excerpt.
 - **Requested outputs.** `ChangeCapturePort` implementations may offer
   `probe_requested_paths(workspace, values) -> tuple[RequestedPathProbe, ...]`
   (`ports/change_capture.py`; `location` `inside|outside`, root-relative `relative`, `exists`,
@@ -8376,12 +8392,18 @@ is withheld whole), recorded as a bounded `semantic_composition/check_time_chang
   `planned_verification_failed`,
   `planned_verification_not_observed`, `planned_verification_stale`,
   `requested_output_git_ignored`. `closure_gate_from_readiness(readiness, frontier_sequence=,
-  frontier_digest=, observation_pending=) -> ClosureGate(identity, text, items) | None`;
+  frontier_digest=, observation_pending=, reasked_blockers=) -> ClosureGate(identity, text, items,
+  blocker_keys) | None` also fires, in `action_required` or `ready_with_limitations`, for a
+  `blocked_obligations` pair whose `<obligation id>:<kind>` key is not in `reasked_blockers`. It adds
+  the item `BLOCKER_RECHECK_ITEM` (`blocker_recheck`) and names each obligation and kind once.
   `read_closure_gate(...)` reads compact status and raises `ClosureGateUnavailable` when it cannot;
-  `closure_gate_already_delivered` / `record_closure_gate_delivered` keep the owner-only
-  `observation/closure-gate.json` once-per-frontier memory. Hook diagnostic reasons:
-  `closure_gate_continued`, `closure_gate_not_required`, `closure_gate_repeat_suppressed`,
-  `closure_gate_loop_guard`, `closure_gate_budget_exhausted`, `closure_gate_unavailable`.
+  `closure_gate_already_delivered` / `record_closure_gate_delivered(..., blocker_keys=)` keep the
+  owner-only `observation/closure-gate.json` once-per-frontier memory, and
+  `closure_gate_reasked_blockers(session_id)` reads the per-session re-asked keys in
+  `observation/closure-gate-blockers.json` (at most 64 per session). Hook diagnostic reasons:
+  `closure_gate_continued`, `closure_gate_blocker_rechecked`, `closure_gate_not_required`,
+  `closure_gate_repeat_suppressed`, `closure_gate_loop_guard`, `closure_gate_budget_exhausted`,
+  `closure_gate_unavailable`.
 - **Text surfaces.** `domain/receipts.TASK_FACT_GAP_SENTENCES` holds one fixed sentence per task-fact
   code; `check_time_change_gap_sentence(code)` returns it, so receipt gap details and limitations,
   `render_human_check`/`render_human_status` and the MCP check summary show it. A publish rejection

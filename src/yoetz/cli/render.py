@@ -451,6 +451,15 @@ def render_closure_readiness_lines(readiness: StatusClosureReadinessModel) -> tu
         lines.append("Agent-actionable: " + ", ".join(readiness.agent_actionable))
     if readiness.standing_limitations:
         lines.append("Standing limitations: " + ", ".join(readiness.standing_limitations))
+    if readiness.blocked_obligations:
+        # Recorded yoetz-blocker claims (#977): ids and the closed kind; Yoetz did not verify them.
+        lines.append(
+            "Recorded blockers (agent-declared, unverified): "
+            + ", ".join(
+                f"{item.obligation_id} ({item.blocker_kind})"
+                for item in readiness.blocked_obligations
+            )
+        )
     if readiness.acknowledged_not_done:
         listed = ", ".join(readiness.acknowledged_not_done)
         hidden = int(readiness.acknowledged_not_done_count) - len(readiness.acknowledged_not_done)

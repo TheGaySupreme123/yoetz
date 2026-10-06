@@ -220,7 +220,10 @@ the stop is continued once with the list. When something outside your control bl
 obligation (authority, consent, credentials, or a dependency you cannot obtain), record a
 `decision_recorded` naming it in `affected_obligation_ids` with the statement line
 `yoetz-blocker:<authority|consent|credential|dependency_unavailable>`; it then reads as a disclosed
-limitation instead of open work.
+limitation instead of open work. Yoetz cannot verify a blocker, so the next stop asks you once to
+confirm each blocked obligation and its kind: data the task says is recoverable, a failing test,
+or a result that only looks infeasible is not a blocker, so continue the work instead. Stopping
+again keeps the blocker, and the closing review checks it against the task once.
 
 ### `receipt`
 Projects the honest summary of what was checked, at what coverage, and what remains open. Formats:

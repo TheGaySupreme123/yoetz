@@ -27,7 +27,7 @@ import pytest
 
 from builders.observed_runs import INSTALLATION_KEY, ObservedLedger
 from yoetz.application.check import CheckScope, run_deterministic_policies
-from yoetz.cli.closure_gate import closure_gate_from_readiness
+from yoetz.cli.closure_gate import BLOCKER_RECHECK_ITEM, closure_gate_from_readiness
 from yoetz.domain.events import (
     ActionKind,
     ActionRecordedPayload,
@@ -205,6 +205,8 @@ def _replay(name: str) -> tuple[_Replay, dict[str, Any]]:
 def _stop_gate(
     replayed: _Replay,
     output_states: dict[tuple[ObligationId, int], RequestedOutputState],
+    *,
+    reasked: frozenset[str] = frozenset(),
 ) -> tuple[Any, Any]:
     records = replayed.ledger.prefix
     projection = replay(records)
@@ -226,10 +228,11 @@ def _stop_gate(
         conditions.append("obligations_open")
     if blocking_findings:
         conditions.append("receipt_findings_unresolved")
+    facts = closure_readiness_facts(projection, records)
     readiness = derive_closure_readiness(
         conditions,
         (*signals.codes, *(code for code, _ in markers)),
-        closure_readiness_facts(projection, records),
+        facts,
         semantic_review_required=False,
     )
     view = SimpleNamespace(
@@ -237,12 +240,17 @@ def _stop_gate(
         agent_actionable=readiness.agent_actionable,
         open_obligation_count=str(len(open_obligations)),
         receipt_blocking_finding_count=str(len(blocking_findings)),
+        blocked_obligations=tuple(
+            SimpleNamespace(obligation_id=obligation, blocker_kind=kind, decision_event_id=event)
+            for obligation, kind, event in facts.blocked_obligation_details
+        ),
     )
     gate = closure_gate_from_readiness(
         view,
         frontier_sequence=str(projection.frontier),
         frontier_digest=projection.head_digest,
         observation_pending=False,
+        reasked_blockers=reasked,
     )
     return gate, signals
 
@@ -295,22 +303,47 @@ def test_atrx_vep_crispr_det_missing_report_blocks_the_receipt_and_continues_the
     assert "Remaining: 5 open obligation(s); 1 receipt-blocking finding(s)" in gate.text
 
 
-def test_a_genuine_blocker_lets_pretrain_stop_without_the_gate() -> None:
+def _declare_blocker(replayed: _Replay, rationale: str) -> tuple[ObligationId, ...]:
     from yoetz.domain.events import DecisionRecordedPayload
     from yoetz.domain.values import actor_id
 
-    replayed, _fixture = _replay("pretrain_shard_corruption_det")
     projection = replay(replayed.ledger.prefix)
-    open_obligations = open_effective_obligations(projection)
+    open_obligations = tuple(sorted(open_effective_obligations(projection)))
     replayed.ledger.append(
         EventSchema("decision_recorded", "1.0.0"),
         DecisionRecordedPayload(
             statement="yoetz-blocker:dependency_unavailable",
-            rationale="Replay: every open obligation declared blocked.",
+            rationale=rationale,
             authority=actor_id("agt_codex"),
-            affected_obligation_ids=tuple(sorted(open_obligations)),
+            affected_obligation_ids=open_obligations,
         ),
         observed=False,
     )
+    return open_obligations
+
+
+def test_tb4v1_pretrain_blocker_for_a_missing_snapshot_is_rechecked_once() -> None:
+    """tb4v1: the agent declared ``dependency_unavailable`` for "no original snapshot found"
+    although the task said the data was recoverable. Yoetz cannot judge that claim, so the next
+    Stop re-asks it once, naming each obligation and the claimed kind."""
+
+    replayed, _fixture = _replay("pretrain_shard_corruption_det")
+    blocked = _declare_blocker(replayed, "No original snapshot found.")
     gate, _signals = _stop_gate(replayed, {})
-    assert gate is None
+
+    assert gate is not None
+    assert gate.items == (BLOCKER_RECHECK_ITEM,)
+    for obligation in blocked:
+        assert f"{obligation} (dependency_unavailable)" in gate.text
+    assert "Missing or inconsistent data the task says is recoverable" in gate.text
+    assert "is not a blocker" in gate.text
+
+
+def test_a_genuine_blocker_lets_pretrain_stop_after_one_recheck() -> None:
+    replayed, _fixture = _replay("pretrain_shard_corruption_det")
+    _declare_blocker(replayed, "Replay: every open obligation declared blocked.")
+    first, _signals = _stop_gate(replayed, {})
+    assert first is not None
+    # The agent stops again without changing anything: the blocker is honoured, never a loop.
+    second, _signals = _stop_gate(replayed, {}, reasked=frozenset(first.blocker_keys))
+    assert second is None

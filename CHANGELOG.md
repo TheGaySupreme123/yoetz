@@ -26,8 +26,13 @@ reverse-chronological released versions.
 
 - A blocker outside the agent's control is now explicit: a `decision_recorded` naming the
   obligations with the statement line `yoetz-blocker:<authority|consent|credential|
-  dependency_unavailable>`. Those obligations read as a disclosed standing limitation and never
-  trigger the Stop continuation (#977).
+  dependency_unavailable>`. Those obligations read as a disclosed standing limitation (#977).
+  Yoetz cannot verify the claim, so the first Stop after it is recorded asks the agent once to
+  confirm each blocked obligation and its kind (status `closure_readiness.blocked_obligations`
+  names them). That Stop says that data the task calls recoverable, a failing test or an
+  infeasible-looking result is not a blocker. Stopping again honours the blocker without asking
+  again. The closing review checks each recorded blocker once against the task and challenges one
+  the task contradicts, as an ordinary finding the agent answers with `respond` (#976).
 
 - Hooks classify three closed runtime facts per tool call (`install_target`, `write_scope`,
   `effective_user`; no path or command text) on the unreleased control-request 2.9.0, and
@@ -178,6 +183,11 @@ reverse-chronological released versions.
   budget without dropping any rule.
 
 ### Fixed
+
+- Status no longer fails when every open obligation is named by a recorded blocker, and a check
+  whose only remaining gap is such a blocker no longer fails internally with
+  `invalid_ranked_findings`; standing task facts are disclosures, not `ledger_stale_or_incomplete`
+  findings (#977).
 
 - A repaired AI-powered finding can now resolve in a long session. A recheck over a bounded review
   scope used to require every item the reviewer cited to be shown again, but the repair's own work

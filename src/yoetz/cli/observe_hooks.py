@@ -49,8 +49,10 @@ from yoetz.adapters.integrations.observation_local import (
 from yoetz.adapters.workspace_binding import canonical_workspace_locator, resolve_workspace_locator
 from yoetz.cli import hook_io
 from yoetz.cli.closure_gate import (
+    BLOCKER_RECHECK_ITEM,
     ClosureGate,
     closure_gate_already_delivered,
+    closure_gate_reasked_blockers,
     read_closure_gate,
     record_closure_gate_delivered,
 )
@@ -3654,6 +3656,8 @@ def _decide_closure_gate(
             pending = store.pending_outbox_count(workspace_commitment) > 0
         except Exception:
             pending = True
+        # Blockers this session was already re-asked about are honoured without asking again.
+        reasked = closure_gate_reasked_blockers(mapping.yoetz_session_id, _state=_state)
 
         async def _read() -> ClosureGate | None:
             return await read_closure_gate(
@@ -3662,6 +3666,7 @@ def _decide_closure_gate(
                 connect=cast(Callable[..., Awaitable[object]], connector),
                 actor_id=f"yoetz:{harness_id}-hooks",
                 observation_pending=pending,
+                reasked_blockers=reasked,
             )
 
         decided = cast(ClosureGate | None, run(_read))
@@ -5221,10 +5226,21 @@ def handle_observe(
                 emitted = _stdout_json({}, stdout)
             if emitted and host_consumable and closure_gate is not None and mapping is not None:
                 with contextlib.suppress(BaseException):
-                    record_closure_gate_delivered(
-                        mapping.yoetz_session_id, closure_gate.identity, _state=_state
-                    )
+                    if not record_closure_gate_delivered(
+                        mapping.yoetz_session_id,
+                        closure_gate.identity,
+                        blocker_keys=closure_gate.blocker_keys,
+                        _state=_state,
+                    ):
+                        # Visible, never fatal: the host loop guard still bounds a repeat.
+                        record_hook_diagnostic(
+                            "closure_gate_memory_unwritten", resolved_event, _state=_state
+                        )
                     record_hook_diagnostic("closure_gate_continued", resolved_event, _state=_state)
+                    if BLOCKER_RECHECK_ITEM in closure_gate.items:
+                        record_hook_diagnostic(
+                            "closure_gate_blocker_rechecked", resolved_event, _state=_state
+                        )
             if emitted and host_consumable and pending_delivery is not None:
                 # Strictly after the write: delivered-but-unrecorded costs one
                 # redelivery, recorded-but-undelivered would cost the advice.

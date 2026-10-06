@@ -11,12 +11,18 @@ the service's own ``status`` answer (``closure_readiness``), never the transcrip
   that cannot or will not act is never trapped; the host's own loop guard (``stop_hook_active``,
   Cursor ``loop_count``) is honoured before any service read;
 * an obligation a recorded blocker decision names (authority, consent, credentials, an
-  unobtainable dependency) is already a standing disclosure in readiness and never gates;
+  unobtainable dependency) is a standing disclosure in readiness. Yoetz cannot verify the claim,
+  so the first Stop that finds a blocker the agent has not been asked about continues the agent
+  once with a re-check that names the obligation and the claimed kind (``blocked_obligations`` in
+  readiness). The re-check is remembered per session and ``(obligation, kind)``: stopping again,
+  or recording the same blocker again, is the re-confirmation, and the blocker is then honoured
+  without asking again. Nothing judges the claim here; the closing review does (#976);
 * while hook observations are still draining, the facts that depend on observed runs are not
   used to continue the agent.
 
-The delivered text holds only closed tokens and counts. The once-per-frontier memory is a small
-owner-only file in the observation state directory holding opaque session and frontier ids.
+The delivered text holds only closed tokens, counts and service-minted ids. The once-per-frontier
+and once-per-blocker memory is two small owner-only files in the observation state directory
+holding opaque session, frontier and obligation ids and closed blocker kinds.
 """
 
 from __future__ import annotations
@@ -50,15 +56,22 @@ except ImportError:  # pragma: no cover - supported hook hosts are POSIX
 __all__ = [
     "ClosureGate",
     "ClosureGateUnavailable",
+    "BLOCKER_RECHECK_ITEM",
     "closure_gate_already_delivered",
     "closure_gate_from_readiness",
+    "closure_gate_reasked_blockers",
     "read_closure_gate",
     "record_closure_gate_delivered",
 ]
 
 _FILE_NAME: Final = "closure-gate.json"
+_BLOCKER_FILE_NAME: Final = "closure-gate-blockers.json"
 _LOCK_NAME: Final = "closure-gate.lock"
 _MAX_SESSIONS: Final = 128
+_MAX_BLOCKER_KEYS: Final = 64
+_BLOCKER_KINDS: Final = frozenset({"authority", "consent", "credential", "dependency_unavailable"})
+# The closed item a blocker re-check adds to ``ClosureGate.items`` (#977).
+BLOCKER_RECHECK_ITEM: Final = "blocker_recheck"
 _STATUS_DEADLINE_MS: Final = 4_000
 _OBSERVATION_DEPENDENT: Final = frozenset(
     {
@@ -99,6 +112,41 @@ class ClosureGate:
     identity: str
     text: str
     items: tuple[str, ...]
+    # ``<obligation id>:<kind>`` keys this gate re-asks; remembered once delivered.
+    blocker_keys: tuple[str, ...] = ()
+
+
+def _blocker_rows(readiness: object) -> tuple[tuple[str, str], ...]:
+    """``(obligation id, kind)`` pairs from readiness ``blocked_obligations``; malformed rows drop."""
+
+    raw = getattr(readiness, "blocked_obligations", None)
+    if not isinstance(raw, (tuple, list)):
+        return ()
+    rows: dict[str, str] = {}
+    for item in tuple(cast(tuple[object, ...], raw)):
+        obligation = getattr(item, "obligation_id", None)
+        kind = getattr(item, "blocker_kind", None)
+        if (
+            type(obligation) is str
+            and obligation.startswith("obl_")
+            and len(obligation) <= 64
+            and type(kind) is str
+            and kind in _BLOCKER_KINDS
+        ):
+            rows.setdefault(obligation, kind)
+    return tuple(sorted(rows.items(), key=lambda row: row[0].encode()))
+
+
+def _blocker_text(rows: tuple[tuple[str, str], ...]) -> str:
+    named = ", ".join(f"{obligation} ({kind})" for obligation, kind in rows)
+    return (
+        f"Blocker re-check (asked once): you recorded {named} as blocked outside your control."
+        " Confirm each is genuinely outside your control: authority or consent you do not have,"
+        " a credential you lack, or a dependency you cannot obtain. Missing or inconsistent data"
+        " the task says is recoverable, a failing test, or a result that looks infeasible is not"
+        " a blocker: continue the work on that obligation instead. If a blocker is genuine, stop"
+        " again; Yoetz will not ask again and the receipt discloses it as a standing limitation."
+    )
 
 
 def closure_gate_from_readiness(
@@ -107,22 +155,42 @@ def closure_gate_from_readiness(
     frontier_sequence: str,
     frontier_digest: str,
     observation_pending: bool,
+    reasked_blockers: frozenset[str] = frozenset(),
 ) -> ClosureGate | None:
-    """Decide the gate from one ``closure_readiness`` object; ``None`` means let the agent stop."""
+    """Decide the gate from one ``closure_readiness`` object; ``None`` means let the agent stop.
 
-    if getattr(readiness, "state", None) != "action_required":
+    ``reasked_blockers`` holds the ``<obligation id>:<kind>`` keys this session was already
+    re-asked about; any other blocked obligation in readiness is re-asked once.
+    """
+
+    state = getattr(readiness, "state", None)
+    if state not in {"action_required", "ready_with_limitations"}:
         return None
-    actionable = getattr(readiness, "agent_actionable", None)
-    if not isinstance(actionable, (tuple, list)):
-        return None
-    present = {item for item in tuple(cast(tuple[object, ...], actionable)) if type(item) is str}
-    items = tuple(
-        token
-        for token in STOP_GATE_TOKENS
-        if token in present and not (observation_pending and token in _OBSERVATION_DEPENDENT)
+    rows = tuple(
+        (obligation, kind)
+        for obligation, kind in _blocker_rows(readiness)
+        if f"{obligation}:{kind}" not in reasked_blockers
     )
+    items: tuple[str, ...] = ()
+    if state == "action_required":
+        actionable = getattr(readiness, "agent_actionable", None)
+        if not isinstance(actionable, (tuple, list)):
+            return None
+        present = {
+            item for item in tuple(cast(tuple[object, ...], actionable)) if type(item) is str
+        }
+        items = tuple(
+            token
+            for token in STOP_GATE_TOKENS
+            if token in present and not (observation_pending and token in _OBSERVATION_DEPENDENT)
+        )
+    identity = f"{frontier_sequence}:{frontier_digest}"
+    keys = tuple(f"{obligation}:{kind}" for obligation, kind in rows)
     if not items:
-        return None
+        if not rows:
+            return None
+        text = f"Yoetz closure gate (shown once for these blockers): {_blocker_text(rows)}"
+        return ClosureGate(identity, text, (BLOCKER_RECHECK_ITEM,), keys)
     open_count = str(getattr(readiness, "open_obligation_count", "?"))
     blocking_count = str(getattr(readiness, "receipt_blocking_finding_count", "?"))
     remaining = "; ".join(
@@ -141,9 +209,11 @@ def closure_gate_from_readiness(
         " yoetz-blocker:<authority|consent|credential|dependency_unavailable>, then say so in"
         " your final answer. Data the task says is recoverable is not such a blocker."
     )
+    if rows:
+        text += " " + _blocker_text(rows)
     if observation_pending:
         text += " (Hook observations were still draining; observed-run facts were not used.)"
-    return ClosureGate(f"{frontier_sequence}:{frontier_digest}", text, items)
+    return ClosureGate(identity, text, items + ((BLOCKER_RECHECK_ITEM,) if rows else ()), keys)
 
 
 def _status_request(session_id: str, writer_id: str, actor_id: str) -> StatusRequest:
@@ -171,6 +241,7 @@ async def read_closure_gate(
     connect: Callable[[ControlClientKind], Awaitable[object]],
     actor_id: str,
     observation_pending: bool,
+    reasked_blockers: frozenset[str] = frozenset(),
 ) -> ClosureGate | None:
     """Read the mapped session's compact status and decide the gate.
 
@@ -201,6 +272,7 @@ async def read_closure_gate(
             frontier_sequence=sequence,
             frontier_digest=digest,
             observation_pending=observation_pending,
+            reasked_blockers=reasked_blockers,
         )
     except ClosureGateUnavailable:
         raise
@@ -213,9 +285,9 @@ async def read_closure_gate(
                 await cast(Callable[[], Awaitable[object]], close)()
 
 
-def _paths(_state: Path | None) -> tuple[Path, Path, Path]:
+def _paths(_state: Path | None, name: str = _FILE_NAME) -> tuple[Path, Path, Path]:
     directory = (state_dir() if _state is None else _state) / "observation"
-    return directory, directory / _FILE_NAME, directory / _LOCK_NAME
+    return directory, directory / name, directory / _LOCK_NAME
 
 
 def _load(path: Path) -> dict[str, str]:
@@ -241,28 +313,54 @@ def closure_gate_already_delivered(
     return _load(path).get(session_id) == identity
 
 
+def closure_gate_reasked_blockers(session_id: str, *, _state: Path | None = None) -> frozenset[str]:
+    """The ``<obligation id>:<kind>`` blockers this session was already re-asked about."""
+
+    _directory, path, _lock = _paths(_state, _BLOCKER_FILE_NAME)
+    value = _load(path).get(session_id, "")
+    return frozenset(key for key in value.split(" ") if key)
+
+
+def _store(directory: Path, path: Path, name: str, entries: dict[str, str]) -> None:
+    while len(entries) > _MAX_SESSIONS:
+        entries.pop(next(iter(entries)))
+    temporary = directory / f".{name}.{os.getpid()}.tmp"
+    temporary.write_text(json.dumps(entries, sort_keys=False), encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+
+
 def record_closure_gate_delivered(
-    session_id: str, identity: str, *, _state: Path | None = None
+    session_id: str,
+    identity: str,
+    *,
+    blocker_keys: tuple[str, ...] = (),
+    _state: Path | None = None,
 ) -> bool:
-    """Remember that this session's gate fired at this frontier. Never raises."""
+    """Remember that this session's gate fired at this frontier and which blockers it re-asked.
+
+    Never raises.
+    """
 
     try:
         directory, path, lock_path = _paths(_state)
+        _directory, blocker_path, _lock = _paths(_state, _BLOCKER_FILE_NAME)
         ensure_owner_only_dir(directory)
         flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(lock_path, flags, 0o600)
         try:
             if fcntl is not None:
                 fcntl.flock(descriptor, fcntl.LOCK_EX)
+            if blocker_keys:
+                blockers = _load(blocker_path)
+                known = [key for key in blockers.pop(session_id, "").split(" ") if key]
+                merged = list(dict.fromkeys((*known, *blocker_keys)))[-_MAX_BLOCKER_KEYS:]
+                blockers[session_id] = " ".join(merged)
+                _store(directory, blocker_path, _BLOCKER_FILE_NAME, blockers)
             entries = _load(path)
             entries.pop(session_id, None)
             entries[session_id] = identity
-            while len(entries) > _MAX_SESSIONS:
-                entries.pop(next(iter(entries)))
-            temporary = directory / f".{_FILE_NAME}.{os.getpid()}.tmp"
-            temporary.write_text(json.dumps(entries, sort_keys=False), encoding="utf-8")
-            os.chmod(temporary, 0o600)
-            os.replace(temporary, path)
+            _store(directory, path, _FILE_NAME, entries)
         finally:
             os.close(descriptor)
         return True

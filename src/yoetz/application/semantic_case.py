@@ -108,6 +108,7 @@ from yoetz.kernel.projections import (
     FindingProjectionRecord,
     ProjectionState,
 )
+from yoetz.kernel.task_facts import blocker_declarations, open_effective_obligations
 from yoetz.ports.change_capture import CHECK_CHANGE_MEDIA_TYPE, CheckChangeCapture
 from yoetz.ports.objects import ObjectKind, ObjectRef
 from yoetz.ports.semantic import (
@@ -176,6 +177,7 @@ __all__ = [
     "SEMANTIC_REVIEW_PURPOSE",
     "assemble_filtered_review_packet",
     "build_semantic_case",
+    "recorded_blockers",
     "review_question_set",
     "captured_edit_paths",
     "review_selection_digest",
@@ -264,10 +266,78 @@ _REVIEW_QUESTIONS: Final = (
 )
 
 
-def review_question_set(phase: SemanticBudgetProfile) -> tuple[str, ...]:
-    """Return the closed question set for one review phase."""
+# A closing review names at most this many recorded blockers in its blocker question.
+MAX_REVIEWED_BLOCKERS: Final = 16
 
-    return (REVIEW_PHASE_QUESTIONS[parse_semantic_budget_profile(phase)], *_REVIEW_QUESTIONS)
+
+def recorded_blockers(projection: ProjectionState) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+    """``(decision event id, kind, open obligation ids)`` for each recorded blocker (#976, #977).
+
+    Only open effective obligations count, as in closure readiness. Ids and the closed kind only:
+    the decision's statement and rationale reach the reviewer through its privacy-gated decision
+    item, never through this summary.
+    """
+
+    open_obligations = set(open_effective_obligations(projection))
+    grouped: dict[str, tuple[str, set[str]]] = {}
+    for obligation, declaration in blocker_declarations(projection).items():
+        if obligation not in open_obligations:
+            continue
+        row = grouped.setdefault(str(declaration.decision_event_id), (declaration.kind, set()))
+        row[1].add(str(obligation))
+    return tuple(
+        (decision, kind, tuple(sorted(obligations, key=str.encode)))
+        for decision, (kind, obligations) in sorted(
+            grouped.items(), key=lambda row: row[0].encode()
+        )
+    )
+
+
+# Obligations named per blocker decision, and the byte bound of the listing itself, so the
+# question stays far below ``MAX_REVIEW_TEXT_BYTES`` however many obligations a decision names.
+_MAX_BLOCKER_OBLIGATIONS_LISTED: Final = 8
+_MAX_BLOCKER_LISTING_BYTES: Final = 2_048
+
+
+def _blocker_question(blockers: tuple[tuple[str, str, tuple[str, ...]], ...]) -> str:
+    rows: list[str] = []
+    used = 0
+    for decision, kind, obligations in blockers[:MAX_REVIEWED_BLOCKERS]:
+        listed = ", ".join(obligations[:_MAX_BLOCKER_OBLIGATIONS_LISTED])
+        hidden = len(obligations) - _MAX_BLOCKER_OBLIGATIONS_LISTED
+        row = f"decision {decision} declares yoetz-blocker:{kind} for {listed}" + (
+            f" (+{hidden} more)" if hidden > 0 else ""
+        )
+        if rows and used + len(row) + 2 > _MAX_BLOCKER_LISTING_BYTES:
+            break
+        rows.append(row)
+        used += len(row) + 2
+    more = len(blockers) - len(rows)
+    return (
+        f"Recorded blockers: {'; '.join(rows)}"
+        + (f" (+{more} more blocker decisions)" if more > 0 else "")
+        + ". Verify each blocker once against the task statement and the work. When the task "
+        "statement or the readable material contradicts it (the task says the data is "
+        "recoverable, the dependency is present, the authority was granted), challenge it once, "
+        "citing whichever of its decision and obligation ids citable_refs lists, and name the "
+        "work the agent can still do. Otherwise it stands as a disclosed limitation outside the "
+        "agent's control: do not challenge it."
+    )
+
+
+def review_question_set(
+    phase: SemanticBudgetProfile,
+    blockers: tuple[tuple[str, str, tuple[str, ...]], ...] = (),
+) -> tuple[str, ...]:
+    """Return the closed question set for one review phase.
+
+    The final phase adds one blocker question when ``blockers`` (``recorded_blockers``) is not
+    empty; the routine phase never judges blockers.
+    """
+
+    parsed = parse_semantic_budget_profile(phase)
+    extra = (_blocker_question(blockers),) if parsed == "final" and blockers else ()
+    return (REVIEW_PHASE_QUESTIONS[parsed], *_REVIEW_QUESTIONS, *extra)
 
 
 type _Section = Literal[
@@ -3190,7 +3260,15 @@ def _build_semantic_case_once(
             )
 
     # --- Decisions ---
-    for event_id, record in sorted(projection.decisions.items(), key=lambda pair: str(pair[0])):
+    # Recorded blockers go first so the decision cap never drops one the closing review must
+    # verify (#976, #977).
+    blocker_decision_refs = {
+        str(item.decision_event_id) for item in blocker_declarations(projection).values()
+    }
+    for event_id, record in sorted(
+        projection.decisions.items(),
+        key=lambda pair: (str(pair[0]) not in blocker_decision_refs, str(pair[0])),
+    ):
         ref = str(event_id)
         if ref not in allowed:
             continue
@@ -4182,7 +4260,7 @@ def _build_semantic_case_once(
             ),
         }
     # A pure function of the frozen projection, so recovery rebuilds the same phase and digest.
-    question_set = review_question_set(review_phase)
+    question_set = review_question_set(review_phase, recorded_blockers(frozen_case.projection))
     # Bind assessments/omissions/packet lists into the digest so provenance covers the full case.
     case_digest = canonical_digest(
         cast(

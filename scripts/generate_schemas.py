@@ -4267,6 +4267,30 @@ def _add_status_closure_checklist(definitions: dict[str, JsonValue]) -> None:
                 "enum": ["action_required", "ready", "ready_with_limitations", "unknown"],
                 "type": "string",
             },
+            # Open obligations a recorded yoetz-blocker decision names (#977): ids and the closed
+            # kind only. Optional and independent of the checklist group.
+            "blocked_obligations": {
+                "items": {
+                    "additionalProperties": False,
+                    "properties": {
+                        "blocker_kind": {
+                            "enum": [
+                                "authority",
+                                "consent",
+                                "credential",
+                                "dependency_unavailable",
+                            ],
+                            "type": "string",
+                        },
+                        "decision_event_id": {"$ref": "#/$defs/event_id"},
+                        "obligation_id": {"$ref": "#/$defs/obligation_id"},
+                    },
+                    "required": ["blocker_kind", "decision_event_id", "obligation_id"],
+                    "type": "object",
+                },
+                "maxItems": 64,
+                "type": "array",
+            },
         }
     )
     # Optional on this unreleased version so a result shaped by an earlier 0.3 build still

@@ -304,6 +304,15 @@ SEMANTIC_REVIEW_INSTRUCTION: Final = (
         "disclosed limitation supports a claim only when it lies outside the agent's control "
         "(authority, credentials, an unavailable external resource); a limitation the agent could "
         "reduce with available work is a discrepancy. "
+        # Issues #976/#977: recorded blockers are verified once in the closing review.
+        "A decision whose statement holds the line yoetz-blocker:<kind> is the agent's claim that "
+        "its affected obligations are blocked outside its control; the final question_set lists "
+        "them. Verify each once against the task statement and the work: when either contradicts "
+        "it (missing or inconsistent data the task says is recoverable, a failing test, a result "
+        "that only looks infeasible, a dependency the packet shows is available), raise one "
+        "challenge citing that decision or obligation. A genuine blocker (authority, consent, "
+        "credentials, a dependency the agent cannot obtain) stays a disclosed limitation: do not "
+        "challenge it. "
         "Do not invent repository facts, fetch more context, overrule deterministic results, waive "
         "findings, or claim stronger coverage than the packet. "
         # Unassessable content and repair-first feedback (issue #885).

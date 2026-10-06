@@ -323,3 +323,155 @@ def test_closing_review_requirement_continues_with_the_final_review_repair() -> 
     assert gate is not None
     assert gate.items == ("closing_review_required",)
     assert "`final_review: true`" in gate.text
+
+
+# --- blocker re-check (#977 follow-up) -------------------------------------------------------
+
+_OBL = "obl_97700000-0000-4000-8000-000000000001"
+_EVT = "evt_97700000-0000-4000-8000-000000000002"
+
+
+def _blocked(kind: str = "dependency_unavailable", obligation: str = _OBL) -> Any:
+    return SimpleNamespace(obligation_id=obligation, blocker_kind=kind, decision_event_id=_EVT)
+
+
+def _blocked_readiness(
+    *rows: Any, state: str = "ready_with_limitations", actionable: tuple[str, ...] = ()
+) -> Any:
+    readiness = _readiness(state=state, actionable=actionable)
+    readiness.blocked_obligations = rows or (_blocked(),)
+    return readiness
+
+
+def test_a_recorded_blocker_is_rechecked_once_naming_the_obligation_and_kind() -> None:
+    gate = _gate(_blocked_readiness())
+    assert gate is not None
+    assert gate.items == (gate_module.BLOCKER_RECHECK_ITEM,)
+    assert gate.blocker_keys == (f"{_OBL}:dependency_unavailable",)
+    assert f"{_OBL} (dependency_unavailable)" in gate.text
+    assert "authority or consent you do not have" in gate.text
+    assert "the task says is recoverable" in gate.text
+    assert "a failing test" in gate.text
+    assert "continue the work" in gate.text
+    # Once re-asked, the same (obligation, kind) is honoured whatever the frontier.
+    assert (
+        closure_gate_from_readiness(
+            _blocked_readiness(),
+            frontier_sequence="99",
+            frontier_digest=_DIGEST,
+            observation_pending=False,
+            reasked_blockers=frozenset(gate.blocker_keys),
+        )
+        is None
+    )
+
+
+def test_a_changed_blocker_kind_is_a_new_claim_and_rechecked_once() -> None:
+    reasked = frozenset({f"{_OBL}:dependency_unavailable"})
+    gate = closure_gate_from_readiness(
+        _blocked_readiness(_blocked("credential")),
+        frontier_sequence="8",
+        frontier_digest=_DIGEST,
+        observation_pending=False,
+        reasked_blockers=reasked,
+    )
+    assert gate is not None
+    assert gate.blocker_keys == (f"{_OBL}:credential",)
+
+
+def test_blocker_recheck_joins_other_remaining_work() -> None:
+    gate = _gate(
+        _blocked_readiness(state="action_required", actionable=("closing_review_required",))
+    )
+    assert gate is not None
+    assert gate.items == ("closing_review_required", gate_module.BLOCKER_RECHECK_ITEM)
+    assert "`final_review: true`" in gate.text
+    assert f"{_OBL} (dependency_unavailable)" in gate.text
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        SimpleNamespace(obligation_id=_OBL, blocker_kind="data_missing", decision_event_id=_EVT),
+        SimpleNamespace(obligation_id="not-an-id", blocker_kind="consent", decision_event_id=_EVT),
+        "obl_x:consent",
+    ],
+)
+def test_malformed_blocker_rows_never_gate(row: object) -> None:
+    assert _gate(_blocked_readiness(row)) is None
+
+
+def test_blocker_memory_round_trip_is_per_session_and_bounded(tmp_path: Path) -> None:
+    assert gate_module.closure_gate_reasked_blockers("ses_a", _state=tmp_path) == frozenset()
+    keys = tuple(f"obl_{index:04d}:consent" for index in range(80))
+    assert record_closure_gate_delivered("ses_a", "1:x", blocker_keys=keys, _state=tmp_path)
+    remembered = gate_module.closure_gate_reasked_blockers("ses_a", _state=tmp_path)
+    assert len(remembered) == 64
+    assert keys[-1] in remembered
+    assert gate_module.closure_gate_reasked_blockers("ses_b", _state=tmp_path) == frozenset()
+    # A plain frontier record keeps the session's blocker memory.
+    assert record_closure_gate_delivered("ses_a", "2:y", _state=tmp_path)
+    assert keys[-1] in gate_module.closure_gate_reasked_blockers("ses_a", _state=tmp_path)
+
+
+def test_stop_rechecks_a_blocker_once_then_honours_it(tmp_path: Path, host: _Host) -> None:
+    session = "gate-blocker"
+    h = _Harness(tmp_path, host.key(session))
+    h.readiness = _blocked_readiness()
+
+    first = _stop(h, host, session)
+    if host.name == "codex":
+        text = first["reason"]
+    elif host.name == "claude":
+        text = first["hookSpecificOutput"]["additionalContext"]
+    else:
+        text = first["followup_message"]
+    assert "Blocker re-check (asked once)" in text
+    assert f"{_OBL} (dependency_unavailable)" in text
+    assert h.reasons() == ["closure_gate_continued", "closure_gate_blocker_rechecked"]
+
+    # The agent stops again without changing anything: the blocker is honoured.
+    second = _stop(h, host, session)
+    assert "closure gate" not in json.dumps(second)
+    # It re-records the same blocker (the frontier moves): still honoured, never a loop.
+    h.sequence = "6"
+    third = _stop(h, host, session)
+    assert "closure gate" not in json.dumps(third)
+    assert h.reasons()[-2:] == ["closure_gate_not_required", "closure_gate_not_required"]
+
+
+def test_loop_guard_still_wins_over_an_unasked_blocker(tmp_path: Path, host: _Host) -> None:
+    session = "gate-blocker-guard"
+    h = _Harness(tmp_path, host.key(session))
+    h.readiness = _blocked_readiness()
+    output = _stop(h, host, session, guarded=True)
+    assert "closure gate" not in json.dumps(output)
+    assert h.status_calls == 0
+
+
+def test_a_blocker_recheck_is_not_held_back_by_draining_observations() -> None:
+    readiness = _blocked_readiness(
+        state="action_required", actionable=("planned_verification_not_observed",)
+    )
+    gate = _gate(readiness, pending=True)
+    assert gate is not None
+    assert gate.items == (gate_module.BLOCKER_RECHECK_ITEM,)
+
+
+def test_an_unwritable_memory_is_a_visible_diagnostic(
+    tmp_path: Path, host: _Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = "gate-blocker-unwritable"
+    h = _Harness(tmp_path, host.key(session))
+    h.readiness = _blocked_readiness()
+
+    def unwritable(*args: object, **kwargs: object) -> bool:
+        del args, kwargs
+        return False
+
+    monkeypatch.setattr(observe_hooks, "record_closure_gate_delivered", unwritable)
+    _stop(h, host, session)
+    assert "closure_gate_memory_unwritten" in h.reasons()
+    # The host loop guard still ends the turn even though nothing was remembered.
+    guarded = _stop(h, host, session, guarded=True)
+    assert "closure gate" not in json.dumps(guarded)

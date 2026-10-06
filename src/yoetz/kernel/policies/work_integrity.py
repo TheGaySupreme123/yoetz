@@ -60,6 +60,7 @@ from yoetz.kernel.policies.response_support import (
     response_support_admissible,
 )
 from yoetz.kernel.task_facts import (
+    STANDING_TASK_FACT_GAPS,
     acting_started,
     blocked_obligations,
     cooperative_event_ids_from_coverage,
@@ -698,6 +699,14 @@ def _ledger_finding(case: DeterministicCase) -> list[DeterministicAssessment]:
             # label, not a ledger defect: it stays in case coverage and the receipt names it once
             # with a count, but no agent action can change it, so it never becomes a finding
             # subject whose growth would mint a new issue on every publication (issue #912).
+            continue
+        if gap.code in STANDING_TASK_FACT_GAPS:
+            # A standing task fact (#977): an obligation a recorded blocker names, or a planned
+            # verification whose outcome is unknown or unobservable. It is a disclosure classified
+            # in GAP_CLASSIFICATION, not a stale ledger. As this informational finding it also
+            # contradicted the check's own completeness (standing facts do not make a check
+            # coverage-incomplete) and failed the check internally (invalid_ranked_findings).
+            # Task-wide standing facts carry no subject and never reached a finding here.
             continue
         if gap.code == _COMMAND_ATTEMPT_UNCORROBORATED_GAP:
             # Same principle (TB4 pilot): a hook records a keyed commitment instead of command

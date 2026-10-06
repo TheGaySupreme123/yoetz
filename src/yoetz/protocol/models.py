@@ -4127,6 +4127,18 @@ class StatusImportStatusModel(_ClosedModel):
     source_identity_digest: Sha256Digest | None
 
 
+class StatusBlockedObligationModel(_ClosedModel):
+    """One open obligation a recorded ``yoetz-blocker`` decision names (issues #976, #977).
+
+    Only service-minted ids and the closed blocker kind: the decision's statement and rationale
+    stay in the ledger. The Stop-time closure gate names these when it re-asks a blocker once.
+    """
+
+    obligation_id: ObligationIdWire
+    blocker_kind: Literal["authority", "consent", "credential", "dependency_unavailable"]
+    decision_event_id: EventIdWire
+
+
 class StatusClosureReadinessModel(_ClosedModel):
     """What currently bounds a completion conclusion, before a check or receipt is spent.
 
@@ -4176,6 +4188,9 @@ class StatusClosureReadinessModel(_ClosedModel):
     standing_limitations: tuple[CodeWire, ...] | None = None
     acknowledged_not_done: tuple[AcknowledgedItemIdWire, ...] | None = None
     acknowledged_not_done_count: CanonicalUInt64Wire | None = None
+    # Open obligations a recorded blocker decision names (#977). Optional on the unreleased 1.4.0
+    # wire: an earlier 0.3 build omits it, and absence never means "nothing is blocked".
+    blocked_obligations: tuple[StatusBlockedObligationModel, ...] | None = None
 
     optional_non_null_fields = frozenset(
         {
@@ -4185,12 +4200,17 @@ class StatusClosureReadinessModel(_ClosedModel):
             "standing_limitations",
             "acknowledged_not_done",
             "acknowledged_not_done_count",
+            "blocked_obligations",
         }
     )
 
     @model_validator(mode="after")
     def _validate_closure_readiness(self) -> StatusClosureReadinessModel:
         _require_unique(self.blocking_conditions, limit=8)
+        if self.blocked_obligations is not None:
+            _require_unique(
+                tuple(item.obligation_id for item in self.blocked_obligations), limit=64
+            )
         self._validate_checklist()
         # Absent counts mean the compact singleton could not be read (an unreadable task title
         # omits it). Reporting zero there would assert "nothing is open" from missing data, so
@@ -4284,9 +4304,24 @@ class StatusClosureReadinessModel(_ClosedModel):
         )
         if state != expected:
             raise ValueError("closure_readiness_state_mismatch")
+        # Open obligations are the agent's to clear unless every one is named by a recorded
+        # blocker outside its control (#977): then readiness discloses them as a standing
+        # limitation instead.
+        blocked_rows = self.blocked_obligations
+        open_count = None if self.open_obligation_count is None else int(self.open_obligation_count)
+        if "obligations_open" in self.blocking_conditions and "obligations_open" not in actionable:
+            if "obligation_blocked_outside_agent_control" not in standing or (
+                blocked_rows is not None
+                and open_count is not None
+                and len(blocked_rows) != min(open_count, 64)
+            ):
+                raise ValueError("closure_readiness_actionable_condition_mismatch")
+        elif ("obligations_open" in self.blocking_conditions) != ("obligations_open" in actionable):
+            raise ValueError("closure_readiness_actionable_condition_mismatch")
+        if blocked_rows is not None and open_count is not None and len(blocked_rows) > open_count:
+            raise ValueError("closure_readiness_blocked_count_mismatch")
         # These conditions are always the agent's to clear; none can be classified away.
         for condition in (
-            "obligations_open",
             "findings_unanswered",
             "no_plan_published",
             "no_obligations_declared",
@@ -5732,6 +5767,10 @@ _STATUS_COMMON_STRUCTURAL_POINTERS: Final = (
             "standing_limitations/*",
             "acknowledged_not_done/*",
             "acknowledged_not_done_count",
+            # Service-minted ids and the closed blocker kind only (#977).
+            "blocked_obligations/*/obligation_id",
+            "blocked_obligations/*/blocker_kind",
+            "blocked_obligations/*/decision_event_id",
         ),
     )
 )
@@ -6470,7 +6509,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 1412:
+    if len(result) != 1415:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 
