@@ -97,6 +97,7 @@ export function mountParticles(canvas, options = {}) {
   let anchor = null; // canvas-pixel position of the word "computer" in the closing copy
   let anchorN = { x: 0.32, y: 0.52 };
   let tierPx = null; // the slot in the copy where the tier word is drawn in dots
+  let narrowLayout = false; // phone: artwork up top, score above the sun
   let tierN = { x: 0.9, y: 0.55, w: 0.7, h: 0.3 };
   let tilt = 0;
   let ox = 0;
@@ -383,7 +384,8 @@ export function mountParticles(canvas, options = {}) {
           }
           if (f >= 0.52) {
             // the benchmark score, rising with the sun: one figure per stop
-            fromSet(i, digits, 0.6, -0.72, Math.min(sy, 0.55), 0.1, 0);
+            if (narrowLayout) fromSet(i, digits, 0.5, 0.02, sy - 0.62, 0.1, 0);
+            else fromSet(i, digits, 0.6, -0.72, Math.min(sy, 0.55), 0.1, 0);
             continue;
           }
           if (f < 0.3) sphere(i, 0, sy, 0, 0.17, 2);
@@ -422,8 +424,11 @@ export function mountParticles(canvas, options = {}) {
     }
     const t = (performance.now() - t0) / 1000;
     const S = cw < 720 ? cw * 0.42 : Math.min(cw, ch) * 0.46;
-    if (anchor) anchorN = { x: (anchor.x - cw / 2 - ox * cw) / S, y: (anchor.y - ch / 2) / S };
-    if (tierPx) tierN = { x: (tierPx.x - cw / 2 - ox * cw) / S, y: (tierPx.y - ch / 2) / S, w: tierPx.w / S, h: tierPx.h / S };
+    const nrw = cw < 720;
+    narrowLayout = nrw;
+    const cxo = cw / 2 + (nrw ? ox * 0.4 : ox) * cw, cyo = nrw ? ch * 0.36 : ch / 2;
+    if (anchor) anchorN = { x: (anchor.x - cxo) / S, y: (anchor.y - cyo) / S };
+    if (tierPx) tierN = { x: (tierPx.x - cxo) / S, y: (tierPx.y - cyo) / S, w: tierPx.w / S, h: tierPx.h / S };
     let spec;
     if (scroll != null) {
       const tl = timeline(scroll);
@@ -463,8 +468,9 @@ export function mountParticles(canvas, options = {}) {
     smx += ((spec.mouse ? mx : 0) - smx) * 0.05;
     const yaw = reduced ? 0 : Math.sin(t * 0.12) * spec.yawAmp + smx * 0.3;
     const cy0 = Math.cos(yaw), sy0 = Math.sin(yaw), ct = Math.cos(tilt), st = Math.sin(tilt);
-    const cx = cw / 2 + ox * cw;
-    const cy = ch / 2;
+    const narrow = cw < 720;
+    const cx = cw / 2 + (narrow ? ox * 0.4 : ox) * cw;
+    const cy = narrow ? ch * 0.36 : ch / 2;
     const F = 2.6;
     const jit = reduced ? 0 : 0.5;
     for (let i = 0; i < N; i++) {

@@ -198,13 +198,6 @@ img, svg { max-width: 100%; }
   .btn { transition: none; }
 }
 
-/* ---------- Phone ---------- */
-@media (max-width: 720px) {
-  .nav-links a.lnk { display: none; }
-  .copy-right { margin-left: 0; align-items: flex-start; text-align: left; }
-  .scene { padding: 80px 16px; }
-  .footer-links { margin-left: 0; }
-}
 
 /* ---------- Hero: copy above and below the changing word ---------- */
 .stanza.center { margin: 0 auto; text-align: center; max-width: 760px; }
@@ -224,10 +217,6 @@ img, svg { max-width: 100%; }
 
 
 
-@media (max-width: 720px) {
-  .hero-top { top: calc(50% - 90px); }
-  .hero-bottom { top: calc(50% + 60px); }
-}
 
 /* ---------- Benchmark: tier colours and the logo row ---------- */
 /* Inline tags inside a serif line: the mark sits in the text, no chip */
@@ -264,3 +253,30 @@ img, svg { max-width: 100%; }
 .copy.hero { position: absolute; }
 .paper { display: inline-flex; align-items: center; gap: 6px; font: 500 15px/1 var(--font-sans); color: var(--accent-text); text-decoration: underline; text-underline-offset: 3px; padding: 8px 0; }
 .paper svg { width: 16px; height: 16px; }
+
+/* ---------- Phone: artwork up top, copy at the bottom, one column ---------- */
+@media (max-width: 720px) {
+  .nav-inner { height: 60px; padding: 0 16px; gap: 12px; }
+  .lockup img { height: 26px; }
+  .nav-links { gap: 8px; }
+  .nav-links a.lnk { display: none; }
+  .btn.sm { height: 36px; padding: 0 12px; font-size: 13px; }
+  .copy { align-items: flex-end; padding: 0 16px 56px; }
+  .copy-right, .copy-right.wide { margin-left: 0; max-width: none; align-items: flex-start; text-align: left; }
+  .stanza { font-size: clamp(26px, 8vw, 34px); text-align: left; }
+  .stanza.center { text-align: center; }
+  .stanza.sub { font-size: 20px; }
+  .display { font-size: clamp(34px, 11vw, 44px); }
+  .hero-top { top: calc(36% - 100px); }
+  .hero-bottom { top: auto; bottom: 56px; }
+  .copy.foot { padding-bottom: 56px; }
+  .copy-center { gap: 16px; }
+  .actions { gap: 10px; }
+  .btn { height: 44px; padding: 0 16px; font-size: 15px; }
+  .dot-word { height: 1.5em; margin-top: 0.35em; }
+  .paper { font-size: 14px; }
+  .footer-inner { padding: 20px 16px; gap: 12px 20px; }
+  .footer-links { margin-left: 0; gap: 16px; }
+  .footer-meta { flex-basis: 100%; }
+  .toast { bottom: 12px; }
+}
