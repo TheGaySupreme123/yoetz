@@ -755,3 +755,23 @@ function. Bare dotted assignments such as `TOKEN=opaque.value` or `token=opaque.
 values such as `password=functionName()`, quoted lookalikes, mixed-language text, and malformed
 source remain heuristic matches. Capture-time redaction and the owner-controlled privacy policy are
 unchanged. The deferred heuristic opt-out remains out of scope.
+
+## Partial withholding and encoding-stable redaction amendment (2026-10-06, issue #976)
+
+TB4 run tb4f1 lost every implementation-stage review in two tasks to a Yoetz false positive: a
+heuristic span redacted to `[REDACTED]` re-matched the token-assignment detector once the item was
+JSON-encoded into the prepared case (`\n` became part of the "value"), and the prepared-bytes rescan
+blocked the whole packet with `never_send_detected`. Decisions:
+
+- The assignment detectors treat the JSON escapes `\n`, `\r` and `\t` as whitespace: an unquoted
+  value ends at one and the separator may span one. A JSON-escaped quoted value (`\"…\"`) is a
+  quoted value. The name/value separator is searched from the assignment name, so a JSON member's
+  `:` is never read as the separator. The exact-marker exemption accepts `[REDACTED]` in any of
+  these forms, so redaction is a fixed point across encoding. Real assignments in encoded text are
+  still detected and redacted.
+- When a low-confidence heuristic still survives into the prepared semantic-review bytes, local
+  minimization withholds only the item(s) whose own content (as sent or as JSON-encoded) carries it
+  and re-assembles the case, in at most three rounds. The withheld items join
+  `semantic_withheld_item_ids` with the `content_redacted` gap, so the check and receipt disclose
+  what was withheld. A high-confidence credential, scanner saturation, a heuristic in the structural
+  review-packet envelope, or one no single item explains still fails the whole case closed.

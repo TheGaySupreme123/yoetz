@@ -82,10 +82,21 @@ _URI_PASSWORD = re.compile(rb"[A-Za-z][A-Za-z0-9+.-]{0,31}://[^\s/:@]{1,128}:[^\
 # Assignment values are bounded but may be quoted JSON/Python strings.  Keep the complete quoted
 # span, including whitespace and escaped quotes, so redaction cannot leave a suffix behind or
 # remove the closing quote and corrupt an otherwise valid structured payload.
+# A JSON string escape for a line break or tab (``\\n``, ``\\r``, ``\\t``) is whitespace in the
+# text it encodes. Prepared review packets are canonical JSON, so the separator may span one, and
+# the exact-marker exemption ignores trailing ones; otherwise Yoetz's own ``[REDACTED]`` marker
+# followed by an encoded newline re-matches as a fresh assignment after encoding and blocks the
+# whole packet (TB4 tb4f1, issue #976). Values stay greedy: a real value is never shortened.
+_ENCODED_SPACE = rb"(?:\s|\\[nrt])"
+_UNQUOTED_VALUE_CHAR = rb"[^\s,'\";}{]"
+# A quoted value inside an encoded JSON string: ``\"...\"``. Inside it an encoded escaped quote
+# (three backslashes and a quote) and an encoded backslash (two) are part of the value.
+_ESCAPED_QUOTED_VALUE = rb'\\"(?:\\\\\\"|\\\\\\\\|(?!\\")[^\r\n]){1,512}\\"'
+_TRAILING_ENCODED_SPACE: Final = re.compile(rb"(?:\\[nrt])+$")
 _ASSIGNMENT_VALUE = (
     rb"(?:\"(?:\\.|[^\"\\\r\n]){1,512}\""
     rb"|'(?:\\.|[^'\\\r\n]){1,512}'"
-    rb"|[^\s,'\";}{]{1,512})"
+    rb"|" + _ESCAPED_QUOTED_VALUE + rb"|" + _UNQUOTED_VALUE_CHAR + rb"{1,512})"
 )
 # Compound names such as AWS_SECRET_ACCESS_KEY and AZURE_CLIENT_SECRET keep the
 # secret token as one underscore/hyphen component, not the entire identifier.
@@ -94,7 +105,7 @@ _SECRET_ASSIGNMENT = re.compile(
     rb"(?:[A-Za-z][A-Za-z0-9]{0,63}[_-])*"
     rb"(?:api[_-]?key|access[_-]?token|auth[_-]?token|password|passwd|private[_-]?key|secret)"
     rb"(?:[_-][A-Za-z][A-Za-z0-9]{0,63})*"
-    rb"['\"]?\s*[:=]\s*" + _ASSIGNMENT_VALUE
+    rb"['\"]?\s*[:=]" + _ENCODED_SPACE + rb"*" + _ASSIGNMENT_VALUE
 )
 # `*_TOKEN` only as the final identifier component. The value must contain a
 # non-digit and be at least eight bytes so MAX_TOKEN=4096 and TOKEN_COUNT=12
@@ -102,10 +113,15 @@ _SECRET_ASSIGNMENT = re.compile(
 _TOKEN_ASSIGNMENT = re.compile(
     rb"(?i)(?:^|[^A-Za-z0-9_])['\"]?"
     rb"(?:[A-Za-z][A-Za-z0-9]{0,63}[_-])*token"
-    rb"['\"]?\s*[:=]\s*(?="
+    rb"['\"]?\s*[:=]" + _ENCODED_SPACE + rb"*(?="
     rb"(?:\"(?:\\.|[^\"\\\r\n]){1,512}\""
     rb"|'(?:\\.|[^'\\\r\n]){1,512}'"
-    rb"|[^\s,'\";}{]{0,511}[A-Za-z_/=+-]))" + _ASSIGNMENT_VALUE
+    rb"|"
+    + _ESCAPED_QUOTED_VALUE
+    + rb"|"
+    + _UNQUOTED_VALUE_CHAR
+    + rb"{0,511}[A-Za-z_/=+-]))"
+    + _ASSIGNMENT_VALUE
 )
 # Assignment heuristics remain conservative: ordinary parser/member/call expressions should not
 # turn a whole review into a credential refusal, but a bare dotted value is ambiguous without
@@ -448,6 +464,23 @@ def _python_attribute_assignment_spans(data: bytes) -> tuple[tuple[int, int], ..
     return tuple(sorted(set(spans)))
 
 
+_ASSIGNMENT_SEPARATOR: Final = re.compile(rb"[:=]" + _ENCODED_SPACE + rb"*")
+_ASSIGNMENT_NAME_START: Final = re.compile(rb"[A-Za-z]")
+
+
+def _assignment_separator(raw: bytes) -> re.Match[bytes] | None:
+    """The ``:``/``=`` that separates an assignment match's name from its value.
+
+    The match may begin with one boundary byte before the name, which can itself be ``:`` or
+    ``=`` (a JSON member such as ``"c":"API_TOKEN=..."``). Searching from the name keeps that
+    boundary from being read as the separator, which would turn the whole name into the value and
+    defeat the exact-marker exemption.
+    """
+
+    name = _ASSIGNMENT_NAME_START.search(raw)
+    return _ASSIGNMENT_SEPARATOR.search(raw, 0 if name is None else name.start())
+
+
 def _assignment_value_is_code(
     match: re.Match[bytes],
     *,
@@ -458,18 +491,20 @@ def _assignment_value_is_code(
     """Recognize source expressions only when the assignment syntax proves source context."""
 
     raw = match.group(0)
-    separator = re.search(rb"[:=]\s*", raw)
+    separator = _assignment_separator(raw)
     if separator is None:
         return False
     value = raw[separator.end() :]
     # This is Yoetz's own bounded replacement marker. It carries no secret bytes, so allowing the
     # scanner to classify the marker as a fresh assignment would make every structured redaction
     # fail its final scan. Only the exact marker is exempt; any suffix remains heuristic.
-    if value.startswith((b"'", b'"')):
+    if value.startswith(b'\\"'):
+        marker_value = value[2:-2] if value.endswith(b'\\"') else value[2:]
+    elif value.startswith((b"'", b'"')):
         marker_value = value[1:-1] if value.endswith(value[:1]) else value[1:]
     else:
         marker_value = value
-    if marker_value == b"[REDACTED]":
+    if _TRAILING_ENCODED_SPACE.sub(b"", marker_value) == b"[REDACTED]":
         return True
     # Quoted values are literals even when their text resembles source code. Keep them in the
     # heuristic class so a value such as ``TOKEN='nextToken(parser)'`` is still withheld.
@@ -654,14 +689,20 @@ def _replace_sensitive_spans(data: bytes, findings: tuple[ScanFinding, ...]) -> 
             continue
         pieces.append(data[cursor : finding.start_offset])
         raw = data[finding.start_offset : finding.end_offset]
-        separator = re.search(rb"[:=]\s*", raw)
+        separator = _assignment_separator(raw)
         prefix = b"" if separator is None else raw[: separator.start()].lower()
         if separator is not None and (
             finding.confidence is ScanConfidence.HEURISTIC
             or re.search(rb"(?:token|secret|password|passwd|api|key|auth)", prefix)
         ):
             value = raw[separator.end() :]
-            opening_quote = value[:1] if value.startswith((b"'", b'"')) else b""
+            opening_quote = (
+                value[:2]
+                if value.startswith(b'\\"')
+                else value[:1]
+                if value.startswith((b"'", b'"'))
+                else b""
+            )
             closing_quote = (
                 opening_quote if opening_quote and value.endswith(opening_quote) else b""
             )
