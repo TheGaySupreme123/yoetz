@@ -289,3 +289,14 @@ is untagged, and the new code `preexisting_test_skip_unknown` is classified stan
 table. A Codex unified-exec follow-up (`write_stdin`) is still materialized as `other`, so a long
 run's final exit status reaches the ledger only through a session-stream outcome correction; the
 outcome-less run still corroborates.
+
+## Amendment — blockers outside the agent's control and task facts (2026-10-06, #977)
+
+ADR-033 adds two readiness inputs without changing the table's existing assignments. Open
+effective obligations that a recorded `decision_recorded` names with the exact statement line
+`yoetz-blocker:<authority|consent|credential|dependency_unavailable>` read as the standing
+`obligation_blocked_outside_agent_control` instead of `obligations_open`, but only when every open
+obligation is so named; obligation-level acknowledgement as not done (decision 6) is still open.
+The task-fact gap codes of ADR-033 are classified once each in `GAP_CLASSIFICATION`, and the
+Stop hook continues an agent once per frontier while `agent_actionable` holds open obligations,
+an unacknowledged receipt-blocking finding, or one of the repairable task facts.

@@ -954,6 +954,12 @@ is permitted, and an LLM inference channel is enabled, and the provider is still
 unusable, including when no factory id is available. `SessionEnd` still emits `{}` and does not
 consume a pending delivery.
 
+**Stop-time closure gate (host decision: supported).** When a mapped session stops while closure
+still requires agent action, the `Stop` hook continues the agent once with `decision: block` and a
+`reason` naming what remains and how to record a blocker outside its control. Codex's
+`stop_hook_active` is honoured first, so the gate continues an agent at most once per turn; in a
+single-turn `codex exec` run that is exactly once. The decision reads only the service's compact `status` for the mapped session (`closure_readiness`); it fires when `agent_actionable` holds open obligations, an unacknowledged receipt-blocking finding, a planned verification that was not observed, failed, or ran before the latest edit, or a git-ignored requested output, at most once per ledger frontier and session (owner-only `observation/closure-gate.json`), never while observed-run facts are still draining, and never for obligations named by a `yoetz-blocker:<kind>` decision. Every outcome is a hook diagnostic (`closure_gate_continued`, `closure_gate_not_required`, `closure_gate_repeat_suppressed`, `closure_gate_loop_guard`, `closure_gate_budget_exhausted`, `closure_gate_unavailable`) in `yoetz observe status`. See ADR-033 and issue #977.
+
 Legacy synchronous `hooks spool` is a separate structural fast path. It only appends the owner-only
 structural spool record and returns; it does not normalize or pair the event, open the service, drain
 an outbox, or carry native content. The READY forwarder later consumes the spool and performs normal

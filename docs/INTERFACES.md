@@ -8304,3 +8304,81 @@ is withheld whole), recorded as a bounded `semantic_composition/check_time_chang
   and `required_categories()` then includes `repository_excerpt`. An inference channel without that
   category approves no check-time part, and `withheld_review_categories` names it, so the check
   reports `semantic_review_context_withheld`.
+
+### Task facts, blocker decisions and the Stop-time closure gate (issue #977, ADR-033)
+
+- **`kernel/task_facts.py`.** `task_fact_signals(projection, records) -> TaskFactSignals(codes,
+  markers, acting_started, blocked)` derives closed codes from service-stamped hook observations and
+  the effective plan. `markers` pair a code with its obligation (`<code>:<obligation id>` in the
+  frozen case) or `None`. Agent-actionable (`AGENT_ACTIONABLE_TASK_FACT_GAPS`):
+  `planned_verification_not_observed`, `planned_verification_failed`,
+  `planned_verification_stale`, `edited_after_last_verification`, `requested_output_git_ignored`.
+  Standing (`STANDING_TASK_FACT_GAPS`): `planned_verification_outcome_unknown`,
+  `planned_verification_unobservable`, `install_into_yoetz_runtime`, `install_into_private_env`,
+  `write_outside_workspace`, `verification_only_as_root`,
+  `obligation_blocked_outside_agent_control`, `requested_output_ignored_by_repository`,
+  `requested_output_unchanged`,
+  `requested_output_outside_workspace`, `requested_output_unverified`. Each code is classified
+  once in `GAP_CLASSIFICATION`; standing ones are advisory for the check verdict, the receipt
+  conclusion and `DETERMINISTIC_SCOPED_STANDING_GAPS`, and every task-fact code is tolerated by a
+  local absence proof. `build_deterministic_case` and the compact status gaps add them beside the
+  plan-drift signals.
+- **Planned-verification identity.** `register_command_identity_key(key)` (the service calls it at
+  composition with the local observation store key) lets `requested_command_identity(value)`
+  compute `hmac-sha256:` over `normalize_observed_command(value)`, the identity a hook records as
+  `omitted:<commitment>`. Without a registered key no planned-verification code is produced.
+- **`acting_started(projection, observed, cooperative)`.** True after an observed edit, an observed
+  run whose runner class is `test`, `lint`, `typecheck` or `build`, or any cooperative (MCP or local
+  CLI) action. `cooperative_event_ids_from_records(records)` and `observed_event_ids_from_records`
+  supply the two sets.
+- **Blocker decisions.** `blocked_obligations(projection) -> Mapping[ObligationId, kind]` reads
+  readable, unsuperseded `decision_recorded` events whose statement holds the exact line
+  `yoetz-blocker:<kind>` (`BLOCKER_MARKER`; `BLOCKER_KINDS` = `authority`, `consent`,
+  `credential`, `dependency_unavailable`) for their `affected_obligation_ids`.
+  `ClosureReadinessFacts` gains `open_obligation_ids` and `blocked_obligation_ids`;
+  `derive_closure_readiness` replaces `obligations_open` with the standing
+  `obligation_blocked_outside_agent_control` when every open effective obligation is blocked.
+- **Requested outputs.** `ChangeCapturePort` implementations may offer
+  `probe_requested_paths(workspace, values) -> tuple[RequestedPathProbe, ...]`
+  (`ports/change_capture.py`; `location` `inside|outside`, root-relative `relative`, `exists`,
+  `ignored`, and for an ignored path `ignore_source` `info_exclude|repository_file|
+  outside_repository` with the root-relative `ignore_file`), metadata only. `application/check_change.requested_output_states(...)` turns them,
+  with the structural change capture, into `RequestedOutputState(location, exists, ignored,
+  changed, deleted, ignored_by_task)` per `(obligation, item index)` (`ignored_by_task`: the rule is
+  `.git/info/exclude` or a `.gitignore` the check-time change adds; values with whitespace, glob,
+  brace, `~`, `$` or a URL scheme are not read), and `requested_output_facts(projection,
+  states)` returns `(absent, markers)`. `work_integrity_findings(case, *, absent_outputs=)`
+  raises `requested_item_never_attempted` with the fact `requested_output_absent`
+  (`REQUESTED_OUTPUT_ABSENT_FACT`) for each absent pair.
+- **Work-integrity 0.3.0.** `requested_item_never_attempted` waits for `acting_started`, adds the
+  absent-output fact, and skips blocked obligations. `RecordedPolicyVersionWire`,
+  `CurrentPolicyPackWire`, `RecordedPolicyPackWire` and `RecordedVersionSlicePackWire` admit
+  `work-integrity/0.3.0`; `POLICY_PACK_GENERATIONS` gains the `research-evidence/0.2.0` +
+  `work-integrity/0.2.0` generation.
+- **Runtime structural fields.** The observation envelope and control-request 2.9.0
+  `structural_payload` admit `install_target` (`yoetz_runtime|workspace_env|private_env|system|
+  unresolved`), `write_scope` (`outside_workspace`) and `effective_user` (`root|non_root`),
+  produced only by `cli/runtime_facts.runtime_structural_facts`. `observed_action_description(...,
+  install_target=, write_outside_workspace=, effective_user=)` appends ` (install <class>)`,
+  ` (write outside_workspace)`, ` (user <root|non_root>)` after the tool and runner suffixes;
+  `observed_action_runtime_tokens(description)` reads them back. Observation advice 0.1.8 adds the
+  advice-only rule codes `install_into_yoetz_runtime`, `install_into_private_env`,
+  `write_outside_workspace`.
+- **Closure gate (`cli/closure_gate.py`).** `STOP_GATE_TOKENS` (in `kernel/task_facts.py`) are
+  `obligations_open`, `receipt_findings_unresolved`, `closing_review_required`,
+  `planned_verification_failed`,
+  `planned_verification_not_observed`, `planned_verification_stale`,
+  `requested_output_git_ignored`. `closure_gate_from_readiness(readiness, frontier_sequence=,
+  frontier_digest=, observation_pending=) -> ClosureGate(identity, text, items) | None`;
+  `read_closure_gate(...)` reads compact status and raises `ClosureGateUnavailable` when it cannot;
+  `closure_gate_already_delivered` / `record_closure_gate_delivered` keep the owner-only
+  `observation/closure-gate.json` once-per-frontier memory. Hook diagnostic reasons:
+  `closure_gate_continued`, `closure_gate_not_required`, `closure_gate_repeat_suppressed`,
+  `closure_gate_loop_guard`, `closure_gate_budget_exhausted`, `closure_gate_unavailable`.
+- **Text surfaces.** `domain/receipts.TASK_FACT_GAP_SENTENCES` holds one fixed sentence per task-fact
+  code; `check_time_change_gap_sentence(code)` returns it, so receipt gap details and limitations,
+  `render_human_check`/`render_human_status` and the MCP check summary show it. A publish rejection
+  whose validation pointer is `/event_drafts/<n>/payload/outcome` adds the fixed
+  `_RESULT_OUTCOME_HINT` (closed outcome set, no `blocked`, the blocker line) to the MCP error text.
+- **Scope.** The requested-output read runs only in `check`; status candidate findings and semantic
+  assessment matching call `work_integrity_findings(case)` without `absent_outputs`.

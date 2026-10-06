@@ -8,6 +8,33 @@ reverse-chronological released versions.
 
 ### Added
 
+- Local checks now report facts about the task's own work, not only about the ledger (#977,
+  ADR-033). Closure readiness, check results and receipts name a planned verification (an
+  obligation's requested command) that hooks never saw run, that failed on its latest run, or that
+  last ran before your latest edit; an edit after the last test, lint, typecheck or build run; a
+  requested output file that is missing (a receipt-blocking finding, even if an action named it),
+  git-ignored or excluded, unchanged, or outside the repository; and package installs that went
+  into Yoetz's own runtime or a private environment, writes outside the workspace, and
+  verification that only ran as root. Matching uses the hooks' keyed command identity; no command
+  text or path is stored. The work-integrity pack is now `0.3.0`.
+
+- The Stop hook continues an agent once per ledger state when closure still names its work (open
+  obligations, an unrepaired receipt-blocking finding, a missing or stale planned verification, a
+  git-ignored requested output), on Codex (`decision: block`), Claude Code (`additionalContext`)
+  and Cursor (`followup_message`). Host loop guards are honoured, and every decision is visible in
+  `yoetz observe status` hook diagnostics (#977).
+
+- A blocker outside the agent's control is now explicit: a `decision_recorded` naming the
+  obligations with the statement line `yoetz-blocker:<authority|consent|credential|
+  dependency_unavailable>`. Those obligations read as a disclosed standing limitation and never
+  trigger the Stop continuation (#977).
+
+- Hooks classify three closed runtime facts per tool call (`install_target`, `write_scope`,
+  `effective_user`; no path or command text) on the unreleased control-request 2.9.0, and
+  observation advice 0.1.8 tells the agent once when a package install went into Yoetz's own
+  runtime or a private environment, or a write landed outside the workspace. A publish rejected for
+  its result `outcome` now names the closed outcome set and the blocker line (#977).
+
 - `yoetz closure-prepare --output <file>` saves the complete inventory or prepared request to an
   owner-only file, replaced whole, and prints a short summary, so agents query the file instead of
   preparing again (#916).
@@ -109,7 +136,11 @@ reverse-chronological released versions.
 
 ### Changed
 
-- Checks run the `research-evidence/0.2.0` and `work-integrity/0.2.0` policy packs, and status
+- `requested_item_never_attempted` is no longer raised before the agent has started acting, and
+  its repair text no longer suggests revising the obligation as the default exit (#977).
+
+- Checks run the `research-evidence/0.2.0` and `work-integrity/0.2.0` policy packs (work-integrity
+  is now `0.3.0`, see #977 above), and status
   reports `gap_classification_version` `"2"`, so results produced under the new task-statement,
   observed-run corroboration and test-edit rules carry their own identifiers. Checks and findings
   recorded under `0.1.0` stay readable, and a later check can still resolve a finding recorded

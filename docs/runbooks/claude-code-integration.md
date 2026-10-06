@@ -704,7 +704,11 @@ Advice uses Claude Code's documented output contract. `SessionStart`, `PostToolU
 keeps `hookEventName: PostToolUseFailure` even though Yoetz normalizes its internal advice cadence
 to `PostToolUse`. At `Stop`, additional context is Claude Code's non-error feedback channel: it
 continues through the same `stop_hook_active` loop guard as a blocking decision, but is labelled as
-feedback rather than an error. Yoetz never emits `decision: block` to Claude Code. `SessionEnd`
+feedback rather than an error. Yoetz never emits `decision: block` to Claude Code. **Stop-time
+closure gate (host decision: supported).** When a mapped session stops while closure still requires
+agent action, `Stop` carries the gate text in that same `additionalContext` channel, which continues
+the conversation; `stop_hook_active` is honoured first, so the gate continues Claude Code at most
+once per turn. The decision reads only the service's compact `status` for the mapped session (`closure_readiness`); it fires when `agent_actionable` holds open obligations, an unacknowledged receipt-blocking finding, a planned verification that was not observed, failed, or ran before the latest edit, or a git-ignored requested output, at most once per ledger frontier and session (owner-only `observation/closure-gate.json`), never while observed-run facts are still draining, and never for obligations named by a `yoetz-blocker:<kind>` decision. Every outcome is a hook diagnostic (`closure_gate_continued`, `closure_gate_not_required`, `closure_gate_repeat_suppressed`, `closure_gate_loop_guard`, `closure_gate_budget_exhausted`, `closure_gate_unavailable`) in `yoetz observe status`. See ADR-033 and issue #977. `SessionEnd`
 emits `{}`. Provider-repair advice is standing advice (#844). Claude Code delivers it only on
 `SessionStart` and `Stop`, still as `additionalContext` and never as `decision: block`.
 `PostToolUse` does not carry it. A private or no-egress install, an install with no provider

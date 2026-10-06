@@ -972,8 +972,12 @@ contract and the alias is a defensive bound. Local rendering and integration tes
 live host session binding.
 
 Advice uses Cursor's native output contract rather than the Codex/Claude Code envelope.
-`sessionStart` may emit `additional_context`. `stop` does not emit `followup_message` because Cursor
-would auto-submit it as a new user message. `afterFileEdit`, `afterMCPExecution`, and `sessionEnd`
+`sessionStart` may emit `additional_context`. `stop` does not emit `followup_message` for ordinary
+advice because Cursor would auto-submit it as a new user message. **Stop-time closure gate (host
+decision: supported).** The one exception is the closure gate: when a mapped session stops while
+closure still requires agent action, `stop` emits `followup_message` naming what remains, so Cursor
+continues the agent once. Cursor's `loop_count` is the loop guard: a `stop` with `loop_count > 0`
+never carries the gate. The decision reads only the service's compact `status` for the mapped session (`closure_readiness`); it fires when `agent_actionable` holds open obligations, an unacknowledged receipt-blocking finding, a planned verification that was not observed, failed, or ran before the latest edit, or a git-ignored requested output, at most once per ledger frontier and session (owner-only `observation/closure-gate.json`), never while observed-run facts are still draining, and never for obligations named by a `yoetz-blocker:<kind>` decision. Every outcome is a hook diagnostic (`closure_gate_continued`, `closure_gate_not_required`, `closure_gate_repeat_suppressed`, `closure_gate_loop_guard`, `closure_gate_budget_exhausted`, `closure_gate_unavailable`) in `yoetz observe status`. See ADR-033 and issue #977. `afterFileEdit`, `afterMCPExecution`, and `sessionEnd`
 have no advice output channel and emit `{}`. Only a successfully written, nonempty `sessionStart`
 object commits advice delivery; output-less events do not acquire the delivery lease. No hook
 delivers a frontier-motion notice (issue #915), including the ordinary-profile `postToolUse`: every
