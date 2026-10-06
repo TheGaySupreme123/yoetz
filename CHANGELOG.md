@@ -193,7 +193,16 @@ reverse-chronological released versions.
   and exits successfully; `preview`, `trust` and `run` say `policy_not_configured`, and only a
   real read or parse fault says `invalid_policy`. Every such failure, and the guidance, now states
   that this is Yoetz configuration, never a `yoetz-blocker` (#977).
-
+- AI-powered reviewer challenges are no longer dropped when a citation or quote cannot be proved.
+  The review packet now lists as citable only the records it actually sent; a challenge keeps the
+  sent records it cites (disclosed as `semantic_review_refs_reduced`), and one that cites no sent
+  record is shown in the review summary as an advisory, unverified concern (`ref_not_carried`)
+  rather than vanishing. Quotes are matched against the sent text tolerantly (whitespace, JSON
+  encoding, typographic punctuation, the redaction marker) and recorded as the exact sent span;
+  each rejection reason is counted separately in diagnostics (#976).
+- Requested-output facts (an output left unchanged or written outside the workspace) are now
+  reported only for items named in a recorded `edit` action's attempted items; an item named only
+  by a command, research, or other action no longer reports as an unchanged requested output (#977).
 - A repaired AI-powered finding can now resolve in a long session. A recheck over a bounded review
   scope used to require every item the reviewer cited to be shown again, but the repair's own work
   pushed those early items out of the review's recent-history window, and correcting the criticised

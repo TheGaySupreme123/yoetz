@@ -808,6 +808,7 @@ def test_snapshot_rejects_a_null_resolution_key() -> None:
         "semantic_provider_input_manifest_parse_failed",
         "semantic_provider_input_manifest_mismatch",
         "semantic_provider_input_manifest_recovery_failed",
+        "semantic_review_refs_reduced",
         "semantic_review_snippet_invalid",
     ],
 )
