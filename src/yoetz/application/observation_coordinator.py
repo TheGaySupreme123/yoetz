@@ -49,7 +49,10 @@ from yoetz.application.observation_advice_semantic import (
     ObservationAdviceSemanticSupervisor,
     ObservationAdviceSemanticWorker,
 )
-from yoetz.application.observation_check_policy import load_observation_check_policy
+from yoetz.application.observation_check_policy import (
+    ObservationCheckPolicyAbsent,
+    load_observation_check_policy,
+)
 from yoetz.application.observation_drain import ObservationCaptureRecoveryOutcome
 from yoetz.application.observation_materialize import (
     MATERIALIZATION_LEGACY_MAPPING_VERSIONS,
@@ -5604,6 +5607,9 @@ class ObservationCoordinator:
             locator = base64.b64decode(content_b64.encode("ascii"), validate=True).decode("utf-8")
             handle = open_local_workspace(Path(locator))
             policy, _raw_policy = load_observation_check_policy(Path(locator))
+        except ObservationCheckPolicyAbsent:
+            # No approved-check policy is the ordinary opt-in state, not lost content capture.
+            return None
         except Exception:
             await self._local(
                 partial(

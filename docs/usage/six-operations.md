@@ -138,7 +138,7 @@ longer matches and nothing runs until the new digest is trusted.
 ```text
 yoetz observe checks preview                          # policy digest and each proposed argv, without activating
 yoetz observe checks trust --policy-digest <digest>   # trust only the exact digest currently present
-yoetz observe checks status                           # trusted or untrusted, and which checks may run
+yoetz observe checks status                           # trusted, untrusted, or not_configured, and which checks may run
 yoetz observe checks revoke                           # withdraw this workspace's check-policy trust
 yoetz observe checks run                              # run the trusted argv under the enforcing sandbox
 ```
@@ -151,6 +151,13 @@ step), so a missing `bwrap` is named before a check is approved rather than per 
 output digest and byte count, and whether it is current: a run is bound to the working tree and
 diff state captured before and after it, so a result whose tree moved while it ran is marked not
 current rather than reusable. When no enforcing sandbox is available the outcome says so.
+
+Approved checks are optional. In a workspace without `.yoetz/checks.toml`, `status` reports
+`state: not_configured` and exits successfully; `preview`, `trust`, and `run` stop with
+`policy_not_configured`. A file that exists but cannot be read or parsed reports `invalid_policy`.
+Other local faults (for example an unreadable workspace) report `unavailable`. Configuring or
+trusting a policy is the owner's choice and no finding asks an agent for it, so neither state is a
+reason for an agent to stop; a limit it leaves unproven stays disclosed in the receipt.
 
 ### `respond`
 Answers a finding: accept and act, supply evidence, revise the claim, dispute with evidence, or

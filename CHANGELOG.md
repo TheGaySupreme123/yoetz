@@ -179,6 +179,12 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- `yoetz observe checks status` no longer reports a workspace without `.yoetz/checks.toml` as
+  `invalid_policy` (exit 20). Approved checks are optional: it now reports `state: not_configured`
+  and exits successfully; `preview`, `trust` and `run` say `policy_not_configured`, and only a
+  real read or parse fault says `invalid_policy`. Every such failure, and the guidance, now states
+  that this is Yoetz configuration, never a `yoetz-blocker` (#977).
+
 - A repaired AI-powered finding can now resolve in a long session. A recheck over a bounded review
   scope used to require every item the reviewer cited to be shown again, but the repair's own work
   pushed those early items out of the review's recent-history window, and correcting the criticised

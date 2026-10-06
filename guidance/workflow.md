@@ -233,6 +233,13 @@ record a blocker outside your control as above; then stop.
 there is a disclosure, not a task. Never treat a standing limitation as work, and never describe
 an acknowledged item as done.
 
+Approved workspace checks (`yoetz observe checks`) are optional owner configuration; no finding
+asks you to configure or trust them, so `not_configured` or `invalid_policy` there is not by
+itself a `yoetz-blocker`. Likewise, when a qualifying recheck after your repair still lists
+`Resolution requirements not met` only for proof limits such as `command_attempt_uncorroborated`
+or `content_redacted`, that is a Yoetz proof limit, not a blocker: leave the finding unresolved
+and let the receipt disclose it.
+
 Before claiming feedback complete, put its obligation in a supported plan revision or exact
 next-version restatement; a stored or resolved obligation alone does not update effective scope.
 Include each material delivery outcome the user requested in the effective obligations, or state the
