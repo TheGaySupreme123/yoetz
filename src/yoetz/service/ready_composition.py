@@ -4462,6 +4462,7 @@ def _privacy_gated_semantic_evaluator(
         lineage_evaluation: LineageEvaluation | None = None,
         require_complete_specification: bool = False,
         final_review: bool = False,
+        task_fact_gaps: tuple[str, ...] = (),
     ) -> FinalSemanticEvaluation:
         from yoetz.ports.ledger import OperationLease as _OpLease
 
@@ -4826,6 +4827,12 @@ def _privacy_gated_semantic_evaluator(
                 # still sees that pre-existing test edits need scrutiny.
                 captured_content_gaps = tuple(
                     sorted(set(captured_content_gaps) | set(test_edit_gaps), key=str.encode)
+                )
+            if task_fact_gaps:
+                # Check-time requested-output facts (#977) are closed codes only; paths stay in
+                # the local check result. The closing review (#976) reads them beside the work.
+                captured_content_gaps = tuple(
+                    sorted(set(captured_content_gaps) | set(task_fact_gaps), key=str.encode)
                 )
             workspace_root = await _workspace_root_for_runtime(runtime)
             semantic_case_id = recovered_case_id or ids.new(IdKind.OUTBOUND_CASE)

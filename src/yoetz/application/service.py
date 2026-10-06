@@ -541,8 +541,10 @@ class _SemanticEvaluator(Protocol):
         runtime: TaskRuntime | None = None,
         lineage_evaluation: LineageEvaluation | None = None,
         require_complete_specification: bool = False,
-        final_review: bool = False,
     ) -> Awaitable[object]: ...
+
+    # ``final_review`` (issue #976) is optional on this port: ``evaluate_semantic_check`` passes
+    # it only to evaluators whose signature declares it, so older doubles stay assignable.
 
 
 type _ScopeResolver = Callable[
@@ -2722,13 +2724,17 @@ class Application:
         lineage_evaluation: LineageEvaluation | None = None,
         require_complete_specification: bool = False,
         final_review: bool = False,
+        task_fact_gaps: tuple[str, ...] = (),
     ) -> object:
         evaluator = self.semantic_evaluator
-        # The closing-review choice (issue #976) reaches only evaluators that declare it, so an
-        # older double keeps its exact call shape instead of failing into the fallbacks below.
-        extra: dict[str, bool] = {}
+        # The closing-review choice (issue #976) and the check-time task-fact codes (#977) reach
+        # only evaluators that declare them, so an older double keeps its exact call shape
+        # instead of failing into the fallbacks below.
+        extra: dict[str, object] = {}
         if final_review and _accepts_keyword(evaluator, "final_review"):
             extra["final_review"] = True
+        if task_fact_gaps and _accepts_keyword(evaluator, "task_fact_gaps"):
+            extra["task_fact_gaps"] = task_fact_gaps
         # Production evaluators accept the task runtime for durable job/attempt coordination.
         # Test doubles may still be binary callables.
         try:

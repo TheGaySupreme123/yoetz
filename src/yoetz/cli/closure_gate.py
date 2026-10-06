@@ -72,7 +72,7 @@ _ITEM_TEXT: Final[Mapping[str, str]] = {
     "receipt_findings_unresolved": "{blocking} receipt-blocking finding(s) not repaired",
     "closing_review_required": (
         "the closing review has not run since your last change: run `check` with"
-        " `final_review: true`"
+        " `final_review: true` (a recorded blocker does not waive it)"
     ),
     PLANNED_VERIFICATION_NOT_OBSERVED_GAP: (
         "a planned verification command (an obligation's requested command item) was never seen"

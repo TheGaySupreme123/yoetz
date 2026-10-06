@@ -558,6 +558,7 @@ async def _bootstrap_finding(
     refs: bool = False,
     max_findings: str = "3",
     task_statement: str | None = None,
+    requested_items: tuple[dict[str, JsonValue], ...] = (),
 ) -> tuple[StartInternalResult, CheckCommitResult, str]:
     """Publish one open obligation plus an unsupported completion claim about it, then check.
 
@@ -603,6 +604,7 @@ async def _bootstrap_finding(
                     "description": "Publish a result for the respond/status/receipt exercise.",
                     "acceptance_criteria": "A result is recorded in the task ledger.",
                     "evidence_expectation": "A linked immutable result record.",
+                    **({"requested_items": requested_items} if requested_items else {}),
                     "status": "open",
                 },
                 "artifact_refs": (),
@@ -8441,3 +8443,56 @@ async def test_closing_review_request_reaches_the_evaluator() -> None:
     )
     assert type(closing) is CheckCommitResult
     assert seen == [False, True]
+
+
+async def test_requested_output_facts_reach_the_evaluator_as_task_fact_gaps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #977: check-time requested-file facts travel to the AI-powered review seam.
+
+    The workspace read is replaced (it needs a real Git checkout); everything from the closed
+    gap codes onward runs through the real check and ``Application.evaluate_semantic_check``.
+    """
+
+    from yoetz.application import check_change
+    from yoetz.kernel.deterministic_checks import REQUESTED_OUTPUT_ABSENT_FACT
+    from yoetz.kernel.task_facts import REQUESTED_OUTPUT_GIT_IGNORED_GAP, RequestedOutputState
+
+    seed = 5600
+    obligation = protocol_id("obl_", seed + 1)
+
+    async def states(**_kwargs: object) -> dict[tuple[object, int], RequestedOutputState]:
+        return {
+            (obligation, 0): RequestedOutputState("inside", exists=False),
+            (obligation, 1): RequestedOutputState(
+                "inside", exists=True, ignored=True, ignored_by_task=True
+            ),
+        }
+
+    monkeypatch.setattr(check_change, "requested_output_states", states)
+    seen: list[tuple[str, ...]] = []
+
+    async def evaluate(
+        frozen: object,
+        findings: object,
+        runtime: object | None = None,
+        lineage_evaluation: object | None = None,
+        require_complete_specification: bool = False,
+        task_fact_gaps: tuple[str, ...] = (),
+    ) -> object:
+        del require_complete_specification
+        seen.append(task_fact_gaps)
+        return await _semantic_succeeds(frozen, findings, runtime, lineage_evaluation)
+
+    app, _runtime, _ = _build_app(seed_offset=56, semantic="optional", semantic_evaluator=evaluate)
+    await _bootstrap_finding(
+        app,
+        seed=seed,
+        mode="semantic_if_configured",
+        requested_items=(
+            {"item_kind": "file", "value": "out/missing.txt"},
+            {"item_kind": "file", "value": "out/ignored.txt"},
+        ),
+    )
+
+    assert seen == [(REQUESTED_OUTPUT_ABSENT_FACT, REQUESTED_OUTPUT_GIT_IGNORED_GAP)]

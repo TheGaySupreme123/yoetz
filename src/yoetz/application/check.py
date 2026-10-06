@@ -94,6 +94,7 @@ from yoetz.kernel.claims import (
 )
 from yoetz.kernel.deterministic_checks import (
     DETERMINISTIC_TEXT_CONTRACT_DIGEST,
+    REQUESTED_OUTPUT_ABSENT_FACT,
     DeterministicAssessment,
     DeterministicCase,
     FindingBasisRef,
@@ -2145,8 +2146,7 @@ async def _requested_output_inputs(
     source: CheckWorkspaceSource | None,
     port: object | None,
     request_id: str,
-) -> tuple[_PolicyEvaluator, tuple[str, ...]]:
-    """The work-integrity evaluator and gap codes for requested files at check time (#977)."""
+) -> tuple[_PolicyEvaluator, tuple[str, ...], bool]:
 
     from yoetz.application.check_change import requested_output_states
 
@@ -2159,7 +2159,7 @@ async def _requested_output_inputs(
     )
     absent, markers = requested_output_facts(case.projection, states)
     gaps = tuple(sorted({code for code, _obligation in markers}, key=str.encode))
-    return partial(work_integrity_findings, absent_outputs=frozenset(absent)), gaps
+    return partial(work_integrity_findings, absent_outputs=frozenset(absent)), gaps, bool(absent)
 
 
 def run_deterministic_policies(
@@ -3258,6 +3258,7 @@ async def _semantic_evaluation(
     route_profile: Literal["policy", "strict"],
     lineage_evaluation: LineageEvaluation | None = None,
     require_complete_specification: bool = False,
+    task_fact_gaps: tuple[str, ...] = (),
 ) -> FinalSemanticEvaluation:
     if request.mode == "deterministic_only":
         return FinalSemanticEvaluation(
@@ -3284,6 +3285,23 @@ async def _semantic_evaluation(
             # The closing review (issue #976) reaches only an evaluator that declares it.
             if request.final_review and _semantic_evaluator_accepts_keyword(app, "final_review"):
                 kwargs["final_review"] = True
+            # Requested-output facts (#977) are read at check time, after the case is frozen;
+            # the reviewer sees their closed codes in the packet's coverage.
+            if task_fact_gaps and _semantic_evaluator_accepts_keyword(app, "task_fact_gaps"):
+                # The seam declares the keyword (checked above); the port protocol keeps it
+                # optional so older application doubles stay assignable.
+                evaluate = cast(
+                    Callable[..., Awaitable[FinalSemanticEvaluation]],
+                    app.evaluate_semantic_check,
+                )
+                return await evaluate(
+                    frozen,
+                    deterministic,
+                    runtime,
+                    lineage_evaluation,
+                    task_fact_gaps=task_fact_gaps,
+                    **kwargs,
+                )
             return await app.evaluate_semantic_check(
                 frozen,
                 deterministic,
@@ -3724,7 +3742,7 @@ async def execute_check_commit(
                 PREEXISTING_TEST_BASELINE_UNKNOWN_GAP,
                 CHECK_TIME_CHANGE_UNAVAILABLE_GAP,
             )
-        work_evaluator, deterministic_output_gaps = await _requested_output_inputs(
+        work_evaluator, deterministic_output_gaps, output_absent = await _requested_output_inputs(
             frozen.case,
             structural_capture,
             structural_source,
@@ -3830,6 +3848,15 @@ async def execute_check_commit(
             route_profile=route_profile,
             lineage_evaluation=lineage_evaluation,
             require_complete_specification=request.mode == "semantic_required",
+            task_fact_gaps=tuple(
+                sorted(
+                    {
+                        *deterministic_output_gaps,
+                        *((REQUESTED_OUTPUT_ABSENT_FACT,) if output_absent else ()),
+                    },
+                    key=str.encode,
+                )
+            ),
         )
         # Durable AI-powered review attempts may renew the check lease (TTL 60s vs timeout up to 300s).
         if semantic_result.operation_lease is not None:

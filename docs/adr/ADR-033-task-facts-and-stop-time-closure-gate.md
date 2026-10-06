@@ -79,7 +79,9 @@ agent must not be able to stop silently with known work left.
    edited, or by a global excludes file is the
    standing `requested_output_ignored_by_repository`; an unchanged tracked output, an output
    outside the repository, and an unread one are standing disclosures. No path is stored, returned
-   or sent.
+   or sent. The same check's AI-powered review packet (including the closing review, ADR-006)
+   carries these requested-output codes, and `requested_output_absent` when a requested file is
+   missing, in its coverage `known_gaps`, so the reviewer judges the work beside them.
 3. **The plan is not an omission.** `requested_item_never_attempted` for an unattempted item waits
    until the agent has started acting: an observed edit, an observed run the hook classified as
    `test`, `lint`, `typecheck` or `build`, or any published action. Investigation commands
@@ -95,7 +97,11 @@ agent must not be able to stop silently with known work left.
    it honours it and discloses it. Readiness reports open obligations that are all so named as the
    standing `obligation_blocked_outside_agent_control` instead of `obligations_open`; their
    requested items raise no never-attempted or absent-output finding; the Stop gate does not fire
-   for them. Missing data the task says is recoverable, an inconsistent input, or a failing test
+   for them. A blocker never waives the closing review (ADR-006, #976): the receipt is the final
+   step after a final review, recording the blocker is itself a material change, and running
+   `check` with `final_review: true` stays within the agent's control, so
+   `closing_review_required` stays agent-actionable and keeps the gate armed until that review
+   is current. Missing data the task says is recoverable, an inconsistent input, or a failing test
    are not blocker kinds. The result `outcome` enum stays `success|failure|partial|unknown`.
 5. **The Stop-time closure gate continues the agent once per ledger frontier.** At a mapped
    session's Stop hook, the hook reads the service's compact `status` and continues the agent when
