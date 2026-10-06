@@ -2917,10 +2917,12 @@ async def _semantic_not_configured(
     runtime: TaskRuntime | None = None,
     lineage_evaluation: LineageEvaluation | None = None,
     require_complete_specification: bool = False,
+    final_review: bool = False,
 ) -> FinalSemanticEvaluation:
     """Explicit path when AI-powered review is enabled but no provider endpoint is bound."""
 
     del frozen, findings, runtime, lineage_evaluation, require_complete_specification
+    del final_review
     return FinalSemanticEvaluation(
         SemanticStatus.NOT_CONFIGURED, SemanticReason.PROVIDER_NOT_CONFIGURED
     )
@@ -2932,6 +2934,7 @@ async def _semantic_provider_unbound(
     runtime: TaskRuntime | None = None,
     lineage_evaluation: LineageEvaluation | None = None,
     require_complete_specification: bool = False,
+    final_review: bool = False,
 ) -> FinalSemanticEvaluation:
     """AI-powered review is enabled, but no external provider endpoint is configured."""
 
@@ -4458,6 +4461,7 @@ def _privacy_gated_semantic_evaluator(
         runtime: TaskRuntime | None = None,
         lineage_evaluation: LineageEvaluation | None = None,
         require_complete_specification: bool = False,
+        final_review: bool = False,
     ) -> FinalSemanticEvaluation:
         from yoetz.ports.ledger import OperationLease as _OpLease
 
@@ -4845,6 +4849,7 @@ def _privacy_gated_semantic_evaluator(
                     check_time_change=check_change.change,
                     check_time_change_unavailable=check_change.unavailable,
                     check_time_change_unavailable_reason=check_change.reason,
+                    final_review=final_review,
                 )
 
             try:
@@ -5013,7 +5018,9 @@ def _privacy_gated_semantic_evaluator(
                         + (fallback_timeout if fallback_plan is not None else 0.0)
                     ),
                     fallback_timeout,
-                    select_semantic_budget_profile(frozen.case.projection),
+                    select_semantic_budget_profile(
+                        frozen.case.projection, final_review=final_review
+                    ),
                 )
 
             # UTC expiry is durable; monotonic time is reconstructed only from its remainder.

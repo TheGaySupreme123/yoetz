@@ -138,8 +138,31 @@ def test_reviewer_snippets_use_exact_provider_bound_text() -> None:
         citable_refs=frozenset({str(clm(1))}),
         provider_input_text_by_ref={str(clm(1)): ("different-provider-row",)},
     )
-    assert rejected.challenges_rejected == 1
-    assert rejected.candidates == ()
+    # The cited ref was sent, so the challenge stands; only its unproven quote is removed and
+    # disclosed as a snippet loss (TB4 tb4f1 ks-solver-cpp, issue #976).
+    assert rejected.challenges_rejected == 0
+    assert len(rejected.candidates) == 1
+    assert rejected.candidates[0].challenge is not None
+    assert rejected.candidates[0].challenge.snippet is None
+    assert rejected.snippets_rejected == 1
+
+    # A quote that matches only after whitespace normalization is not a packet substring: it is
+    # removed rather than shown as a quote.
+    reflowed = validate_semantic_judgment(
+        case,
+        (),
+        SemanticJudgment(
+            "challenges_returned",
+            (_challenge(str(clm(1)), snippet="first line   second line"),),
+        ),
+        _provenance(),
+        expected_frontier=case.frontier,
+        citable_refs=frozenset({str(clm(1))}),
+        provider_input_text_by_ref={str(clm(1)): ("row: first line\n second line end",)},
+    )
+    assert reflowed.snippets_rejected == 1
+    assert reflowed.candidates[0].challenge is not None
+    assert reflowed.candidates[0].challenge.snippet is None
 
     recovered_without_text = validate_semantic_judgment(
         case,
@@ -533,7 +556,10 @@ def test_prior_finding_rulings_are_admitted_only_with_their_own_support() -> Non
         (str(fnd(2)), "unassessable"),
         (str(fnd(3)), "withdrawn"),
     ]
-    assert review.verdicts_unsupported == 2
+    # fnd(2)'s unsupported fixed is unsupported. A ruling on the local fnd(4) is set aside: its
+    # answer travels as non-rulable context and the ruling is only counted (issue #976).
+    assert review.verdicts_unsupported == 1
+    assert review.verdicts_set_aside == 1
     assert review.candidates == ()
 
 
@@ -983,3 +1009,56 @@ def test_a_narrower_challenge_is_its_own_item_not_a_restatement() -> None:
         expected_frontier=case.frontier,
     )
     assert (len(same.candidates), same.restatements_suppressed) == (0, 1)
+
+
+def test_a_challenge_replying_to_an_answered_finding_is_a_returned_linked_finding() -> None:
+    """TB4 tb4f1 (issue #976): the reviewer's reply to an answer reaches the agent as a finding.
+
+    A challenge that names the answered finding's id was folded into it as a ruling, leaving the
+    agent with "findings returned: 0" and the concern only in summary text.
+    """
+
+    case = _restatement_case(obligation_recorded_at=2)
+    answered = ResponseRecordedPayload(
+        finding_id=fnd(1),
+        finding_frontier=FRONTIER,
+        disposition=ResponseDisposition.ACKNOWLEDGED,
+        reason="The verification now runs in CI.",
+    )
+    answered_case = replace(
+        case, projection=replace(case.projection, responses={fnd(1): record(answered, 6)})
+    )
+    reply = replace(
+        _obligation_challenge(str(fnd(1))),
+        discrepancy="The answer cites CI, but the recorded runs still fail two stencil cases.",
+    )
+    review = validate_semantic_judgment(
+        answered_case,
+        (),
+        SemanticJudgment("challenges_returned", (reply,)),
+        _provenance(),
+        expected_frontier=answered_case.frontier,
+    )
+    assert len(review.candidates) == 1
+    assert review.candidates[0].related_finding_ids == (fnd(1),)
+    assert review.restatements_suppressed == 0
+
+    # A re-raise that does not name the answered item, or of an unanswered one, is still folded.
+    unnamed = validate_semantic_judgment(
+        answered_case,
+        (),
+        SemanticJudgment("challenges_returned", (_obligation_challenge(str(obl(1))),)),
+        _provenance(),
+        expected_frontier=answered_case.frontier,
+    )
+    assert unnamed.candidates == ()
+    assert unnamed.restatements_suppressed == 1
+    unanswered = validate_semantic_judgment(
+        case,
+        (),
+        SemanticJudgment("challenges_returned", (_obligation_challenge(str(fnd(1))),)),
+        _provenance(),
+        expected_frontier=case.frontier,
+    )
+    assert unanswered.candidates == ()
+    assert unanswered.restatements_suppressed == 1

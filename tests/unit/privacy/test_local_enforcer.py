@@ -847,3 +847,158 @@ def test_empty_local_projection_is_an_approved_structural_decision() -> None:
     decision = _decision(classified)
 
     assert decision == PrivacyDecision((), (), PrivacyOutcome.COMPLETED, None)
+
+
+def _two_excerpt_semantic_candidate(clean: bytes, suspect: bytes) -> CandidateContext:
+    clean_ref = "evd_10000000-0000-4000-8000-000000000020"
+    suspect_ref = "evd_10000000-0000-4000-8000-000000000021"
+    envelope = canonical_encode(
+        {
+            "case_digest": _DIGEST,
+            "case_id": "cas_10000000-0000-4000-8000-000000000022",
+            "dependency_digest": _DIGEST,
+            "frontier_refs": [clean_ref, suspect_ref],
+            "local_check_refs": [],
+            "item_catalog": [
+                {
+                    "category": "bounded_structural_metadata",
+                    "item_id": "review-packet",
+                    "section": "timeline",
+                    "source_kind": "task",
+                    "source_ref": "evt_10000000-0000-4000-8000-000000000023",
+                    "linked_subject_refs": [],
+                    "occurred_order": 0,
+                },
+                {
+                    "category": "evidence_excerpt",
+                    "item_id": "clean",
+                    "section": "excerpt",
+                    "source_kind": "evidence",
+                    "source_ref": clean_ref,
+                    "linked_subject_refs": [],
+                    "occurred_order": 1,
+                },
+                {
+                    "category": "evidence_excerpt",
+                    "item_id": "suspect",
+                    "section": "excerpt",
+                    "source_kind": "evidence",
+                    "source_ref": suspect_ref,
+                    "linked_subject_refs": [],
+                    "occurred_order": 2,
+                },
+            ],
+            "question_set": ["What did you verify?"],
+            "review_packet": {
+                "targeted_excerpts": [
+                    {"excerpt_item_id": "clean", "source_kind": "evidence"},
+                    {"excerpt_item_id": "suspect", "source_kind": "evidence"},
+                ],
+                "omissions": [],
+            },
+            "schema": "yoetz.review-packet-case/2",
+        }
+    )
+    return CandidateContext(
+        request_id=_REQUEST,
+        channel=EgressChannel.LLM_INFERENCE,
+        local_sink=None,
+        purpose="semantic-review",
+        scope=_scope(),
+        subject_digest=_DIGEST,
+        provider_binding=None,
+        items=(
+            CandidateContextItem(
+                "review-packet",
+                DataCategory.BOUNDED_STRUCTURAL_METADATA,
+                _scope(),
+                "/case/review-packet",
+                envelope,
+            ),
+            CandidateContextItem(
+                "clean", DataCategory.EVIDENCE_EXCERPT, _scope(), "/case/excerpt/clean", clean
+            ),
+            CandidateContextItem(
+                "suspect",
+                DataCategory.EVIDENCE_EXCERPT,
+                _scope(),
+                "/case/excerpt/suspect",
+                suspect,
+            ),
+        ),
+    )
+
+
+def _no_op_redaction(data: bytes) -> tuple[bytes, int]:
+    """Simulate a redaction that leaves a heuristic in the prepared bytes."""
+
+    return data, 1
+
+
+def _minimize_all(candidate: CandidateContext):  # noqa: ANN202 - test helper
+    enforcer = LocalPrivacyEnforcer()
+    classified = enforcer.classify(candidate, _effective())
+    return enforcer.minimize_and_scan(
+        classified,
+        PrivacyDecision(("clean", "review-packet", "suspect"), (), PrivacyOutcome.COMPLETED, None),
+    )
+
+
+@pytest.mark.parametrize(
+    "line",
+    (
+        b"        self.token = functools.lru_cache(maxsize=2048)(self._token)\n",
+        b"    for char in token:\n            node = x\n",
+    ),
+)
+def test_redacted_code_line_survives_packet_encoding_without_blocking(line: bytes) -> None:
+    """TB4 tb4f1 regression (issue #976): the JSON-escaped marker no longer re-matches.
+
+    batched-eval-parity and data-anonymization lost every implementation-stage review because a
+    redacted line like ``self.token = [REDACTED]\\n`` re-matched once encoded into the packet.
+    """
+
+    minimized = _minimize_all(_two_excerpt_semantic_candidate(b"clean evidence", line))
+    assert minimized.heuristic_findings == ()
+    assert minimized.forbidden_findings == ()
+    assert set(minimized.included_item_ids) == {"clean", "review-packet", "suspect"}
+    assert minimized.withheld_item_ids == ()
+    assert b"[REDACTED]" in minimized.prepared_bytes
+
+
+def test_surviving_heuristic_withholds_only_the_offending_item(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Partial withholding (issue #976): one offending item is withheld, the rest is reviewed."""
+
+    import yoetz.adapters.privacy.local_enforcer as enforcer_module
+
+    # Simulate a redaction that leaves a heuristic in the prepared bytes.
+    monkeypatch.setattr(enforcer_module, "redact_heuristic_spans", _no_op_redaction)
+    minimized = _minimize_all(
+        _two_excerpt_semantic_candidate(b"clean evidence", b"API_TOKEN=abcdefgh12345678\n")
+    )
+    assert minimized.heuristic_findings == ()
+    assert minimized.forbidden_findings == ()
+    assert set(minimized.included_item_ids) == {"clean", "review-packet"}
+    assert minimized.withheld_item_ids == ("suspect",)
+    assert b"abcdefgh12345678" not in minimized.prepared_bytes
+    assert b"clean evidence" in minimized.prepared_bytes
+
+
+def test_heuristic_in_structural_envelope_still_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.adapters.privacy.local_enforcer as enforcer_module
+
+    monkeypatch.setattr(enforcer_module, "redact_heuristic_spans", _no_op_redaction)
+    candidate = _two_excerpt_semantic_candidate(b"clean evidence", b"plain words")
+    envelope = candidate.items[0]
+    poisoned = replace(
+        envelope,
+        plaintext=envelope.plaintext.replace(
+            b"What did you verify?", b"auth_token: envelope-suspicious-value"
+        ),
+    )
+    minimized = _minimize_all(replace(candidate, items=(poisoned, *candidate.items[1:])))
+    assert minimized.heuristic_findings

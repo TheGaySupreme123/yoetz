@@ -2229,6 +2229,10 @@ def _check_request_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
 
     document = _load_versioned_template(entry, "operations/check-request-1.0.0.schema.json")
     _select_current_policy_packs(document)
+    # Issue #976, unreleased in-place addition: request the closing review (final phase) with or
+    # without a completion claim. Absent requests keep their exact shape.
+    properties = cast(dict[str, JsonValue], document["properties"])
+    properties["final_review"] = {"type": "boolean"}
     document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
     document["title"] = f"Yoetz check request {entry.schema_version}"
     return document
@@ -3294,6 +3298,7 @@ def _check_result_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
             "requested_next_step": {
                 "enum": [
                     "act",
+                    "answer_question",
                     "dispute_with_evidence",
                     "provide_evidence",
                     "revise_claim",
@@ -3768,6 +3773,7 @@ def _status_result_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
             "requested_next_step": {
                 "enum": [
                     "act",
+                    "answer_question",
                     "dispute_with_evidence",
                     "provide_evidence",
                     "revise_claim",
@@ -5107,6 +5113,8 @@ def _add_review_input_manifest_to_outbound_case(document: dict[str, JsonValue]) 
             },
             "omitted_item_count": {"maximum": 64, "minimum": 0, "type": "integer"},
             "phase": {"enum": ["composed", "provider_bound"], "type": "string"},
+            # Issue #976, optional in place: the review phase the packet's question set named.
+            "review_phase": {"enum": ["routine", "final"], "type": "string"},
             "schema": {"const": "yoetz.review-input-manifest/1", "type": "string"},
             "selected_excerpt_bytes": {"maximum": 524288, "minimum": 0, "type": "integer"},
             "selected_item_count": {"maximum": 256, "minimum": 0, "type": "integer"},

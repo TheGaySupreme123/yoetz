@@ -804,6 +804,7 @@ REVIEWER_NEXT_STEPS: Final = frozenset(
         "revise_claim",
         "dispute_with_evidence",
         "state_unresolved_limitation",
+        "answer_question",
     }
 )
 # A challenge cites at most 16 refs, so it can name at most 16 earlier findings.

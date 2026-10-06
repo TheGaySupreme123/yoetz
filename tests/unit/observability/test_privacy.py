@@ -23,10 +23,12 @@ from yoetz.observability.privacy import (
     redact_diagnostic_record,
     redact_diagnostic_value,
     redact_heuristic_spans,
+    redact_sensitive_content,
     scan_for_sensitive_content,
     session_id_hash,
 )
 from yoetz.ports.keys import MacKeyHandle
+from yoetz.protocol.canonical import canonical_encode
 
 _SESSION_ID = "ses_11111111-1111-4111-8111-111111111111"
 _REQUEST_ID = "req_22222222-2222-4222-8222-222222222222"
@@ -255,7 +257,9 @@ def test_heuristic_json_assignment_redaction_keeps_structured_payload_valid() ->
         "event_id": "evt_1",
         "payload": {
             "auth_token": "[REDACTED]",
-            "config": "[REDACTED]",
+            # The value is redacted and the assignment name kept: the JSON member's ``:`` before
+            # the string is a boundary byte, not the assignment separator (issue #976).
+            "config": "TOKEN=[REDACTED]",
         },
     }
     assert scan_for_sensitive_content(redacted) == ()
@@ -411,3 +415,64 @@ def test_request_commitment_covers_final_body_only() -> None:
     ).hexdigest()
     assert privacy_request_commitment(body, handle) == f"hmac-sha256:{expected}"
     assert privacy_request_commitment(body + b"!", handle) != f"hmac-sha256:{expected}"
+
+
+@pytest.mark.parametrize(
+    "line",
+    (
+        b"self.token = functools.lru_cache(maxsize=2048)(self._token)\n",
+        b"for char in token:\n            node = x\n",
+        b"API_TOKEN=abcdefgh12345678\n",
+        b'x_token = "abcdefgh12345678"\n',
+    ),
+)
+def test_redacted_line_stays_clean_after_json_encoding(line: bytes) -> None:
+    """TB4 tb4f1 (issue #976): Yoetz's own marker must not re-match once JSON-escaped.
+
+    The prepared review packet is canonical JSON, so ``[REDACTED]\\n`` used to read as a fresh
+    token assignment value and the egress rescan blocked the whole packet.
+    """
+
+    redacted, count = redact_heuristic_spans(line)
+    assert count == 1
+    encoded = canonical_encode({"content": redacted.decode("utf-8")})
+    assert scan_for_sensitive_content(encoded) == ()
+    # Redacting the encoded form again is a fixed point.
+    assert redact_heuristic_spans(encoded) == (encoded, 0)
+
+
+@pytest.mark.parametrize(
+    ("encoded", "secret"),
+    (
+        (b'{"c":"API_TOKEN=abcdefgh12345678\\n"}', b"abcdefgh12345678"),
+        (b'{"c":"auth_token:\\n  zzqqrrtt9988\\n"}', b"zzqqrrtt9988"),
+        (b'{"k":"password=\\"s3cretvalue\\""}', b"s3cretvalue"),
+    ),
+)
+def test_json_encoded_assignment_is_still_detected_and_redacted(
+    encoded: bytes, secret: bytes
+) -> None:
+    findings = scan_for_sensitive_content(encoded)
+    assert findings
+    assert all(finding.confidence is ScanConfidence.HEURISTIC for finding in findings)
+    redacted, count = redact_heuristic_spans(encoded)
+    assert count == 1
+    assert secret not in redacted
+    json.loads(redacted)
+
+
+@pytest.mark.parametrize(
+    ("data", "secret"),
+    (
+        (b"password=Ab12\\tZZtail9", b"ZZtail9"),
+        (b"password=C:\\temp\\new", b"new"),
+        (json.dumps({"c": "password=ab\\ntail"}).encode(), b"tail"),
+        (json.dumps({"c": 'password="ab\\"cd efgh"'}).encode(), b"efgh"),
+    ),
+)
+def test_encoded_escapes_never_shorten_a_redacted_value(data: bytes, secret: bytes) -> None:
+    """A literal backslash escape inside a value stays inside the redacted span (issue #976)."""
+
+    redacted, changed = redact_sensitive_content(data)
+    assert changed
+    assert secret not in redacted

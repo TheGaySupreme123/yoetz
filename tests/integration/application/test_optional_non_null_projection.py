@@ -75,6 +75,7 @@ from yoetz.protocol.models import (
     ReadGuidanceSuccessModel,
     RespondEvidenceSummaryModel,
     RespondResponseModel,
+    ReviewInputManifestModel,
     StartSuccessModel,
     StatusAdviceItemModel,
     StatusClosureReadinessModel,
@@ -270,6 +271,7 @@ _RESULT_OPTIONAL_NON_NULL: tuple[tuple[type[BaseModel], frozenset[str]], ...] = 
     (StatusCompactItemModel, frozenset({"latest_check_test_edits"})),
     (StatusFindingsPageModel, frozenset({"attempt_budget"})),
     (StatusHistoryItemV14Model, frozenset({"review_input_manifest"})),
+    (ReviewInputManifestModel, frozenset({"review_phase"})),
     (StatusObligationItemModel, frozenset({"acceptance_criteria"})),
     (StatusObservedRunModel, frozenset({"tool_name", "command_commitment", "exit_status"})),
     (StatusResultItemModel, frozenset({"observed_run"})),
@@ -901,6 +903,40 @@ async def test_public_error_omits_unset_safe_details() -> None:
     assert "safe_details" not in again.model_dump(mode="json", exclude_unset=True)
 
 
+async def test_review_input_manifest_omits_unset_review_phase() -> None:
+    """A manifest recorded before the review phase existed stays without it (issue #976)."""
+
+    section: dict[str, object] = {
+        "status": "missing",
+        "source_refs": [],
+        "item_ids": [],
+        "omitted_refs": [],
+        "omission_reasons": [],
+        "revision": None,
+        "content_digest": None,
+        "content_bytes": 0,
+    }
+    payload: dict[str, object] = {
+        "schema": "yoetz.review-input-manifest/1",
+        "specification": section,
+        "current_diff": section,
+        "caller_evidence": section,
+        "latest_verification": section,
+        "prior_finding_context": section,
+        "phase": "provider_bound",
+        "missing_inputs": [],
+        "selected_item_count": 0,
+        "selected_excerpt_bytes": 0,
+        "omitted_item_count": 0,
+    }
+    model = ReviewInputManifestModel.model_validate(payload)
+    dumped = model.model_dump(mode="json", by_alias=True, exclude_unset=True)
+    assert "review_phase" not in dumped
+    assert model.review_phase is None
+    final = ReviewInputManifestModel.model_validate({**payload, "review_phase": "final"})
+    assert final.model_dump(mode="json", by_alias=True)["review_phase"] == "final"
+
+
 @pytest.mark.parametrize(
     ("model_type", "payload"),
     (
@@ -1465,6 +1501,9 @@ def test_every_result_optional_non_null_field_has_an_unset_projection_case() -> 
     )
     covered["StatusHistoryItemV14Model", "review_input_manifest"] = (
         "test_nested_multi_agent_results_omit_unset_fields"
+    )
+    covered["ReviewInputManifestModel", "review_phase"] = (
+        "test_review_input_manifest_omits_unset_review_phase"
     )
     covered["StatusOperationPageModel", "semantic_withheld_items"] = (
         "test_nested_multi_agent_results_omit_unset_fields"

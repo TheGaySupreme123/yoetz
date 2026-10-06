@@ -1364,11 +1364,20 @@ def _describe_presentation_schema(name: str, schema: dict[str, JsonValue]) -> No
                 "Omit for the whole case, or send both claim_ids and obligation_ids. Two empty "
                 "arrays also mean the whole case."
             )
+        final_review = properties.get("final_review")
+        if isinstance(final_review, dict):
+            final_review["description"] = (
+                "Set true for the closing review, the last check before the receipt: the "
+                "reviewer judges each stated requirement and requested output against the task, "
+                "with or without a completion claim. Omit for in-progress checks."
+            )
     elif name == "respond-request":
         disposition = properties.get("disposition")
         if isinstance(disposition, dict):
             disposition["description"] = (
-                "Acknowledged accepts no waiver fields. Acknowledged_not_done means you will "
+                "Acknowledged accepts no waiver fields and, on an AI-powered review finding, "
+                "requires a reason the next review reads (for answer_question, the answer). "
+                "Acknowledged_not_done means you will "
                 "not do it and is final. Provenance_disputed contests the finding's authorship "
                 "or provenance premise rather than its conclusion. It, rejected and "
                 "acknowledged_not_done require reason and accept no waiver fields. Waived "

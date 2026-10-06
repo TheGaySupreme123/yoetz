@@ -153,8 +153,11 @@ def render_review_input_manifest_lines(value: object) -> tuple[str, ...]:
     omitted = _count(source.get("omitted_item_count"), 64)
     if phase is None or selected is None or excerpt_bytes is None or omitted is None:
         return ()
+    # Issue #976: the review phase is shown when recorded; "final" is the closing review.
+    review_phase = _token(source.get("review_phase"), frozenset({"routine", "final"}))
+    phase_clause = "" if review_phase is None else f"review phase {review_phase}; "
     lines = [
-        f"Review input manifest: {phase}; selected items {selected}; "
+        f"Review input manifest: {phase}; {phase_clause}selected items {selected}; "
         f"selected excerpt bytes {excerpt_bytes}; omitted items {omitted}."
     ]
     for name in _SECTION_NAMES:

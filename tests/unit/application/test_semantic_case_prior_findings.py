@@ -505,3 +505,65 @@ def test_a_selection_without_the_assessments_section_discloses_unshown_prior_fin
     shown = _build(_numba_case())
     assert any(item.section == "prior_finding" for item in shown.items)
     assert SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP not in shown.packet.coverage.known_gaps
+
+
+def test_answered_local_finding_reaches_the_reviewer_as_non_rulable_context() -> None:
+    """TB4 tb4f1 atrx (issue #976): the agent's answer to Yoetz's own finding reaches the review.
+
+    The deliverable finding was local, so its answer ("cannot honestly be populated") never
+    reached the reviewer and prior_finding_context read missing although findings were answered.
+    """
+
+    local = finding_record(_semantic(7, origin=FindingOrigin.DETERMINISTIC), 11)
+    answer = ResponseRecordedPayload(
+        finding_id=fnd(7),
+        finding_frontier=FRONTIER,
+        disposition=ResponseDisposition.ACKNOWLEDGED,
+        reason="The report file cannot honestly be populated: no variant qualifies.",
+    )
+    case = _build(
+        _numba_case(
+            extra_findings={fnd(7): local},
+            extra_responses={fnd(7): record(answer, 17)},
+        )
+    )
+    structural = _row(case, f"local-finding-answer-{fnd(7)}")
+    assert structural["rulable"] is False
+    assert structural["schema"] == "yoetz.local-finding-answer/1"
+    assert structural["disposition"] == "acknowledged"
+    texts = {item.item_id: item.content.decode("utf-8") for item in case.items}
+    assert "cannot honestly be populated" in texts[f"local-finding-answer-text-{fnd(7)}"]
+    # Never offered for a ruling.
+    assert f"prior-finding-{fnd(7)}" not in case.packet.prior_finding_item_ids
+    assert str(fnd(7)) not in case.packet.prior_finding_refs
+
+
+def test_unanswered_local_finding_is_not_carried() -> None:
+    local = finding_record(_semantic(7, origin=FindingOrigin.DETERMINISTIC), 11)
+    case = _build(_numba_case(extra_findings={fnd(7): local}))
+    assert not any(item.item_id.startswith("local-finding-answer") for item in case.items)
+
+
+def test_closing_review_request_builds_the_final_phase_and_records_it() -> None:
+    """Issue #976: the closing review's phase is in the question set and the manifest."""
+
+    routine = _build(_numba_case())
+    assert routine.question_set[0].startswith("Review phase: routine.")
+    assert routine.packet.input_manifest is not None
+    assert routine.packet.input_manifest.review_phase == "routine"
+
+    closing = build_semantic_case(
+        case_id="cas_10000000-0000-4000-8000-000000000001",
+        frozen_case=_numba_case(),
+        dependency_digest="sha256:" + "b" * 64,
+        findings=(),
+        review_context_profile=ReviewContextProfile.GOAL_AWARE,
+        review_selection=ReviewSelectionPolicy.for_profile(ReviewContextProfile.GOAL_AWARE),
+        policy_id="pvy_10000000-0000-4000-8000-000000000001",
+        policy_version="1",
+        final_review=True,
+    )
+    assert closing.question_set[0].startswith("Review phase: final. This is the closing review")
+    assert closing.packet.input_manifest is not None
+    assert closing.packet.input_manifest.review_phase == "final"
+    assert closing.case_digest != routine.case_digest

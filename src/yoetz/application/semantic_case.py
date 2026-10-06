@@ -229,6 +229,8 @@ _PACKET_ID_LIST_KEYS: Final = (
 # The prior-findings section (issue #905) has its own bounds, outside the timeline's 64 rows.
 MAX_PRIOR_FINDINGS: Final = 8
 MAX_PRIOR_FINDING_SECTION_BYTES: Final = 48 * 1024
+# Answers to local findings carried beside them (issue #976); they share the section's bounds.
+MAX_LOCAL_FINDING_ANSWERS: Final = 4
 # Refs listed per structural row; the full counts travel beside them.
 _MAX_PRIOR_FINDING_LISTED_REFS: Final = MAX_PRIOR_FINDING_LISTED_REFS
 _CANONICAL_PACKS: Final = (
@@ -247,8 +249,10 @@ REVIEW_PHASE_QUESTIONS: Final[Mapping[SemanticBudgetProfile, str]] = MappingProx
             "report material defects in the work so far without judging completeness."
         ),
         "final": (
-            "Review phase: final. A completion claim is in effect: judge whether the change and "
-            "its recorded verification support it."
+            "Review phase: final. This is the closing review, with or without a completion "
+            "claim: judge completeness against the task statement. For each stated requirement "
+            "and requested output (path), say whether the change and its recorded verification "
+            "deliver it, and challenge each one they do not."
         ),
     }
 )
@@ -2646,7 +2650,106 @@ def _prior_findings_section(
         byte_budget -= size
         items.extend(rows)
         omissions.extend(row_omissions)
+    # The agent's answers to Yoetz's own local findings (issue #976). They are not rulable, so
+    # they never enter prior_finding_refs, but the reviewer judges their substance: an answer that
+    # says a requested output "cannot be produced" is exactly what a closing review must test.
+    answers = 0
+    for ref, record in _local_answer_candidates(projection, allowed):
+        rows = _local_answer_items(ref, record, projection, include_prose=include_prose)
+        size = sum(item.content_bytes for item in rows)
+        if (
+            answers >= MAX_LOCAL_FINDING_ANSWERS
+            or len(rows) > item_budget - len(items)
+            or size > byte_budget
+        ):
+            truncated = True
+            continue
+        answers += 1
+        byte_budget -= size
+        items.extend(rows)
     return items, omissions, truncated
+
+
+def _local_answer_candidates(
+    projection: ProjectionState, allowed: frozenset[str]
+) -> list[tuple[str, FindingProjectionRecord]]:
+    """Open local findings the main agent answered with a readable reason, newest answer first."""
+
+    rows: list[tuple[int, str, FindingProjectionRecord]] = []
+    for key, record in projection.findings.items():
+        payload = record.payload
+        ref = str(key)
+        if (
+            payload is None
+            or record.redacted
+            or payload.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+            or ref not in allowed
+            or record.resolved_by_check_event_id is not None
+            or finding_todo_state(projection, key)
+            in {FindingTodoState.VERIFIED_RESOLVED, FindingTodoState.REJECTION_ACCEPTED}
+        ):
+            continue
+        response = projection.responses.get(key)
+        if (
+            response is None
+            or response.redacted
+            or response.payload is None
+            or response.payload.reason is None
+        ):
+            continue
+        rows.append((response.source_frontier, ref, record))
+    rows.sort(key=lambda row: (-row[0], row[1].encode("ascii")))
+    return [(ref, record) for _order, ref, record in rows]
+
+
+def _local_answer_items(
+    ref: str,
+    record: FindingProjectionRecord,
+    projection: ProjectionState,
+    *,
+    include_prose: bool,
+) -> list[SemanticCaseItem]:
+    payload = record.payload
+    response = projection.responses.get(finding_id_value(ref))
+    assert payload is not None and response is not None and response.payload is not None
+    body: dict[str, JsonValue] = {
+        "disposition": response.payload.disposition.value,
+        "finding_kind": payload.kind.value,
+        "finding_ref": ref,
+        "recorded_sequence": record.source_frontier,
+        "response_sequence": response.source_frontier,
+        "rulable": False,
+        "schema": "yoetz.local-finding-answer/1",
+    }
+    if include_prose:
+        body["text_item_ids"] = {"answer": f"local-finding-answer-text-{ref}"}
+    text, _omitted = _bounded_json(body)
+    items = [
+        _content_item(
+            item_id=f"local-finding-answer-{ref}",
+            section="prior_finding",
+            category=DataCategory.BOUNDED_STRUCTURAL_METADATA,
+            source_kind="finding",
+            source_ref=ref,
+            linked_subject_refs=(ref,),
+            occurred_order=response.source_frontier,
+            text=text,
+        )
+    ]
+    if include_prose:
+        items.append(
+            _content_item(
+                item_id=f"local-finding-answer-text-{ref}",
+                section="prior_finding",
+                category=DataCategory.FINDING_SUMMARY,
+                source_kind="finding",
+                source_ref=ref,
+                linked_subject_refs=(ref,),
+                occurred_order=response.source_frontier,
+                text=response.payload.reason or "",
+            )
+        )
+    return items
 
 
 def build_semantic_case(
@@ -2668,8 +2771,13 @@ def build_semantic_case(
     check_time_change: CheckTimeChange | None = None,
     check_time_change_unavailable: bool = False,
     check_time_change_unavailable_reason: str | None = None,
+    final_review: bool = False,
 ) -> SemanticCase:
     """Build one pre-egress AI-powered review case from frozen authority only.
+
+    ``final_review`` is the check request's closing-review choice (issue #976): the final review
+    phase runs with or without a completion claim. A recovered check replays the same request,
+    so the phase and the case digest are rebuilt identically.
 
     ``check_time_change`` is the service's own capture of the repository when this check ran
     (ADR-031); ``check_time_change_unavailable`` records that the recipe selected it but the
@@ -2718,6 +2826,7 @@ def build_semantic_case(
             check_time_change=check_time_change,
             check_time_change_unavailable=check_time_change_unavailable,
             check_time_change_unavailable_reason=check_time_change_unavailable_reason,
+            final_review=final_review,
         )
 
     def fits(candidate: SemanticCase) -> bool | None:
@@ -2776,9 +2885,11 @@ def _build_semantic_case_once(
     check_time_change: CheckTimeChange | None = None,
     check_time_change_unavailable: bool = False,
     check_time_change_unavailable_reason: str | None = None,
+    final_review: bool = False,
 ) -> SemanticCase:
     if type(frozen_case) is not DeterministicCase:
         raise TypeError("deterministic_case_invalid")
+    review_phase = select_semantic_budget_profile(frozen_case.projection, final_review=final_review)
     if type(review_context_profile) is not ReviewContextProfile:
         raise TypeError("review_context_profile_invalid")
     if type(review_selection) is not ReviewSelectionPolicy:
@@ -3939,6 +4050,7 @@ def _build_semantic_case_once(
         prior_finding_refs=prior_finding_refs,
         check_time_change_selected=check_change_selected,
         check_time_change_unavailable=check_time_change_unavailable,
+        review_phase=review_phase,
         truncated_item_ids=tuple(
             sorted(
                 (set(over_limit) | truncated_item_ids) & {item.item_id for item in items},
@@ -4070,7 +4182,7 @@ def _build_semantic_case_once(
             ),
         }
     # A pure function of the frozen projection, so recovery rebuilds the same phase and digest.
-    question_set = review_question_set(select_semantic_budget_profile(frozen_case.projection))
+    question_set = review_question_set(review_phase)
     # Bind assessments/omissions/packet lists into the digest so provenance covers the full case.
     case_digest = canonical_digest(
         cast(
@@ -4309,6 +4421,7 @@ def review_input_manifest_to_json(manifest: ReviewInputManifest) -> dict[str, Js
         "omitted_item_count": manifest.omitted_item_count,
         "phase": manifest.phase,
         "prior_finding_context": _review_input_section_to_json(manifest.prior_finding_context),
+        **({} if manifest.review_phase is None else {"review_phase": manifest.review_phase}),
         "schema": manifest.schema,
         "selected_excerpt_bytes": manifest.selected_excerpt_bytes,
         "selected_item_count": manifest.selected_item_count,
@@ -4412,6 +4525,7 @@ def review_input_manifest(
     check_time_change_selected: bool = False,
     check_time_change_unavailable: bool = False,
     truncated_item_ids: Sequence[str] = (),
+    review_phase: SemanticBudgetProfile | None = None,
 ) -> ReviewInputManifest:
     """Build the bounded per-check input manifest from frozen case material.
 
@@ -4697,6 +4811,7 @@ def review_input_manifest(
         selected_item_count=len(items),
         selected_excerpt_bytes=sum(item.content_bytes for item in excerpt_items),
         omitted_item_count=omitted_item_count,
+        review_phase=review_phase,
     )
 
 
@@ -5094,6 +5209,8 @@ def _provider_bound_input_manifest(
         "phase": "provider_bound",
         "schema": "yoetz.review-input-manifest/1",
     }
+    if composed.get("review_phase") in {"routine", "final"}:
+        projected["review_phase"] = composed["review_phase"]
     section_names = (
         "specification",
         "current_diff",
@@ -5352,7 +5469,11 @@ def _decode_review_input_manifest(
     if not isinstance(raw, Mapping):
         return None
     body = cast(Mapping[str, object], raw)
-    if any(type(key) is not str for key in body) or frozenset(body) != _REVIEW_INPUT_MANIFEST_KEYS:
+    if (
+        any(type(key) is not str for key in body)
+        or frozenset(body) - {"review_phase"} != _REVIEW_INPUT_MANIFEST_KEYS
+        or body.get("review_phase", "routine") not in {"routine", "final"}
+    ):
         return None
     schema = body.get("schema")
     phase = body.get("phase")
@@ -5472,6 +5593,7 @@ def _decode_review_input_manifest(
             selected_item_count=selected_item_count,
             selected_excerpt_bytes=selected_excerpt_bytes,
             omitted_item_count=omitted_item_count,
+            review_phase=cast(Literal["routine", "final"] | None, body.get("review_phase")),
         )
     except KeyError, TypeError, ValueError:
         return None

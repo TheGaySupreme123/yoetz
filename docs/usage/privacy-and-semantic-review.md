@@ -82,6 +82,13 @@ independently authenticate, so the local ceremony remains the stronger path. Loo
 silent: every path shows the complete change before you decide. The machine row is an installation
 ceiling; external LLM work also needs an exact granted row for the current repository beneath it.
 
+Secret-shaped text that only looks like a credential (an assignment to a name such as `token`) is
+redacted in place. If such text could still reach the prepared packet, Yoetz withholds only the item
+that carries it and reviews the rest; the check lists the withheld items and reports the
+`content_redacted` gap. Only a concrete credential, a private key, or a scanner that cannot finish
+blocks the whole review. You never need to hide or git-ignore a requested output to keep it out of
+review.
+
 ## Commands
 
 ```text
@@ -309,7 +316,10 @@ back to 16, choose Assisted in `yoetz --privacy`, or propose the earlier Expande
 
 Inside that confirmed policy, review is direct-to-agent. The reviewer returns a bounded challenge to
 the main agent, which can act, supply evidence, revise its claim, dispute with evidence, or state an
-unresolved limitation — then recheck. Routine checks and retries need no human prompt.
+unresolved limitation — then recheck. The reviewer can also ask the agent a question. The agent
+answers each review finding with a reason, and the next review sees that answer (and the agent's
+answers to Yoetz's own findings) and rules on it; a reply that names an earlier finding comes back as
+a new finding linked to it. Routine checks and retries need no human prompt.
 
 The reviewer works as a verifying reviewer: it checks the change against the task and the recorded
 verification against the change. It judges recorded test and command output itself instead of
@@ -317,7 +327,10 @@ asking the agent to run it again, reports every distinct problem it finds (up to
 and names the exact missing item when it needs more. It knows it is the review that was asked for,
 so it does not report its own review, Yoetz checks, findings, or limits on what its packet could
 carry as problems in the work, and it never asks the agent to install tools or change the
-environment. Work left open while completion is claimed is still reported, and so is a real
+environment. It does flag delivery risks it can see, such as an import the recorded environment
+lacks or files written outside the requested location, and it tests an "impossible" or
+"infeasible" conclusion against what the task asked for. A limitation outside the agent's control
+is acceptable when disclosed; one the agent could reduce is not support. Work left open while completion is claimed is still reported, and so is a real
 discrepancy in the agent's own record, such as a completion claim beyond the plan or a recorded
 command that differs from the one observed. Every provider — the Codex subscription, OpenAI, and
 OpenAI-compatible endpoints — gets the same instructions. Track a required review by choosing
@@ -402,7 +415,8 @@ Checks started before this version show no progress.
 ### Routine checkpoints and final reviews
 
 A Codex subscription review uses one of two budget profiles. A check made after your task
-records a completion claim is a **final** review. It uses the configured final reasoning effort
+records a completion claim, or a check the agent asks to be the closing review (`final_review`), is
+a **final** review. It uses the configured final reasoning effort
 (`high` by default) and an output limit of 8192 tokens. Every earlier check is a **routine**
 checkpoint, which uses the routine effort (`medium` for new setups) and an output limit of 4096
 tokens.
@@ -418,8 +432,11 @@ tokens.
   and output limit used. A review whose visible answer exceeds its limit is stopped and reported
   as an invalid answer.
 - **What the reviewer judges.** On every provider, a routine checkpoint reports problems in the
-  work so far without judging whether it is complete; a final review judges whether the change and
-  its recorded verification support the completion claim.
+  work so far without judging whether it is complete; a final review judges completeness against
+  the task: each stated requirement and requested output, with or without a completion claim.
+- **The closing review.** The receipt is the last step, so the last review before it is a final
+  review. When a task uses AI-powered review, its closure checklist lists `closing_review_required`
+  until a final review is current after the last change; the check result names the review phase.
 
 ### Cancelled background review
 

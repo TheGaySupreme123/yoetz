@@ -283,6 +283,33 @@ def _assemble_semantic_review_payload(
     )
 
 
+# One round normally suffices; the bound keeps a pathological packet from looping.
+_MAX_PARTIAL_WITHHOLD_ROUNDS: Final = 3
+
+
+def _items_carrying_heuristic(
+    included: tuple[ClassifiedContextItem, ...],
+    transformed_content: dict[str, bytes],
+) -> frozenset[str]:
+    """Ids of included items whose own content, as JSON-encoded in the packet, scans heuristic.
+
+    The prepared packet embeds each item's text as a JSON string, so each item is scanned both as
+    sent bytes and in that encoding. Only the item id is returned; no scanned bytes are retained.
+    """
+
+    offending: set[str] = set()
+    for item in included:
+        content = transformed_content.get(item.candidate.item_id, item.candidate.plaintext)
+        forms = [content]
+        try:
+            forms.append(canonical_encode(content.decode("utf-8")))
+        except UnicodeDecodeError:
+            pass
+        if any(scan_exact_bytes_with_confidence(form).all_findings for form in forms):
+            offending.add(item.candidate.item_id)
+    return frozenset(offending)
+
+
 class LocalPrivacyEnforcer:
     """Provider-free implementation of the local privacy classifier port."""
 
@@ -368,7 +395,7 @@ class LocalPrivacyEnforcer:
         if type(classified) is not ClassifiedContext or type(decision) is not PrivacyDecision:
             raise TypeError("privacy_minimization_input_invalid")
         approved = set(decision.approved_item_ids)
-        included = tuple(
+        included: tuple[ClassifiedContextItem, ...] = tuple(
             item
             for item in classified.items
             if item.candidate.item_id in approved
@@ -404,6 +431,30 @@ class LocalPrivacyEnforcer:
                 withheld_item_ids=withheld_item_ids,
                 transformed_content=transformed_content,
             )
+            # Partial withholding (issue #976): a low-confidence heuristic that survives into the
+            # prepared bytes withholds only the item(s) whose own encoded content carries it, and
+            # the packet is re-assembled, in bounded rounds. A high-confidence finding, a
+            # heuristic in the structural envelope, or one no single item explains leaves the
+            # prepared bytes as they are, and egress still fails the whole case closed.
+            for _round in range(_MAX_PARTIAL_WITHHOLD_ROUNDS):
+                surviving = scan_exact_bytes_with_confidence(prepared)
+                if not surviving.heuristic or surviving.high_confidence:
+                    break
+                offending = _items_carrying_heuristic(included, transformed_content)
+                if not offending or REVIEW_PACKET_ITEM_ID in offending:
+                    break
+                included = tuple(
+                    item for item in included if item.candidate.item_id not in offending
+                )
+                for item_id in offending:
+                    transformed_content.pop(item_id, None)
+                withheld_item_ids = tuple(sorted({*withheld_item_ids, *offending}, key=str.encode))
+                prepared = _assemble_semantic_review_payload(
+                    classified,
+                    included,
+                    withheld_item_ids=withheld_item_ids,
+                    transformed_content=transformed_content,
+                )
             # The assembly helper fails closed to a structural empty fallback when the approved
             # envelope is missing or malformed.  That fallback is useful as a bounded diagnostic,
             # but it is not a provider-bound review packet.  Clear the approved ids so the

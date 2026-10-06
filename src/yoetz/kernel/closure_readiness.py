@@ -39,6 +39,7 @@ from typing import Final, Literal
 from yoetz.domain.events import CheckRecordedPayload, LedgerRecord
 from yoetz.domain.receipts import CHECK_TIME_CHANGE_UNAVAILABLE_REASON_GAPS
 from yoetz.domain.values import FindingId, ObligationId
+from yoetz.kernel.claims import completion_claim_present
 from yoetz.kernel.finding_resolution import finding_is_resolved
 from yoetz.kernel.finding_todo import finding_blocks_receipt
 from yoetz.kernel.plan_drift import PLAN_DRIFT_ADVISORY_GAPS, PLAN_DRIFT_GAPS
@@ -177,6 +178,10 @@ GAP_CLASSIFICATION: Final[Mapping[str, GapClass]] = MappingProxyType(
         # A readiness condition rather than a recorded gap: a check holds the session frontier
         # right now, so its result (and any finding it returns) is still to come.
         "check_in_progress": _A,
+        # Issue #976: AI-powered review is required or in use on this task and no closing
+        # review (final phase, with or without a completion claim) is current since the last
+        # material change. Removed by `check` with `final_review: true`.
+        "closing_review_required": _A,
         "check_current_as_of_earlier_frontier": _S,
         "check_payload_unavailable": _S,
         # -- AI-powered review outcome and packet bounds: disclosure of how the review was bounded.
@@ -452,6 +457,7 @@ READINESS_CHECK_CONDITIONS: Final = (
     "check_in_progress",
     "check_not_recorded",
     "check_not_applicable",
+    "closing_review_required",
 )
 
 type CheckApplicability = Literal[
@@ -476,6 +482,12 @@ class ClosureReadinessFacts:
     # Open effective obligations, and the subset a recorded blocker decision names (#977).
     open_obligation_ids: tuple[ObligationId, ...] = ()
     blocked_obligation_ids: tuple[ObligationId, ...] = ()
+    # Issue #976. Whether a closing review (final phase) is current since the last material
+    # change, or a review attempt since then could not complete for a reason the agent cannot
+    # remove; and whether any AI-powered review completed on this task. The defaults keep a
+    # hand-built fact set at its pre-#976 answer.
+    closing_review_current: bool = True
+    semantic_review_used: bool = False
 
     def __post_init__(self) -> None:
         if (
@@ -487,6 +499,8 @@ class ClosureReadinessFacts:
                 "payload_unavailable",
             }
             or type(self.semantic_review_current) is not bool
+            or type(self.closing_review_current) is not bool
+            or type(self.semantic_review_used) is not bool
         ):
             raise ValueError("closure_readiness_facts_invalid")
         for values in (
@@ -596,6 +610,73 @@ def _semantic_review_current(
     return False
 
 
+# Statuses of an AI-powered review attempt that did not complete for a reason a recheck by the
+# agent cannot remove (policy, privacy, configuration or a human decision). A timeout or an
+# unavailable or failed provider is transient: the closing review stays actionable. Their own gaps disclose it, and
+# closure does not also demand a closing review the route cannot deliver.
+_UNDELIVERABLE_SEMANTIC_STATUSES: Final = frozenset(
+    {
+        SemanticStatus.BLOCKED_BY_POLICY,
+        SemanticStatus.BLOCKED_FORBIDDEN_DATA,
+        SemanticStatus.NOT_CONFIGURED,
+        SemanticStatus.CLASSIFICATION_UNCERTAIN,
+        SemanticStatus.HUMAN_DENIED,
+        SemanticStatus.APPROVAL_EXPIRED,
+    }
+)
+
+
+def _closing_review_facts(
+    state: ProjectionState,
+    records: tuple[LedgerRecord, ...],
+    limitations: frozenset[FindingId],
+) -> tuple[bool, bool]:
+    """Return ``(closing_review_current, semantic_review_used)`` for this prefix (issue #976).
+
+    A check is the closing review when its recorded review input manifest names the final
+    phase. A check recorded before the manifest carried the phase was final exactly when an
+    effective completion claim preceded it; with no material change since it, the current
+    projection's claim answers that.
+    """
+
+    used = False
+    for record in records:
+        payload = record.payload
+        if (
+            record.schema.name == "check_recorded"
+            and type(payload) is CheckRecordedPayload
+            and payload.semantic_status is SemanticStatus.SUCCEEDED
+        ):
+            used = True
+            break
+    for record in reversed(records):
+        payload = record.payload
+        if record.schema.name != "check_recorded" or type(payload) is not CheckRecordedPayload:
+            continue
+        if any(
+            invalidates_recorded_check(
+                later,
+                record.ledger.ingestion_sequence,
+                payload.returned_finding_ids,
+                limitation_finding_ids=limitations,
+            )
+            for later in records
+        ):
+            return False, used
+        status = payload.semantic_status
+        if status in _UNDELIVERABLE_SEMANTIC_STATUSES:
+            return True, used
+        if status is not SemanticStatus.SUCCEEDED:
+            continue
+        manifest = payload.review_input_manifest
+        phase = None if manifest is None else manifest.get("review_phase")
+        if phase == "final":
+            return True, used
+        if phase is None and completion_claim_present(state):
+            return True, used
+    return False, used
+
+
 def _acknowledged_obligation_ids(state: ProjectionState) -> tuple[ObligationId, ...]:
     """Always empty: no recorded form acknowledges an obligation as not done yet.
 
@@ -639,6 +720,7 @@ def closure_readiness_facts(
     limitations = observation_limitation_finding_ids(state, records)
     open_obligations = open_effective_obligations(state)
     blocked = blocked_obligations(state)
+    closing_current, review_used = _closing_review_facts(state, records, limitations)
     return ClosureReadinessFacts(
         check_applicability=_check_applicability(state, records, limitations),
         semantic_review_current=_semantic_review_current(records, limitations),
@@ -649,6 +731,8 @@ def closure_readiness_facts(
         blocked_obligation_ids=tuple(
             sorted({item for item in open_obligations if item in blocked}, key=str.encode)
         ),
+        closing_review_current=closing_current,
+        semantic_review_used=review_used,
     )
 
 
@@ -722,6 +806,16 @@ def derive_closure_readiness(
         semantic_review_current=facts is not None and facts.semantic_review_current,
     )
     actionable.extend(code for code in split.agent_actionable if code not in actionable)
+    # Issue #976: the receipt is the last step, so the last review before it judges
+    # completeness. Required on a route that requires AI-powered review, and on any task that
+    # already used it; not repeated while the missing review is already the actionable item.
+    if (
+        facts is not None
+        and (semantic_review_required or facts.semantic_review_used)
+        and not facts.closing_review_current
+        and "semantic_review_not_requested" not in actionable
+    ):
+        actionable.append("closing_review_required")
     for token in live_blockers:
         item = token if _CODE_RE.fullmatch(token) else _unclassified(token)
         if item not in actionable:

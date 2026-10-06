@@ -258,8 +258,12 @@ SEMANTIC_REVIEW_INSTRUCTION: Final = (
         # Phase (issue #906): the budget selector's routine/final profile, named in the packet.
         "The packet's question_set names the review phase. Review phase: routine means work is in "
         "progress; report material defects in the work so far and do not judge completeness. Review "
-        "phase: final means a completion claim is in effect; judge whether the change and its "
-        "recorded verification support that claim. A packet that names no phase is routine. "
+        "phase: final is the closing review, with or without a completion claim: judge completeness "
+        "against the task statement, return one verified row per stated requirement and requested "
+        "output (path), and challenge each one the change and its recorded verification do not "
+        "deliver. Ask what would make this result fail an independent check of the task. An "
+        "aggregate pass count does not support a multi-item requirement. A packet that names no "
+        "phase is routine. "
         # Task statement (issue #906; the task-statement input itself belongs to #908).
         "When the packet carries the user's task statement, it wins over the agent's goal, plan, "
         "and obligations: a plan that omits or contradicts a stated requirement is a discrepancy, "
@@ -287,6 +291,19 @@ SEMANTIC_REVIEW_INSTRUCTION: Final = (
         "credentials, or other environment changes. An environment constraint the packet records, "
         "such as an unavailable runtime or package version, is a recorded limit: judge what the "
         "readable material allows and state what the limit leaves unverified. "
+        # Issue #976 (TB4 tb4f1): delivery-environment risks are raised, never installs requested.
+        "Do raise a delivery-environment risk the readable material shows: an import or tool the "
+        "recorded environment lacks or that was installed only into a different interpreter, "
+        "output or scratch files written outside the requested location, or files a different "
+        "runtime user may not be able to read or write. "
+        # Issue #976: premise challenge and limitations the agent could reduce.
+        "When the agent concludes the requested outcome is impossible, infeasible, contradictory, "
+        "or blocked, test that conclusion against the task statement's premise; when the statement "
+        "requires the outcome, challenge it and name the strongest interpretation under which it "
+        "is achievable. Reporting such a conclusion honestly is not completing the task. A "
+        "disclosed limitation supports a claim only when it lies outside the agent's control "
+        "(authority, credentials, an unavailable external resource); a limitation the agent could "
+        "reduce with available work is a discrepancy. "
         "Do not invent repository facts, fetch more context, overrule deterministic results, waive "
         "findings, or claim stronger coverage than the packet. "
         # Unassessable content and repair-first feedback (issue #885).
@@ -315,7 +332,12 @@ SEMANTIC_REVIEW_INSTRUCTION: Final = (
         # answered findings restated them under new ids. Kept as one self-contained paragraph.
         "Return one challenge for each distinct material problem the readable material supports, up "
         "to the challenge limit, never only the most important one and never two for one problem. "
-        "The packet records earlier findings and the main agent's responses to them. Do not raise "
+        "The packet records earlier findings and the main agent's responses to them. Prior-finding "
+        "rows with schema yoetz.local-finding-answer/1 are the agent's answers to Yoetz's own local "
+        "findings: judge their substance like any claim, but return no prior_finding_verdicts "
+        "entry for them. When you "
+        "need the agent's answer before you can judge, ask it as a challenge with "
+        "requested_next_step answer_question. Do not raise "
         "again a finding the main agent has answered, or request an action the packet shows was "
         "already done, unless material newer than that response shows the problem remains; then cite "
         "that newer material and the earlier finding's fnd_ id from citable_refs. "
@@ -326,7 +348,7 @@ SEMANTIC_REVIEW_INSTRUCTION: Final = (
         "finding_ref (never an item_id), whatever the conclusion: fixed only when evidence or results "
         "recorded after the finding show the problem is gone, citing them; still_present or "
         "answered_not_fixed citing the material that shows it remains; withdrawn when the main "
-        "agent's reasoned rejection holds; unassessable when the packet cannot settle it. A verdict "
+        "agent's reasoned rejection holds, including a rejection that answers your question; unassessable when the packet cannot settle it. A verdict "
         "speaks only for its own finding."
     )
     + (
@@ -683,7 +705,9 @@ CHALLENGE_FIELD_GLOSSARY: Final[dict[str, str]] = {
         "correct or withdraw what was claimed; dispute_with_evidence: rebut this challenge if you "
         "believe it is wrong; state_unresolved_limitation: disclose what remains after a recorded "
         "concrete resolution attempt, or name the specific authority or environment blocker "
-        "preventing that attempt."
+        "preventing that attempt; answer_question: you need the agent's answer before you can "
+        "judge (an interpretation it chose, a check it may have run); put the question in "
+        "discrepancy, and the next review reads the answer."
     ),
     "uncertainty": (
         "What you could not determine from the packet and what would settle it. Say so plainly "

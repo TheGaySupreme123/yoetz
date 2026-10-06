@@ -88,6 +88,21 @@ Missing or clipped markers, a missing page, stale revision, mismatched digest, o
 is an explicit incomplete-guidance result. Retry the exact page, or restart at page zero after a
 revision mismatch; do not start work or claim guidance is loaded until the assembler succeeds.
 
+## Publication templates
+
+Exact topic URIs; use these anchors verbatim and never derive one:
+
+- `yoetz://guidance/request-templates.md#publish-work-plan-plus-obligation`: plan plus obligation
+- `yoetz://guidance/request-templates.md#publish-work-action`: action
+- `yoetz://guidance/request-templates.md#publish-work-result`: result
+- `yoetz://guidance/request-templates.md#publish-work-evidence`: evidence
+- `yoetz://guidance/request-templates.md#publish-work-claim`: claim
+- `yoetz://guidance/request-templates.md#publish-work-revised-plan`: revised plan
+- `yoetz://guidance/request-templates.md#publish-work-decision`: decision
+- `yoetz://guidance/request-templates.md#respond`: respond
+- `yoetz://guidance/request-templates.md#check-whole-case`: check
+- `yoetz://guidance/request-templates.md#receipt`: receipt
+
 ## `start`
 
 Use `create_or_attach` with a stable workspace/work-item pair when first opening or resuming the
@@ -652,6 +667,27 @@ the pre-admission case projection; the successful check result and its `check_re
 row expose the `provider_bound` manifest after privacy removal and bounded rendering. Use its
 section digests and byte counts when describing what the reviewer actually received.
 
+### `check`: closing review
+
+Before the receipt, add the optional boolean `final_review: true` to a whole-case check. It judges
+each stated requirement and requested output against the task, with or without a completion claim.
+The other fields are unchanged.
+
+```json
+{
+  "protocol_version": "0.1",
+  "schema_version": "1.0.0",
+  "request_id": "req_00000000-0000-4000-8000-000000000014",
+  "session_id": "ses_00000000-0000-4000-8000-000000000001",
+  "writer_id": "wri_00000000-0000-4000-8000-000000000001",
+  "expected_frontier": {"sequence": "0", "head_digest": "genesis"},
+  "final_review": true,
+  "max_findings": "10",
+  "actor": {"actor_id": "harness:mcp-template", "actor_type": "harness"},
+  "client": {"kind": "cooperative_agent", "version": "0.1.0", "integration": "cooperative_mcp"}
+}
+```
+
 ## `check`: scoped
 
 If `scope` is present, send both arrays. Either may be empty; two empty arrays mean whole case.
@@ -694,7 +730,7 @@ never erases the finding. Observation-authored non-actionable findings need no r
   "finding_id": "fnd_00000000-0000-4000-8000-000000000001",
   "finding_frontier": {"sequence": "11", "head_digest": "sha256:0b77cea7992de93fe83a6748fbd6b4557b53d965e3fe0d2d8a1f47023d5edb72"},
   "disposition": "acknowledged",
-  "reason": "Replace with the bounded disposition reason",
+  "reason": "Replace with the bounded answer or disposition reason; required for acknowledged on a reviewer finding",
   "actor": {"actor_id": "harness:mcp-template", "actor_type": "harness"},
   "client": {"kind": "cooperative_agent", "version": "0.1.0", "integration": "cooperative_mcp"}
 }
