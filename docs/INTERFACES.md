@@ -1234,14 +1234,21 @@ Five further codes describe a review that did run but could not deliver everythi
 
 - `semantic_review_context_withheld` — the review ran without categories its own profile selected;
 - `semantic_challenges_rejected` — the reviewer returned challenges and post-validation dropped at
-  least one (a citation outside the frozen case, an unchanged-claim over a withheld source, or
+  least one (no cited ref had content in the sent packet — reason `ref_not_carried` —, a citation
+  outside the advertised set or the frozen case, an unchanged-claim over a withheld source, or
   citations whose resolved subjects exceed one finding's 64-subject bound). A cited `fnd_` from
   `citable_refs` resolves to that finding's subjects whether it is one of this check's local
   findings or a readable recorded finding inside the frozen fence, so a re-raise that names the
-  earlier finding it concerns is not dropped (issue #905);
-- `semantic_review_snippet_invalid` — a reviewer challenge or verification quote could not be
-  proved against the exact safe provider-bound text, including after response recovery without the
-  ephemeral text index. The affected row is dropped while the remaining review stays visible;
+  earlier finding it concerns is not dropped (issue #905). A `ref_not_carried` challenge mints no
+  finding but is never silent: its summary and message are appended to the recorded
+  `review_summary` under a fixed header saying they are advisory and unverified (issue #976);
+- `semantic_review_refs_reduced` — a reviewer item cited refs the sent packet did not carry: a
+  challenge keeps only its sent refs and stands on them, a verified row is dropped (it reads as
+  support, so it may not rest on unsent material) (issue #976);
+- `semantic_review_snippet_invalid` — a reviewer quote could not be proved against the exact safe
+  provider-bound text of the rows it cites, including after response recovery without the
+  ephemeral text index. The quote is removed from a kept challenge, a verified row is dropped, and
+  the remaining review stays visible;
 - `semantic_case_content_over_item_limit` — recorded text the publish-side prose bound accepted
   (`MAX_TEXT_BYTES`, 8192) exceeded what one case item carries (`MAX_REVIEW_TEXT_BYTES`, 4096), so
   the case shortened it or replaced the payload with a `yoetz.bounded-content-omission/1` marker.
@@ -1313,8 +1320,12 @@ Two further check-path operations describe a review that did reach a provider:
 `semantic_judgment_rejected` records a structurally unusable judgment, and
 `semantic_review_accounting` is appended once per dispatched review carrying counts only —
 `semantic_conclusion`, `semantic_challenges_returned`, `semantic_candidates_accepted`,
-`semantic_challenges_rejected`, `semantic_findings_selected`, `semantic_findings_suppressed`.
-The counts reconcile (`returned == accepted + rejected`, `accepted == selected + suppressed`), so
+`semantic_challenges_rejected`, the per-reason split `semantic_rejected_<reason>`
+(`ref_not_carried`, `ref_outside_case`, `hidden_source_claim`, `subject_refs_over_limit`),
+`semantic_review_refs_reduced`, `semantic_review_snippets_rejected`,
+`semantic_restatements_suppressed`, `semantic_findings_selected`, `semantic_findings_suppressed`.
+The counts reconcile (`returned == accepted + rejected + suppressed restatements`,
+`accepted == selected + suppressed findings`), so
 "the reviewer answered and none of it reached you" is never invisible. Challenge text, refs, and
 provider identity remain forbidden from this sink like every other.
 
@@ -1953,6 +1964,7 @@ unprovable. For local rows the tolerated set is the AI-powered review absence/we
 semantic_relevance_review_not_run|optional_semantic_review_blocked_by_policy|
 optional_semantic_review_registration_drift|
 semantic_review_context_withheld|semantic_challenges_rejected|semantic_review_snippet_invalid|
+semantic_review_refs_reduced|
 semantic_missing_agent_suppliable|semantic_missing_structurally_unavailable|
 semantic_missing_already_supplied|semantic_missing_items_rejected|
 semantic_case_content_over_item_limit|semantic_case_finding_refs_over_limit|
@@ -7581,10 +7593,20 @@ read as an unproven provider binding.
 
 Reviewer snippets are fenced against the exact safe text rows in that provider-bound packet after
 privacy transformation and budget selection. The text index is ephemeral and is never placed in a
-check result, receipt, or durable response. If a response is recovered without that index, a
-snippet-bearing challenge or verification row is dropped and disclosed as
-`semantic_review_snippet_invalid`; the review summary and any rows whose evidence remains
-provable are retained.
+check result, receipt, or durable response. The packet's `citable_refs` names only refs whose
+content it carries (a content row's `source_ref` or `linked_subject_refs`) and this check's local
+findings whose assessment row survived; the text index holds exactly those refs (an assessment row
+is indexed as sent text for its finding), so a reviewer following the contract never cites an
+unsent ref (issue #976). A quote is proved when it is an exact substring of a cited row's sent
+text, or matches it after one shared normalization (typographic quotes and dashes folded to ASCII,
+whitespace runs collapsed; a JSON row is also searched through its decoded strings; a redaction
+placeholder matches only Yoetz's own `[REDACTED]` marker at that position). Case, letters and
+digits are never changed, compatibility forms are not folded, and nothing may be elided; a
+placeholder-only quote, or a span with control or format characters, proves nothing. The recorded
+snippet is the verbatim span the quote matched: sent text, or for a JSON row the decoded string the
+reviewer read. If a response is recovered without the index,
+nothing is proven sent: quote-bearing challenges become `ref_not_carried` advisory concerns and
+verification rows with quotes are dropped.
 
 Excerpt selection stays inside the approved count and byte budget. Reserved room comes first: the
 current diff, then the latest output per identified verification command (with the last failure

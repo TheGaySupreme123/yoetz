@@ -339,6 +339,12 @@ OpenAI-compatible endpoints — gets the same instructions. Track a required rev
 AI-powered output is advisory, provenance-labeled, and deterministically fenced. It never silently
 becomes local-check truth, and it never upgrades a coverage claim.
 
+A reviewer concern is not thrown away because one of its citations or its quote cannot be checked.
+A quote is kept only when it matches text the reviewer was actually sent, and the result shows that
+sent text word for word; otherwise the quote is removed and the result says so. A concern that
+cites only material the review did not carry becomes no finding, but its wording is added to the
+review summary as an unverified concern, so the agent still sees it.
+
 If a fallback endpoint is approved and the primary could not serve — repeated timeouts,
 connection failures, or rate limits, a quota exhaustion, or a missing credential — the same
 approved packet goes to the fallback as a fresh attempt with its own authorization and privacy

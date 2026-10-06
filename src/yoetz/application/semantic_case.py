@@ -5236,11 +5236,17 @@ def assemble_filtered_review_packet(
             "case_digest": envelope.get("case_digest", ""),
             "case_id": envelope.get("case_id", ""),
             # The exact ids post-validation will accept in a challenge's cited_refs, in one place
-            # the reviewer can read. The packet already carried them, split across frontier_refs
-            # and local_check_refs, while items[].item_id — the ids most visible in the document —
-            # are not citable at all. Naming the accept set explicitly is what lets a reviewer cite
-            # correctly instead of guessing and having the challenge dropped.
-            "citable_refs": sorted(frontier_refs | local_check_refs),
+            # the reviewer can read: refs whose content this packet carries (a content row's
+            # source or linked subject) and this check's local findings whose assessment row
+            # survived. items[].item_id — the ids most visible in the document — are not citable.
+            # Advertising every frontier ref, including ones whose rows were omitted, invited
+            # citations post-validation then had to discard (TB4 tb4v1, issue #976).
+            "citable_refs": sorted(
+                _carried_citable_refs(
+                    content_rows, filtered_assessments, allowed, local_check_refs
+                ),
+                key=str.encode,
+            ),
             "omitted_reference_count": envelope.get("omitted_reference_count", "0"),
             "selection_accounting": cast(JsonValue, accounting),
             "dependency_digest": envelope.get("dependency_digest", ""),
@@ -5266,6 +5272,35 @@ def assemble_filtered_review_packet(
         },
     )
     return canonical_encode(cast(JsonValue, document))
+
+
+def _carried_citable_refs(
+    content_rows: Sequence[Mapping[str, JsonValue]],
+    assessments: Sequence[JsonValue],
+    allowed: set[str],
+    local_check_refs: set[str],
+) -> set[str]:
+    """Refs the reviewer can cite because the packet carries content or an assessment for them.
+
+    This mirrors the provider-bound text index post-validation proves quotes against (a content
+    row's ``source_ref`` and ``linked_subject_refs``), so a reviewer that cites only advertised
+    refs never has a citation removed for want of sent content.
+    """
+
+    carried: set[str] = set()
+    for row in content_rows:
+        source = row.get("source_ref")
+        if type(source) is str:
+            carried.add(source)
+        linked = row.get("linked_subject_refs")
+        if type(linked) is list:
+            carried.update(ref for ref in cast(list[JsonValue], linked) if type(ref) is str)
+    for raw in assessments:
+        if isinstance(raw, dict):
+            ref = raw.get("finding_ref")
+            if type(ref) is str and ref in local_check_refs:
+                carried.add(ref)
+    return carried & allowed
 
 
 def _provider_bound_input_manifest(
@@ -5836,6 +5871,26 @@ def review_packet_disclosure_result(prepared: bytes) -> ReviewPacketDisclosureRe
                 for ref in cast(list[JsonValue], linked)
                 if type(ref) is str and ref.startswith("evd_")
             )
+    # This check's local findings reach the reviewer as assessment rows, not content rows. A
+    # surviving row is text the provider received for that finding, so it proves the finding was
+    # sent: a challenge may anchor to it and quote it (issue #976). It is not a carried frontier
+    # ref, so it never enters ``kept``.
+    local_raw = document.get("local_check_refs")
+    local_refs = (
+        {ref for ref in cast(list[JsonValue], local_raw) if type(ref) is str}
+        if type(local_raw) is list
+        else set[str]()
+    )
+    assessments_raw = packet_raw.get("deterministic_assessments")
+    if type(assessments_raw) is list:
+        for raw_row in cast(list[JsonValue], assessments_raw):
+            if not isinstance(raw_row, dict):
+                continue
+            finding_ref = raw_row.get("finding_ref")
+            if type(finding_ref) is str and finding_ref in local_refs:
+                provider_text_by_ref.setdefault(finding_ref, []).append(
+                    canonical_encode(raw_row).decode("utf-8")
+                )
     kept = frozenset(((carried & frontier) - omitted) | ((finding_rows & frontier) - withheld))
     provider_manifest: JsonObject | None = None
     failure: str | None = structural_failure or (

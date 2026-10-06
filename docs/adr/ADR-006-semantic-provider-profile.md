@@ -1466,6 +1466,19 @@ claiming completion was never judged for completeness. Decisions:
   `requested_next_step: answer_question`; the agent answers in the `respond` reason (`rejected` when
   the answer shows the concern does not apply, which the reviewer may rule `withdrawn`), and
   `acknowledged` on any AI-powered finding requires a non-empty reason.
+- **Citation fence (TB4 tb4v1 amendment).** (a) above was not enough: in tb4v1, 6 of 7 returned
+  challenges were still dropped, mislabelled `snippet_invalid`, because a separate rule discarded a
+  challenge whenever any cited ref lacked a sent content row, while the packet advertised every
+  frontier ref (including about 64 omitted rows per review) as citable. Now the packet's
+  `citable_refs` lists only carried refs (content rows and surviving local assessment rows, the
+  same set the text index holds); a challenge keeps the cited refs that were sent (disclosed as
+  `semantic_review_refs_reduced`); a challenge with no sent ref — or any quote-bearing challenge
+  recovered without the text index — mints no finding but is counted as `ref_not_carried` and its
+  summary and message are appended to the recorded review summary as an advisory, unverified
+  concern. A verified row citing any unsent ref is still dropped. Quote proof tolerates transport
+  form (whitespace, JSON escapes, typographic punctuation, a placeholder for Yoetz's `[REDACTED]`
+  marker) but never folds letters or digits, and records the verbatim sent span, so no finding
+  cites unproven text. The accounting diagnostic carries per-reason counts.
 - **Reviewer cues.** The standing instruction asks the reviewer to raise delivery-environment risks
   (imports absent from the recorded environment or installed into another interpreter, writes
   outside the requested location, files another runtime user cannot read or write) while still never

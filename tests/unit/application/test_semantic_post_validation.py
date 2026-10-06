@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import replace
 
@@ -20,6 +21,7 @@ from builders.policy_cases import (
 )
 from yoetz.application.check import (
     SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM,
+    SEMANTIC_REJECTED_REF_NOT_CARRIED,
     SEMANTIC_REJECTED_REF_OUTSIDE_CASE,
     SEMANTIC_REJECTED_SUBJECTS_OVER_LIMIT,
     SemanticJudgmentRejected,
@@ -126,8 +128,13 @@ def test_reviewer_snippets_use_exact_provider_bound_text() -> None:
         citable_refs=frozenset({str(clm(1)), str(clm(2))}),
         provider_input_text_by_ref={str(clm(1)): ("sent-safe-row",)},
     )
-    assert partial_provider_text.challenges_rejected == 1
-    assert partial_provider_text.candidates == ()
+    # A cited ref whose content was not sent is removed; the challenge stands on the ref that was
+    # sent instead of being discarded whole (TB4 tb4v1 atrx-vep-crispr, issue #976).
+    assert partial_provider_text.challenges_rejected == 0
+    assert partial_provider_text.refs_reduced == 1
+    assert partial_provider_text.snippets_rejected == 0
+    assert len(partial_provider_text.candidates) == 1
+    assert partial_provider_text.candidates[0].subject_refs == (clm(1),)
 
     rejected = validate_semantic_judgment(
         case,
@@ -146,8 +153,8 @@ def test_reviewer_snippets_use_exact_provider_bound_text() -> None:
     assert rejected.candidates[0].challenge.snippet is None
     assert rejected.snippets_rejected == 1
 
-    # A quote that matches only after whitespace normalization is not a packet substring: it is
-    # removed rather than shown as a quote.
+    # A quote that matches the sent text only after whitespace normalization is proven, and is
+    # recorded as the verbatim sent span rather than the reviewer's reflowed spelling.
     reflowed = validate_semantic_judgment(
         case,
         (),
@@ -160,9 +167,9 @@ def test_reviewer_snippets_use_exact_provider_bound_text() -> None:
         citable_refs=frozenset({str(clm(1))}),
         provider_input_text_by_ref={str(clm(1)): ("row: first line\n second line end",)},
     )
-    assert reflowed.snippets_rejected == 1
+    assert reflowed.snippets_rejected == 0
     assert reflowed.candidates[0].challenge is not None
-    assert reflowed.candidates[0].challenge.snippet is None
+    assert reflowed.candidates[0].challenge.snippet == "first line\n second line"
 
     recovered_without_text = validate_semantic_judgment(
         case,
@@ -173,9 +180,13 @@ def test_reviewer_snippets_use_exact_provider_bound_text() -> None:
         citable_refs=frozenset({str(clm(1))}),
         provider_input_text_by_ref=None,
     )
-    assert recovered_without_text.challenges_rejected == 1
-    assert recovered_without_text.snippets_rejected == 1
+    # Without the provider-bound text index nothing is proven sent: the challenge mints no
+    # finding, but it is counted under its own reason and surfaced as an advisory concern.
     assert recovered_without_text.candidates == ()
+    assert recovered_without_text.rejected_by_reason == ((SEMANTIC_REJECTED_REF_NOT_CARRIED, 1),)
+    assert recovered_without_text.snippets_rejected == 0
+    assert "Evidence gap" in recovered_without_text.review_summary
+    assert "sent-safe-row" not in recovered_without_text.review_summary
 
 
 @pytest.mark.parametrize("conclusion", ["no_material_discrepancy", "challenges_returned"])
@@ -217,7 +228,9 @@ def test_dropped_verified_rows_are_not_counted_as_rejected_challenges(conclusion
     assert review.challenges_rejected == 0
     assert review.challenges_returned == len(challenges)
     assert len(review.candidates) == len(challenges)
-    assert review.snippets_rejected == 2
+    # The quote loss is a snippet loss; the row citing an unsent ref is a disclosed ref loss.
+    assert review.snippets_rejected == 1
+    assert review.refs_reduced == 1
     assert [item.requirement_or_claim for item in review.verified] == ["Claim holds"]
 
 
@@ -1062,3 +1075,273 @@ def test_a_challenge_replying_to_an_answered_finding_is_a_returned_linked_findin
     )
     assert unanswered.candidates == ()
     assert unanswered.restatements_suppressed == 1
+
+
+# --- Reviewer concerns are never discarded for an unsent citation (TB4 tb4v1, issue #976) -------
+#
+# The tb4v1 provider responses were not retained, so the regressions below rebuild the exact shape
+# the run recorded (cited refs advertised but not sent, quotes read from JSON rows, a quote across
+# Yoetz's redaction marker) with the task content replaced by neutral text.
+
+
+def _json_row(statement: str) -> str:
+    """A ledger row as the packet carries it: a JSON document with ASCII escapes."""
+
+    return json.dumps({"event_id": str(evt(1)), "payload": {"statement": statement}})
+
+
+def test_challenge_with_no_carried_ref_is_surfaced_not_silently_dropped() -> None:
+    case = make_case(extra_refs=(clm(1), obl(1)))
+    review = validate_semantic_judgment(
+        case,
+        (),
+        SemanticJudgment(
+            "challenges_returned",
+            (_challenge(str(obl(1)), summary="Requested report is absent", snippet="report.json"),),
+            review_summary="The requested report is absent.",
+        ),
+        _provenance(),
+        expected_frontier=case.frontier,
+        citable_refs=frozenset({str(clm(1)), str(obl(1))}),
+        provider_input_text_by_ref={str(clm(1)): ("unrelated sent row",)},
+    )
+
+    assert review.candidates == ()
+    assert review.rejected_by_reason == ((SEMANTIC_REJECTED_REF_NOT_CARRIED, 1),)
+    # Not a quote problem: the snippet gap is not raised for a citation that was not sent.
+    assert review.snippets_rejected == 0
+    assert review.review_summary.startswith("The requested report is absent.")
+    assert "Reviewer concerns not recorded as findings" in review.review_summary
+    assert "Requested report is absent" in review.review_summary
+    assert "Main agent: provide evidence for the claim." in review.review_summary
+    # The unproven quote never travels with the surfaced concern.
+    assert "report.json" not in review.review_summary
+
+
+def test_uncited_invented_ref_is_still_outside_the_case() -> None:
+    case = make_case(extra_refs=(clm(1),))
+    review = validate_semantic_judgment(
+        case,
+        (),
+        SemanticJudgment("challenges_returned", (_challenge(_INVENTED, snippet="x"),)),
+        _provenance(),
+        expected_frontier=case.frontier,
+        citable_refs=frozenset({str(clm(1))}),
+        provider_input_text_by_ref={str(clm(1)): ("x",)},
+    )
+    assert review.rejected_by_reason == ((SEMANTIC_REJECTED_REF_OUTSIDE_CASE, 1),)
+    assert "Reviewer concerns not recorded" not in review.review_summary
+
+
+def test_quote_matching_only_a_removed_ref_is_stripped_never_shown() -> None:
+    case = make_case(extra_refs=(clm(1), clm(2)))
+    review = validate_semantic_judgment(
+        case,
+        (),
+        SemanticJudgment(
+            "challenges_returned",
+            (_challenge(str(clm(1)), str(clm(2)), snippet="text of the unsent row"),),
+        ),
+        _provenance(),
+        expected_frontier=case.frontier,
+        citable_refs=frozenset({str(clm(1)), str(clm(2))}),
+        # Even if some text existed for clm(2) elsewhere, only sent rows of kept refs prove quotes.
+        provider_input_text_by_ref={str(clm(1)): ("the sent row",)},
+    )
+    assert len(review.candidates) == 1
+    challenge = review.candidates[0].challenge
+    assert challenge is not None and challenge.snippet is None
+    assert review.candidates[0].subject_refs == (clm(1),)
+    assert review.refs_reduced == 1
+    assert review.snippets_rejected == 1
+
+
+def test_tb4v1_atrx_routine_review_mints_both_concerns() -> None:
+    """atrx item 45: two challenges, both dropped as ``snippet_invalid``, zero findings minted.
+
+    The first cited the sent claim plus evidence whose row was omitted (``not_selected``) and quoted
+    the claim with a typographic apostrophe the JSON row carries as an escape; the second cited the
+    report obligation together with this check's local finding about the missing report.
+    """
+
+    local = Finding(
+        finding_id=fnd(9),
+        kind=FindingKind.REQUESTED_ITEM_NEVER_ATTEMPTED,
+        origin=FindingOrigin.DETERMINISTIC,
+        priority=2,
+        summary="A requested output file does not exist in the workspace at check time.",
+        detail="Write the requested output.",
+        subject_refs=(obl(1),),
+        policy_id="work-integrity",
+        policy_version="0.3.0",
+        subject_frontier=FRONTIER,
+        coverage=BASE_COVERAGE,
+    )
+    case = make_case(extra_refs=(clm(1), clm(2), obl(1)))
+    claim_row = _json_row("The report\u2019s annotations\ncame from a custom model.")
+    judgment = SemanticJudgment(
+        "challenges_returned",
+        (
+            _challenge(
+                str(clm(1)),
+                str(clm(2)),
+                summary="Annotations are not from the requested model",
+                snippet="The report's annotations came from a custom model.",
+            ),
+            _challenge(
+                str(fnd(9)),
+                str(obl(1)),
+                summary="Requested report is absent",
+                snippet="requested item never attempted",
+            ),
+        ),
+        review_summary="[redacted summary of the routine review]",
+    )
+    review = validate_semantic_judgment(
+        case,
+        (local,),
+        judgment,
+        _provenance(),
+        expected_frontier=case.frontier,
+        citable_refs=frozenset({str(clm(1)), str(clm(2)), str(obl(1)), str(fnd(9))}),
+        # The local finding reached the reviewer as its assessment row, which the disclosure
+        # indexes as sent text for the finding.
+        provider_input_text_by_ref={
+            str(clm(1)): (claim_row,),
+            str(fnd(9)): (
+                json.dumps({"finding_kind": "requested_item_never_attempted", "finding_ref": "x"}),
+            ),
+        },
+    )
+
+    assert review.challenges_rejected == 0
+    assert [candidate.summary for candidate in review.candidates] == [
+        "Annotations are not from the requested model",
+        "Requested report is absent",
+    ]
+    first, second = (candidate.challenge for candidate in review.candidates)
+    assert first is not None and second is not None
+    # The recorded quote is the verbatim sent text, not the reviewer's spelling of it.
+    assert first.snippet == "The report\u2019s annotations\ncame from a custom model."
+    # The reviewer paraphrased the assessment row's kind: not proven, so removed and disclosed.
+    assert second.snippet is None
+    assert review.candidates[1].subject_refs == (obl(1),)
+    assert review.refs_reduced == 2
+    assert review.snippets_rejected == 1
+
+
+def test_tb4v1_data_anon_quote_across_the_redaction_marker_is_proven() -> None:
+    """data-anon item 108: the reviewer quoted a line around Yoetz's own redaction marker."""
+
+    case = make_case(extra_refs=(clm(1),))
+    sent = "token = [REDACTED] + ':' + subject_id"
+    review = validate_semantic_judgment(
+        case,
+        (),
+        SemanticJudgment(
+            "challenges_returned",
+            (_challenge(str(clm(1)), snippet="token = [redacted] + ':' + subject_id"),),
+        ),
+        _provenance(),
+        expected_frontier=case.frontier,
+        citable_refs=frozenset({str(clm(1))}),
+        provider_input_text_by_ref={str(clm(1)): (sent,)},
+    )
+    assert len(review.candidates) == 1
+    challenge = review.candidates[0].challenge
+    assert challenge is not None and challenge.snippet == sent
+    assert review.snippets_rejected == 0
+
+
+def test_tb4v1_heat_pump_lone_unsent_citation_keeps_the_concern_visible() -> None:
+    """heat-pump item 47: a lone challenge cited only refs whose rows were omitted."""
+
+    case = make_case(extra_refs=(clm(1), clm(2)))
+    review = validate_semantic_judgment(
+        case,
+        (),
+        SemanticJudgment(
+            "challenges_returned",
+            (_challenge(str(clm(2)), summary="Decision count not reconciled", snippet="20"),),
+            review_summary="[redacted summary of the review]",
+        ),
+        _provenance(),
+        expected_frontier=case.frontier,
+        citable_refs=frozenset({str(clm(1)), str(clm(2))}),
+        provider_input_text_by_ref={str(clm(1)): ("sent row",)},
+    )
+    assert review.challenges_returned == 1
+    assert review.rejected_by_reason == ((SEMANTIC_REJECTED_REF_NOT_CARRIED, 1),)
+    assert "Decision count not reconciled" in review.review_summary
+    assert review.snippets_rejected == 0
+
+
+def test_surfaced_concerns_respect_the_review_text_bound() -> None:
+    case = make_case(extra_refs=(clm(1), clm(2), clm(3), clm(4)))
+    long = "x" * 1000
+    review = validate_semantic_judgment(
+        case,
+        (),
+        SemanticJudgment(
+            "challenges_returned",
+            tuple(
+                ReviewerChallenge(
+                    FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE,
+                    long,
+                    (str(clm(number)),),
+                    "d",
+                    "a",
+                    "\u00e9" * 500,
+                    "provide_evidence",
+                    "u",
+                )
+                for number in (2, 3, 4)
+            ),
+            review_summary="y" * 1000,
+        ),
+        _provenance(),
+        expected_frontier=case.frontier,
+        citable_refs=frozenset(str(clm(number)) for number in (1, 2, 3, 4)),
+        provider_input_text_by_ref={str(clm(1)): ("sent",)},
+    )
+    encoded = review.review_summary.encode("utf-8")
+    assert len(encoded) <= 4096
+    assert review.review_summary.endswith("[truncated]")
+    # The cut lands inside multi-byte text and never leaves a replacement character.
+    assert "\ufffd" not in review.review_summary
+    assert review.challenges_rejected == 3
+
+
+def test_mixed_fence_outcomes_reconcile() -> None:
+    """Reduced, unanchored and outside challenges in one review all add up."""
+
+    case = make_case(extra_refs=(clm(1), clm(2)))
+    review = validate_semantic_judgment(
+        case,
+        (),
+        SemanticJudgment(
+            "challenges_returned",
+            (
+                _challenge(str(clm(1)), str(clm(2)), summary="Reduced", snippet="sent"),
+                _challenge(str(clm(2)), summary="Unanchored"),
+                _challenge(_INVENTED, summary="Outside"),
+            ),
+        ),
+        _provenance(),
+        expected_frontier=case.frontier,
+        citable_refs=frozenset({str(clm(1)), str(clm(2))}),
+        provider_input_text_by_ref={str(clm(1)): ("sent",)},
+    )
+    assert review.challenges_returned == 3
+    assert [candidate.summary for candidate in review.candidates] == ["Reduced"]
+    assert review.challenges_returned == (
+        len(review.candidates) + review.challenges_rejected + review.restatements_suppressed
+    )
+    assert dict(review.rejected_by_reason) == {
+        SEMANTIC_REJECTED_REF_NOT_CARRIED: 1,
+        SEMANTIC_REJECTED_REF_OUTSIDE_CASE: 1,
+    }
+    assert review.refs_reduced == 1
+    assert review.snippets_rejected == 0
+    assert "Unanchored" in review.review_summary
+    assert "Outside" not in review.review_summary

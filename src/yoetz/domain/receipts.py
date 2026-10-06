@@ -115,6 +115,7 @@ __all__ = [
     "SEMANTIC_RESTATEMENTS_SUPPRESSED_GAP",
     "SEMANTIC_CHALLENGES_REJECTED_GAP",
     "SEMANTIC_REVIEW_SNIPPET_INVALID_GAP",
+    "SEMANTIC_REVIEW_REFS_REDUCED_GAP",
     "SEMANTIC_MISSING_AGENT_SUPPLIABLE_GAP",
     "SEMANTIC_MISSING_ALREADY_SUPPLIED_GAP",
     "SEMANTIC_MISSING_ITEMS_REJECTED_GAP",
@@ -198,10 +199,13 @@ SEMANTIC_PACKET_INSUFFICIENT_GAP: Final = "semantic_packet_insufficient"
 # post-validation fence. The reviewer said something the check did not carry; coverage says so
 # rather than letting the drop look like the reviewer having found nothing there.
 SEMANTIC_CHALLENGES_REJECTED_GAP: Final = "semantic_challenges_rejected"
-# The provider returned a supporting quote that was not an exact substring of the packet item it
-# cited. The review itself remains usable; the affected judgement/challenge is dropped and this
-# gap keeps the loss visible on every receipt surface.
+# The provider returned a supporting quote that could not be proved against the sent text of the
+# packet rows it cited. The review itself remains usable; the quote is removed from a kept
+# challenge (a verified row is dropped) and this gap keeps the loss visible on every receipt surface.
 SEMANTIC_REVIEW_SNIPPET_INVALID_GAP: Final = "semantic_review_snippet_invalid"
+# A reviewer challenge or verified row cited refs whose content the sent packet did not carry.
+# Those refs were removed and the item kept on the refs that were sent (issue #976).
+SEMANTIC_REVIEW_REFS_REDUCED_GAP: Final = "semantic_review_refs_reduced"
 # An ``insufficient_packet`` review named what it needed (issue #907). These say, as a check
 # limitation, whether any named item is one the agent can supply, whether any cannot be carried on
 # this host or policy at all, whether the reviewer re-requested an item the agent had already
