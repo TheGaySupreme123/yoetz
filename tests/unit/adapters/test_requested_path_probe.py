@@ -131,9 +131,10 @@ def test_probe_never_follows_a_link(tmp_path: Path) -> None:
     assert probe.exists is None
 
 
-def _projection(*values: str) -> ProjectionState:
+def _projection(*values: str, edited: tuple[str, ...] = ()) -> ProjectionState:
     from builders.observed_runs import ObservedLedger
-    from yoetz.domain.events import EventSchema
+    from yoetz.domain.events import ActionKind, ActionRecordedPayload, EventSchema
+    from yoetz.domain.values import action_id
 
     ledger = ObservedLedger()
     ledger.append(
@@ -152,6 +153,17 @@ def _projection(*values: str) -> ProjectionState:
         PlanPublishedPayload(1, "Plan", (_OBLIGATION,)),
         observed=False,
     )
+    if edited:
+        ledger.append(
+            EventSchema("action_recorded", "1.0.0"),
+            ActionRecordedPayload(
+                action_id("act_00000000-0000-4000-8000-000000000901"),
+                ActionKind.EDIT,
+                "Wrote the requested outputs.",
+                attempted_items=tuple(sorted(edited)),
+            ),
+            observed=False,
+        )
     return replay(ledger.prefix)
 
 
@@ -176,6 +188,7 @@ def test_check_time_states_feed_the_requested_output_facts(tmp_path: Path) -> No
         "kept.txt",
         "gone.txt",
         "/elsewhere/out.json",
+        edited=("/elsewhere/out.json", "kept.txt"),
     )
     source = CheckWorkspaceSource(os.fspath(repository), "hmac-sha256:" + "0" * 64)
 
@@ -194,9 +207,26 @@ def test_check_time_states_feed_the_requested_output_facts(tmp_path: Path) -> No
     assert {code for code, _ in markers} == {
         REQUESTED_OUTPUT_GIT_IGNORED_GAP,  # output/ excluded through .git/info/exclude
         REQUESTED_OUTPUT_IGNORED_BY_REPOSITORY_GAP,  # checkpoints/ ignored by the base .gitignore
-        REQUESTED_OUTPUT_UNCHANGED_GAP,  # kept.txt
-        REQUESTED_OUTPUT_OUTSIDE_WORKSPACE_GAP,
+        REQUESTED_OUTPUT_UNCHANGED_GAP,  # kept.txt, recorded as edited
+        REQUESTED_OUTPUT_OUTSIDE_WORKSPACE_GAP,  # /elsewhere/out.json, recorded as edited
     }
+
+    # tb4v1: the same unchanged tracked file and outside path, only read as inputs, are no
+    # requested-output facts; the new untracked report is counted as changed.
+    (repository / "mutation.report.json").write_text("{}\n", encoding="utf-8")
+    capture = adapter.capture_metadata(os.fspath(repository), base)
+    inputs = _projection("kept.txt", "/elsewhere/out.json", "mutation.report.json")
+    states = asyncio.run(
+        requested_output_states(
+            projection=inputs,
+            capture=capture,
+            source=source,
+            port=adapter,
+            request_id="req_00000000-0000-4000-8000-000000000002",
+        )
+    )
+    assert states[(_OBLIGATION, 2)].changed is True
+    assert requested_output_facts(inputs, states) == ((), ())
 
 
 def test_without_a_capture_every_requested_file_is_unverified() -> None:

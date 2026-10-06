@@ -8354,7 +8354,10 @@ is withheld whole), recorded as a bounded `semantic_composition/check_time_chang
   changed, deleted, ignored_by_task)` per `(obligation, item index)` (`ignored_by_task`: the rule is
   `.git/info/exclude` or a `.gitignore` the check-time change adds; values with whitespace, glob,
   brace, `~`, `$` or a URL scheme are not read), and `requested_output_facts(projection,
-  states)` returns `(absent, markers)`. `work_integrity_findings(case, *, absent_outputs=)`
+  states)` returns `(absent, markers)`; `requested_output_unchanged` and
+  `requested_output_outside_workspace` are marked only for an item an `edit` action's
+  `attempted_items` names exactly (`attempted_items_for_obligation(state, obligation,
+  action_kind=ActionKind.EDIT)`), since a `file` item may name a read-only input. `work_integrity_findings(case, *, absent_outputs=)`
   raises `requested_item_never_attempted` with the fact `requested_output_absent`
   (`REQUESTED_OUTPUT_ABSENT_FACT`) for each absent pair.
 - **Work-integrity 0.3.0.** `requested_item_never_attempted` waits for `acting_started`, adds the
