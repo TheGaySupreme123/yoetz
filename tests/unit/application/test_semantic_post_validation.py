@@ -576,6 +576,37 @@ def test_prior_finding_rulings_are_admitted_only_with_their_own_support() -> Non
     assert review.candidates == ()
 
 
+def test_a_ruling_resting_only_on_a_local_finding_cannot_close_anything() -> None:
+    """Citing a local (deterministic) finding is not repair material (issue #976).
+
+    A ``fixed`` ruling whose only support is the local fnd(4) is unsupported and records as
+    ``unassessable``; a ``still_present`` ruling citing it keeps its finding open; neither rules on
+    or resolves the local finding itself, and no candidate is minted.
+    """
+
+    case = _dialogue_case()
+    judgment = SemanticJudgment(
+        "no_material_discrepancy",
+        (),
+        (
+            _verdict(1, "fixed", str(fnd(4))),
+            _verdict(2, "still_present", str(fnd(4))),
+        ),
+    )
+
+    review = validate_semantic_judgment(
+        case, (), judgment, _provenance(), expected_frontier=case.frontier
+    )
+
+    assert [(str(item.finding_id), item.verdict) for item in review.verdicts] == [
+        (str(fnd(1)), "unassessable"),
+        (str(fnd(2)), "still_present"),
+    ]
+    assert all(item.finding_id != fnd(4) for item in review.verdicts)
+    assert review.verdicts_unsupported == 1
+    assert review.candidates == ()
+
+
 def test_rulings_without_cited_material_or_a_rejection_to_accept_are_unassessable() -> None:
     case = _dialogue_case()
     judgment = SemanticJudgment(

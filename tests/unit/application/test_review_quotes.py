@@ -123,6 +123,33 @@ def test_many_adjacent_placeholders_match_in_linear_time() -> None:
     assert time.monotonic() - started < 1
 
 
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "[redacted] " * 2000,
+        "[redacted] a " * 2000,
+        "[redacted]  " * 16 + "zz",
+        "[REDACTED] " * 15 + "abc q",
+        '\\" [ redacted ] \\n  ' * 500 + "abc",
+        "[redacted" * 3000 + " abc",
+        "[ " * 5000 + "redacted",
+    ],
+)
+def test_reviewer_controlled_quotes_cannot_hang_a_check(quote: str) -> None:
+    # A reviewer-controlled quote is matched against large packets in bounded, near-linear time:
+    # many placeholders, whitespace runs, escapes, and unclosed brackets never backtrack.
+    import time
+
+    packets = (
+        "abc [REDACTED] " * 5000 + "x",
+        f"{REDACTION_MARKER} " * 20000,
+        json.dumps({"a": f"{REDACTION_MARKER} " * 2000}),
+    )
+    started = time.monotonic()
+    prove_quote(quote, packets)
+    assert time.monotonic() - started < 1
+
+
 def test_adjacent_markers_without_spaces_match() -> None:
     sent = f"a{REDACTION_MARKER}{REDACTION_MARKER}b"
     assert prove_quote("a [redacted] [redacted] b", (sent,)) == sent

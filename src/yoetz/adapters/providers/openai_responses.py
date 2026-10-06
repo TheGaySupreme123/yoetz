@@ -284,8 +284,8 @@ SEMANTIC_REVIEW_INSTRUCTION: Final = (
         "agent directly, explain the discrepancy and the strongest plausible alternative, cite only "
         "supplied refs, and state the repair or the exact missing artifact that would resolve it. "
         "Every value in cited_refs must come from the packet's citable_refs array and nothing else: "
-        "an item_id from items[] is not citable, and a challenge citing anything outside "
-        "citable_refs is discarded unread. "
+        "an item_id from items[] is not citable. A cited value outside citable_refs is dropped, "
+        "and a challenge left with no citable ref cannot become a finding. "
         # Environment (issue #906): an advisory reviewer never drives environment mutation.
         "Never request toolchain or package installs, downloads, upgrades, network access, "
         "credentials, or other environment changes. An environment constraint the packet records, "
@@ -695,8 +695,9 @@ CHALLENGE_FIELD_GLOSSARY: Final[dict[str, str]] = {
     "summary": "One short line naming the discrepancy, readable on its own.",
     "cited_refs": (
         "The refs this challenge rests on. Every value must appear in the packet's citable_refs "
-        "array; an items[].item_id is not a ref. A challenge citing anything else is discarded, "
-        "so cite the specific claim, obligation, event, or finding the discrepancy is about."
+        "array; an items[].item_id is not a ref. A value outside it is dropped, and a challenge "
+        "left with no citable ref cannot become a finding, so cite the specific claim, "
+        "obligation, event, or finding the discrepancy is about."
     ),
     "discrepancy": "What the packet shows that does not fit, stated as fact rather than suspicion.",
     "alternative_interpretation": (
