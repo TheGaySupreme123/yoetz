@@ -550,6 +550,26 @@ async def execute_respond(app: Application, request: RespondRequest) -> RespondI
                     reason_code="response_fields_invalid",
                     field="/reason",
                 )
+            reviewer_finding = finding_record.payload.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+            reasoned = request.reason is not None and bool(request.reason.strip())
+            if request.disposition == "acknowledged" and reviewer_finding and not reasoned:
+                # Issue #976: the next review carries this answer to the reviewer. A bare
+                # acknowledgement gave it nothing to evaluate (352 of 365 TB4 answers).
+                raise _error(
+                    PublicErrorCode.INVALID_REQUEST,
+                    (
+                        "Acknowledging an AI-powered review finding requires a non-empty reason: "
+                        "say what you changed or verified, or answer the reviewer's question. "
+                        "The next review reads it."
+                    ),
+                    reason_code="response_fields_invalid",
+                    field="/reason",
+                )
+            question = (
+                reviewer_finding
+                and finding_record.payload.challenge is not None
+                and finding_record.payload.challenge.requested_next_step == "answer_question"
+            )
             attempted = False
             for ref in () if request.evidence_refs is None else request.evidence_refs:
                 present = (
@@ -567,7 +587,8 @@ async def execute_respond(app: Application, request: RespondRequest) -> RespondI
                 attempted = attempted or present.source_frontier > finding_record.source_frontier
             if (
                 request.disposition == "acknowledged"
-                and finding_record.payload.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+                and reviewer_finding
+                and not question
                 and not attempted
                 and not _process_finding_answered_by_completed_review(
                     current_records, finding_record

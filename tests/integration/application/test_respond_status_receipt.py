@@ -8335,3 +8335,109 @@ async def test_reattach_with_an_unchanged_statement_keeps_the_statement_event() 
     assert current.source_family == "session_resumed"
     assert current.text == "A different request."
     assert current.equivalent_event_ids == (current.source_event_id,)
+
+
+def _question_evaluator(claim_ref: str) -> Callable[..., Awaitable[object]]:
+    """Ask the agent one question about *claim_ref* (issue #976)."""
+
+    async def evaluate(
+        frozen: object,
+        findings: object,
+        runtime: object | None = None,
+        lineage_evaluation: object | None = None,
+    ) -> object:
+        succeeded = cast(FinalSemanticEvaluation, await _semantic_succeeds(frozen, findings))
+        question = ReviewerChallenge(
+            FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE,
+            "Which interpretation of the output format did you choose?",
+            (claim_ref,),
+            "Question: does the claim use the separator the task statement shows?",
+            "The chosen separator may match the statement exactly.",
+            "Answer which separator you used and why.",
+            "answer_question",
+            "The packet does not show the written output.",
+        )
+        return replace(succeeded, judgment=SemanticJudgment("challenges_returned", (question,)))
+
+    return evaluate
+
+
+async def test_reviewer_question_is_answered_by_a_reason_and_bare_acknowledgement_refused() -> None:
+    """TB4 tb4f1 (issue #976): a reviewer finding needs an answer the next review can read."""
+
+    seed = 5400
+    app, _runtime, _ = _build_app(
+        seed_offset=54,
+        semantic="optional",
+        semantic_evaluator=_question_evaluator(protocol_id("clm_", seed + 5)),
+    )
+    started, checked, _obligation = await _bootstrap_finding(
+        app, seed=seed, mode="semantic_if_configured"
+    )
+    question = next(
+        item for item in checked.findings if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    )
+    assert question.challenge is not None
+    assert question.challenge.requested_next_step == "answer_question"
+
+    def wire(request_seed: int, reason: str | None) -> RespondRequest:
+        body: dict[str, JsonValue] = {
+            **_request_base(protocol_id("req_", request_seed)),
+            "session_id": started.session_id,
+            "writer_id": started.writer_id,
+            "expected_frontier": _frontier(checked.result_frontier),
+            "finding_id": question.finding_id,
+            "finding_frontier": _frontier(checked.result_frontier),
+            "disposition": "acknowledged",
+        }
+        if reason is not None:
+            body["reason"] = reason
+        return RespondRequest.model_validate(body)
+
+    with pytest.raises(PublicOperationError) as refused:
+        await app.respond(wire(seed + 10, None))
+    assert refused.value.code is PublicErrorCode.INVALID_REQUEST
+    assert refused.value.safe_details["reason_code"] == "response_fields_invalid"
+    assert refused.value.safe_details["field"] == "/reason"
+
+    # The answer is the reason; a question needs no separate resolution attempt.
+    answered = await app.respond(wire(seed + 11, "I used '; ' exactly as output_format.txt shows."))
+    assert answered.response.disposition == "acknowledged"
+
+
+async def test_closing_review_request_reaches_the_evaluator() -> None:
+    """Issue #976: ``final_review`` travels from the check request to the evaluator seam."""
+
+    seen: list[bool] = []
+
+    async def evaluate(
+        frozen: object,
+        findings: object,
+        runtime: object | None = None,
+        lineage_evaluation: object | None = None,
+        require_complete_specification: bool = False,
+        final_review: bool = False,
+    ) -> object:
+        del require_complete_specification
+        seen.append(final_review)
+        return await _semantic_succeeds(frozen, findings)
+
+    seed = 5500
+    app, _runtime, _ = _build_app(seed_offset=55, semantic="optional", semantic_evaluator=evaluate)
+    started, checked, _obligation = await _bootstrap_finding(
+        app, seed=seed, mode="semantic_if_configured"
+    )
+    closing = await app.check(
+        CheckRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 30)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(checked.result_frontier),
+                "mode": "semantic_if_configured",
+                "final_review": True,
+            }
+        )
+    )
+    assert type(closing) is CheckCommitResult
+    assert seen == [False, True]

@@ -3039,13 +3039,23 @@ def _unknown_guidance_uri_result(
             f"documents: {', '.join(GUIDANCE_DOCUMENT_URIS)}; or one focused topic: "
             f"{', '.join(FOCUSED_GUIDANCE_URIS)}."
         )
-    return structured_error_result(
+    result = structured_error_result(
         PublicErrorCode.INVALID_REQUEST,
         message,
         safe_details={"field": "/uri"},
         operation="read_guidance",
         host_profile=runtime.host_profile,
     )
+    if runtime.host_profile != "cursor" and len(result.content) == 1:
+        # The text channel otherwise omits the message. This one is built only from closed catalog
+        # constants, so the model-visible retry options are safe to show. Cursor's text is already
+        # the full JSON envelope and must not be duplicated.
+        first = result.content[0]
+        if isinstance(first, types.TextContent):
+            result.content = [
+                types.TextContent(type="text", text=f"{first.text}\n{message}"),
+            ]
+    return result
 
 
 def read_guidance_page(

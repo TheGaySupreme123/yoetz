@@ -176,12 +176,15 @@ type MissingForAssessmentKind = Literal[
     "task_statement",
     "verification_output",
 ]
+# Item-id prefix of the non-rulable rows that carry the agent's answer to a local finding.
+LOCAL_FINDING_ANSWER_ITEM_PREFIX: Final = "local-finding-answer-"
 type ReviewerNextStep = Literal[
     "act",
     "provide_evidence",
     "revise_claim",
     "dispute_with_evidence",
     "state_unresolved_limitation",
+    "answer_question",
 ]
 type ReviewInputSectionName = Literal[
     "specification",
@@ -334,6 +337,7 @@ _NEXT_STEPS: Final = frozenset(
         "revise_claim",
         "dispute_with_evidence",
         "state_unresolved_limitation",
+        "answer_question",
     }
 )
 _FACT_CODES: Final = WORK_INTEGRITY_FACT_CODES | RESEARCH_EVIDENCE_FACT_CODES
@@ -1114,9 +1118,13 @@ class ReviewInputManifest:
     selected_item_count: int = 0
     selected_excerpt_bytes: int = 0
     omitted_item_count: int = 0
+    # Issue #976: the review phase the packet's question set named; ``None`` on older manifests.
+    review_phase: Literal["routine", "final"] | None = None
 
     def __post_init__(self) -> None:
         if self.schema != "yoetz.review-input-manifest/1":
+            raise _invalid_case()
+        if self.review_phase not in {None, "routine", "final"}:
             raise _invalid_case()
         if self.phase not in {"composed", "provider_bound"}:
             raise _invalid_case()
@@ -1457,8 +1465,14 @@ class SemanticCase:
             for item_id in packet.prior_finding_item_ids
             if (item := item_by_id[item_id]).item_id == f"prior-finding-{item.source_ref}"
         )
+        # Rows answering a local finding (issue #976) are non-rulable context of their own.
         if packet.prior_finding_refs != structural or any(
             item_by_id[item_id].source_ref not in structural
+            and item_id
+            not in {
+                LOCAL_FINDING_ANSWER_ITEM_PREFIX + item_by_id[item_id].source_ref,
+                LOCAL_FINDING_ANSWER_ITEM_PREFIX + "text-" + item_by_id[item_id].source_ref,
+            }
             for item_id in packet.prior_finding_item_ids
         ):
             raise _invalid_case()

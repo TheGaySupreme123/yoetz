@@ -541,6 +541,7 @@ class _SemanticEvaluator(Protocol):
         runtime: TaskRuntime | None = None,
         lineage_evaluation: LineageEvaluation | None = None,
         require_complete_specification: bool = False,
+        final_review: bool = False,
     ) -> Awaitable[object]: ...
 
 
@@ -549,6 +550,17 @@ type _ScopeResolver = Callable[
 ]
 type _ReceiptVersions = Callable[[TaskRuntime], ReceiptVersionSlice]
 type _SupportHandler = Callable[..., Awaitable[JsonObject]]
+
+
+def _accepts_keyword(function: object, name: str) -> bool:
+    try:
+        parameters = inspect.signature(cast(Callable[..., object], function)).parameters.values()
+    except TypeError, ValueError:
+        return False
+    return any(
+        parameter.name == name or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
 
 
 def _empty_support_handlers() -> Mapping[ControlMethod, _SupportHandler]:
@@ -2709,8 +2721,14 @@ class Application:
         runtime: object | None = None,
         lineage_evaluation: LineageEvaluation | None = None,
         require_complete_specification: bool = False,
+        final_review: bool = False,
     ) -> object:
         evaluator = self.semantic_evaluator
+        # The closing-review choice (issue #976) reaches only evaluators that declare it, so an
+        # older double keeps its exact call shape instead of failing into the fallbacks below.
+        extra: dict[str, bool] = {}
+        if final_review and _accepts_keyword(evaluator, "final_review"):
+            extra["final_review"] = True
         # Production evaluators accept the task runtime for durable job/attempt coordination.
         # Test doubles may still be binary callables.
         try:
@@ -2720,6 +2738,7 @@ class Application:
                 cast(TaskRuntime | None, runtime),
                 lineage_evaluation,
                 require_complete_specification=require_complete_specification,
+                **extra,
             )
         except TypeError:
             try:

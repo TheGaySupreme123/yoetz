@@ -3859,7 +3859,9 @@ code can never become “no code changed.”
 parallel candidate/challenge pair can duplicate it. A challenge has case-bound `cited_refs`,
 discrepancy, alternative interpretation, direct main-agent message,
 `requested_next_step` (`act|provide_evidence|revise_claim|dispute_with_evidence|
-state_unresolved_limitation`), and uncertainty. Post-validation resolves every cited action/result/
+state_unresolved_limitation|answer_question`), and uncertainty. `answer_question` (issue #976) asks
+the agent a question it answers in the `respond` reason; `acknowledged` on any AI-powered finding
+requires a non-empty reason. Post-validation resolves every cited action/result/
 evidence/frontier-finding/local-check-finding ref to its canonical frozen event/obligation/claim
 roots; only those roots become public `Finding.subject_refs`. A local-check ID is never serialized
 as a dangling public subject. Accepted, ranked challenge prose maps into the existing AI-powered
@@ -3920,8 +3922,10 @@ forbidden. `turn_acknowledged=true` plus ambiguous transport or cleanup maps to
 
 **Semantic budget profile (issue #571, ADR-006 amendment).** `SemanticBudgetProfile` is the
 closed pair `routine | final` (`yoetz.ports.semantic_budget`).
-`select_semantic_budget_profile(projection)` returns `final` when the frozen projection holds an
-effective, readable `completion` claim, and `routine` otherwise. The selected value is frozen as
+`select_semantic_budget_profile(projection, *, final_review=False)` returns `final` when the frozen
+projection holds an effective, readable `completion` claim or the check request carries
+`final_review: true` (the closing review, issue #976), and `routine` otherwise. The review input
+manifest records the selected phase as the optional `review_phase`. The selected value is frozen as
 `execution.budget_profile` in the `yoetz.semantic-case/2` snapshot. An absent key reads as
 `final`, and any other value is `semantic_execution_invalid`. It is exposed to the provider
 factory only for the duration of one physical dispatch, and dispatches outside a check see
@@ -6538,7 +6542,10 @@ unless every receipt-blocking finding's latest response is `acknowledged_not_don
 `no_plan_published`, `no_obligations_declared`, `projection_stale`), then `check_in_progress`
 while a check holds the session frontier (read at the head through the ledger's
 `has_active_frozen_case`; an unanswerable probe counts as in flight), then `check_not_recorded` or
-`check_not_applicable` from the receipt applicability rule, then every actionable gap code and
+`check_not_applicable` from the receipt applicability rule, then `closing_review_required` (issue
+#976: AI-powered review is required on the route or completed on the task, and no completed
+final-phase review, or undeliverable review attempt, is current since the last material change),
+then every actionable gap code and
 `unclassified_gap:<code>` for a base code the running build does not know.
 `standing_limitations` lists the classified standing base codes (plus
 `check_payload_unavailable`). `acknowledged_not_done` lists up to 64 obligation and finding ids

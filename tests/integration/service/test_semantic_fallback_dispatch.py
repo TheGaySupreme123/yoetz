@@ -787,7 +787,8 @@ async def test_budget_profile_is_frozen_with_the_job_and_scoped_to_every_attempt
     privacy = _BudgetRecordingFallback(runtime.task_id, clock)
     selected: list[str] = ["routine"]
 
-    def select(_projection: object) -> str:
+    def select(_projection: object, *, final_review: bool = False) -> str:
+        del final_review
         return selected[0]
 
     monkeypatch.setattr(ready_composition_module, "select_semantic_budget_profile", select)

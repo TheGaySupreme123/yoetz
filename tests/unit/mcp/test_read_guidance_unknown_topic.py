@@ -103,3 +103,21 @@ def test_successful_topic_read_is_not_labelled_unavailable() -> None:
     assert "unavailable" in summary_for_read_guidance(
         {"ok": True, "uri": "yoetz://guidance/workflow.md#made-up", "byte_count": 7}
     )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("profile", ("codex", "claude", "generic"))
+async def test_unknown_anchor_text_content_names_valid_anchors_without_echo(profile: str) -> None:
+    runtime = bridge.build_bridge_runtime(
+        "policy", host_profile=cast(bridge.McpHostProfile, profile)
+    )
+    try:
+        result = await bridge.dispatch_read_guidance(
+            {"uri": f"{_TEMPLATES}#zz-guessed-anchor"}, runtime
+        )
+    finally:
+        await bridge.close_bridge_runtime(runtime)
+    text = "".join(getattr(part, "text", "") for part in result.content)
+    assert "publication-templates" in text
+    assert f"Retry with uri {_TEMPLATES} " in text
+    assert "zz-guessed-anchor" not in text

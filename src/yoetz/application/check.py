@@ -2539,11 +2539,12 @@ def _validate_reviewer_snippets(
     citable_refs: frozenset[str] | None,
     provider_input_text_by_ref: Mapping[str, tuple[str, ...]] | None,
 ) -> tuple[SemanticJudgment, int, int]:
-    """Drop reviewer quotes that are not exact packet substrings.
+    """Fence reviewer quotes that are not packet substrings.
 
-    Returns the fenced judgment, the number of dropped challenges, and the number of dropped
-    verified rows. The two are counted apart: only a dropped challenge is a rejected challenge;
-    a dropped verified row is a coverage loss disclosed through the snippet gap.
+    Returns the fenced judgment, the number of dropped challenges (a cited ref outside the sent
+    packet), and the number of coverage losses: dropped verified rows plus challenges whose
+    unproven quote was removed while the challenge itself was kept (issue #976). Only a dropped
+    challenge is a rejected challenge; the losses are disclosed through the snippet gap.
 
     The provider may still provide useful challenges/judgements beside one malformed quote. A
     bad quote therefore loses only that entry and leaves a bounded diagnostic for the check/receipt
@@ -2575,18 +2576,28 @@ def _validate_reviewer_snippets(
         allowed = frozenset(provider_input_text_by_ref)
     rejected = 0
     verified_rejected = 0
+    quotes_stripped = 0
     challenges: list[ReviewerChallenge] = []
     for challenge in judgment.challenges:
         cited = tuple(ref for ref in challenge.cited_refs if ref in allowed)
-        if len(cited) != len(challenge.cited_refs) or (
-            challenge.snippet is not None
-            and not any(
-                challenge.snippet in text
-                for text in _packet_text_for_refs(cited, provider_input_text_by_ref)
-            )
-        ):
+        if len(cited) != len(challenge.cited_refs):
             rejected += 1
             continue
+        if challenge.snippet is not None and not any(
+            challenge.snippet in text
+            for text in _packet_text_for_refs(cited, provider_input_text_by_ref)
+        ):
+            if provider_input_text_by_ref is None:
+                # Without the provider-bound text index a source ref does not prove delivery,
+                # so a quote-bearing challenge stays fenced out as before.
+                rejected += 1
+                continue
+            # The refs were sent, so the challenge stands; only the quote is unproven. Dropping
+            # the whole challenge turned a reviewer's concern into "findings returned: 0" and a
+            # rewritten no_material_discrepancy (TB4 tb4f1 ks-solver-cpp, issue #976). The quote
+            # is removed, never shown as one, and its loss is disclosed through the snippet gap.
+            quotes_stripped += 1
+            challenge = replace(challenge, snippet=None)
         challenges.append(challenge)
 
     verified: list[VerifiedReviewItem] = []
@@ -2603,6 +2614,9 @@ def _validate_reviewer_snippets(
             continue
         verified.append(item)
 
+    # A stripped quote is a disclosed coverage loss like a dropped verified row; the challenge
+    # itself is admitted.
+    verified_rejected += quotes_stripped
     if (
         rejected == 0
         and verified_rejected == 0
@@ -2755,9 +2769,13 @@ def _admit_prior_verdicts(
             or record is None
             or record.payload is None
             or record.redacted
-            or record.payload.origin is not FindingOrigin.SEMANTIC_MODEL_DERIVED
         ):
             unsupported += 1
+            continue
+        if record.payload.origin is not FindingOrigin.SEMANTIC_MODEL_DERIVED:
+            # A local finding's answer is carried as non-rulable context (issue #976); a ruling
+            # on it says nothing about the review's own findings and is only counted.
+            set_aside += 1
             continue
         if (
             record.resolved_by_check_event_id is not None
@@ -2959,7 +2977,9 @@ def validate_semantic_judgment(
                 rejections.get(SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM, 0) + 1
             )
             continue
-        restated = _restated_finding(case, challenge.finding_kind, refs)
+        restated = _restated_finding(
+            case, challenge.finding_kind, refs, replies_to=resolution.related_finding_ids
+        )
         if restated is not None:
             suppressed, reduced = _record_restatement(case, admitted, restated, refs)
             # A ruling the same review's restatement contradicts is recorded as unassessable on
@@ -3118,7 +3138,11 @@ def _record_restatement(
 
 
 def _restated_finding(
-    case: DeterministicCase, kind: FindingKind, refs: tuple[str, ...]
+    case: DeterministicCase,
+    kind: FindingKind,
+    refs: tuple[str, ...],
+    *,
+    replies_to: tuple[FindingId, ...] = (),
 ) -> FindingId | None:
     """The recorded AI-powered finding a challenge restates, if any (issue #905).
 
@@ -3133,6 +3157,11 @@ def _restated_finding(
     A ``verified_resolved`` row is never a target: done stays done, and the reviewer finding the
     problem again after that proof is a #458 successor, minted and blocking. Suppressing it would
     hide a real re-raise behind a closed row.
+
+    A challenge that cites an open item the main agent has already answered (``replies_to``, the
+    earlier ``fnd_`` ids the challenge names) is the reviewer's reply to that answer, as the
+    reviewer instruction asks: it is minted as a new item linked to the earlier one, so the agent
+    receives it as a finding instead of a ruling it never sees (TB4 tb4f1, issue #976).
     """
 
     wanted = frozenset(refs)
@@ -3150,6 +3179,12 @@ def _restated_finding(
             or finding_todo_state(case.projection, key) is FindingTodoState.VERIFIED_RESOLVED
         ):
             continue
+        if (
+            key in replies_to
+            and finding_todo_state(case.projection, key) is FindingTodoState.OPEN
+            and _answered(case.projection, key)
+        ):
+            continue
         if all(
             (sequence := _ref_sequence(case, ref)) is not None
             and sequence <= record.source_frontier
@@ -3157,6 +3192,11 @@ def _restated_finding(
         ) and (best is None or record.source_frontier > best[0]):
             best = (record.source_frontier, key)
     return None if best is None else best[1]
+
+
+def _answered(projection: ProjectionState, finding: FindingId) -> bool:
+    response = projection.responses.get(finding)
+    return response is not None and response.payload is not None and not response.redacted
 
 
 def _sorted_verdicts(
@@ -3212,6 +3252,9 @@ async def _semantic_evaluation(
             kwargs: dict[str, bool] = {}
             if accepts_full_spec:
                 kwargs["require_complete_specification"] = require_complete_specification
+            # The closing review (issue #976) reaches only an evaluator that declares it.
+            if request.final_review and _semantic_evaluator_accepts_keyword(app, "final_review"):
+                kwargs["final_review"] = True
             return await app.evaluate_semantic_check(
                 frozen,
                 deterministic,
@@ -3276,6 +3319,19 @@ def _semantic_evaluator_accepts_lineage(app: Application) -> bool:
             in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
         )
     ) >= 4 or any(parameter.kind is inspect.Parameter.VAR_POSITIONAL for parameter in parameters)
+
+
+def _semantic_evaluator_accepts_keyword(app: Application, name: str) -> bool:
+    """Whether the application's evaluator seam declares keyword ``name`` (or ``**kwargs``)."""
+
+    try:
+        parameters = tuple(inspect.signature(app.evaluate_semantic_check).parameters.values())
+    except TypeError, ValueError:
+        return False
+    return any(
+        parameter.name == name or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
 
 
 def _semantic_evaluator_accepts_complete_specification(app: Application) -> bool:

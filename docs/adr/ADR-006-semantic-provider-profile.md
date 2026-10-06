@@ -1429,3 +1429,47 @@ bytes, so the count constant was the real limit.
   the prepared bytes each excerpt byte actually cost, since JSON escaping can multiply it.
 - The privacy side (consent, re-approval, egress denial) is recorded in the ADR-009 amendment of
   the same date.
+
+### Closing review and a working review dialogue (2026-10-06, issue #976)
+
+TB4 run tb4f1 showed the final phase was reachable only through a completion claim: 8 of 47
+semantic attempts never had a completeness review (7 failed), and an agent that stopped without
+claiming completion was never judged for completeness. Decisions:
+
+- **Closing review.** `check` accepts the optional `final_review: true` (check-request 1.1.0,
+  unreleased, in place). The budget selector returns `final` when an effective completion claim is
+  present *or* the request asks for the closing review. The request is part of the check's
+  idempotent request digest, so a replayed or recovered check rebuilds the same phase, question set
+  and case digest; the frozen execution snapshot keeps the selected profile as before. The final
+  question set judges completeness against the task statement: one verified row per stated
+  requirement and requested output, a challenge for each one the change does not deliver.
+- **Recorded phase.** The review input manifest carries the optional `review_phase`
+  (`routine`/`final`) on the composed and provider-bound manifests, check results, `check_recorded`
+  and status. Older manifests omit it.
+- **Closure integration.** Closure readiness (ADR-032) lists the agent-actionable
+  `closing_review_required` while AI-powered review is required on the route or has completed on the
+  task, and no check since the last material change is a completed final-phase review. A review
+  attempt after the last material change that was blocked by policy or privacy, not configured,
+  classification-uncertain, or denied or expired at human approval satisfies it, because its own
+  gaps disclose the limit and a recheck cannot remove it; a timeout or a failed or unavailable
+  provider is transient and leaves the closing review actionable. The Stop-time closure gate reads the same readiness answer.
+- **Dialogue.** (a) A challenge whose cited refs were sent but whose quote is not an exact packet
+  substring is kept with the quote removed and disclosed through
+  `semantic_review_snippet_invalid`; before, the whole challenge was dropped and a lone challenge
+  turned the review into `no_material_discrepancy`. Without the provider-bound text index the quote
+  still fences the challenge out. (b) A challenge that names an open AI-powered finding the agent has
+  answered (its `fnd_` id among the challenge's cited refs) is the reviewer's reply to that answer,
+  not a restatement: it is minted as a returned finding linked to the earlier one. (c) The prior-findings section also
+  carries up to four answered local findings as non-rulable rows (`local-finding-answer-*`,
+  `yoetz.local-finding-answer/1`) inside the section's bounds; a ruling on one is set aside, never an
+  unsupported-ruling gap. (d) The reviewer may ask a question with
+  `requested_next_step: answer_question`; the agent answers in the `respond` reason (`rejected` when
+  the answer shows the concern does not apply, which the reviewer may rule `withdrawn`), and
+  `acknowledged` on any AI-powered finding requires a non-empty reason.
+- **Reviewer cues.** The standing instruction asks the reviewer to raise delivery-environment risks
+  (imports absent from the recorded environment or installed into another interpreter, writes
+  outside the requested location, files another runtime user cannot read or write) while still never
+  requesting installs; to test impossible/infeasible conclusions against the task premise; and to
+  accept a disclosed limitation as support only when it lies outside the agent's control.
+- Out of scope, recorded for later: reviewer visibility (diff and test-output truncation, vendored
+  trees) and reviewer-run commands.

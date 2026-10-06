@@ -1649,7 +1649,9 @@ class PublishWorkRequestModel(PublicRequestModel):
 
 
 class CheckRequestModel(PublicRequestModel):
-    optional_non_null_fields = frozenset({"mode", "scope", "max_findings", "policy_packs"})
+    optional_non_null_fields = frozenset(
+        {"mode", "scope", "max_findings", "policy_packs", "final_review"}
+    )
 
     session_id: SessionIdWire
     writer_id: WriterIdWire
@@ -1659,6 +1661,9 @@ class CheckRequestModel(PublicRequestModel):
     scope: CheckScopeModel | None = None
     max_findings: Literal["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"] | None = None
     policy_packs: tuple[CurrentPolicyPackWire, ...] | None = None
+    # Issue #976: the closing review. True runs the final review phase with or without a
+    # completion claim; omitted keeps the claim-driven selection.
+    final_review: bool | None = None
 
     @model_validator(mode="after")
     def _validate_check_request(self) -> CheckRequestModel:
@@ -2173,6 +2178,7 @@ type ReviewerNextStepWire = Literal[
     "revise_claim",
     "dispute_with_evidence",
     "state_unresolved_limitation",
+    "answer_question",
 ]
 type VerifiedVerdictWire = Literal["supported", "not_supported", "not_assessable"]
 type MissingForAssessmentKindWire = Literal[
@@ -3218,6 +3224,8 @@ class ReviewInputMissingModel(_ClosedModel):
 
 
 class ReviewInputManifestModel(_ClosedModel):
+    optional_non_null_fields = frozenset({"review_phase"})
+
     schema_: Literal["yoetz.review-input-manifest/1"] = Field(alias="schema")
     specification: ReviewInputSectionModel
     current_diff: ReviewInputSectionModel
@@ -3229,6 +3237,8 @@ class ReviewInputManifestModel(_ClosedModel):
     selected_item_count: int = Field(ge=0, le=304)
     selected_excerpt_bytes: int = Field(ge=0, le=MAX_SEMANTIC_CASE_BYTES)
     omitted_item_count: int = Field(ge=0, le=MAX_REVIEW_OMISSIONS)
+    # Issue #976: the review phase the packet's question set named (closing review = final).
+    review_phase: Literal["routine", "final"] | None = None
 
 
 class CheckAwaitingHumanModel(_ClosedModel):
@@ -5266,6 +5276,7 @@ _REVIEW_INPUT_MANIFEST_LEAVES: Final = (
     "prior_finding_context/revision",
     "prior_finding_context/source_refs/*",
     "prior_finding_context/status",
+    "review_phase",
     "schema",
     "selected_excerpt_bytes",
     "selected_item_count",
@@ -6457,7 +6468,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 1410:
+    if len(result) != 1412:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 
