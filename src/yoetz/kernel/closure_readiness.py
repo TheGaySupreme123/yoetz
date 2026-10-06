@@ -222,6 +222,7 @@ GAP_CLASSIFICATION: Final[Mapping[str, GapClass]] = MappingProxyType(
         "semantic_provider_input_manifest_recovery_failed": _S,
         "semantic_challenges_rejected": _S,  # reviewer output dropped by the validation fence
         "semantic_review_snippet_invalid": _S,  # provider quote could not be proved against sent text
+        "semantic_review_refs_reduced": _S,  # reviewer citations of unsent refs removed (#976)
         "semantic_case_content_over_item_limit": _S,  # packet item bound (#907)
         "semantic_case_finding_refs_over_limit": _S,
         # #904: what a reduced review sent could not be recorded; one new check is the remedy only

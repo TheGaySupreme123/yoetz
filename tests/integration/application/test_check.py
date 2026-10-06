@@ -190,6 +190,7 @@ class _Ledger:
         self.last_executions: tuple[CheckPolicyExecution, ...] | None = None
         self.last_missing: tuple[MissingForAssessmentItem, ...] = ()
         self.last_conclusion: str | None = None
+        self.last_review_summary: str | None = None
         self.last_verdicts: tuple[object, ...] = ()
         self.operation: OperationRecord | None = None
 
@@ -300,8 +301,10 @@ class _Ledger:
         semantic_included_refs: tuple[str, ...] | None = None,
         semantic_withheld_item_ids: tuple[str, ...] = (),
         review_input_manifest: object | None = None,
+        review_summary: str | None = None,
     ) -> CheckCommitResult:
         assert frozen == self.frozen
+        self.last_review_summary = review_summary
         self.last_verdicts = prior_finding_verdicts
         self.last_missing = missing_for_assessment
         self.last_conclusion = semantic_conclusion
@@ -1689,6 +1692,94 @@ async def test_partial_rejection_keeps_accepted_challenges_and_declares_the_gap(
     )
     assert "Invented ref" not in raw
     assert "Accepted challenge" not in raw
+
+
+@pytest.mark.anyio
+async def test_challenge_citing_an_omitted_ref_is_kept_on_the_sent_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TB4 tb4v1 (issue #976): a cited ref without a sent row no longer discards the challenge.
+
+    The reviewer cites a carried claim and a claim whose row the packet omitted, and quotes the
+    carried claim in its own spelling. One AI-powered finding is minted on the carried claim with
+    the verbatim sent quote; the reduction is disclosed and no snippet loss is reported.
+    A second challenge citing only the omitted claim mints nothing but reaches the agent as an
+    advisory concern in the review summary, under its own rejection reason.
+    """
+
+    from yoetz.domain.receipts import (
+        SEMANTIC_CHALLENGES_REJECTED_GAP,
+        SEMANTIC_REVIEW_REFS_REDUCED_GAP,
+        SEMANTIC_REVIEW_SNIPPET_INVALID_GAP,
+    )
+
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+    app = _App(semantic=True)
+    first = ClaimRecordedPayload(clm(1), ClaimKind.MATERIAL, "Annotated with a custom model", ())
+    second = ClaimRecordedPayload(clm(2), ClaimKind.MATERIAL, "Domain overlap holds", ())
+    app.ledger.frozen = replace(
+        app.ledger.frozen,
+        case=make_case(claims={clm(1): record(first, 1), clm(2): record(second, 2)}),
+    )
+    sent_row = json.dumps({"payload": {"statement": "The report\u2019s model\nis custom."}})
+    app.semantic_result = replace(
+        _succeeded(
+            SemanticJudgment(
+                "challenges_returned",
+                (
+                    replace(
+                        _reviewer_challenge(str(clm(1)), summary="Kept on the sent claim"),
+                        cited_refs=tuple(sorted((str(clm(1)), str(clm(2))))),
+                        snippet="The report's model is custom.",
+                    ),
+                    replace(
+                        _reviewer_challenge(str(clm(2)), summary="Only the omitted claim"),
+                        snippet="Domain overlap holds",
+                    ),
+                ),
+                review_summary="Reviewed the annotations.",
+            )
+        ),
+        case_citable_refs=frozenset({str(clm(1)), str(clm(2))}),
+        provider_input_text_by_ref={str(clm(1)): (sent_row,)},
+    )
+
+    result = await execute_check_commit(app, _request("semantic_required", max_findings="4"))
+
+    semantic_findings = [
+        finding for finding in result.findings if finding.origin.value == "semantic_model_derived"
+    ]
+    assert [finding.summary for finding in semantic_findings] == ["Kept on the sent claim"]
+    challenge = semantic_findings[0].challenge
+    assert challenge is not None
+    assert challenge.snippet == "The report\u2019s model\nis custom."
+    gaps = set(result.coverage.known_gaps)
+    assert SEMANTIC_REVIEW_REFS_REDUCED_GAP in gaps
+    assert SEMANTIC_CHALLENGES_REJECTED_GAP in gaps
+    assert SEMANTIC_REVIEW_SNIPPET_INVALID_GAP not in gaps
+    # The recorded review summary (check_recorded, the check result, status and receipts) carries
+    # the unanchored concern; its unproven quote never travels with it.
+    summary = app.ledger.last_review_summary
+    assert summary is not None
+    assert summary.startswith("Reviewed the annotations.")
+    assert "Only the omitted claim" in summary
+    assert "Domain overlap holds" not in summary
+
+    raw = diagnostics_module.diagnostic_log_path(root=tmp_path).read_text(encoding="ascii")
+    accounting = [
+        json.loads(line)
+        for line in raw.splitlines()
+        if line and json.loads(line)["operation"] == "semantic_review_accounting"
+    ]
+    assert len(accounting) == 1
+    record_json = accounting[0]
+    assert record_json["semantic_challenges_returned"] == 2
+    assert record_json["semantic_candidates_accepted"] == 1
+    assert record_json["semantic_challenges_rejected"] == 1
+    assert record_json["semantic_rejected_ref_not_carried"] == 1
+    assert record_json["semantic_review_refs_reduced"] == 1
+    assert record_json["semantic_review_snippets_rejected"] == 0
+    assert "Only the omitted claim" not in raw
 
 
 @pytest.mark.anyio

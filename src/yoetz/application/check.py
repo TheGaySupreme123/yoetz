@@ -62,6 +62,7 @@ from yoetz.domain.receipts import (
     SEMANTIC_RESTATEMENTS_SUPPRESSED_GAP,
     SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
+    SEMANTIC_REVIEW_REFS_REDUCED_GAP,
     SEMANTIC_REVIEW_SNIPPET_INVALID_GAP,
     check_time_change_unavailable_reason_gap,
     semantic_coverage_gap_code,
@@ -196,6 +197,7 @@ from yoetz.protocol.coverage import (
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, validate_opaque_item_id
 from yoetz.protocol.models import (
+    MAX_REVIEW_TEXT_BYTES,
     MISSING_FOR_ASSESSMENT_KINDS,
     CheckRequest,
     CheckScopeModel,
@@ -215,6 +217,7 @@ from yoetz.version import ENGINE_VERSION
 __all__ = [
     "SEMANTIC_CASE_CONTENT_GAPS",
     "SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM",
+    "SEMANTIC_REJECTED_REF_NOT_CARRIED",
     "SEMANTIC_REJECTED_REF_OUTSIDE_CASE",
     "SEMANTIC_REJECTED_SNIPPET",
     "SEMANTIC_REJECTED_SUBJECTS_OVER_LIMIT",
@@ -256,6 +259,9 @@ _UNAVAILABLE_GAPS = frozenset(
 SEMANTIC_REJECTED_REF_OUTSIDE_CASE: Final = "ref_outside_case"
 SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM: Final = "hidden_source_claim"
 SEMANTIC_REJECTED_SNIPPET: Final = "snippet_invalid"
+# None of a challenge's cited refs is proven sent in the packet (issue #976). Distinct from a quote
+# problem: the concern itself is surfaced as advisory text, it just anchors to nothing.
+SEMANTIC_REJECTED_REF_NOT_CARRIED: Final = "ref_not_carried"
 SEMANTIC_REJECTED_SUBJECTS_OVER_LIMIT: Final = "subject_refs_over_limit"
 # The closed packet content gaps a semantic evaluation may carry into check coverage. Each is
 # classified for finding resolution in ``kernel/finding_resolution.py`` (issue #904); adding one
@@ -339,6 +345,8 @@ class SemanticJudgmentReview:
     review_summary: str = "No review summary recorded."
     verified: tuple[VerifiedReviewItem, ...] = ()
     snippets_rejected: int = 0
+    # Kept challenges and verified rows whose citations of unsent refs were removed (issue #976).
+    refs_reduced: int = 0
 
     def __post_init__(self) -> None:
         if (
@@ -362,6 +370,8 @@ class SemanticJudgmentReview:
             raise _invalid("semantic_judgment_review_invalid")
         if type(self.snippets_rejected) is not int or self.snippets_rejected < 0:
             raise _invalid("semantic_judgment_review_invalid")
+        if type(self.refs_reduced) is not int or self.refs_reduced < 0:
+            raise _invalid("semantic_judgment_review_invalid")
         if any(
             reason not in _SEMANTIC_REJECTION_REASONS or type(count) is not int or count < 1
             for reason, count in self.rejected_by_reason
@@ -384,6 +394,7 @@ class SemanticJudgmentReview:
 _SEMANTIC_REJECTION_REASONS: Final = frozenset(
     {
         SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM,
+        SEMANTIC_REJECTED_REF_NOT_CARRIED,
         SEMANTIC_REJECTED_REF_OUTSIDE_CASE,
         SEMANTIC_REJECTED_SNIPPET,
         SEMANTIC_REJECTED_SUBJECTS_OVER_LIMIT,
@@ -2562,121 +2573,161 @@ def _packet_text_for_refs(
     return tuple(text for ref in refs for text in provider_input_text_by_ref.get(ref, ()))
 
 
+@dataclass(frozen=True, slots=True)
+class _ReviewerQuoteFence:
+    """What the provider-bound fence kept of one judgment, and what it removed (issue #976)."""
+
+    judgment: SemanticJudgment
+    # Challenges no cited ref of which is proven sent. They mint no finding; their text is
+    # surfaced as an advisory concern and their drop is counted and disclosed.
+    not_carried: tuple[ReviewerChallenge, ...] = ()
+    # Challenges whose citations were all outside the advertised citable set.
+    outside: int = 0
+    # Kept challenges that lost citations of unsent refs, plus verified rows dropped for one.
+    refs_reduced: int = 0
+    # Unproven quotes removed from kept challenges plus verified rows dropped for their quote.
+    snippet_losses: int = 0
+
+
 def _validate_reviewer_snippets(
     judgment: SemanticJudgment,
     *,
     citable_refs: frozenset[str] | None,
     provider_input_text_by_ref: Mapping[str, tuple[str, ...]] | None,
-) -> tuple[SemanticJudgment, int, int]:
-    """Fence reviewer quotes that are not packet substrings.
+) -> _ReviewerQuoteFence:
+    """Fence reviewer citations and quotes to what the provider was actually sent.
 
-    Returns the fenced judgment, the number of dropped challenges (a cited ref outside the sent
-    packet), and the number of coverage losses: dropped verified rows plus challenges whose
-    unproven quote was removed while the challenge itself was kept (issue #976). Only a dropped
-    challenge is a rejected challenge; the losses are disclosed through the snippet gap.
+    ``citable_refs`` is the set the packet advertised (not yet narrowed to the text index). A ref
+    is proven sent when the provider-bound text index carries text for it: a content row's source
+    or linked subject, or one of this check's local findings whose assessment row survived.
 
-    The provider may still provide useful challenges/judgements beside one malformed quote. A
-    bad quote therefore loses only that entry and leaves a bounded diagnostic for the check/receipt
-    coverage path (issue #906 Part 2).
+    A challenge is a concern the reviewer raised; it is never discarded because one of its
+    citations or its quote cannot be proved (TB4 tb4v1, issue #976):
+
+    * Cited refs that were not sent are removed; the challenge stands on the refs that were sent,
+      and the reduction is disclosed.
+    * A challenge with no sent ref (or any quote-bearing challenge when the text index is
+      unavailable, so nothing is proven sent) mints no finding, but its text is surfaced to the
+      agent as an advisory concern and its drop is counted under its own reason.
+    * A quote is kept only as the exact sent span it matches (``review_quotes.prove_quote``); an
+      unproven quote is removed, never shown, and disclosed through the snippet gap.
+
+    A verified row reads as support, so it keeps the stricter rule: it is dropped when any cited
+    ref was not sent or its required quote cannot be proved.
     """
 
+    from yoetz.application.review_quotes import prove_quote
+
     # A recovered response from before the exact provider-bound text index existed has no proof
-    # for a newly added quote. Keep legacy judgments without snippets readable, but drop any
-    # snippet-bearing item because a source ref alone cannot prove provider delivery.
+    # for a newly added quote. Keep legacy judgments without snippets readable.
     if (
         provider_input_text_by_ref is None
         and not any(challenge.snippet is not None for challenge in judgment.challenges)
         and not any(item.snippet is not None for item in judgment.verified)
     ):
-        return judgment, 0, 0
+        return _ReviewerQuoteFence(judgment)
 
-    if citable_refs is not None:
-        # A snippet-bearing judgement must name refs that survived the exact provider-bound
-        # packet. The citable list is the composed-case fence; intersecting it with the ephemeral
-        # text index prevents one sent row from laundering a second, omitted ref in the same cite.
-        allowed = (
-            citable_refs
-            if provider_input_text_by_ref is None
-            else citable_refs & frozenset(provider_input_text_by_ref)
-        )
-    elif provider_input_text_by_ref is None:
-        allowed = frozenset[str]()
-    else:
-        allowed = frozenset(provider_input_text_by_ref)
-    rejected = 0
-    verified_rejected = 0
-    quotes_stripped = 0
+    # Without the text index nothing is proven sent.
+    sent = frozenset(() if provider_input_text_by_ref is None else provider_input_text_by_ref)
+    carried = sent if citable_refs is None else citable_refs & sent
+
+    not_carried: list[ReviewerChallenge] = []
+    outside = 0
+    refs_reduced = 0
+    snippet_losses = 0
     challenges: list[ReviewerChallenge] = []
     for challenge in judgment.challenges:
-        cited = tuple(ref for ref in challenge.cited_refs if ref in allowed)
-        if len(cited) != len(challenge.cited_refs):
-            rejected += 1
+        kept_refs = tuple(ref for ref in challenge.cited_refs if ref in carried)
+        if not kept_refs:
+            if citable_refs is not None and not any(
+                ref in citable_refs for ref in challenge.cited_refs
+            ):
+                outside += 1
+            else:
+                not_carried.append(challenge)
             continue
-        if challenge.snippet is not None and not any(
-            challenge.snippet in text
-            for text in _packet_text_for_refs(cited, provider_input_text_by_ref)
-        ):
-            if provider_input_text_by_ref is None:
-                # Without the provider-bound text index a source ref does not prove delivery,
-                # so a quote-bearing challenge stays fenced out as before.
-                rejected += 1
-                continue
-            # The refs were sent, so the challenge stands; only the quote is unproven. Dropping
-            # the whole challenge turned a reviewer's concern into "findings returned: 0" and a
-            # rewritten no_material_discrepancy (TB4 tb4f1 ks-solver-cpp, issue #976). The quote
-            # is removed, never shown as one, and its loss is disclosed through the snippet gap.
-            quotes_stripped += 1
-            challenge = replace(challenge, snippet=None)
+        if len(kept_refs) != len(challenge.cited_refs):
+            refs_reduced += 1
+            challenge = replace(challenge, cited_refs=kept_refs)
+        if challenge.snippet is not None:
+            proven = prove_quote(
+                challenge.snippet, _packet_text_for_refs(kept_refs, provider_input_text_by_ref)
+            )
+            if proven is None:
+                # The quote is removed, never shown as one, and its loss is disclosed.
+                snippet_losses += 1
+                challenge = replace(challenge, snippet=None)
+            elif proven != challenge.snippet:
+                # Record the verbatim sent span, never the reviewer's spelling of it.
+                challenge = replace(challenge, snippet=proven)
         challenges.append(challenge)
 
     verified: list[VerifiedReviewItem] = []
     for item in judgment.verified:
-        cited = tuple(ref for ref in item.cited_refs if ref in allowed)
-        valid = len(cited) == len(item.cited_refs)
-        if valid and item.snippet is not None:
-            valid = any(
-                item.snippet in text
-                for text in _packet_text_for_refs(cited, provider_input_text_by_ref)
-            )
-        if not valid:
-            verified_rejected += 1
+        if any(ref not in carried for ref in item.cited_refs):
+            refs_reduced += 1
             continue
+        if item.snippet is not None:
+            proven = prove_quote(
+                item.snippet, _packet_text_for_refs(item.cited_refs, provider_input_text_by_ref)
+            )
+            if proven is None:
+                snippet_losses += 1
+                continue
+            if proven != item.snippet:
+                item = replace(item, snippet=proven)
         verified.append(item)
 
-    # A stripped quote is a disclosed coverage loss like a dropped verified row; the challenge
-    # itself is admitted.
-    verified_rejected += quotes_stripped
     if (
-        rejected == 0
-        and verified_rejected == 0
+        not not_carried
+        and outside == 0
+        and refs_reduced == 0
+        and snippet_losses == 0
         and tuple(challenges) == judgment.challenges
         and tuple(verified) == judgment.verified
     ):
-        return judgment, 0, 0
+        return _ReviewerQuoteFence(judgment)
     if judgment.conclusion == "challenges_returned" and not challenges:
-        # The domain coupling requires at least one challenge for that conclusion. Preserve the
-        # response as a bounded "no admitted challenge" review so one malformed quote does not
-        # turn the whole provider response into an invalid check; the caller records the snippet
-        # gap from ``rejected`` and retains the provider's original conclusion separately.
-        return (
-            replace(
-                judgment,
-                conclusion="no_material_discrepancy",
-                challenges=(),
-                verified=tuple(verified),
-            ),
-            rejected,
-            verified_rejected,
-        )
-    return (
-        replace(
+        # The domain coupling requires at least one challenge for that conclusion. The check keeps
+        # the provider's original conclusion separately; the dropped concerns are counted, and an
+        # unanchored concern is surfaced as advisory text by the caller.
+        fenced = replace(
             judgment,
-            challenges=tuple(challenges),
+            conclusion="no_material_discrepancy",
+            challenges=(),
             verified=tuple(verified),
-        ),
-        rejected,
-        verified_rejected,
-    )
+        )
+    else:
+        fenced = replace(judgment, challenges=tuple(challenges), verified=tuple(verified))
+    return _ReviewerQuoteFence(fenced, tuple(not_carried), outside, refs_reduced, snippet_losses)
+
+
+_UNANCHORED_CONCERNS_HEADER: Final = (
+    "Reviewer concerns not recorded as findings (no record they cite was in the sent packet; "
+    "advisory and unverified, answer them in your next published work):"
+)
+
+
+def _summary_with_unanchored_concerns(summary: str, concerns: tuple[ReviewerChallenge, ...]) -> str:
+    """Append concerns that could not be anchored to the review summary, within its byte bound.
+
+    The reviewer's words travel only inside the fenced review-summary field, never as a finding;
+    the header says they are unverified. Text that does not fit is cut at a character boundary
+    and marked, so a clipped concern is never presented as whole.
+    """
+
+    if not concerns:
+        return summary
+    lines = [summary, "", _UNANCHORED_CONCERNS_HEADER]
+    for position, concern in enumerate(concerns, start=1):
+        lines.append(f"{position}. {concern.summary} {concern.message_to_main_agent}")
+    text = "\n".join(lines)
+    encoded = text.encode("utf-8")
+    if len(encoded) <= MAX_REVIEW_TEXT_BYTES:
+        return text
+    marker = " [truncated]"
+    budget = MAX_REVIEW_TEXT_BYTES - len(marker.encode("utf-8"))
+    return encoded[:budget].decode("utf-8", errors="ignore") + marker
 
 
 # A finding names at most 64 subjects. Several cited findings can union past that; such a
@@ -2926,6 +2977,9 @@ def validate_semantic_judgment(
         or provenance.reason is not SemanticReason.SEMANTIC_COMPLETED
     ):
         raise _rejected("semantic_judgment_invalid")
+    # The advertised set, before it is narrowed to the text index for rulings below: challenge
+    # citations are fenced against it together with what was actually sent (issue #976).
+    advertised_refs = citable_refs
     if provider_input_text_by_ref is not None:
         # The composed case can advertise refs whose rows were later withheld by privacy or
         # minimization. Once the exact provider-bound text index is available, prior rulings and
@@ -2937,36 +2991,37 @@ def validate_semantic_judgment(
         if prior_finding_refs is not None:
             prior_finding_refs &= provider_refs
     returned_challenges = len(judgment.challenges)
-    judgment, challenge_snippets_rejected, verified_snippets_rejected = _validate_reviewer_snippets(
+    fence = _validate_reviewer_snippets(
         judgment,
-        citable_refs=citable_refs,
+        citable_refs=advertised_refs,
         provider_input_text_by_ref=provider_input_text_by_ref,
     )
+    judgment = fence.judgment
     # Every dropped quote is disclosed through the snippet gap (including verified rows the
     # normalizer already dropped as inconsistent with their verdict); only dropped challenges
     # count toward the returned == accepted + rejected + suppressed challenge accounting.
-    snippets_rejected = (
-        challenge_snippets_rejected + verified_snippets_rejected + judgment.verified_dropped
-    )
+    snippets_rejected = fence.snippet_losses + judgment.verified_dropped
+    review_summary = _summary_with_unanchored_concerns(judgment.review_summary, fence.not_carried)
+    rejections: dict[str, int] = {}
+    if fence.not_carried:
+        rejections[SEMANTIC_REJECTED_REF_NOT_CARRIED] = len(fence.not_carried)
+    if fence.outside:
+        rejections[SEMANTIC_REJECTED_REF_OUTSIDE_CASE] = fence.outside
     admitted, verdicts_unsupported, verdicts_set_aside = _admit_prior_verdicts(
         case, judgment, prior_finding_refs=prior_finding_refs, citable_refs=citable_refs
     )
     if judgment.conclusion != "challenges_returned":
-        rejected_by_reason = (
-            ((SEMANTIC_REJECTED_SNIPPET, challenge_snippets_rejected),)
-            if challenge_snippets_rejected
-            else ()
-        )
         return _judgment_review(
             (),
             returned_challenges,
-            rejected_by_reason,
+            tuple(sorted(rejections.items(), key=lambda item: item[0].encode("ascii"))),
             _sorted_verdicts(admitted),
             verdicts_unsupported,
             verdicts_set_aside=verdicts_set_aside,
-            review_summary=judgment.review_summary,
+            review_summary=review_summary,
             verified=judgment.verified,
             snippets_rejected=snippets_rejected,
+            refs_reduced=fence.refs_reduced,
         )
     coverage = case_coverage(case, semantic=True)
     if not capture_baseline_gaps <= SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS:
@@ -2984,9 +3039,6 @@ def validate_semantic_judgment(
             known_gaps=tuple(sorted(set(coverage.known_gaps) | stamped, key=str.encode)),
         )
     candidates: list[CandidateFinding] = []
-    rejections: dict[str, int] = {}
-    if challenge_snippets_rejected:
-        rejections[SEMANTIC_REJECTED_SNIPPET] = challenge_snippets_rejected
     restatements = 0
     for challenge in judgment.challenges:
         resolution = _resolve_challenge_refs(case, deterministic, challenge)
@@ -3069,10 +3121,33 @@ def validate_semantic_judgment(
         verdicts_unsupported,
         restatements,
         verdicts_set_aside,
-        judgment.review_summary,
+        review_summary,
         judgment.verified,
         snippets_rejected,
+        fence.refs_reduced,
     )
+
+
+def _review_fence_gaps(review: SemanticJudgmentReview) -> frozenset[str]:
+    """The coverage gaps that disclose what the post-validation fence removed from a review."""
+
+    gaps: set[str] = set()
+    # A challenge the fence dropped is material the reviewer raised and the check does not
+    # carry. Saying so is what keeps a dropped challenge from reading as one never made.
+    if review.challenges_rejected:
+        gaps.add(SEMANTIC_CHALLENGES_REJECTED_GAP)
+    # A per-finding ruling the fence dropped or reduced: disclosed, never read as agreement.
+    if review.verdicts_unsupported:
+        gaps.add(SEMANTIC_PRIOR_VERDICTS_UNSUPPORTED_GAP)
+    if review.snippets_rejected:
+        gaps.add(SEMANTIC_REVIEW_SNIPPET_INVALID_GAP)
+    # Citations of unsent refs removed from kept items (issue #976).
+    if review.refs_reduced:
+        gaps.add(SEMANTIC_REVIEW_REFS_REDUCED_GAP)
+    # A restated finding was suppressed rather than minted twice: disclosed, never silent.
+    if review.restatements_suppressed:
+        gaps.add(SEMANTIC_RESTATEMENTS_SUPPRESSED_GAP)
+    return frozenset(gaps)
 
 
 def _judgment_review(*args: object, **kwargs: object) -> SemanticJudgmentReview:
@@ -3436,6 +3511,10 @@ def _record_semantic_review_accounting(
             "semantic_challenges_returned": review.challenges_returned,
             "semantic_candidates_accepted": len(review.candidates),
             "semantic_challenges_rejected": review.challenges_rejected,
+            # Per-reason split so a run can be attributed without guessing (issue #976).
+            **{f"semantic_rejected_{reason}": count for reason, count in review.rejected_by_reason},
+            "semantic_review_refs_reduced": review.refs_reduced,
+            "semantic_review_snippets_rejected": review.snippets_rejected,
             "semantic_restatements_suppressed": review.restatements_suppressed,
             "semantic_prior_rulings_set_aside": review.verdicts_set_aside,
             "semantic_findings_selected": selected,
@@ -4011,18 +4090,7 @@ async def execute_check_commit(
                 semantic_result.provider_input_manifest_failure
                 or SEMANTIC_PROVIDER_INPUT_MANIFEST_MISSING_GAP
             )
-        # A challenge the fence dropped is material the reviewer raised and the check does not
-        # carry. Saying so is what keeps a dropped challenge from reading as one never made.
-        if review.challenges_rejected:
-            declared_gaps.add(SEMANTIC_CHALLENGES_REJECTED_GAP)
-        # A per-finding ruling the fence dropped or reduced: disclosed, never read as agreement.
-        if review.verdicts_unsupported:
-            declared_gaps.add(SEMANTIC_PRIOR_VERDICTS_UNSUPPORTED_GAP)
-        if review.snippets_rejected:
-            declared_gaps.add(SEMANTIC_REVIEW_SNIPPET_INVALID_GAP)
-        # A restated finding was suppressed rather than minted twice: disclosed, never silent.
-        if review.restatements_suppressed:
-            declared_gaps.add(SEMANTIC_RESTATEMENTS_SUPPRESSED_GAP)
+        declared_gaps.update(_review_fence_gaps(review))
         # Recorded prose the case could not carry whole. The reviewer answered on a fragment, and
         # the author has no other signal that the text they published never arrived (issue #177).
         declared_gaps.update(semantic_result.case_content_gaps)
