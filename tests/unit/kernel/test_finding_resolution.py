@@ -3383,7 +3383,7 @@ def test_the_explanation_reads_the_newest_check_that_could_resolve_the_finding()
     assert "Later check" not in explanation
 
 
-_WORK_CURRENT = ("work-integrity", "0.2.0")
+_WORK_CURRENT = ("work-integrity", "0.3.0")
 _RESEARCH_CURRENT = ("research-evidence", "0.2.0")
 
 
@@ -3396,7 +3396,12 @@ def _current_check(**overrides: object) -> CheckRecordedPayload:
         policies=(PolicyVersion(*_RESEARCH_CURRENT), PolicyVersion(*_WORK_CURRENT)),
         policy_executions=tuple(
             _execution(
-                (execution.policy_id, "0.2.0"),
+                (
+                    execution.policy_id,
+                    _WORK_CURRENT[1]
+                    if execution.policy_id == _WORK_CURRENT[0]
+                    else _RESEARCH_CURRENT[1],
+                ),
                 execution.outcome,
                 execution.reason,
             )
@@ -3442,8 +3447,8 @@ def test_a_check_mixing_pack_generations_is_not_a_recorded_selection() -> None:
 
 def test_an_unknown_pack_version_is_not_decodable() -> None:
     with pytest.raises(ValueError):
-        PolicyVersion("work-integrity", "0.3.0")
+        PolicyVersion("work-integrity", "0.9.0")
     with pytest.raises(ValueError):
         PolicyVersion("coordination", "0.2.0")
     with pytest.raises(ValueError):
-        replace(_finding(), policy_version="0.3.0")
+        replace(_finding(), policy_version="0.9.0")

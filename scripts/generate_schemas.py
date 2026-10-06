@@ -6203,6 +6203,14 @@ def _control_v2_9_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
             ],
             "type": "string",
         }
+        # Closed runtime facts the hook derives at the host boundary (#977): where a package
+        # install resolved its interpreter, an edit outside the workspace, the effective user.
+        fields["install_target"] = {
+            "enum": ["private_env", "system", "unresolved", "workspace_env", "yoetz_runtime"],
+            "type": "string",
+        }
+        fields["write_scope"] = {"enum": ["outside_workspace"], "type": "string"}
+        fields["effective_user"] = {"enum": ["non_root", "root"], "type": "string"}
     if entry.schema_name == "control-result":
         definitions = cast(dict[str, JsonValue], document["$defs"])
         runtime = definitions.get("observation_selection_runtime")

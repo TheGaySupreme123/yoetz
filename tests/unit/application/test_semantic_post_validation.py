@@ -213,7 +213,7 @@ def test_semantic_judgment_accepts_only_frozen_refs_and_derives_policy() -> None
     assert len(review.candidates) == 1
     assert review.candidates[0].subject_refs == (clm(1),)
     assert review.candidates[0].policy_id == "work-integrity"
-    assert review.candidates[0].policy_version == "0.2.0"
+    assert review.candidates[0].policy_version == "0.3.0"
     assert review.challenges_returned == 1
     assert review.rejected_by_reason == ()
 

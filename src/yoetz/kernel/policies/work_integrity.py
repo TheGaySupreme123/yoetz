@@ -35,6 +35,7 @@ from yoetz.kernel.deterministic_checks import (
     OBSERVED_FAILURE_LIVE_FACT,
     OBSERVED_VERIFICATION_ABSENT_FACT,
     OBSERVED_VERIFICATION_UNCITED_FACT,
+    REQUESTED_OUTPUT_ABSENT_FACT,
     DeterministicAssessment,
     DeterministicCase,
     FindingBasisRef,
@@ -57,6 +58,11 @@ from yoetz.kernel.policies.response_support import (
     BASE_RESPONSE_INADMISSIBLE_GAPS,
     WORK_RESPONSE_PRESENT_FACT,
     response_support_admissible,
+)
+from yoetz.kernel.task_facts import (
+    acting_started,
+    blocked_obligations,
+    cooperative_event_ids_from_coverage,
 )
 from yoetz.protocol.policy_packs import WORK_INTEGRITY_POLICY_ID, WORK_INTEGRITY_POLICY_VERSION
 
@@ -102,6 +108,7 @@ WORK_INTEGRITY_FACT_CODES: Final = frozenset(
         "response_state_stale",
         OBSERVED_VERIFICATION_UNCITED_FACT,
         OBSERVED_VERIFICATION_ABSENT_FACT,
+        REQUESTED_OUTPUT_ABSENT_FACT,
     }
 )
 _COMMAND_ATTEMPT_UNCORROBORATED_GAP: Final = "command_attempt_uncorroborated"
@@ -261,24 +268,54 @@ def _completion_findings(case: DeterministicCase) -> list[DeterministicAssessmen
     return output
 
 
-def _requested_item_findings(case: DeterministicCase) -> list[DeterministicAssessment]:
+def _requested_item_findings(
+    case: DeterministicCase,
+    absent_outputs: frozenset[tuple[ObligationId, int]] = frozenset(),
+) -> list[DeterministicAssessment]:
+    """Requested items with no attempt once work began, or requested files that do not exist.
+
+    Before the agent has started acting (an edit, a published action, or an observed command
+    other than exploration or version control) an unattempted item is the plan, not an omission,
+    so it raises nothing (#977, TB4: 86% of all findings were this plan-stage notice).
+    ``absent_outputs`` comes from the check-time workspace read: a requested file that does not
+    exist is reported whatever was published about it, because naming a file in
+    ``attempted_items`` does not create it. Obligations a recorded blocker decision names are
+    disclosed through their blocker gap instead.
+    """
+
     output: list[DeterministicAssessment] = []
+    started = acting_started(
+        case.projection,
+        observed_event_ids_from_coverage(case.coverage_by_ref),
+        cooperative_event_ids_from_coverage(case.coverage_by_ref),
+    )
+    blocked = blocked_obligations(case.projection)
     for obligation_ref in sorted(_active_requested_obligations(case), key=_ascii):
         record = case.projection.obligations[obligation_ref]
         payload = record.payload
-        attempted = attempted_items_for_obligation(case.projection, obligation_ref)
-        if payload is None or not any(
-            item.value not in attempted for item in payload.requested_items
-        ):
+        if payload is None or obligation_ref in blocked:
             continue
+        attempted = attempted_items_for_obligation(case.projection, obligation_ref)
+        unattempted = started and any(
+            item.value not in attempted for item in payload.requested_items
+        )
+        absent = any(
+            (obligation_ref, index) in absent_outputs
+            for index in range(len(payload.requested_items))
+        )
+        if not unattempted and not absent:
+            continue
+        observed = [_fact("requested_item_present", obligation_ref)]
+        if absent:
+            observed.append(_fact(REQUESTED_OUTPUT_ABSENT_FACT, obligation_ref))
         output.append(
             build_policy_assessment(
                 case,
                 WORK_INTEGRITY_POLICY_PACK,
                 FindingKind.REQUESTED_ITEM_NEVER_ATTEMPTED,
                 (obligation_ref,),
-                (_fact("requested_item_present", obligation_ref),),
-                (_fact("linked_attempt_absent", obligation_ref),),
+                tuple(observed),
+                (_fact("linked_attempt_absent", obligation_ref),) if unattempted else (),
             )
         )
     return output
@@ -773,14 +810,20 @@ def _response_findings(case: DeterministicCase) -> list[DeterministicAssessment]
 
 def work_integrity_findings(
     case: DeterministicCase,
+    *,
+    absent_outputs: frozenset[tuple[ObligationId, int]] = frozenset(),
 ) -> tuple[DeterministicAssessment, ...]:
-    """Evaluate the closed work-integrity rule table without I/O."""
+    """Evaluate the closed work-integrity rule table without I/O.
+
+    ``absent_outputs`` is the one check-time input that is not in the case: the requested files
+    the application's metadata-only workspace read found absent (#977). The default reads none.
+    """
 
     if type(case) is not DeterministicCase:
         raise ValueError("policy_wiring_invalid")
     by_rule = (
         _completion_findings(case),
-        _requested_item_findings(case),
+        _requested_item_findings(case, absent_outputs),
         _failed_work_findings(case),
         _unsupported_claim_findings(case),
         _orphan_result_findings(case),

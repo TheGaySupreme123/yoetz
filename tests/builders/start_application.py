@@ -196,7 +196,7 @@ class StartTestApplication:
     profile: RuntimeProfile = RuntimeProfile.TEST_FAKE
     policy_packs: tuple[str, ...] = (
         "research-evidence/0.2.0",
-        "work-integrity/0.2.0",
+        "work-integrity/0.3.0",
     )
     version_manifest: Mapping[str, JsonValue] = {
         "protocol_version": "0.1",

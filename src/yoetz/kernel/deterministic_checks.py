@@ -124,6 +124,7 @@ __all__ = [
     "MAX_FROZEN_HISTORY_EVENTS",
     "OBSERVED_FAILURE_LIVE_FACT",
     "OBSERVED_VERIFICATION_ABSENT_FACT",
+    "REQUESTED_OUTPUT_ABSENT_FACT",
     "OBSERVED_VERIFICATION_UNCITED_FACT",
     "PREEXISTING_TEST_EDIT_UNJUSTIFIED_FACT",
     "STATEMENT_SOURCED_OBLIGATION_ABSENT_FACT",
@@ -168,6 +169,12 @@ TASK_STATEMENT_RECORDED_FACT: Final = "task_statement_recorded"
 # A completion claim cites no hook-observed verification run made after the latest observed edit.
 OBSERVED_VERIFICATION_UNCITED_FACT: Final = "observed_verification_uncited"
 OBSERVED_VERIFICATION_ABSENT_FACT: Final = "observed_verification_absent"
+REQUESTED_OUTPUT_ABSENT_SUMMARY: Final = (
+    "A requested output file does not exist in the workspace at check time."
+)
+# A requested file the check-time workspace read found absent, and not a tracked file the change
+# deletes (#977). Its repair is the deliverable itself, never a revised obligation.
+REQUESTED_OUTPUT_ABSENT_FACT: Final = "requested_output_absent"
 _CODE_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$", re.ASCII)
 _POLICY_PATTERN: Final = re.compile(r"^[a-z][a-z0-9-]{0,127}$", re.ASCII)
 _VERSION_PATTERN: Final = re.compile(
@@ -456,7 +463,12 @@ DETERMINISTIC_FINDING_TEMPLATES: Final[
         ),
         FindingKind.REQUESTED_ITEM_NEVER_ATTEMPTED: DeterministicFindingTemplate(
             "A requested item has no recorded attempt.",
-            "Attempt the requested item or revise its obligation.",
+            "Attempt the requested item and record the action naming it in attempted_items."
+            " Revise the obligation only if the user's request itself changed. If something"
+            " outside your control (authority, consent, credentials, a dependency you cannot"
+            " obtain) prevents it, record a decision_recorded naming the obligation in"
+            " affected_obligation_ids with the statement line yoetz-blocker:<authority|consent|"
+            "credential|dependency_unavailable>.",
         ),
         FindingKind.FAILED_WORK_OMITTED: DeterministicFindingTemplate(
             "Recorded failed work is omitted from the published account.",
@@ -607,6 +619,20 @@ def render_deterministic_finding_text(
                     " resolve it, and it stays current until a qualifying check proves those"
                     f" other gaps absent.{support}"
                 )
+    if kind is FindingKind.REQUESTED_ITEM_NEVER_ATTEMPTED and any(
+        fact.fact_code == REQUESTED_OUTPUT_ABSENT_FACT for fact in observed_facts
+    ):
+        return (
+            REQUESTED_OUTPUT_ABSENT_SUMMARY,
+            f"Subjects: {', '.join(refs)}. Main agent: Write each requested file the obligation"
+            " names (status view=obligations lists them) at its requested path, then check again."
+            " If an input looks inconsistent, still write a best-effort artifact in the requested"
+            " format and disclose the assumption; an input problem is not a reason to omit a"
+            " requested output, and publishing an action that names the file does not create it."
+            " If the requested item is not the path the request asks for, correct the item."
+            " Do not git-ignore, exclude, stash or delete a requested output to keep it out of"
+            " review: Yoetz redacts what it sends.",
+        )
     if kind is FindingKind.TASK_REQUIREMENT_UNMET and any(
         fact.fact_code == TASK_STATEMENT_UNMAPPED_FACT for fact in observed_facts
     ):
@@ -1931,6 +1957,16 @@ def build_deterministic_case(
     # check/receipt conclusion paths explicitly treat these codes as non-blocking diagnostics.
     for code in plan_drift_signals(projection, accepted_prefix).codes:
         _add_gap(gaps, code, code, ())
+
+    # Task facts (#977): what hook observations and the ledger establish about the task's own
+    # work. Frozen with the case so a resumed check and a receipt replay disclose the same facts.
+    from yoetz.kernel.task_facts import task_fact_signals
+
+    for code, obligation in task_fact_signals(projection, accepted_prefix).markers:
+        if obligation is None:
+            _add_gap(gaps, code, code, ())
+        else:
+            _add_gap(gaps, f"{code}:{obligation}", code, (obligation,))
 
     relevant_evidence: set[EvidenceId] = set()
     relevant_results: set[ResultId] = set()

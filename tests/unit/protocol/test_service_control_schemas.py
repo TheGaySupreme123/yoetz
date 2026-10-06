@@ -702,6 +702,10 @@ def test_v25_observation_wire_tracks_domain_structural_keys_without_rewriting_v2
             "command_commitment",
             # So is the command runner class every tool observation carries.
             "runner_class",
+            # And the closed runtime facts a hook classifies (#977).
+            "install_target",
+            "write_scope",
+            "effective_user",
         }
     )
     assert set(v25_properties) == expected_observation_keys
@@ -1353,11 +1357,24 @@ def _structural_properties(document: dict[str, Any]) -> dict[str, Any]:
 def _assert_v29_request_adds_only_command_commitment(
     v28: dict[str, Any], v29: dict[str, Any]
 ) -> None:
-    """The 2.9 request adds the keyed command identity and runner class and nothing else (#909)."""
+    """The 2.9 request adds the keyed command identity, the runner class and the closed runtime
+    facts (#909, #977) and nothing else."""
 
     v28_fields = _structural_properties(v28)
     v29_fields = _structural_properties(v29)
-    assert set(v29_fields) - set(v28_fields) == {"command_commitment", "runner_class"}
+    assert set(v29_fields) - set(v28_fields) == {
+        "command_commitment",
+        "runner_class",
+        "install_target",
+        "write_scope",
+        "effective_user",
+    }
+    assert v29_fields["install_target"] == {
+        "enum": ["private_env", "system", "unresolved", "workspace_env", "yoetz_runtime"],
+        "type": "string",
+    }
+    assert v29_fields["write_scope"] == {"enum": ["outside_workspace"], "type": "string"}
+    assert v29_fields["effective_user"] == {"enum": ["non_root", "root"], "type": "string"}
     assert v29_fields["runner_class"] == {
         "enum": ["build", "compound", "exploration", "lint", "other", "test", "typecheck", "vcs"],
         "type": "string",
@@ -1369,8 +1386,14 @@ def _assert_v29_request_adds_only_command_commitment(
         "type": "string",
     }
     stripped = json.loads(json.dumps(v29))
-    del _structural_properties(stripped)["command_commitment"]
-    del _structural_properties(stripped)["runner_class"]
+    for added in (
+        "command_commitment",
+        "runner_class",
+        "install_target",
+        "write_scope",
+        "effective_user",
+    ):
+        del _structural_properties(stripped)[added]
     assert {k: v for k, v in v28.items() if k != "$id"} == {
         k: v for k, v in stripped.items() if k != "$id"
     }

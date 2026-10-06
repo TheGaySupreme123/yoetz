@@ -108,7 +108,7 @@ _ACTION = EventSchema("action_recorded", "1.0.0")
 _RESULT = EventSchema("result_recorded", "1.0.0")
 _CLAIM_V1 = EventSchema("claim_recorded", "1.0.0")
 _CLAIM_V1_1 = EventSchema("claim_recorded", "1.1.0")
-_PACKS = ("research-evidence/0.2.0", "work-integrity/0.2.0")
+_PACKS = ("research-evidence/0.2.0", "work-integrity/0.3.0")
 OMISSION_KINDS = frozenset(
     {FindingKind.FAILED_WORK_OMITTED, FindingKind.MATERIAL_LIMITATION_OMITTED}
 )
@@ -122,11 +122,16 @@ def command_identity_for(command: str) -> str:
     return "omitted:" + observed_command_commitment(INSTALLATION_KEY, normalized)
 
 
-def _logical_key(payload: EventPayload) -> str:
-    for name in ("result_id", "action_id", "claim_id"):
+def _logical_key(payload: EventPayload, identifier: EventId) -> str:
+    for name in ("result_id", "action_id", "claim_id", "obligation_id"):
         value = getattr(payload, name, None)
         if value is not None:
             return str(value)
+    plan_version = getattr(payload, "plan_version", None)
+    if plan_version is not None:
+        return str(plan_version)
+    if type(payload).__name__ == "DecisionRecordedPayload":
+        return str(identifier)
     raise AssertionError("unsupported payload")
 
 
@@ -217,7 +222,7 @@ class ObservedLedger:
                 payload=payload,
                 projection_locator=ProjectionLocator(
                     schema=schema,
-                    logical_key=_logical_key(payload),
+                    logical_key=_logical_key(payload, identifier),
                     canonical_payload_digest=canonical_digest(encode_payload(payload)),
                     redaction_target_event_ids=(),
                     redaction_target_object_ids=(),
@@ -242,6 +247,10 @@ class ObservedLedger:
         raw_command: str | None = None,
         tool: str | None = None,
         subject_state: SubjectStateRef | None = None,
+        install_target: str | None = None,
+        write_outside_workspace: bool = False,
+        effective_user: str | None = None,
+        runner: str | None = None,
     ) -> ResultId:
         """Record one tool call as the coordinator materializes it: action, then result."""
 
@@ -263,8 +272,12 @@ class ObservedLedger:
             if kind is ActionKind.COMMAND
             else "apply_patch"
         )
-        runner_class = command_runner_class(
-            {"tool_name": default_tool, "command": command}  # type: ignore[dict-item]
+        runner_class = (
+            runner
+            if runner is not None
+            else command_runner_class(
+                {"tool_name": default_tool, "command": command}  # type: ignore[dict-item]
+            )
         )
         self._append(
             _ACTION,
@@ -275,6 +288,9 @@ class ObservedLedger:
                     f"Observed {kind.value} via Codex hook",
                     default_tool,
                     runner_class,
+                    install_target=install_target,
+                    write_outside_workspace=write_outside_workspace,
+                    effective_user=effective_user,
                 ),
                 command=recorded,
                 subject_state=subject_state,
@@ -313,10 +329,17 @@ class ObservedLedger:
         outcome: ResultOutcome = ResultOutcome.SUCCESS,
         *,
         subject_state: SubjectStateRef | None = None,
+        write_outside_workspace: bool = False,
     ) -> ResultId:
         """An observed apply_patch/edit capture; Codex states its exit code (#883)."""
 
-        return self.run(None, outcome, kind=ActionKind.EDIT, subject_state=subject_state)
+        return self.run(
+            None,
+            outcome,
+            kind=ActionKind.EDIT,
+            subject_state=subject_state,
+            write_outside_workspace=write_outside_workspace,
+        )
 
     def claim(
         self,

@@ -357,7 +357,7 @@ async def test_same_request_replay_after_repository_grant_reaches_terminal_resul
                 },
                 "mode": "semantic_required",
                 "max_findings": "3",
-                "policy_packs": ["work-integrity/0.2.0"],
+                "policy_packs": ["work-integrity/0.3.0"],
             }
         )
 

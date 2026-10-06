@@ -314,6 +314,10 @@ _STRUCTURAL_KEYS: Final = frozenset(
         "selection_writer_id",
         "selection_authority_generation",
         "protection_reference",
+        # Closed runtime facts a hook derives at the host boundary (#977).
+        "install_target",
+        "write_scope",
+        "effective_user",
     }
 )
 _STRUCTURAL_TOKEN_KEYS: Final = frozenset(
@@ -340,6 +344,13 @@ _STRUCTURAL_TOKEN_KEYS: Final = frozenset(
 _RUNNER_CLASSES: Final = frozenset(
     {"exploration", "test", "build", "lint", "typecheck", "vcs", "other", "compound"}
 )
+_RUNTIME_FACT_VALUES: Final = {
+    "install_target": frozenset(
+        {"yoetz_runtime", "workspace_env", "private_env", "system", "unresolved"}
+    ),
+    "write_scope": frozenset({"outside_workspace"}),
+    "effective_user": frozenset({"root", "non_root"}),
+}
 
 _PROSE_KEYS: Final = frozenset(
     {
@@ -846,6 +857,8 @@ def _structural_payload(value: object) -> JsonObject:
         if key in _STRUCTURAL_TOKEN_KEYS:
             _token(item)
         if key == "runner_class" and item not in _RUNNER_CLASSES:
+            raise _invalid("invalid_event_value_type")
+        if key in _RUNTIME_FACT_VALUES and item not in _RUNTIME_FACT_VALUES[key]:
             raise _invalid("invalid_event_value_type")
         if key == "protection_reference":
             validate_observation_protection_reference(item)

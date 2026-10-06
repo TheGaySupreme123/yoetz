@@ -176,6 +176,15 @@ _REASONS: Final = frozenset(
         # enforcement point. Aborting mid-hook would drop ingest.
         "hook_budget_exceeded",
         "hook_followup_deferred",
+        # The Stop-time closure gate (#977): it continued the agent once, closure needed no
+        # action, it already fired at this frontier, the host loop guard was set, too little of
+        # the Stop budget was left for the status read, or the read failed.
+        "closure_gate_continued",
+        "closure_gate_not_required",
+        "closure_gate_repeat_suppressed",
+        "closure_gate_loop_guard",
+        "closure_gate_budget_exhausted",
+        "closure_gate_unavailable",
         "hook_slo_breached",
         # A host's automatic tool-call reviewer (Claude Code auto mode) denied a
         # scoped AI-powered ``check`` before Yoetz received it, or a permission

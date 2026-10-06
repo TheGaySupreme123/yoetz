@@ -50,6 +50,7 @@ from yoetz.ports.change_capture import (
     ChangeMetadataEntry,
     CheckChangeCapture,
     CheckChangeMetadata,
+    RequestedPathProbe,
     TaskChangeBase,
 )
 from yoetz.ports.subject_state import LocalWorkspaceHandle
@@ -272,6 +273,31 @@ def _nul_fields(payload: bytes) -> list[bytes]:
     return payload[:-1].split(b"\0")
 
 
+_MAX_REQUESTED_PATH_PROBES: Final = 64
+
+
+def _requested_relative_path(root: Path, value: str) -> bytes | None:
+    """The root-relative form of one requested path, or ``None`` when it is not under the root.
+
+    Lexical only: ``.``/``..`` segments are resolved textually and a result that leaves the root
+    is outside. Links are never followed here; ``_path_identity`` refuses them on the way down.
+    """
+
+    if type(value) is not str or not value or "\x00" in value:
+        return None
+    candidate = Path(value)
+    if candidate.is_absolute():
+        try:
+            candidate = Path(os.path.normpath(candidate)).relative_to(root)
+        except ValueError:
+            return None
+    normalized = os.path.normpath(os.fspath(candidate))
+    encoded = os.fsencode(normalized)
+    if encoded in {b".", b""} or not _safe_relative(encoded) or encoded.startswith(b".git/"):
+        return None
+    return encoded
+
+
 def _safe_relative(path: bytes) -> bool:
     return (
         bool(path)
@@ -432,6 +458,104 @@ class GitChangeCaptureAdapter:
                 if _expired(assembly):
                     break
         raise ChangeCaptureUnavailable("changed_during_capture")
+
+    def probe_requested_paths(
+        self, workspace: str, values: tuple[str, ...]
+    ) -> tuple[RequestedPathProbe, ...]:
+        """Locate requested file paths under the root; report existence and Git ignore state.
+
+        Metadata only (#977): each path is reached from the validated root descriptor one
+        component at a time without following a link and only ``stat``-ed; no file or blob
+        content is read. A relative value is taken relative to the repository root, an absolute
+        one must lie under it. Ignore state is Git's own answer (``git check-ignore``), which
+        honours ``.gitignore``, ``.git/info/exclude``, a repository ``core.excludesFile`` and the
+        owner's global ignore file, and never reports a tracked file. Paths are only ever passed
+        as arguments after ``--`` to the hardened runner; none is returned or logged.
+        """
+
+        if len(values) > _MAX_REQUESTED_PATH_PROBES:
+            raise ChangeCaptureUnavailable("unsupported_repository")
+        deadline = time.monotonic() + self._deadline_seconds
+        pinned = self._open(workspace, deadline)
+        self._refuse_unsafe_config(pinned, deadline)
+        located: list[tuple[str, bytes | None]] = []
+        for value in values:
+            relative = _requested_relative_path(pinned.root, value)
+            located.append(("inside", relative) if relative is not None else ("outside", None))
+        inside = sorted({path for _, path in located if path is not None})
+        identities = {path: _path_identity(pinned.descriptor, path) for path in inside}
+        ignored: set[bytes] = set()
+        unknown: set[bytes] = set()
+        sources: dict[bytes, bytes] = {}
+        queried = [path for path in inside if identities[path] != _BLOCKED]
+        unknown.update(path for path in inside if identities[path] == _BLOCKED)
+        if queried:
+            excludes = self._repository_excludes_file(pinned, deadline)
+            if excludes is None:
+                excludes = _global_excludes_file(deadline)
+            config = ("-c", f"core.excludesFile={excludes}") if excludes is not None else ()
+            # One quiet query per path: its exit status is the whole answer (0 ignored, 1 not),
+            # so no path ever has to be parsed back out of Git's quoted output. A path Git
+            # refuses (beyond a link, say) stays unknown without failing the others.
+            for path in queried:
+                try:
+                    code, _ = self._git(
+                        pinned,
+                        (*config, "check-ignore", "-q", "--", os.fsdecode(path)),
+                        deadline=deadline,
+                        limit=1_024,
+                        accepted=frozenset({0, 1}),
+                    )
+                except ValueError, ChangeCaptureUnavailable:
+                    unknown.add(path)
+                    continue
+                if code != 0:
+                    continue
+                ignored.add(path)
+                # Which rule ignores it: a negated match also prints here, so this second call
+                # runs only for a path the quiet query already proved ignored.
+                try:
+                    _, verbose = self._git(
+                        pinned,
+                        (*config, "check-ignore", "-v", "--", os.fsdecode(path)),
+                        deadline=deadline,
+                        limit=8_192,
+                        accepted=frozenset({0, 1}),
+                    )
+                except ValueError, ChangeCaptureUnavailable:
+                    verbose = b""
+                sources[path] = verbose.split(b":", 1)[0] if b":" in verbose else b""
+        info_exclude = os.fsencode(pinned.root / ".git" / "info" / "exclude")
+        probes: list[RequestedPathProbe] = []
+        for location, path in located:
+            if path is None:
+                probes.append(RequestedPathProbe(location))
+                continue
+            identity = identities[path]
+            source = sources.get(path)
+            probes.append(
+                RequestedPathProbe(
+                    location,
+                    os.fsdecode(path),
+                    None if identity == _BLOCKED else identity is not None,
+                    None if path in unknown else path in ignored,
+                    ignore_source=(
+                        None
+                        if source is None
+                        else "info_exclude"
+                        if source in {b".git/info/exclude", info_exclude}
+                        else "outside_repository"
+                        if source.startswith(b"/") or not source
+                        else "repository_file"
+                    ),
+                    ignore_file=(
+                        os.fsdecode(source)
+                        if source is not None and source and not source.startswith(b"/")
+                        else None
+                    ),
+                )
+            )
+        return tuple(probes)
 
     def capture_metadata(self, workspace: str, base: TaskChangeBase | None) -> CheckChangeMetadata:
         """Return changed-path facts without reading file or blob content.

@@ -141,6 +141,7 @@ __all__ = [
     "unresolved_findings_for_render",
     "semantic_coverage_gap_code",
     "check_time_change_gap_sentence",
+    "TASK_FACT_GAP_SENTENCES",
     "check_time_change_unavailable_reason_gap",
 ]
 
@@ -350,9 +351,69 @@ def check_time_change_gap_sentence(code: str) -> str | None:
             "were compared, not where redactions and hunks lay."
         )
     if code not in CHECK_TIME_CHANGE_UNAVAILABLE_REASON_GAPS:
-        return None
+        return TASK_FACT_GAP_SENTENCES.get(code)
     text = CHECK_TIME_CHANGE_UNAVAILABLE_REASONS[code[len(_CHECK_TIME_CHANGE_REASON_PREFIX) :]]
     return "The check-time change was unavailable: " + text
+
+
+# One fixed sentence per task-fact gap (#977, ADR-033), shown wherever check-time gap sentences
+# are: receipt gap details and limitations, the CLI human check and status, the MCP check summary.
+# Codes only; no path or command text exists to show.
+TASK_FACT_GAP_SENTENCES: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "planned_verification_not_observed": (
+            "A planned verification (an obligation's requested command) was never observed running"
+            " exactly as recorded; run it as recorded or correct the requested command."
+        ),
+        "planned_verification_failed": (
+            "A planned verification command failed on its latest observed run."
+        ),
+        "planned_verification_stale": (
+            "A planned verification command last ran before the latest observed edit."
+        ),
+        "planned_verification_outcome_unknown": (
+            "A planned verification command ran, but the host stated no outcome for it."
+        ),
+        "planned_verification_unobservable": (
+            "No observed command carries a command identity, so planned verification could not be"
+            " matched."
+        ),
+        "edited_after_last_verification": (
+            "An observed edit followed the last observed test, lint, typecheck or build run."
+        ),
+        "requested_output_git_ignored": (
+            "A requested output file is excluded by .git/info/exclude (a local exclude) or by a"
+            " .gitignore this task created, so a diff-based delivery omits it."
+        ),
+        "requested_output_ignored_by_repository": (
+            "A requested output file is ignored by the repository's own ignore rules, so a"
+            " diff-based delivery would omit it."
+        ),
+        "requested_output_unchanged": (
+            "A requested output file exists but is unchanged from the task base."
+        ),
+        "requested_output_outside_workspace": (
+            "A requested output path lies outside the checked repository; Yoetz did not read it."
+        ),
+        "requested_output_unverified": ("Requested output files could not be read at check time."),
+        "install_into_yoetz_runtime": (
+            "A package install resolved to Yoetz's own runtime interpreter, not the task's."
+        ),
+        "install_into_private_env": (
+            "A package install resolved to a virtual environment outside the workspace."
+        ),
+        "write_outside_workspace": (
+            "A write landed outside the workspace; it is not part of the delivered change."
+        ),
+        "verification_only_as_root": (
+            "Every observed test, lint, typecheck or build run ran as root."
+        ),
+        "obligation_blocked_outside_agent_control": (
+            "An open obligation is named by a recorded blocker outside the agent's control"
+            " (authority, consent, credentials, or an unobtainable dependency)."
+        ),
+    }
+)
 
 
 OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP: Final = "optional_semantic_review_blocked_by_policy"

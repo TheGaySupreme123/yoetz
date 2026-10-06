@@ -210,6 +210,18 @@ changes nothing. The receipt still lists every limitation, and its conclusion is
 local-only check with limitations is still `insufficient_coverage`. `ready` means nothing remains
 at all, and `unknown` means read status again once it is readable.
 
+Local checks also report facts about the task's own work: a planned verification command (an
+obligation's requested command) that was never seen running exactly as recorded, failed on its
+latest run, or last ran before your latest edit; a requested output file that is missing (a
+receipt-blocking finding, even if an action named it), excluded from Git, or unchanged; and
+installs or writes that went outside the task's workspace. If you stop while open obligations, a
+receipt-blocking finding, or one of those planned-verification or excluded-output facts remains,
+the stop is continued once with the list. When something outside your control blocks an
+obligation (authority, consent, credentials, or a dependency you cannot obtain), record a
+`decision_recorded` naming it in `affected_obligation_ids` with the statement line
+`yoetz-blocker:<authority|consent|credential|dependency_unavailable>`; it then reads as a disclosed
+limitation instead of open work.
+
 ### `receipt`
 Projects the honest summary of what was checked, at what coverage, and what remains open. Formats:
 `json`, `markdown`, `text` — all three project under the default policy. If a stricter owner policy

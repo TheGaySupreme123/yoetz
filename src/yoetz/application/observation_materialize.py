@@ -11,7 +11,7 @@ import hashlib
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from typing import Final, Literal, cast
+from typing import Final, Literal, TypedDict, cast
 
 from yoetz.domain.events import (
     EVIDENCE_SCHEMA_VERSION,
@@ -346,6 +346,24 @@ def _post_outcome(payload: Mapping[str, JsonValue]) -> ResultOutcome:
     if exit_status == 0 or payload.get("success") is True or lowered in _RESULT_STATUS_SUCCESS:
         return ResultOutcome.SUCCESS
     return ResultOutcome.UNKNOWN
+
+
+class _RuntimeDescriptionFacts(TypedDict, total=False):
+    install_target: str | None
+    write_outside_workspace: bool
+    effective_user: str | None
+
+
+def _runtime_description_facts(structural: Mapping[str, JsonValue]) -> _RuntimeDescriptionFacts:
+    """The closed runtime tokens (#977) the observed action description carries."""
+
+    install = structural.get("install_target")
+    user = structural.get("effective_user")
+    return {
+        "install_target": install if type(install) is str else None,
+        "write_outside_workspace": structural.get("write_scope") == "outside_workspace",
+        "effective_user": user if type(user) is str else None,
+    }
 
 
 def _omitted_command(structural: Mapping[str, JsonValue]) -> str:
@@ -1009,6 +1027,7 @@ def materialize_observation_envelope(
             f"Observed pending {action_kind.value} via {host}",
             tool,
             cast(str | None, structural.get("runner_class")),
+            **_runtime_description_facts(structural),
         )
         command = None
         if action_kind is ActionKind.COMMAND:
@@ -1170,6 +1189,7 @@ def materialize_observation_envelope(
                         ),
                         tool,
                         cast(str | None, structural.get("runner_class")),
+                        **_runtime_description_facts(structural),
                     ),
                     command=command,
                 ),

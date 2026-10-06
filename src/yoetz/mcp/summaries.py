@@ -882,6 +882,34 @@ def _validation_location_clause(error: Mapping[str, JsonValue]) -> str:
     return f" Rejected: {shown}."
 
 
+_RESULT_OUTCOME_POINTER: Final = re.compile(r"\A/event_drafts/[0-9]{1,3}/payload/outcome\Z")
+_RESULT_OUTCOME_HINT: Final = (
+    " Outcomes: success|failure|partial|unknown (no blocked): record failure or partial, and a"
+    " blocker outside your control as decision_recorded with the line yoetz-blocker:<kind>."
+)
+
+
+def _result_outcome_clause(error: Mapping[str, JsonValue]) -> str:
+    """Name the closed outcome set when a result draft's outcome was rejected (#977).
+
+    TB4 agents sent ``outcome: "blocked"`` and learned only that the field was invalid. The clause
+    is fixed repository text selected by the frozen rejection pointer; no caller value is echoed.
+    """
+
+    details = error.get("safe_details")
+    if not isinstance(details, Mapping):
+        return ""
+    fields = cast(Mapping[str, JsonValue], details).get("fields")
+    if not isinstance(fields, Sequence) or isinstance(fields, str):
+        return ""
+    if any(
+        type(field) is str and _RESULT_OUTCOME_POINTER.fullmatch(field) is not None
+        for field in cast(Sequence[JsonValue], fields)
+    ):
+        return _RESULT_OUTCOME_HINT
+    return ""
+
+
 def _claim_revision_clause(error: Mapping[str, JsonValue]) -> str:
     """Render the closed claim-revision invariant and its correction from typed details.
 
@@ -937,7 +965,8 @@ def summary_for_public_error(envelope: object) -> str:
     prefix = f"Error {code}; retryable: {retry_text}; correlation: {correlation_text}."
     extra = (
         f"{_repair_clause(error)}{_reason_location_clause(error)}"
-        f"{_validation_location_clause(error)}{_claim_revision_clause(error)}"
+        f"{_validation_location_clause(error)}{_result_outcome_clause(error)}"
+        f"{_claim_revision_clause(error)}"
     )
     # Priority order (issue #739): identity, then what was wrong, then what to do about it. The
     # continuation is budgeted against what the identity and location clauses already spent, so a

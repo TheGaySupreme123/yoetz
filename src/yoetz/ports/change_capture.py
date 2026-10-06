@@ -46,6 +46,7 @@ __all__ = [
     "decode_task_change_base",
     "encode_check_change",
     "encode_task_change_base",
+    "RequestedPathProbe",
 ]
 
 TASK_CHANGE_BASE_MEDIA_TYPE: Final = "application/vnd.yoetz.task-change-base+json"
@@ -270,6 +271,39 @@ class ChangeCapturePort(Protocol):
     def capture_metadata(self, workspace: str, base: TaskChangeBase | None) -> CheckChangeMetadata:
         """Return bounded changed-path facts without reading or returning file content."""
         ...
+
+
+@dataclass(frozen=True, slots=True)
+class RequestedPathProbe:
+    """One requested file path located against the checked repository root (#977).
+
+    ``location`` is ``inside`` or ``outside``. For an inside path, ``relative`` is its
+    root-relative form (compared with the check-time change entries, never stored), ``exists`` is
+    ``None`` when a link or non-directory blocked the walk, and ``ignored`` is Git's answer.
+    """
+
+    location: str
+    relative: str | None = field(default=None, repr=False)
+    exists: bool | None = None
+    ignored: bool | None = None
+    # For an ignored path, where the ignoring rule lives: ``info_exclude`` (``.git/info/exclude``),
+    # ``repository_file`` (a ``.gitignore`` in the tree, named root-relative by ``ignore_file``),
+    # or ``outside_repository`` (a configured or global excludes file).
+    ignore_source: str | None = None
+    ignore_file: str | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.location not in {"inside", "outside"}:
+            raise _invalid()
+        if self.ignore_source not in {
+            None,
+            "info_exclude",
+            "repository_file",
+            "outside_repository",
+        }:
+            raise _invalid()
+        if (self.location == "inside") is (self.relative is None):
+            raise _invalid()
 
 
 class TaskChangeBaseStorePort(Protocol):

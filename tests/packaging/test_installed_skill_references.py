@@ -59,13 +59,10 @@ def test_step_zero_stops_on_an_empty_guidance_read() -> None:
     )
     combined = f"{collapsed} {safety_floor}"
     assert "resolve without any repository checkout" not in collapsed
-    assert (
-        "If a body is empty, carries a truncation marker, or is nonempty but clipped" in combined
-    )
+    assert "If a body is empty, carries a truncation marker, or is nonempty but clipped" in combined
     assert "call `read_guidance` with the same URI" in combined
     assert (
-        "UTF-8 byte counts, offsets, markers, revision, continuation, and final digest"
-        in combined
+        "UTF-8 byte counts, offsets, markers, revision, continuation, and final digest" in combined
     )
     assert "structuredContent.text" in combined
     assert "`references/<name>.md`" in combined
