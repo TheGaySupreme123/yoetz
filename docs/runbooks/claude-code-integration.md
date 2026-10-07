@@ -1738,3 +1738,9 @@ its post share one action (described as observed via Claude Code hook), and a po
 keeps the standing `unpaired_event` record and triggers one "Yoetz notice (no response needed)"
 per new orphan scope instead of a recurring stale-observation advisory. Claude Code has no
 code-mode cell, so the stream wrapper rule does not apply.
+
+## Remote service mode (ADR-033)
+
+Claude Code is not a remote-service integration. Hooks and the MCP bridge stay clients of the
+local service. `yoetz remote connect` records nothing on the network and opens no connection.
+Remote forwarding stays deferred until the founder questions in ADR-033 are accepted.

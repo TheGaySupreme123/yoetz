@@ -503,6 +503,7 @@ class YoetzTui(App[int]):
             "privacy": self.command_privacy,
             "provider": self.command_provider,
             "service": self.command_service,
+            "remote": self.command_remote,
             "doctor": self.command_doctor,
             "help": self.command_help,
             "quit": self.command_quit,
@@ -1479,6 +1480,69 @@ class YoetzTui(App[int]):
                 f"{_disclosure_command(disclosure, 'resume_command', _RESUME_COMMAND)}",
             ),
         )
+
+    async def command_remote(self) -> None:
+        from yoetz.application.remote_mode import (
+            RemoteModeError,
+            configure_remote,
+            connect_remote,
+            default_remote_root,
+            disconnect_remote,
+            remote_status,
+            render_remote_status,
+        )
+        from yoetz.cli.render import render_local_recovery_lines
+
+        try:
+            root = default_remote_root()
+            status = remote_status(root)
+        except RemoteModeError as error:
+            self.say(
+                Level.BLOCKED,
+                "Remote mode is unavailable",
+                tuple(render_local_recovery_lines(error.reason)) or (error.reason,),
+            )
+            return
+        self.say(Level.ACTIVE, "Remote mode", render_remote_status(status).splitlines())
+        choice = await self.ask(
+            SelectionView(
+                name="remote",
+                options=[
+                    Option("https", "Record an HTTPS endpoint", "No credential is stored."),
+                    Option("ssh", "Record an SSH target", "No key is stored."),
+                    Option("disconnect", "Clear the stored endpoint"),
+                    Option("connect", "Connect", "Refuses before any network use."),
+                ],
+                hint="enter to choose · esc to go back",
+            )
+        )
+        if choice is None:
+            return
+        try:
+            if choice == "disconnect":
+                status = disconnect_remote(root)
+            elif choice == "connect":
+                connect_remote(root)
+                return
+            else:
+                entry = TextEntryView(
+                    name="remote-endpoint",
+                    title="Remote endpoint",
+                    label="HTTPS origin or SSH target",
+                    placeholder="https://reviews.example",
+                    empty_is_cancel=False,
+                )
+                if await self.ask(entry) is None:
+                    return
+                status = configure_remote(root, transport=choice, endpoint=entry.value.strip())
+        except RemoteModeError as error:
+            self.say(
+                Level.BLOCKED,
+                "Remote mode did not change",
+                tuple(render_local_recovery_lines(error.reason)) or (error.reason,),
+            )
+            return
+        self.say(Level.ACTIVE, "Remote mode", render_remote_status(status).splitlines())
 
     async def command_doctor(self) -> None:
         self.say(Level.ACTIVE, "Checking this installation")

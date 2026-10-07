@@ -6929,6 +6929,13 @@ facade and are never MCP tools.
   `privacy_request_commitment(final_request_body, audit_mac: MacKeyHandle)`; raw MAC keys are never
   accepted.
 
+Remote service mode (ADR-033, issue #903) is a local record. `yoetz remote status`, `configure`,
+`disconnect`, and `connect` read or write the on-disk document `yoetz.remote-mode/1` under the
+installation state directory. Status always reports the service as local and forwarding as off.
+`connect` fails with `remote_egress_not_authorized` and opens no socket. Hooks, MCP, the CLI, and
+the TUI remain clients of the local service and do not hold a remote credential. No receipt
+field, control method, or `schemas/` name is registered for a remote peer.
+
 ## 14. Version identities
 
 `version.py` exposes `VersionManifest`: package, protocol (`0.1`), local control protocol (`1.0`),
