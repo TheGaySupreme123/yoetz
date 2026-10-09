@@ -32,16 +32,20 @@ const structuredData = {
   license: "https://www.apache.org/licenses/LICENSE-2.0",
 };
 
-// The scroll story: one scene per screen, in order. `screens` is how many viewport
-// heights the scene spans; the sun rises across three so each stop gets its own line.
+// The scroll story: one scene at a time, in order. `screens` is how many viewport
+// heights the scene spans: a beat and a half for each of the first two lines, 1.2 for each
+// of the robot's three, and three for the sunrise so each stop gets its own line.
 const plan = [
   ["hero", 0.82],
-  ["alone", 1],
-  ["swarm", 1],
-  ["robot", 3],
+  ["alone", 1.5],
+  ["swarm", 1.5],
+  ["robot", 3.6],
   ["sun", 3],
   ["end", 1],
 ];
+// Extra screens the finished lockup holds, frozen, before the footer scrolls in.
+const END_HOLD = 0.6;
+const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + END_HOLD;
 
 // The sunrise is a benchmark: one model on Codex alone, then with Local FinishUP, then
 // with AI-powered FinishUP. Fill these in from the run; the page shows them as given.
@@ -140,7 +144,7 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
           </div>
           </div>
         </div>
-        <div class="spacer" aria-hidden="true"></div>
+        <div class="spacer" aria-hidden="true" style={`height: ${STORY_SCREENS * 100}vh; height: ${STORY_SCREENS * 100}svh`}></div>
       </div>
 
     </main>
@@ -180,43 +184,53 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
         const narrow = window.innerWidth < 720;
         const scoresEl = document.getElementById("bench-scores");
         const scores: string[] = scoresEl ? JSON.parse(scoresEl.textContent || "[]") : [];
-        const art = mountParticles(canvas, { count: narrow ? 2600 : 5200, reducedMotion: reduced, scores });
+        const art = mountParticles(canvas, { count: narrow ? 4500 : 9000, reducedMotion: reduced, scores, plan });
         let raf = 0;
         let last = "";
         const slot = document.getElementById("pc-slot");
         const tiers = Array.from(document.querySelectorAll<HTMLElement>(".dot-word"));
         const benchWith = document.getElementById("bench-with");
         const copies = Array.from(document.querySelectorAll<HTMLElement>(".copy"));
-        const COPY_AT: [string, number][] = [["hero", 0], ["alone", 0.82], ["swarm", 1.82], ["robot1", 2.82], ["robot2", 3.82], ["robot3", 4.82], ["bench", 5.82], ["end", 8.82]];
+        // where each scene starts, in screens; the copy beats are derived from the same plan
+        const start: Record<string, [number, number]> = {};
+        let acc = 0;
+        for (const [name, len] of plan) { start[name] = [acc, len]; acc += len; }
+        const robot = start.robot ?? [0, 3];
+        const COPY_AT: [string, number][] = [
+          ["hero", 0],
+          ["alone", start.alone?.[0] ?? 0],
+          ["swarm", start.swarm?.[0] ?? 0],
+          ["robot1", robot[0]],
+          ["robot2", robot[0] + robot[1] / 3],
+          ["robot3", robot[0] + (2 * robot[1]) / 3],
+          ["bench", start.sun?.[0] ?? 0],
+          ["end", start.end?.[0] ?? 0],
+        ];
+        const byCopy: Record<string, HTMLElement> = {};
+        for (const el of copies) if (el.dataset.copy) byCopy[el.dataset.copy] = el;
+        const ease = (v: number) => { const u = Math.max(0, Math.min(1, v)); return u * u * (3 - 2 * u); };
         const benchDot = document.getElementById("bench-dot");
         const update = () => {
           raf = 0;
           const vh = window.innerHeight || 900;
           const top = -story.getBoundingClientRect().top;
           const screens = (top + vh * 0.5) / vh;
-          let acc = 0;
-          let form = plan[plan.length - 1][0];
-          let phase = 1;
-          for (let i = 0; i < plan.length; i++) {
-            const [name, len] = plan[i];
-            if (screens < acc + len || i === plan.length - 1) {
-              form = name;
-              phase = Math.max(0, Math.min(1, (screens - acc) / len));
-              break;
-            }
-            acc += len;
-          }
-          void form;
-          void phase;
-          // one copy block at a time, cross-fading in place
-          let current = "hero";
-          for (const [name, at] of COPY_AT) if (screens >= at - 0.15) current = name;
-          for (const el of copies) el.classList.toggle("on", el.dataset.copy === current);
+          // One line at a time, timed by the scroll itself: the outgoing line is gone before
+          // the next fades in, and the dots change shape in the empty moment between.
+          COPY_AT.forEach(([name, at], k) => {
+            const el = byCopy[name];
+            if (!el) return;
+            const next = k + 1 < COPY_AT.length ? COPY_AT[k + 1][1] : Infinity;
+            const fadeIn = k === 0 ? 1 : ease((screens - (at + 0.05)) / 0.17);
+            const fadeOut = next === Infinity ? 1 : 1 - ease((screens - (next - 0.22)) / 0.17);
+            const opacity = Math.min(fadeIn, fadeOut);
+            el.style.opacity = opacity.toFixed(3);
+            el.style.transform = reduced ? "none" : `translateY(${((fadeOut - fadeIn) * 18).toFixed(1)}px)`;
+            el.classList.toggle("on", opacity > 0.5);
+          });
           // the benchmark copy stays put; "with FinishUP" appears at the second stop
-          if (benchWith) {
-            let sunStart = 0;
-            for (const [name, len] of plan) { if (name === "sun") break; sunStart += len; }
-            const bp = (screens - sunStart) / 3;
+          if (benchWith && start.sun) {
+            const bp = (screens - start.sun[0]) / start.sun[1];
             benchWith.classList.toggle("on", bp >= 0.33);
             benchDot?.classList.toggle("off", bp >= 0.33);
           }

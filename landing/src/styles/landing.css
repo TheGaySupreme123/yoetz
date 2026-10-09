@@ -233,8 +233,9 @@ img, svg { max-width: 100%; }
 .stanza .bench-dot { transition: opacity 0.3s ease; }
 .stanza .bench-dot.off { opacity: 0; }
 
-/* ---------- Story copy: one fixed layer, blocks cross-fade in place ---------- */
-.story .spacer { height: 982vh; height: 982svh; margin-top: -100vh; margin-top: -100svh; }
+/* ---------- Story copy: one fixed layer; the scroll sets each block's opacity ---------- */
+/* the spacer's height is the story's length, set from the plan in index.astro */
+.story .spacer { margin-top: -100vh; margin-top: -100svh; }
 .copies { position: absolute; inset: 0; pointer-events: none; }
 .copy {
   position: absolute;
@@ -245,9 +246,8 @@ img, svg { max-width: 100%; }
   box-sizing: border-box;
   opacity: 0;
   transform: translateY(14px);
-  transition: opacity 0.8s ease, transform 0.8s ease;
 }
-.copy.on { opacity: 1; transform: none; transition-delay: 0.25s; }
+.copy.on { opacity: 1; transform: none; }
 .copy.on a, .copy.on button { pointer-events: auto; }
 .copy.foot { align-items: flex-end; justify-content: center; }
 .copy.hero { position: absolute; }

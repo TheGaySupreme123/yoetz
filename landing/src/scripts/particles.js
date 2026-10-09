@@ -13,44 +13,49 @@ const PALETTE = {
 };
 
 const HERO_WORDS = ["work", "code", "research", "science", "writing", "reviews"];
-const HERO_SECONDS = 2.2;
+const HERO_SECONDS = 3.2;
+// once the reader starts scrolling, the hero keeps the word it was showing
+const HERO_HOLD_AT = 0.56;
 
 // The scroll story, in screens. Around each boundary the two neighbouring shapes are
 // blended by scroll position (BLEND screens either side), so the dots move with the
-// reader's hand rather than racing to a new shape when a line is crossed.
-const PLAN = [["hero", 0.82], ["alone", 1], ["swarm", 1], ["robot", 3], ["sun", 3], ["end", 1]];
+// reader's hand rather than racing to a new shape when a line is crossed. The page passes
+// its own plan; this one is the fallback.
+const PLAN = [["hero", 0.82], ["alone", 1.5], ["swarm", 1.5], ["robot", 3.6], ["sun", 3], ["end", 1]];
 const BLEND = 0.3;
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 const smooth = (v) => { const u = clamp01(v); return u * u * (3 - 2 * u); };
-function timeline(s) {
+function timeline(s, plan) {
   let acc = 0;
-  for (let i = 0; i < PLAN.length; i++) {
-    const [name, len] = PLAN[i];
+  for (let i = 0; i < plan.length; i++) {
+    const [name, len] = plan[i];
     const end = acc + len;
-    if (s < end || i === PLAN.length - 1) {
+    if (s < end || i === plan.length - 1) {
       const pa = clamp01((s - acc) / len);
-      if (i < PLAN.length - 1 && s > end - BLEND) {
-        return { a: name, pa, b: PLAN[i + 1][0], pb: clamp01((s - end) / PLAN[i + 1][1]), u: smooth((s - (end - BLEND)) / (2 * BLEND)) };
+      if (i < plan.length - 1 && s > end - BLEND) {
+        return { a: name, ia: i, pa, b: plan[i + 1][0], ib: i + 1, pb: clamp01((s - end) / plan[i + 1][1]), u: smooth((s - (end - BLEND)) / (2 * BLEND)) };
       }
       if (i > 0 && s < acc + BLEND) {
-        return { a: PLAN[i - 1][0], pa: 1, b: name, pb: pa, u: smooth((s - (acc - BLEND)) / (2 * BLEND)) };
+        return { a: plan[i - 1][0], ia: i - 1, pa: 1, b: name, ib: i, pb: pa, u: smooth((s - (acc - BLEND)) / (2 * BLEND)) };
       }
-      return { a: name, pa, b: null, pb: 0, u: 0 };
+      return { a: name, ia: i, pa, b: null, ib: -1, pb: 0, u: 0 };
     }
     acc = end;
   }
-  return { a: "end", pa: 1, b: null, pb: 0, u: 0 };
+  return { a: "end", ia: plan.length - 1, pa: 1, b: null, ib: -1, pb: 0, u: 0 };
 }
 
 export function mountParticles(canvas, options = {}) {
   const ctx = canvas.getContext("2d");
-  if (!ctx) return { setScene() {}, setAnchor() {}, destroy() {} };
+  if (!ctx) return { setScene() {}, setScroll() {}, setAnchor() {}, setTier() {}, destroy() {} };
   const reduced = !!options.reducedMotion;
-  const N = Math.max(800, Math.min(9000, options.count || 5200));
+  const N = Math.max(800, Math.min(9000, options.count || 9000));
   const sun = options.sun || "#E9B200";
   const scores = options.scores || ["60", "70", "80"];
+  const plan = options.plan && options.plan.length ? options.plan : PLAN;
 
   const pos = new Float32Array(N * 3);
+  const vel = new Float32Array(N * 3);
   const tgt = new Float32Array(N * 3);
   const tgtA = new Float32Array(N * 3);
   const tcolA = new Uint8Array(N);
@@ -59,8 +64,12 @@ export function mountParticles(canvas, options = {}) {
   const px = new Float32Array(N);
   const py = new Float32Array(N);
   const ps = new Float32Array(N);
+  const big = new Float32Array(N); // dot size multiplier: the benchmark's figures and words keep larger dots
+  const tbig = new Float32Array(N);
   const pa = new Float32Array(N);
   const R = new Float32Array(N * 6);
+  big.fill(1);
+  tbig.fill(1);
 
   let seed = 20260603;
   for (let i = 0; i < N * 6; i++) {
@@ -91,6 +100,20 @@ export function mountParticles(canvas, options = {}) {
   const off = document.createElement("canvas");
   off.width = 900;
   off.height = 300;
+  const offCtx = off.getContext("2d", { willReadFrequently: true });
+  // one soft round dot per colour, stamped for every point
+  const sprites = {};
+  const sprite = (color) => {
+    if (sprites[color]) return sprites[color];
+    const c = document.createElement("canvas");
+    c.width = c.height = 24;
+    const g = c.getContext("2d");
+    g.fillStyle = color;
+    g.beginPath();
+    g.arc(12, 12, 11, 0, 6.2832);
+    g.fill();
+    return (sprites[color] = c);
+  };
 
   let scene = { form: "hero", phase: 0 };
   let scroll = null; // screens into the story, when the page drives the engine by scroll
@@ -101,8 +124,11 @@ export function mountParticles(canvas, options = {}) {
   let tierN = { x: 0.9, y: 0.55, w: 0.7, h: 0.3 };
   let tilt = 0;
   let ox = 0;
+  let orb = 0;
+  let jit = reduced ? 0 : 0.5;
   let mx = 0;
   let smx = 0;
+  let heroWord = 0;
   let visible = true;
   let raf = 0;
   const t0 = performance.now();
@@ -112,13 +138,25 @@ export function mountParticles(canvas, options = {}) {
     tgt[i * 3 + 1] = y;
     tgt[i * 3 + 2] = z;
     tcol[i] = c;
+    tbig[i] = 1;
   };
   const scatter = (i) => set(i, (R[i * 6] - 0.5) * 2.8, (R[i * 6 + 1] - 0.5) * 2.8, (R[i * 6 + 2] - 0.5) * 2.8, 4);
-  const fromSet = (i, pts, sc, dx, dy, zj, c) => {
+  // Each dot takes the sample point at its own place in the shape's angular order, so dots
+  // that are neighbours in one shape stay neighbours in the next and the change flows rather
+  // than scattering. Solid shapes get a front and a back face, as deep as the shape is
+  // thick, so they read as volumes when the camera turns; `flat` keeps them on the plane.
+  const fromSet = (i, pts, sc, dx, dy, zj, c, flat) => {
     const n = pts.length / 3;
     if (!n) return scatter(i);
-    const j = Math.floor(R[i * 6 + 3] * n) * 3;
-    set(i, pts[j] * sc + dx, pts[j + 1] * sc + dy, (R[i * 6 + 4] - 0.5) * zj, c == null ? (pts[j + 2] ? 1 : 0) : c);
+    const idx = pts.order[Math.min(n - 1, Math.floor(R[i * 6] * n))];
+    const j = idx * 3;
+    let z;
+    if (flat) z = (R[i * 6 + 4] - 0.5) * zj;
+    else {
+      const zh = Math.min(0.08, pts.dep[idx] * 0.8 + 0.01);
+      z = (R[i * 6 + 4] < 0.5 ? -1 : 1) * zh * Math.min(sc, 1.2) * (0.8 + R[i * 6 + 2] * 0.2);
+    }
+    set(i, pts[j] * sc + dx, pts[j + 1] * sc + dy, z, c == null ? (pts[j + 2] ? 1 : 0) : c);
   };
   // like fromSet, but points i0..i1 walk the sample in order, so coverage is even and
   // the letters read crisply (no clumps, no gaps, no depth jitter)
@@ -135,10 +173,11 @@ export function mountParticles(canvas, options = {}) {
     const q = Math.sqrt(1 - u * u);
     set(i, cx + rr * q * Math.cos(ph), cy + rr * q * Math.sin(ph), cz + rr * u, c);
   };
-  const ring = (i, cx, cy, r, w, c, zj) => {
+  // a ring with a rim: two faces a little apart, like the edge of a dial
+  const ring = (i, cx, cy, r, w, c) => {
     const a = R[i * 6] * 6.2832;
     const rr = r + (R[i * 6 + 1] - 0.5) * w;
-    set(i, cx + rr * Math.cos(a), cy + rr * Math.sin(a), (R[i * 6 + 2] - 0.5) * zj, c);
+    set(i, cx + rr * Math.cos(a), cy + rr * Math.sin(a), (R[i * 6 + 2] < 0.5 ? -1 : 1) * 0.05 + (R[i * 6 + 3] - 0.5) * 0.03, c);
   };
   const seg = (i, x1, y1, x2, y2, w, c, z) => {
     const u = R[i * 6];
@@ -149,7 +188,7 @@ export function mountParticles(canvas, options = {}) {
     set(i, x1 + dx * u - (dy / L) * o, y1 + dy * u + (dx / L) * o, (z || 0) + (R[i * 6 + 2] - 0.5) * 0.05, c);
   };
   const clock = (i, f, cx, cy, r, hA, mA) => {
-    if (f < 0.56) ring(i, cx, cy, r, r * 0.07, 0, 0.08);
+    if (f < 0.56) ring(i, cx, cy, r, r * 0.07, 0);
     else if (f < 0.72) {
       const k = Math.floor(R[i * 6 + 5] * 12);
       const a = (k / 12) * 6.2832;
@@ -167,26 +206,85 @@ export function mountParticles(canvas, options = {}) {
     else if (q === 3) seg(i, ax - w, ay + h * 0.75, ax + w, ay + h * 0.75, 0.03 * s, c);
     else seg(i, ax - w * 1.25, ay + h, ax + w * 1.25, ay + h, 0.05 * s, c);
   };
+  void laptop;
 
   function sample(key, draw) {
     if (cache[key]) return cache[key];
     const W = off.width;
     const H = off.height;
-    const c = off.getContext("2d");
+    const c = offCtx;
     c.setTransform(1, 0, 0, 1, 0, 0);
     c.clearRect(0, 0, W, H);
     draw(c, W, H);
     const d = c.getImageData(0, 0, W, H).data;
-    const pts = [];
-    for (let y = 0; y < H; y += 2) {
-      for (let x = 0; x < W; x += 2) {
-        const k = (y * W + x) * 4;
-        if (d[k + 3] > 120) pts.push((x - W / 2) / (W / 2), (y - H / 2) / (W / 2), d[k + 1] > 128 ? 1 : 0);
+    // distance from each sample to the shape's edge (two-pass chamfer on the sampling grid):
+    // how thick the shape is there, so it can be given volume
+    const gw = W / 2, gh = H / 2;
+    const dist = new Float32Array(gw * gh);
+    for (let gy = 0; gy < gh; gy++) for (let gx = 0; gx < gw; gx++) dist[gy * gw + gx] = d[(gy * 2 * W + gx * 2) * 4 + 3] > 120 ? 1e6 : 0;
+    for (let gy = 0; gy < gh; gy++) {
+      for (let gx = 0; gx < gw; gx++) {
+        const q = gy * gw + gx;
+        let v = dist[q];
+        if (!v) continue;
+        v = Math.min(v, gx > 0 ? dist[q - 1] + 1 : 1);
+        if (gy > 0) {
+          v = Math.min(v, dist[q - gw] + 1);
+          if (gx > 0) v = Math.min(v, dist[q - gw - 1] + 1.414);
+          if (gx < gw - 1) v = Math.min(v, dist[q - gw + 1] + 1.414);
+        } else v = Math.min(v, 1);
+        dist[q] = v;
       }
     }
-    let lo = 9, hi = -9;
-    for (let j = 0; j < pts.length; j += 3) { if (pts[j] < lo) lo = pts[j]; if (pts[j] > hi) hi = pts[j]; }
+    for (let gy = gh - 1; gy >= 0; gy--) {
+      for (let gx = gw - 1; gx >= 0; gx--) {
+        const q = gy * gw + gx;
+        let v = dist[q];
+        if (!v) continue;
+        v = Math.min(v, gx < gw - 1 ? dist[q + 1] + 1 : 1);
+        if (gy < gh - 1) {
+          v = Math.min(v, dist[q + gw] + 1);
+          if (gx < gw - 1) v = Math.min(v, dist[q + gw + 1] + 1.414);
+          if (gx > 0) v = Math.min(v, dist[q + gw - 1] + 1.414);
+        } else v = Math.min(v, 1);
+        dist[q] = v;
+      }
+    }
+    const pts = [];
+    const dep = [];
+    for (let gy = 0; gy < gh; gy++) {
+      for (let gx = 0; gx < gw; gx++) {
+        const k = (gy * 2 * W + gx * 2) * 4;
+        if (d[k + 3] > 120) {
+          pts.push((gx * 2 - W / 2) / (W / 2), (gy * 2 - H / 2) / (W / 2), d[k + 1] > 128 ? 1 : 0);
+          dep.push((dist[gy * gw + gx] * 2) / (W / 2));
+        }
+      }
+    }
+    const n = pts.length / 3;
+    let lo = 9, hi = -9, mx0 = 0, my0 = 0;
+    for (let j = 0; j < n; j++) {
+      const x = pts[j * 3];
+      if (x < lo) lo = x;
+      if (x > hi) hi = x;
+      mx0 += x;
+      my0 += pts[j * 3 + 1];
+    }
+    mx0 /= Math.max(1, n);
+    my0 /= Math.max(1, n);
+    // the samples in angular order around the shape's centre (see fromSet)
+    const ang = new Float32Array(n);
+    for (let j = 0; j < n; j++) {
+      let a = Math.atan2(pts[j * 3 + 1] - my0, pts[j * 3] - mx0);
+      if (a < 0) a += 6.2832;
+      ang[j] = a;
+    }
+    const order = new Uint32Array(n);
+    for (let j = 0; j < n; j++) order[j] = j;
+    order.sort((p, q) => ang[p] - ang[q]);
     pts.width = Math.max(0.2, hi - lo);
+    pts.dep = dep;
+    pts.order = order;
     cache[key] = pts;
     return pts;
   }
@@ -278,45 +376,57 @@ export function mountParticles(canvas, options = {}) {
       rrect(c, cx - 66, 156, 132, 108, 16);
       rrect(c, cx - 104, 166, 30, 82, 12);
       rrect(c, cx + 74, 166, 30, 82, 12);
-      rrect(c, cx - 44, 266, 34, 30, 8);
-      rrect(c, cx + 10, 266, 34, 30, 8);
     });
 
-  function build(name, t, phase) {
-    const spec = { tilt: 0, ox: 0, yawAmp: 0.26, mouse: true };
+  // `idx` is the scene's place in the plan; `phase` how far through it the reader is.
+  function build(name, t, phase, idx) {
+    // orbit: how far the camera has turned with the scroll; still: the scene holds
+    // perfectly still once formed (the closing lockup)
+    const spec = { tilt: 0, ox: 0, yawAmp: 0.26, orbit: 0, mouse: true, still: false, turn: true };
     let pts, i, f, k, a;
     switch (name) {
       case "logo":
       case "end": {
-        // Lockup lifted above the closing copy; the laptop sits on the word "computer".
+        // The lockup in the top third, clear of the closing copy, and then frozen: it stays
+        // exactly as drawn while the page scrolls on to the footer.
         pts = logoSet();
-        spec.yawAmp = 0.08;
+        spec.yawAmp = 0;
         spec.mouse = false;
+        spec.still = true;
+        spec.turn = false;
+        const ly = narrowLayout ? -0.62 : -0.7;
         for (i = 0; i < N; i++) {
           f = i / N;
-          if (f < 0.96) fromSet(i, pts, 0.78, 0, -0.52, 0.12, null);
-          else sphere(i, 0, -0.52, 0, 1.1, 1);
+          if (f < 0.96) fromSet(i, pts, 0.56, 0, ly, 0.04, null, true);
+          else sphere(i, 0, ly, 0, 0.8, 1);
         }
         break;
       }
-      case "alone":
+      case "alone": {
+        // the clock's hands follow the scroll: an hour and a half passes in this scene
         pts = figureSet();
         spec.ox = -0.08;
+        const hA = -1.5708 + phase * 0.9;
+        const mA = -1.5708 + phase * 9.4248;
         for (i = 0; i < N; i++) {
           f = i / N;
           if (f < 0.3) fromSet(i, pts, 1.1, -0.58, 0.04, 0.12, 0);
-          else clock(i, (f - 0.3) / 0.7, 0.36, 0, 0.44, -1.5708 + t * 0.05, -1.5708 + t * 0.35);
+          else clock(i, (f - 0.3) / 0.7, 0.36, 0, 0.44, hA, mA);
         }
         break;
+      }
       case "swarm": {
-        // small robots on a tilted orbit around the human, clear of the copy on the right
+        // small robots on a tilted orbit around the human, clear of the copy on the right;
+        // the clock, shrunk, now races: six turns of the minute hand across the scene
         pts = figureSet();
         const bots = robotSet();
         spec.ox = -0.08;
+        const hA = -1.5708 + 0.9 + phase * 3;
+        const mA = -1.5708 + 9.4248 + phase * 37.7;
         for (i = 0; i < N; i++) {
           f = i / N;
           if (f < 0.3) fromSet(i, pts, 1.05, 0, 0.02, 0.12, 0);
-          else if (f < 0.46) clock(i, (f - 0.3) / 0.16, 0.7, -0.5, 0.18, -1.5708 + t * 0.5, -1.5708 + t * 5);
+          else if (f < 0.46) clock(i, (f - 0.3) / 0.16, 0.7, -0.5, 0.18, hA, mA);
           else {
             k = Math.floor(((f - 0.46) / 0.54) * 6);
             a = (k / 6) * 6.2832 + t * 0.35;
@@ -327,8 +437,8 @@ export function mountParticles(canvas, options = {}) {
         break;
       }
       case "robot": {
-        // One scene over three screens: the agent fades (0 to 0.33), FinishUP's check
-        // arrives (0.33 to 0.66), the agent comes back greener than it started (0.66 to 1).
+        // One scene over three beats: the agent fades, FinishUP's check arrives, the agent
+        // comes back greener than it started.
         pts = robotSet();
         spec.ox = -0.12;
         spec.yawAmp = 0.2;
@@ -362,8 +472,11 @@ export function mountParticles(canvas, options = {}) {
         break;
       }
       case "sun": {
+        // The figures and tier words are drawn flat and the camera holds square, so they
+        // stay readable and land in the slot the copy leaves for them.
         spec.yawAmp = 0.05;
         spec.ox = -0.1;
+        spec.turn = false;
         const y0 = 0.8;
         const sy = 0.84 - phase * 1.3;
         const stop = Math.min(2, Math.floor(phase * 3));
@@ -378,14 +491,17 @@ export function mountParticles(canvas, options = {}) {
             continue;
           }
           if (f >= 0.62) {
-            if (tier) fromSetEven(i, Math.floor(N * 0.62), N, tier, tsc, tierN.x + tierN.w / 2 - (tier.width * tsc) / 2, tierN.y, stop === 1 ? 5 : 6);
-            else sphere(i, 0, sy, 0, 0.17, 2);
+            if (tier) {
+              fromSetEven(i, Math.floor(N * 0.62), N, tier, tsc, tierN.x + tierN.w / 2 - (tier.width * tsc) / 2, tierN.y, stop === 1 ? 5 : 6);
+              tbig[i] = 1.6;
+            } else sphere(i, 0, sy, 0, 0.17, 2);
             continue;
           }
           if (f >= 0.52) {
             // the benchmark score, rising with the sun: one figure per stop
-            if (narrowLayout) fromSet(i, digits, 0.5, 0.02, sy - 0.5, 0.1, 0);
-            else fromSet(i, digits, 0.6, -0.72, Math.min(sy, 0.55), 0.1, 0);
+            if (narrowLayout) fromSet(i, digits, 0.5, 0.02, sy - 0.5, 0.1, 0, true);
+            else fromSet(i, digits, 0.6, -0.72, Math.min(sy, 0.55), 0.1, 0, true);
+            tbig[i] = 1.6;
             continue;
           }
           if (f < 0.3) sphere(i, 0, sy, 0, 0.17, 2);
@@ -400,15 +516,23 @@ export function mountParticles(canvas, options = {}) {
       }
       case "hero":
       default: {
-        // The word between "We use agents to do" and "FinishUP makes sure they do it."
-        const w = HERO_WORDS[Math.floor(t / HERO_SECONDS) % HERO_WORDS.length];
-        pts = wordSet(w);
+        // The word between "We use agents for" and "FinishUP makes sure they do it."
+        // It changes on its own until the reader scrolls, then holds.
+        if (scroll == null || scroll < HERO_HOLD_AT) heroWord = Math.floor(t / HERO_SECONDS) % HERO_WORDS.length;
+        pts = wordSet(HERO_WORDS[heroWord]);
         spec.yawAmp = 0.12;
         for (i = 0; i < N; i++) {
           if (R[i * 6 + 5] < 0.03) sphere(i, 0, -0.16, 0, 1.0, 1);
           else fromSet(i, pts, 0.8, 0, -0.16, 0.14, 0);
         }
       }
+    }
+    if (spec.turn) {
+      // The camera turns with the scroll, about 13 degrees across a scene, alternating
+      // direction scene to scene so a scene starts where the last one left the camera.
+      spec.orbit = (idx % 2 ? -1 : 1) * (phase - 0.5) * 0.45;
+      spec.tilt = -0.16 * Math.sin(Math.PI * phase);
+      spec.yawAmp *= 0.35;
     }
     return spec;
   }
@@ -431,48 +555,63 @@ export function mountParticles(canvas, options = {}) {
     if (tierPx) tierN = { x: (tierPx.x - cxo) / S, y: (tierPx.y - cyo) / S, w: tierPx.w / S, h: tierPx.h / S };
     let spec;
     if (scroll != null) {
-      const tl = timeline(scroll);
-      spec = build(tl.a, t, tl.pa);
+      const tl = timeline(scroll, plan);
+      spec = build(tl.a, t, tl.pa, tl.ia);
       if (tl.b && tl.u > 0) {
         tgtA.set(tgt);
         tcolA.set(tcol);
-        const specB = build(tl.b, t, tl.pb);
+        const specB = build(tl.b, t, tl.pb, tl.ib);
         const u = tl.u;
-        // mid-blend the dots fall back into the haze and come forward again
-        const back = Math.sin(Math.PI * u) * 0.7;
-        for (let i = 0; i < N * 3; i++) tgt[i] = tgtA[i] + (tgt[i] - tgtA[i]) * u + (i % 3 === 2 ? back : 0);
-        if (u < 0.5) tcol.set(tcolA);
+        // The change sweeps across the form from left to right like a wave, and each dot
+        // takes a little turbulence in flight before it settles.
+        for (let i = 0; i < N; i++) {
+          const j = i * 3;
+          const ui = smooth(u * 1.7 - clamp01((tgtA[j] + 1.2) / 2.4) * 0.7);
+          const amp = Math.sin(Math.PI * ui) * 0.14;
+          tgt[j] = tgtA[j] + (tgt[j] - tgtA[j]) * ui + Math.sin(tgtA[j + 1] * 4 + t * 0.8 + R[i * 6 + 2] * 2) * amp;
+          tgt[j + 1] = tgtA[j + 1] + (tgt[j + 1] - tgtA[j + 1]) * ui + Math.cos(tgtA[j] * 4 - t * 0.7 + R[i * 6 + 3] * 2) * amp;
+          tgt[j + 2] = tgtA[j + 2] + (tgt[j + 2] - tgtA[j + 2]) * ui + amp * 0.6;
+          if (ui < 0.5) tcol[i] = tcolA[i];
+        }
         spec = {
           tilt: spec.tilt + (specB.tilt - spec.tilt) * u,
           ox: spec.ox + (specB.ox - spec.ox) * u,
           yawAmp: spec.yawAmp + (specB.yawAmp - spec.yawAmp) * u,
+          orbit: spec.orbit + (specB.orbit - spec.orbit) * u,
           mouse: u < 0.5 ? spec.mouse : specB.mouse,
+          still: u < 0.5 ? spec.still : specB.still,
         };
       }
     } else {
-      spec = build(scene.form, t, clamp01(scene.phase || 0));
+      spec = build(scene.form, t, clamp01(scene.phase || 0), 0);
     }
+    // each dot is a damped spring on its target: it arrives with a little inertia
     for (let i = 0; i < N; i++) {
-      const k = 0.035 + R[i * 6 + 4] * 0.05;
+      const ks = 0.006 + R[i * 6 + 4] * 0.006;
       const j = i * 3;
       const dx = tgt[j] - pos[j];
       const dy = tgt[j + 1] - pos[j + 1];
       const dz = tgt[j + 2] - pos[j + 2];
-      pos[j] += dx * k;
-      pos[j + 1] += dy * k;
-      pos[j + 2] += dz * k;
+      vel[j] = (vel[j] + dx * ks) * 0.88;
+      vel[j + 1] = (vel[j + 1] + dy * ks) * 0.88;
+      vel[j + 2] = (vel[j + 2] + dz * ks) * 0.88;
+      pos[j] += vel[j];
+      pos[j + 1] += vel[j + 1];
+      pos[j + 2] += vel[j + 2];
       if (dx * dx + dy * dy + dz * dz < 0.02) col[i] = tcol[i];
+      big[i] += (tbig[i] - big[i]) * 0.08;
     }
-    tilt += (spec.tilt - tilt) * 0.04;
+    tilt += ((reduced ? 0 : spec.tilt) - tilt) * 0.04;
     ox += (spec.ox - ox) * 0.04;
+    orb += ((reduced ? 0 : spec.orbit) - orb) * 0.06;
+    jit += ((reduced || spec.still ? 0 : 0.5) - jit) * 0.05;
     smx += ((spec.mouse ? mx : 0) - smx) * 0.05;
-    const yaw = reduced ? 0 : Math.sin(t * 0.12) * spec.yawAmp + smx * 0.3;
+    const yaw = reduced ? 0 : Math.sin(t * 0.12) * spec.yawAmp + orb + smx * 0.3;
     const cy0 = Math.cos(yaw), sy0 = Math.sin(yaw), ct = Math.cos(tilt), st = Math.sin(tilt);
     const narrow = cw < 720;
     const cx = cw / 2 + (narrow ? ox * 0.4 : ox) * cw;
     const cy = narrow ? ch * 0.36 : ch / 2;
     const F = 2.6;
-    const jit = reduced ? 0 : 0.5;
     for (let i = 0; i < N; i++) {
       const j = i * 3;
       const x = pos[j], y = pos[j + 1], z = pos[j + 2];
@@ -484,7 +623,7 @@ export function mountParticles(canvas, options = {}) {
       const jj = col[i] >= 5 ? 0 : jit;
       px[i] = cx + x1 * S * sc + Math.sin(t * 2.2 + i) * jj;
       py[i] = cy + y2 * S * sc + Math.cos(t * 1.9 + i * 0.7) * jj;
-      ps[i] = (1.2 + R[i * 6 + 1] * 1.9) * sc * (col[i] >= 5 ? 1.25 : 1);
+      ps[i] = (0.8 + R[i * 6 + 1] * 1.4) * 1.3 * sc * big[i] * (col[i] >= 5 ? 1.25 : 1);
       const dep = 1 - (Math.max(-1.2, Math.min(1.2, z2)) + 1.2) / 2.4;
       pa[i] = col[i] >= 5 ? 1 : 0.22 + dep * 0.78;
     }
@@ -506,16 +645,17 @@ export function mountParticles(canvas, options = {}) {
       const sc = F / (F + z2);
       const dep = 1 - Math.max(0, Math.min(1, (z2 - 0.2) / 1.6));
       ctx.globalAlpha = 0.05 + dep * 0.16;
-      const s = (0.8 + (ph / 6.2832) * 1.2) * sc;
+      const s = (0.8 + (ph / 6.2832) * 1.2) * sc * 0.7;
       ctx.fillRect(cx + x1 * S * sc, cy + y2 * S * sc, s, s);
     }
     for (let c = 0; c < PAL.length; c++) {
-      ctx.fillStyle = PAL[c];
+      const dot = sprite(PAL[c]);
       const am = AM[c];
       for (let i = 0; i < N; i++) {
         if (col[i] !== c) continue;
         ctx.globalAlpha = pa[i] * am;
-        ctx.fillRect(px[i], py[i], ps[i], ps[i]);
+        const s = ps[i];
+        ctx.drawImage(dot, px[i] - s / 2, py[i] - s / 2, s, s);
       }
     }
     ctx.globalAlpha = 1;
