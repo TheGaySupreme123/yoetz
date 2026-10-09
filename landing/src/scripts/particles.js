@@ -126,6 +126,7 @@ export function mountParticles(canvas, options = {}) {
   let ox = 0;
   let orb = 0;
   let jit = reduced ? 0 : 0.5;
+  let scaleS = 400; // the last frame's scale, canvas px per unit
   let mx = 0;
   let smx = 0;
   let heroWord = 0;
@@ -479,32 +480,37 @@ export function mountParticles(canvas, options = {}) {
         spec.turn = false;
         const y0 = 0.8;
         const sy = 0.84 - phase * 1.3;
-        const stop = Math.min(2, Math.floor(phase * 3));
+        // two stops: Codex alone, then with FinishUP's AI-powered review
+        const stop = phase < 0.5 ? 0 : 1;
         const digits = wordSet((scores[Math.min(scores.length - 1, stop)] || "") + "%");
-        // the tier word, drawn in dots where the copy leaves room for it
-        const tier = stop === 1 ? wordSet("Local", true) : stop === 2 ? wordSet("AI-powered", true) : null;
+        // the tier word, drawn densely in dots where the copy leaves room for it, its dots
+        // sized to the word so it reads at every width
+        const tier = stop === 1 ? wordSet("AI-powered", true) : null;
         const tsc = tier ? Math.min(tierN.w / tier.width, tierN.h / 0.42) : 0;
+        // flush with the copy: right-aligned on wide screens, left-aligned on phones
+        const tierX = narrowLayout ? tierN.x - tierN.w / 2 + (tier ? tier.width * tsc : 0) / 2 : tierN.x + tierN.w / 2 - (tier ? tier.width * tsc : 0) / 2;
+        const tierDot = Math.max(0.9, Math.min(1.5, (tsc * 0.42 * scaleS) / 55));
         for (i = 0; i < N; i++) {
           f = i / N;
           if (f < 0.18) {
             set(i, (R[i * 6] - 0.5) * 2.3, y0 + (R[i * 6 + 1] - 0.5) * 0.03, (R[i * 6 + 2] - 0.5) * 0.5, 0);
             continue;
           }
-          if (f >= 0.62) {
+          if (f >= 0.45) {
             if (tier) {
-              fromSetEven(i, Math.floor(N * 0.62), N, tier, tsc, tierN.x + tierN.w / 2 - (tier.width * tsc) / 2, tierN.y, stop === 1 ? 5 : 6);
-              tbig[i] = 1.6;
+              fromSetEven(i, Math.floor(N * 0.45), N, tier, tsc, tierX, tierN.y, 6);
+              tbig[i] = tierDot;
             } else sphere(i, 0, sy, 0, 0.17, 2);
             continue;
           }
-          if (f >= 0.52) {
+          if (f >= 0.37) {
             // the benchmark score, rising with the sun: one figure per stop
             if (narrowLayout) fromSet(i, digits, 0.5, 0.02, sy - 0.5, 0.1, 0, true);
             else fromSet(i, digits, 0.6, -0.72, Math.min(sy, 0.55), 0.1, 0, true);
             tbig[i] = 1.6;
             continue;
           }
-          if (f < 0.3) sphere(i, 0, sy, 0, 0.17, 2);
+          if (f < 0.26) sphere(i, 0, sy, 0, 0.17, 2);
           else {
             a = R[i * 6] * 6.2832;
             const rr = 0.2 + R[i * 6 + 1] * 0.32 * (0.55 + 0.45 * Math.sin(a * 9 + t * 1.5));
@@ -548,6 +554,7 @@ export function mountParticles(canvas, options = {}) {
     }
     const t = (performance.now() - t0) / 1000;
     const S = cw < 720 ? cw * 0.42 : Math.min(cw, ch) * 0.46;
+    scaleS = S;
     const nrw = cw < 720;
     narrowLayout = nrw;
     const cxo = cw / 2 + (nrw ? ox * 0.4 : ox) * cw, cyo = nrw ? ch * 0.36 : ch / 2;
@@ -699,7 +706,7 @@ export function mountParticles(canvas, options = {}) {
     setAnchor(x, y) {
       anchor = x == null ? null : { x, y };
     },
-    // the slot (canvas pixels: centre and size) where "Local" / "AI-powered" is drawn in dots
+    // the slot (canvas pixels: centre and size) where "AI-powered" is drawn in dots
     setTier(x, y, w, h) {
       tierPx = x == null ? null : { x, y, w, h };
     },

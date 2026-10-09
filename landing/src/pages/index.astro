@@ -47,11 +47,11 @@ const plan = [
 const END_HOLD = 0.6;
 const STORY_SCREENS = plan.reduce((sum, [, len]) => sum + (len as number), 0) + END_HOLD;
 
-// The sunrise is a benchmark: one model on Codex alone, then with Local FinishUP, then
-// with AI-powered FinishUP. Fill these in from the run; the page shows them as given.
-// The three scores are drawn in dots beside the sun (see particles.js); 60/70/80 are
-// stand-ins until the run's numbers are supplied.
-const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80"] };
+// The sunrise is a benchmark: one model on Codex alone, then with FinishUP's AI-powered
+// review. Fill these in from the run; the page shows them as given. The two scores are
+// drawn in dots beside the sun (see particles.js); 60/80 are stand-ins until the run's
+// numbers are supplied.
+const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "80"] };
 ---
 
 <html lang="en">
@@ -128,7 +128,7 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
           </div>
           <div class="copy side" data-copy="bench">
               <div class="copy-right wide">
-                <p class="stanza">We tested {BENCH.model} on <span class="nowrap"><span class="tag"><img src="/assets/openai.svg" alt="" width="22" height="22" />Codex</span>,</span> scored on <span class="nowrap"><span class="tag wordmark">{BENCH.suite}</span><span class="bench-dot" id="bench-dot">.</span></span> <span class="nowrap reveal" id="bench-with">with <img class="fup-mark" src="/assets/finishup-mark.png" alt="" />FinishUP</span><span class="dot-word" aria-label="Local, then AI-powered" role="img"></span></p>
+                <p class="stanza">We tested {BENCH.model} on <span class="nowrap"><span class="tag"><img src="/assets/openai.svg" alt="" width="22" height="22" />Codex</span>,</span> scored on <span class="nowrap"><span class="tag wordmark">{BENCH.suite}</span><span class="bench-dot" id="bench-dot">.</span></span> <span class="nowrap reveal" id="bench-with">with <img class="fup-mark" src="/assets/finishup-mark.png" alt="" />FinishUP</span><span class="dot-word" aria-label="AI-powered" role="img"></span></p>
                 <a class="paper" href={PAPER_URL} target="_blank" rel="noopener">Read the full paper <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9" /></svg></a>
               </div>
           </div>
@@ -210,6 +210,8 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
         for (const el of copies) if (el.dataset.copy) byCopy[el.dataset.copy] = el;
         const ease = (v: number) => { const u = Math.max(0, Math.min(1, v)); return u * u * (3 - 2 * u); };
         const benchDot = document.getElementById("bench-dot");
+        // screens into the story with the page at the very top: where the hero rests
+        const rest = (-(story.getBoundingClientRect().top + window.scrollY) + (window.innerHeight || 900) * 0.5) / (window.innerHeight || 900);
         const update = () => {
           raf = 0;
           const vh = window.innerHeight || 900;
@@ -224,15 +226,20 @@ const BENCH = { model: "GPT 6.1 Sol", suite: "DeepSWE", scores: ["60", "70", "80
             const fadeIn = k === 0 ? 1 : ease((screens - (at + 0.05)) / 0.17);
             const fadeOut = next === Infinity ? 1 : 1 - ease((screens - (next - 0.22)) / 0.17);
             const opacity = Math.min(fadeIn, fadeOut);
+            // each line drifts gently upward while it is on screen; the hero's starts with
+            // the first scroll
+            const from = k === 0 ? rest : at + 0.05;
+            const to = next === Infinity ? from + 1 : next - 0.05;
+            const drift = (k === 0 ? 0 : 12) - 24 * Math.max(0, Math.min(1, (screens - from) / Math.max(0.01, to - from)));
             el.style.opacity = opacity.toFixed(3);
-            el.style.transform = reduced ? "none" : `translateY(${((fadeOut - fadeIn) * 18).toFixed(1)}px)`;
+            el.style.transform = reduced ? "none" : `translateY(${((fadeOut - fadeIn) * 18 + drift).toFixed(1)}px)`;
             el.classList.toggle("on", opacity > 0.5);
           });
           // the benchmark copy stays put; "with FinishUP" appears at the second stop
           if (benchWith && start.sun) {
             const bp = (screens - start.sun[0]) / start.sun[1];
-            benchWith.classList.toggle("on", bp >= 0.33);
-            benchDot?.classList.toggle("off", bp >= 0.33);
+            benchWith.classList.toggle("on", bp >= 0.5);
+            benchDot?.classList.toggle("off", bp >= 0.5);
           }
           const key = String(Math.round(screens * 400) / 400);
           if (key !== last) {
