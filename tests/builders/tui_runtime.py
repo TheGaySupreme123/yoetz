@@ -96,9 +96,10 @@ LOCAL_ONLY = PrivacyPosture(profile="local_only", llm_inference_enabled=False, r
 # `finishup.cli.privacy_setup.recommended_privacy_recipe` applies.
 RECOMMEND_PRIVATE = PrivacyRecommendation(
     "private",
-    "No current eligible exact provider route is configured, so this keeps network egress off "
-    "entirely.",
-    "In exchange, there is no external AI-powered review at all.",
+    "No reviewer with current reviewed data-use evidence is set up, so FinishUP runs its local "
+    "checks on every task and sends no work for AI-powered review.",
+    "Add AI-powered review with /provider when you want it; your agent can then turn it on for "
+    "a task when it helps.",
 )
 # Verbatim from `FinishUpRuntime.privacy_recommendation`. A fake that paraphrases lets a test
 # assert wording the product does not actually say.
@@ -152,6 +153,7 @@ class FakeRuntime:
     subscription_actions: list[str] = field(default_factory=lambda: [])
     subscription_setups: list[tuple[str, str, str, str, bool]] = field(default_factory=lambda: [])
     subscription_routine_efforts: list[str | None] = field(default_factory=lambda: [])
+    subscription_model_suggestions: list[bool] = field(default_factory=lambda: [])
     checks: list[tuple[str, CheckMode]] = field(default_factory=lambda: [])
     opened: list[str] = field(default_factory=lambda: [])
     progress_reads: list[str] = field(default_factory=lambda: [])
@@ -195,14 +197,25 @@ class FakeRuntime:
         return self.mcp
 
     async def run_privacy_setup(
-        self, recipe_hint: str | None, *, offer_recommended: bool = False
+        self,
+        recipe_hint: str | None,
+        *,
+        offer_recommended: bool = False,
+        conversation_review: str | None = None,
+        ai_review_add_on: bool = False,
     ) -> object:
         from finishup.cli.privacy_setup import PrivacySetupReport
 
         # ``None`` means the CLI opens on its recommendation; the fake resolves it the same way
-        # the real one does so the interface cannot be tested against a rule of its own.
-        recipe = recipe_hint or self.recommendation.recipe
-        self.ceremonies.append(f"privacy:{recipe}{'+recommended' if offer_recommended else ''}")
+        # the real one does so the interface cannot be tested against a rule of its own. The
+        # AI-powered review add-on list starts on Assisted review (ADR-049 review round 1).
+        recipe = recipe_hint or ("assisted_review" if ai_review_add_on else None)
+        recipe = recipe or self.recommendation.recipe
+        self.ceremonies.append(
+            f"privacy:{recipe}{'+recommended' if offer_recommended else ''}"
+            + ("+add_on" if ai_review_add_on else "")
+            + ("" if conversation_review is None else f"+conversations:{conversation_review}")
+        )
         profile = {
             "private": "local_only",
             "metadata_only": "confirm_every_request",
@@ -350,6 +363,10 @@ class FakeRuntime:
         return "/opt/codex/codex", "/var/lib/finishup/codex-home", "gpt-5.6-luna", "high"
 
     subscription_routine_default: str | None = "medium"
+    subscription_model_is_suggested: bool = True
+
+    def codex_subscription_model_is_suggested(self) -> bool:
+        return self.subscription_model_is_suggested
 
     def codex_subscription_routine_default(self) -> str | None:
         return self.subscription_routine_default
@@ -385,8 +402,10 @@ class FakeRuntime:
         *,
         switch_account: bool = False,
         routine_reasoning_effort: str | None = None,
+        model_is_suggestion: bool = False,
     ) -> dict[str, object]:
         action = "switch" if switch_account else "setup"
+        self.subscription_model_suggestions.append(model_is_suggestion)
         self.subscription_routine_efforts.append(routine_reasoning_effort)
         self.subscription_actions.append(action)
         self.subscription_setups.append(

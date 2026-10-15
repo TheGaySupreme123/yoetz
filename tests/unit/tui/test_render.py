@@ -55,6 +55,7 @@ def test_welcome_shows_the_wordmark_only_when_the_terminal_can_hold_it() -> None
     assert finishup_mark(MIN_ASCII_WIDTH) != ()
     assert finishup_mark(MIN_ASCII_WIDTH - 1) == ()
     assert "Welcome to FinishUP" in "\n".join(render_welcome(NARROW))
+    assert "FinishUP was previously called Yoetz." in " ".join(render_welcome(WIDE))
 
 
 def test_welcome_renders_at_wide_and_narrow_widths(assert_snapshot: Snapshot) -> None:
@@ -556,3 +557,46 @@ def test_the_session_header_middle_truncates_a_long_project_path() -> None:
     assert ">_ FinishUP (v0.1.0)" in joined
     assert "…" in joined
     assert "/privacy to change" in joined
+
+
+def test_privacy_posture_says_review_is_not_set_up_in_a_repository_without_a_grant() -> None:
+    """ADR-049 review round 2: `/privacy` reads the repository, not the inherited row."""
+
+    from finishup.tui.models import PrivacyPosture as _Posture
+
+    missing = _Posture(
+        profile="assisted_review",
+        llm_inference_enabled=True,
+        readable=True,
+        repository_grant_state="missing",
+        conversation_review="ai_powered",
+        conversation_review_explicit=False,
+    )
+    summary = missing.conversation_review_summary or ""
+    assert "AI-powered review is not set up for this repository" in summary
+    assert "every task runs with AI-powered review" not in summary
+    released_off = _Posture(
+        profile="private",
+        llm_inference_enabled=False,
+        readable=True,
+        repository_grant_state="granted",
+        conversation_review="local_only",
+        conversation_review_explicit=False,
+    )
+    assert "agents may not" not in (released_off.conversation_review_summary or "")
+
+
+def test_privacy_posture_names_a_pending_carry_forward() -> None:
+    from finishup.tui.models import PrivacyPosture as _Posture
+
+    pending = _Posture(
+        profile="assisted_review",
+        llm_inference_enabled=True,
+        readable=True,
+        repository_grant_state="missing",
+        repository_migration_state="first_repository_available",
+        conversation_review="ai_powered",
+        conversation_review_explicit=False,
+    )
+    summary = pending.conversation_review_summary or ""
+    assert "carried forward to it when a task first starts" in summary

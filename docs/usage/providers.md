@@ -48,9 +48,16 @@ setup, the prompt-loop provider menu, `/provider`, or run:
 finishup provider codex-subscription setup --executable /absolute/path/to/codex
 ```
 
-New setups preselect `gpt-6-luna` with reasoning effort `high` for final reviews and `medium`
-for routine checkpoints. A check counts as final when your task has recorded a completion claim;
-every earlier check is a routine checkpoint, which can use a lower effort than final reviews. Use
+New setups suggest `gpt-6.1-sol` with reasoning effort `medium` for final reviews and `medium`
+for routine checkpoints. The suggestion is bound only when the Codex that FinishUP runs lists
+`gpt-6.1-sol` with those efforts. An older Codex such as `0.157.1` does not, so setup uses
+`gpt-6-luna` instead and says so before the sign-in. A model you type yourself is never
+substituted, and upgrading never changes the model an existing setup already uses. The
+suggestion is checked against Codex's model list only; no authenticated AI-powered review with
+`gpt-6.1-sol` has been recorded yet.
+
+A check counts as final when your task has recorded a completion claim; every earlier check is a
+routine checkpoint, which can use a lower effort than final reviews. Use
 `--reasoning-effort` and `--routine-reasoning-effort` to choose each one. When an existing
 subscription binding is targeted, omitting `--model` preserves its exact model. Omitting
 `--reasoning-effort` and `--routine-reasoning-effort` preserves its final and routine choices,
@@ -268,7 +275,7 @@ models stay listed while xAI lists them. The Grok entries inside the OpenRouter 
 Gateway lists were re-reviewed against those gateways' own published catalogs on the same day and
 follow the identifier each gateway publishes today, which is not always the identifier xAI uses.
 The Fireworks list also retains `accounts/fireworks/models/minimax-m3`, which has prior
-repository-recorded live AI-powered review provenance. The lists are static so setup stays deterministic
+repository-recorded live AI-powered review provenance. The lists are static so setup stays repeatable
 and opens no new network or credential channel; they can age, may not match account entitlements,
 and do not establish FinishUP's exact structured-output compatibility. Use the custom entry for any
 new, private, preview, region-specific, or omitted model.
@@ -604,7 +611,7 @@ semantic_advice_enabled = false
 semantic_advice_min_interval_seconds = 180
 ```
 
-This stops background reviews while keeping deterministic advice and explicit AI-powered checks
+This stops background reviews while keeping local advice and explicit AI-powered checks
 available. Set it to `true`, or remove the line to return to the default, to turn it back on.
 FinishUP writes this line only when you choose it, so a later default change still reaches you
 when you have not. Background reviews that were queued before advice was switched off are

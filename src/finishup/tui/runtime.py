@@ -110,6 +110,24 @@ def _project_legacy_registration_text(project_mcp: Mapping[str, object]) -> str 
     return _LEGACY_REGISTRATION_TEXT.get(legacy)
 
 
+def _conversation_review_token(
+    policy_map: Mapping[str, object], llm_enabled: bool | None
+) -> str | None:
+    """The conversation setting a composed policy means (ADR-049).
+
+    An explicit token is the owner's; a policy written before the field existed keeps the
+    released reading: AI-powered review in every task where its inference channel is on, and
+    local checks only where it is off.
+    """
+
+    explicit = policy_map.get("conversation_review")
+    if explicit in {"local_only", "local_owner_approval", "local_agent_opt_in", "ai_powered"}:
+        return cast(str, explicit)
+    if explicit is not None or llm_enabled is None:
+        return None
+    return "ai_powered" if llm_enabled else "local_only"
+
+
 def _agent_route_detail(provider: ProviderPosture) -> str:
     """Explain the agent-route verdict without restating installation readiness."""
 
@@ -721,13 +739,33 @@ class FinishUpRuntime:
         )
 
     async def run_privacy_setup(
-        self, recipe_hint: str | None, *, offer_recommended: bool = False
+        self,
+        recipe_hint: str | None,
+        *,
+        offer_recommended: bool = False,
+        conversation_review: str | None = None,
+        ai_review_add_on: bool = False,
     ) -> object:
-        """Hand the trusted questionnaire to the CLI implementation."""
+        """Hand the trusted questionnaire to the CLI implementation.
+
+        ``conversation_review`` is the owner's first-run answer (ADR-049), drafted into the
+        policy instead of asked again. ``ai_review_add_on`` lists the AI-powered review recipes
+        with their own recommendation (an answer that adds AI-powered review).
+        """
 
         from finishup.cli.privacy_setup import run_privacy_setup
         from finishup.cli.unlock import HumanCeremonyCliError
+        from finishup.domain.privacy import ConversationReview
         from finishup.ports.control import ControlError
+
+        try:
+            conversation = (
+                None if conversation_review is None else ConversationReview(conversation_review)
+            )
+        except ValueError:
+            raise RuntimeError_(
+                "privacy_conversation_review_invalid", "the conversation setting is invalid"
+            ) from None
 
         if recipe_hint is not None and recipe_hint not in {
             "private",
@@ -752,6 +790,8 @@ class FinishUpRuntime:
                 ),
                 offer_recommended=offer_recommended,
                 workspace_locator=self._cwd,
+                conversation_review=conversation,
+                ai_review_add_on=ai_review_add_on,
             )
         except (ControlError, HumanCeremonyCliError, OSError, ValueError) as error:
             raise RuntimeError_(
@@ -797,9 +837,10 @@ class FinishUpRuntime:
             )
         return PrivacyRecommendation(
             recipe,
-            "No current eligible exact provider route is configured, so this keeps network "
-            "egress off entirely.",
-            "In exchange, there is no external AI-powered review at all.",
+            "No reviewer with current reviewed data-use evidence is set up, so FinishUP runs its "
+            "local checks on every task and sends no work for AI-powered review.",
+            "Add AI-powered review with /provider when you want it; your agent can then turn it "
+            "on for a task when it helps.",
         )
 
     # -- integration ----------------------------------------------------
@@ -1304,6 +1345,8 @@ class FinishUpRuntime:
         network_egress = network_raw if type(network_raw) is bool else None
         task_statement_sent, task_statement_disclosure = _task_statement_posture(policy_map)
         return PrivacyPosture(
+            conversation_review=_conversation_review_token(policy_map, llm_enabled),
+            conversation_review_explicit=policy_map.get("conversation_review") is not None,
             recipe_outdated=_review_recipe_outdated(policy_map),
             credential_heuristic=_credential_heuristic_pair(response.get("credential_heuristic")),
             profile=profile if isinstance(profile, str) else None,
@@ -1386,7 +1429,7 @@ class FinishUpRuntime:
                 provider_id="openai-codex",
                 host="openai.com",
                 base_path_prefix=" through Codex-managed login",
-                default_model="gpt-6-luna",
+                default_model="gpt-6.1-sol",
                 api_style="Codex app-server v2 (stdio)",
                 endpoint_profile_id="codex-chatgpt-subscription",
                 endpoint_profile_version="1.0.0",
@@ -1417,6 +1460,13 @@ class FinishUpRuntime:
             default_codex_subscription_model(),
             default_codex_subscription_reasoning_effort(),
         )
+
+    def codex_subscription_model_is_suggested(self) -> bool:
+        """True when no binding exists, so the offered model is setup's own suggestion."""
+
+        from finishup.cli.codex_subscription import codex_subscription_model_is_suggested
+
+        return codex_subscription_model_is_suggested()
 
     def codex_subscription_routine_default(self) -> str | None:
         """Routine effort setup applies by default; ``None`` keeps a legacy single effort."""
@@ -1457,6 +1507,7 @@ class FinishUpRuntime:
         *,
         switch_account: bool = False,
         routine_reasoning_effort: str | None = None,
+        model_is_suggestion: bool = False,
     ) -> Mapping[str, object]:
         """Run Codex-owned login, then recompose the service around the exact binding."""
 
@@ -1473,6 +1524,7 @@ class FinishUpRuntime:
                 login_mode="browser",
                 open_browser=True,
                 switch_account=switch_account,
+                model_is_suggestion=model_is_suggestion,
             )
             await restart_service_for_semantic_composition(report_startup_failure=False)
             return result

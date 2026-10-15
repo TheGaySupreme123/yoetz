@@ -13,14 +13,16 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import json
 import os
 import shlex
+import shutil
 import sys
 import tempfile
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Literal, cast
+from typing import TYPE_CHECKING, Final, Literal, cast
 
 import anyio
 import typer
@@ -62,6 +64,7 @@ from finishup.cli.agent_start import AGENT_START_HANDOFF
 from finishup.config.load import load_config
 from finishup.config.models import ConfigError
 from finishup.config.paths import PathSafetyError, setup_marker_path
+from finishup.domain.privacy import ConversationReview
 from finishup.domain.values import RequestId, request_id
 from finishup.ports.harness_mcp import (
     HarnessBinary,
@@ -82,6 +85,9 @@ from finishup.ports.integrations import (
 )
 from finishup.protocol.canonical import JsonValue, canonical_encode
 from finishup.protocol.ids import IdKind, new_id
+
+if TYPE_CHECKING:
+    from finishup.adapters.integrations.host_discovery import HostInstallation
 
 __all__ = [
     "SETUP_MARKER_SCHEMA",
@@ -141,6 +147,8 @@ _PROVIDER_SETUP_DIRECT_REASONS: Final = frozenset(
         "trusted_console_required",
         "codex_runtime_not_found",
         "codex_runtime_unavailable",
+        "codex_model_unavailable",
+        "codex_reasoning_effort_unavailable",
         "codex_subscription_timeout",
         "codex_subscription_failed",
         # Evaluator-runtime selection and retention (#855): each names its own next step.
@@ -160,6 +168,82 @@ def _canonical_setup_workspace(workspace: Path | None = None) -> Path:
     if canonical is None:
         raise ValueError("workspace_locator_invalid")
     return Path(canonical)
+
+
+_NEXT_PROJECT: Final = (
+    "Run 'finishup setup run' from inside the project folder you want to connect, or pass "
+    "--project <folder>. Your home folder and the filesystem root cannot be connected."
+)
+_NEXT_PRIVACY_AFTER_PROVIDER: Final = (
+    "Next: from the project folder, run 'finishup --privacy' to choose the disclosure policy for "
+    "AI-powered review; the provider binding is kept."
+)
+_NEXT_CREDENTIAL_AFTER_PRIVACY: Final = (
+    "No API key was stored: after that, rerun 'finishup --set' from the project folder, or run "
+    "'finishup provider credential set' there."
+)
+_NEXT_PROVIDER_AFTER_SKIP: Final = (
+    "Next: no provider was chosen. Rerun 'finishup --set' and choose one, or run 'finishup "
+    "provider endpoint' (API key) or 'finishup provider codex-subscription setup' (Codex with a "
+    "ChatGPT subscription)."
+)
+_PRIVACY_READY: Final = frozenset({"configured", "unchanged"})
+
+
+def _emit_unconnectable_project(host: str, *, json_output: bool) -> int:
+    """Report a project folder setup cannot connect, with the same words on every path."""
+
+    if json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "schema": "yoetz.host-connection-report/1",
+                    "host": host,
+                    "action": "connect",
+                    "connection_observed": False,
+                    "outcome": "incomplete",
+                    "reason": "workspace_locator_invalid",
+                    "next_step": _NEXT_PROJECT,
+                },
+                sort_keys=True,
+            )
+        )
+    else:
+        typer.echo(f"{host}: incomplete")
+        typer.echo("workspace_locator_invalid")
+        typer.echo(_NEXT_PROJECT)
+    return 1
+
+
+def _resolve_setup_project(project: Path | None, *, interactive: bool) -> Path | None:
+    """Return the canonical project to connect, asking once per attempt in a terminal.
+
+    Setup used to discover an unusable folder (the home folder, ``/``, or a symlinked path) only
+    after every question had been answered, and then failed as ``internal_error``. Now the
+    folder is checked first; a terminal user may name another one, and an empty answer stops
+    with a plain next step.
+    """
+
+    try:
+        return _canonical_setup_workspace(project)
+    except ValueError:
+        pass
+    if not interactive:
+        return None
+    typer.echo(
+        "FinishUP connects an agent to one project folder. This folder cannot be connected "
+        "(your home folder, the filesystem root, and symlinked paths are refused)."
+    )
+    while True:
+        answer = typer.prompt(
+            "Project folder to connect (Enter to stop)", default="", show_default=False
+        ).strip()
+        if not answer:
+            return None
+        try:
+            return _canonical_setup_workspace(Path(answer).expanduser())
+        except ValueError:
+            typer.echo("That folder cannot be connected either; choose a project folder.")
 
 
 _PROVIDER_SETUP_PRIVACY_REASONS: Final = frozenset(
@@ -524,9 +608,13 @@ def should_offer_first_run() -> bool:
     return interactive and not setup_marker_present()
 
 
-def _integration_layers() -> dict[str, JsonValue]:
-    """Inspect skill, plugin, hook, and trust state without inferring activation."""
+def _integration_layers(workspace: Path | None = None) -> dict[str, JsonValue]:
+    """Inspect skill, plugin, hook, and trust state without inferring activation.
 
+    ``workspace`` is the project setup connected; the current directory when omitted.
+    """
+
+    root = str(Path.cwd() if workspace is None else workspace)
     source = None
     try:
         source = load_packaged_skill_source()
@@ -542,7 +630,7 @@ def _integration_layers() -> dict[str, JsonValue]:
     if source is not None:
         try:
             skill_inspection = inspect_destination(
-                IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(Path.cwd())),
+                IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, root),
                 source,
             )
         except IntegrationError:
@@ -552,9 +640,7 @@ def _integration_layers() -> dict[str, JsonValue]:
             skill_digest = skill_inspection.installed_digest
             skill_compatibility = "supported" if tested_profiles else "unsupported"
     try:
-        inspection = inspect_plugin(
-            IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(Path.cwd()))
-        )
+        inspection = inspect_plugin(IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, root))
     except IntegrationError as error:
         return {
             "hooks": {
@@ -604,30 +690,57 @@ def _is_interactive_terminal() -> bool:
         return False
 
 
-def _choose_review_mode() -> Literal["local_only", "semantic"]:
-    """Let first run choose its complete privacy posture before registration.
+type ReviewChoice = Literal["agent_opt_in", "local_only", "ai_powered"]
 
-    AI-powered review is offered first and is the default answer. That is a choice about this
-    prompt, not about what an installation seeds: the durable policy is still ``local_only``,
-    and this branch only leads to the provider binding, credential, and separately
-    reauthenticated policy commit that egress actually requires. Accepting it here configures
-    nothing on its own.
+# The owner's three first-run answers (ADR-049). Each maps to the conversation setting the drafted
+# privacy policy carries; all three register the ``policy`` MCP route, so the owner can widen
+# later without re-registering, and the privacy policy alone decides what may be sent.
+_REVIEW_CHOICES: Final[tuple[tuple[ReviewChoice, str], ...]] = (
+    (
+        "agent_opt_in",
+        "FinishUP (recommended): local checks; your agent can turn on AI-powered review for a "
+        "task when it helps",
+    ),
+    ("local_only", "FinishUP, local only (agents may not opt in)"),
+    ("ai_powered", "AI-powered review on every task"),
+)
+
+
+def review_choice_conversation_setting(choice: ReviewChoice) -> ConversationReview:
+    """The privacy-policy conversation setting one first-run answer stands for (ADR-049)."""
+
+    return {
+        "agent_opt_in": ConversationReview.LOCAL_AGENT_OPT_IN,
+        "local_only": ConversationReview.LOCAL_ONLY,
+        "ai_powered": ConversationReview.AI_POWERED,
+    }[choice]
+
+
+def _choose_review_mode() -> ReviewChoice:
+    """Let first run choose how tasks use AI-powered review before registration (ADR-049).
+
+    Every task starts with FinishUP's local checks unless the owner picks AI-powered review on
+    every task. The recommended first answer is the owner's standing permission for an agent to
+    turn on AI-powered review for one task when it helps; the second keeps every task local and
+    refuses agent opt-in; the third reviews every task. The answer configures nothing on its own:
+    reaching egress still needs the reviewer, its credential, and the separately reauthenticated
+    privacy decision, and an answer that leads to AI-powered review is drafted into that policy.
     """
 
     typer.echo("")
     typer.echo("Choose how FinishUP should review work:")
-    typer.echo("  1. AI-powered review (recommended) — configure a provider, API key, and policy")
+    for number, (_choice, text) in enumerate(_REVIEW_CHOICES, 1):
+        typer.echo(f"  {number}. {text}")
     typer.echo(
-        "  2. Local only — local checks, no AI-powered review; task content stays on this computer "
-        "(the next prompt separately decides PyPI update checks)"
+        "Local checks run on every task. AI-powered review sends work only within the privacy "
+        "policy you approve next, and you can change this later with "
+        "'finishup privacy conversations'."
     )
     while True:
         raw = typer.prompt("Review mode", default="1").strip()
-        if raw == "1":
-            return "semantic"
-        if raw == "2":
-            return "local_only"
-        typer.echo("Please enter 1 or 2.")
+        if raw in {"1", "2", "3"}:
+            return _REVIEW_CHOICES[int(raw) - 1][0]
+        typer.echo("Please enter 1, 2, or 3.")
 
 
 def _write_setup_marker(outcome: str) -> bool:
@@ -716,7 +829,8 @@ def _choose_binary(
     for index, binary in enumerate(binaries, start=1):
         version = binary.reported_version or "unknown version"
         typer.echo(f"  {index}. {binary.executable_path} ({version})")
-    raw = typer.prompt("Select the Codex installation to configure", default="1")
+    default = _path_codex_choice([Path(binary.executable_path) for binary in binaries]) or 1
+    raw = typer.prompt("Select the Codex installation to configure", default=str(default))
     if not raw.isdecimal() or not 1 <= int(raw) <= len(binaries):
         raise _UsageExit(_usage_failure("the harness selection is not one of the listed numbers"))
     return binaries[int(raw) - 1]
@@ -1920,6 +2034,7 @@ async def _register_step(
     accept: bool,
     route_profile: Literal["policy", "strict"] | None = None,
     codex_home: Path | None = None,
+    workspace: Path | None = None,
     _state: Path | None = None,
 ) -> dict[str, JsonValue]:
     """Backward-compatible name for the complete Codex integration step."""
@@ -1929,6 +2044,7 @@ async def _register_step(
         interactive=interactive,
         accept=accept,
         route_profile=route_profile,
+        workspace=workspace,
         codex_home=codex_home,
         _state=_state,
     )
@@ -2154,8 +2270,13 @@ async def _interactive_provider_setup(
     model: str | None = None,
     before_credential: Callable[[], Awaitable[str | None]] | None = None,
     storage_only: bool = False,
+    project: Path | None = None,
 ) -> tuple[dict[str, JsonValue], dict[str, JsonValue]]:
-    """Run trusted local setup ceremonies while keeping secrets out of wizard state."""
+    """Run trusted local setup ceremonies while keeping secrets out of wizard state.
+
+    ``project`` is the folder the credential's repository privacy commitment names (the current
+    directory when omitted), the same folder the privacy step governs.
+    """
 
     from finishup.adapters.keys.os_keyring import AutoUnlockPassphraseStore, OSKeyringError
     from finishup.cli.privacy_setup import get_privacy_setup_snapshot
@@ -2376,6 +2497,12 @@ async def _interactive_provider_setup(
                 "model_available": status.get("model_available"),
                 "process_cleanup": status.get("process_cleanup"),
                 "login_reused": status.get("login_reused") is True,
+                "model": status.get("model"),
+                **(
+                    {"model_fallback_from": status["model_fallback_from"]}
+                    if type(status.get("model_fallback_from")) is str
+                    else {}
+                ),
             }
         )
         service = await _restart_service_for_semantic_composition()
@@ -2451,7 +2578,7 @@ async def _interactive_provider_setup(
         provider.endpoint_profile_version,
     )
     try:
-        repository_snapshot = await get_privacy_setup_snapshot()
+        repository_snapshot = await get_privacy_setup_snapshot(project)
         repository_commitment = repository_snapshot.bound_scope.get("workspace_ref_commitment")
     except ControlError, OSError, ValueError:
         repository_commitment = None
@@ -2551,14 +2678,81 @@ def _emit_provider_setup_layer_report(*, privacy_outcome: str) -> None:
     )
 
 
+def _emit_privacy_incomplete(
+    *, reason: object, privacy_outcome: str, api_key_unstored: bool
+) -> None:
+    """Name a declined or failed privacy step after the provider binding, and what is left."""
+
+    typer.echo(f"Reason: {_privacy_block_reason(reason)}")
+    typer.echo(f"Privacy policy: {privacy_outcome}")
+    typer.echo(_NEXT_PRIVACY_AFTER_PROVIDER)
+    if api_key_unstored:
+        typer.echo(_NEXT_CREDENTIAL_AFTER_PRIVACY)
+
+
+def _emit_codex_subscription_layer_report(*, privacy_outcome: str) -> None:
+    """The Codex-subscription route's own layers: no API key and no vault credential exist."""
+
+    typer.echo(
+        "Codex subscription binding written. Codex keeps the ChatGPT sign-in in the dedicated "
+        "evaluator home; FinishUP never reads it."
+    )
+    typer.echo("Other layers (ready vs not demonstrated by this path):")
+    typer.echo(f"  Privacy policy: {privacy_outcome}")
+    typer.echo("  Live AI-powered review: not demonstrated")
+    typer.echo("The binding and the sign-in are not proof that an AI-powered review ran.")
+
+
+async def _run_local_only_privacy_setup(project: Path | None) -> int:
+    """Record the owner's "local only; agents may not opt in" answer (ADR-049).
+
+    The Private recipe with the explicit ``local_only`` conversation setting, through the same
+    trusted questionnaire every privacy change uses. It narrows, so it applies without the
+    widening ceremony. Without it a policy-route registration would keep the released check
+    behaviour of an installation that never chose.
+    """
+
+    from finishup.cli.privacy_setup import run_privacy_setup
+    from finishup.cli.unlock import HumanCeremonyCliError
+    from finishup.ports.control import ControlError
+
+    service = await _service_reachability(start_if_absent=True)
+    if not service.get("reachable"):
+        typer.echo("privacy_setup_failed: service_unavailable", err=True)
+        return 20
+    try:
+        result = await run_privacy_setup(
+            recipe_hint="private",
+            workspace_locator=None if project is None else _canonical_setup_workspace(project),
+            conversation_review=ConversationReview.LOCAL_ONLY,
+        )
+    except (ControlError, HumanCeremonyCliError, OSError, ValueError) as error:
+        typer.echo(
+            f"privacy_setup_failed: {_privacy_block_reason(getattr(error, 'reason', None))}",
+            err=True,
+        )
+        return 20
+    if result.outcome in {"configured", "unchanged"}:
+        return 0
+    typer.echo(f"privacy_setup_failed: {_privacy_block_reason(result.reason)}", err=True)
+    return 20
+
+
 async def run_provider_setup(
     *,
     fireworks: bool = False,
     grok: bool = False,
     provider: str | None = None,
     model: str | None = None,
+    conversation_review: ConversationReview | None = None,
+    project: Path | None = None,
 ) -> int:
-    """Run only the simple local provider setup path used by ``finishup --set``."""
+    """Run only the simple local provider setup path used by ``finishup --set``.
+
+    ``conversation_review`` is a first-run answer already taken (ADR-049): the drafted privacy
+    policy carries it and the privacy step does not ask again. ``project`` is the folder the
+    privacy step governs; the current directory when omitted.
+    """
 
     if (fireworks or grok) and provider is not None:
         return _usage_failure("provider shortcuts and --provider are mutually exclusive")
@@ -2566,7 +2760,6 @@ async def run_provider_setup(
         return _usage_failure("--fireworks and --grok are mutually exclusive")
     provider_choice = "fireworks" if fireworks else ("grok" if grok else provider)
     if provider_choice is not None:
-        from finishup.config.models import ConfigError
         from finishup.config.write import provider_preset
 
         try:
@@ -2575,33 +2768,61 @@ async def run_provider_setup(
             return _usage_failure("--provider must name a reviewed provider preset")
     if not _is_interactive_terminal():
         return _usage_failure("--set requires a local terminal for hidden credential input")
-    typer.echo("FinishUP LLM setup")
-    typer.echo("The API key is entered with hidden input and stored only in the local vault.")
+    typer.echo("FinishUP AI-powered review setup")
+    typer.echo(
+        "Choose a provider next. An API key, when the provider needs one, is entered with hidden "
+        "input and stored only in the local vault; Codex with a ChatGPT subscription needs none."
+    )
     service = await _service_reachability(start_if_absent=True)
     if not service.get("reachable"):
         typer.echo("provider_setup_failed: service_unavailable", err=True)
         return 20
-    privacy_result: object | None = None
+    # The disclosure policy this run chose: ``failed`` when the privacy step raised, and
+    # ``not_attempted`` only when the provider step stopped before reaching it.
+    privacy_outcome = "not_attempted"
 
     async def authorize_provider_channel() -> str | None:
-        nonlocal privacy_result
-        from finishup.cli.privacy_setup import run_privacy_setup
+        nonlocal privacy_outcome
+        from finishup.cli.privacy_setup import adds_ai_review, run_privacy_setup
         from finishup.cli.unlock import HumanCeremonyCliError
         from finishup.ports.control import ControlError
 
+        try:
+            external_runtime_configured = (
+                load_config({}, os.environ, None).external_runtime is not None
+            )
+        except ConfigError:
+            # Same rule as the first-run wizard: an unreadable configuration keeps the API-key
+            # prompt path, and the owning provider step reports the configuration error.
+            external_runtime_configured = False
         typer.echo("")
-        typer.echo("Choose the exact disclosure policy before the API key can be tested.")
-        credential_probe_authorized = _prompt_credential_probe_authorization()
+        if external_runtime_configured:
+            # Codex with a ChatGPT subscription has no API key, so no key-verification request
+            # is offered; only the disclosure policy is chosen here.
+            typer.echo("Choose the exact disclosure policy for AI-powered review.")
+            credential_probe_authorized = False
+        else:
+            typer.echo("Choose the exact disclosure policy before the API key can be tested.")
+            credential_probe_authorized = _prompt_credential_probe_authorization()
+        # ADR-049 review round 1: an answer that adds AI-powered review lists the AI recipes
+        # with their own recommendation, never the released Private recommendation.
+        add_on = adds_ai_review(conversation_review)
         try:
             privacy_result = await run_privacy_setup(
-                recipe_hint="assisted_review",
-                offer_recommended=True,
+                recipe_hint=None if add_on else "assisted_review",
+                offer_recommended=not add_on,
                 credential_probe_authorized=credential_probe_authorized,
+                conversation_review=conversation_review,
+                workspace_locator=project,
+                ai_review_add_on=add_on,
             )
         except (ControlError, HumanCeremonyCliError, OSError, ValueError) as error:
+            privacy_outcome = "failed"
             typer.echo(f"privacy_setup_failed: {type(error).__name__}", err=True)
             return _privacy_block_reason(getattr(error, "reason", None))
-        if getattr(privacy_result, "outcome", "failed") in {"configured", "unchanged"}:
+        outcome = getattr(privacy_result, "outcome", "failed")
+        privacy_outcome = outcome if type(outcome) is str else "failed"
+        if privacy_outcome in _PRIVACY_READY:
             return None
         return _privacy_block_reason(getattr(privacy_result, "reason", None))
 
@@ -2610,6 +2831,7 @@ async def run_provider_setup(
         provider_choice=provider_choice,
         model=model,
         before_credential=authorize_provider_channel,
+        project=project,
     )
     service, provider_report = _provider_setup_result(service, provider_report)
     binding = provider_report.get("binding")
@@ -2618,26 +2840,59 @@ async def run_provider_setup(
     typer.echo(f"Provider binding: {binding}")
     from finishup.cli.provider_status import credential_human_display
 
-    typer.echo(
-        "Credential: "
-        + credential_human_display(
-            True if credential == "stored" else (False if credential == "failed" else None)
+    if credential == "external_runtime_oauth":
+        typer.echo("Credential: held by Codex's own ChatGPT sign-in; FinishUP stores none")
+    else:
+        typer.echo(
+            "Credential: "
+            + credential_human_display(
+                True if credential == "stored" else (False if credential == "failed" else None)
+            )
         )
-    )
-    if binding != "configured" or credential != "stored":
+    model_fallback_from = provider_report.get("model_fallback_from")
+    if type(model_fallback_from) is str:
+        typer.echo(
+            f"Model: {provider_report.get('model')} (suggested {model_fallback_from} is not "
+            "listed by this Codex)"
+        )
+    # A provider binding without the disclosure policy is not usable: on the API-key path the
+    # credential step never ran, and a Codex sign-in is already held, so the privacy outcome
+    # itself must gate success on every provider path.
+    privacy_ready = privacy_outcome in _PRIVACY_READY
+    if (
+        binding != "configured"
+        or not _provider_credential_ready(provider_report)
+        or not privacy_ready
+    ):
+        privacy_attempted = privacy_outcome != "not_attempted"
+        if binding == "configured" and not privacy_ready and privacy_attempted:
+            _emit_privacy_incomplete(
+                reason=provider_report.get("credential_reason"),
+                privacy_outcome=privacy_outcome,
+                api_key_unstored=credential != "external_runtime_oauth"
+                and not _provider_credential_ready(provider_report),
+            )
+            return 20
         reason = provider_report.get("credential_reason")
+        if type(reason) is not str and binding == "configured" and not privacy_ready:
+            reason = "privacy_setup_incomplete"
         if type(reason) is str:
             typer.echo(f"Reason: {reason}")
+            from finishup.cli.codex_subscription import subscription_remediation
+
+            remediation = subscription_remediation(reason)
+            if remediation is not None:
+                typer.echo(f"Next: {remediation}")
+        elif binding == "skipped":
+            # No provider was chosen, so neither the privacy step nor a credential ran.
+            typer.echo(_NEXT_PROVIDER_AFTER_SKIP)
         return 20
-    privacy_outcome = (
-        "not_attempted" if privacy_result is None else getattr(privacy_result, "outcome", "failed")
-    )
-    _emit_provider_setup_layer_report(privacy_outcome=privacy_outcome)
-    if privacy_outcome == "failed":
-        return 20
+    if credential == "external_runtime_oauth":
+        _emit_codex_subscription_layer_report(privacy_outcome=privacy_outcome)
+    else:
+        _emit_provider_setup_layer_report(privacy_outcome=privacy_outcome)
     typer.echo(
-        "Preview Codex MCP registration again to review the policy route command now that "
-        "AI-powered review configuration changed."
+        "AI-powered review configuration changed: start a fresh agent session so it uses it."
     )
     return 0
 
@@ -2717,6 +2972,7 @@ async def _refresh_setup_recommendations(
     binary: HarnessBinary | None,
     codex_home: Path | None,
     allow_network: bool,
+    workspace: Path | None = None,
 ) -> dict[str, JsonValue]:
     """Refresh cached recommendations from current local and durable policy facts."""
 
@@ -2730,7 +2986,7 @@ async def _refresh_setup_recommendations(
         activation_state: str | None = None
         if binary is not None and codex_home is not None:
             activation_state = inspect_activation(
-                _integration_target(),
+                _integration_target(workspace),
                 executable_path=binary.executable_path,
                 codex_home=codex_home,
             ).state.value
@@ -2746,6 +3002,26 @@ async def _refresh_setup_recommendations(
         return {"outcome": "refreshed", "pending": list(state.pending)}
     except Exception as error:
         return {"outcome": "failed", "reason": type(error).__name__, "pending": []}
+
+
+def _path_codex_choice(executables: Sequence[Path | None]) -> int | None:
+    """The 1-based position of the Codex a plain ``codex`` command runs, if it is listed."""
+
+    on_path = shutil.which("codex")
+    if on_path is None:
+        return None
+    selected = Path(os.path.abspath(on_path))
+    for index, executable in enumerate(executables, 1):
+        if executable is not None and Path(os.path.abspath(executable)) == selected:
+            return index
+    return None
+
+
+def _default_installation_choice(installations: Sequence[HostInstallation]) -> int:
+    """Offer the Codex a plain ``codex`` command runs, not merely the first path in sort order."""
+
+    codex = [item.executable if item.host == "codex" else None for item in installations]
+    return _path_codex_choice(codex) or 1
 
 
 async def run_setup_wizard(
@@ -2766,10 +3042,12 @@ async def run_setup_wizard(
     """Run the guided first-run setup and report each step honestly.
 
     ``route_profile`` is the explicit MCP route input (``--route-profile``). When
-    absent, an interactive run derives the route from the human's review-mode
-    answer as before, and a non-interactive run preserves the observed profile of
-    an existing finishup-owned registration (strict only for a fresh registration) —
-    ``--accept`` alone never changes an existing route (#389).
+    absent, an interactive run registers the ``policy`` route for every review answer
+    (ADR-049: the answer is drafted into the privacy policy as its conversation setting,
+    and the policy alone decides what may be sent), and a non-interactive run, which
+    answers nothing, preserves the observed profile of an existing finishup-owned
+    registration (strict only for a fresh registration) — ``--accept`` alone never
+    changes an existing route (#389).
     """
 
     interactive = not non_interactive and _is_interactive_terminal()
@@ -2781,10 +3059,18 @@ async def run_setup_wizard(
         installations = discover_hosts()
         alternatives = [item for item in installations if item.host != "codex"]
         if alternatives and interactive:
-            typer.echo("Choose an agent to connect:")
+            typer.echo(
+                "Choose an agent to connect (one per run; run setup again to connect another):"
+            )
             for index, item in enumerate(installations, 1):
-                typer.echo(f"  {index}. {item.label} {item.version or ''}")
-            choice = int(typer.prompt("Agent", type=IntRange(1, len(installations)), default=1))
+                typer.echo(f"  {index}. {item.label} {item.version or ''} ({item.executable})")
+            choice = int(
+                typer.prompt(
+                    "Agent",
+                    type=IntRange(1, len(installations)),
+                    default=_default_installation_choice(installations),
+                )
+            )
             selected = installations[choice - 1]
             host, host_path, host_config_root = (
                 selected.host,
@@ -2799,8 +3085,16 @@ async def run_setup_wizard(
                 selected.config_root,
             )
     if host is not None:
-        selected_route = route_profile or (
-            "policy" if interactive and _choose_review_mode() == "semantic" else "strict"
+        connected_project = _resolve_setup_project(project, interactive=interactive)
+        if connected_project is None:
+            return _emit_unconnectable_project(host, json_output=json_output)
+        # ADR-049: every interactive answer registers the policy route; the privacy policy, not
+        # the route, decides what may be sent. A run that asks nothing keeps the strict default.
+        host_review: ReviewChoice | None = (
+            _choose_review_mode() if interactive and route_profile is None else None
+        )
+        host_route: Literal["policy", "strict"] = route_profile or (
+            "policy" if host_review is not None else "strict"
         )
 
         def connect() -> int:
@@ -2808,8 +3102,8 @@ async def run_setup_wizard(
                 host=host,
                 executable=host_path,
                 config_root=host_config_root,
-                project=_canonical_setup_workspace(project),
-                route=selected_route,
+                project=connected_project,
+                route=host_route,
                 accept=accept,
                 interactive=interactive,
                 request_value=request_value,
@@ -2821,11 +3115,28 @@ async def run_setup_wizard(
         # Codex's legacy composition owns an AnyIO loop and must stay off this loop.
         result = await run_sync(connect) if host == "codex" else connect()
         if result == 0 and interactive:
-            if selected_route == "policy":
-                result = await run_provider_setup()
+            # The privacy step governs the project just connected, which may be a folder the
+            # owner typed rather than the current directory.
+            if host_review == "local_only":
+                result = await _run_local_only_privacy_setup(connected_project)
+            elif host_route == "policy":
+                result = await run_provider_setup(
+                    conversation_review=(
+                        None
+                        if host_review is None
+                        else review_choice_conversation_setting(host_review)
+                    ),
+                    project=connected_project,
+                )
             if result == 0:
                 _write_setup_marker("complete")
         return result
+
+    # The Codex wizard needs the same project folder before its first question; it is carried
+    # through registration, the privacy and provider steps, readiness and recommendations.
+    codex_project = _resolve_setup_project(project, interactive=interactive)
+    if codex_project is None:
+        return _emit_unconnectable_project("codex", json_output=json_output)
 
     binaries = discover_codex_binaries()
     try:
@@ -2857,8 +3168,12 @@ async def run_setup_wizard(
         else:
             codex_home = suggested
 
+    review_choice: ReviewChoice | None = _choose_review_mode() if interactive else None
+    # The released report vocabulary: ``semantic`` for an answer that sets up AI-powered review.
     review_mode: Literal["local_only", "semantic", "deferred"] = (
-        _choose_review_mode() if interactive else "deferred"
+        "deferred"
+        if review_choice is None
+        else ("local_only" if review_choice == "local_only" else "semantic")
     )
     update_checks_choice = (
         typer.confirm(
@@ -2874,7 +3189,9 @@ async def run_setup_wizard(
         if route_profile is not None:
             selected_route: Literal["policy", "strict"] | None = route_profile
         elif interactive:
-            selected_route = "policy" if review_mode == "semantic" else "strict"
+            # ADR-049: all three answers register the policy route, so the owner can let an
+            # agent opt in later without re-registering; the privacy policy decides egress.
+            selected_route = "policy"
         else:
             # No explicit input and no human answer: the step preserves an
             # existing finishup-owned route and registers strict only when fresh.
@@ -2885,6 +3202,7 @@ async def run_setup_wizard(
             accept=accept,
             route_profile=selected_route,
             codex_home=codex_home,
+            workspace=codex_project,
         )
 
     service = await _service_reachability(start_if_absent=interactive)
@@ -2922,12 +3240,20 @@ async def run_setup_wizard(
             credential_probe_authorized = (
                 False if external_runtime_configured else _prompt_credential_probe_authorization()
             )
+            # ADR-049 review round 1: both answers that set up AI-powered review list the AI
+            # recipes with their own recommendation (Assisted review by default), never the
+            # released Private recommendation a subscription reviewer would otherwise get.
             try:
                 privacy_result = await run_privacy_setup(
-                    recipe_hint="assisted_review",
-                    offer_recommended=True,
                     credential_probe_authorized=credential_probe_authorized,
                     update_checks_override=update_checks_choice,
+                    conversation_review=(
+                        None
+                        if review_choice is None
+                        else review_choice_conversation_setting(review_choice)
+                    ),
+                    workspace_locator=codex_project,
+                    ai_review_add_on=True,
                 )
             except (ControlError, HumanCeremonyCliError, OSError, ValueError) as error:
                 reason = getattr(error, "reason", None)
@@ -2961,6 +3287,7 @@ async def run_setup_wizard(
         service, provider = await _interactive_provider_setup(
             service,
             before_credential=authorize_provider_channel,
+            project=codex_project,
         )
         service, provider = _provider_setup_result(service, provider)
         if service.get("state") == "ready" and provider.get("binding") == "configured":
@@ -2974,7 +3301,7 @@ async def run_setup_wizard(
                 # dispatches AI-powered review work, and it supplies authoritative blockers after a
                 # credential ceremony fails or returns an ambiguous result.
                 try:
-                    semantic_status = await provider_status_report()
+                    semantic_status = await provider_status_report(workspace_locator=codex_project)
                 except ControlError, OSError, ValueError:
                     semantic_status = None
     elif interactive and review_mode == "local_only":
@@ -2986,6 +3313,9 @@ async def run_setup_wizard(
             privacy_result = await run_privacy_setup(
                 recipe_hint="private",
                 update_checks_override=update_checks_choice,
+                # ADR-049: the owner's explicit "local only; agents may not opt in".
+                conversation_review=ConversationReview.LOCAL_ONLY,
+                workspace_locator=codex_project,
             )
             privacy = {
                 "outcome": privacy_result.outcome,
@@ -3062,17 +3392,34 @@ async def run_setup_wizard(
         )
 
     mutating_run = interactive or accept
+    # A privacy step this run attempted for AI-powered review and that was declined or failed
+    # leaves setup incomplete, as on every provider path, even when an earlier policy keeps the
+    # evaluator composable.
+    privacy_incomplete = review_mode == "semantic" and privacy.get("outcome") not in {
+        "configured",
+        "unchanged",
+        "not_changed",
+        "deferred",
+    }
+    if privacy_incomplete and interactive:
+        # The closing block names the privacy step and, when no API key was stored, the
+        # credential step, in that order; the summary list leaves them out so each prints once.
+        next_steps = [step for step in next_steps if step not in {_NEXT_PRIVACY, _NEXT_CREDENTIAL}]
     setup_complete = (
         not interactive
         or (review_mode == "local_only" and privacy.get("outcome") in {"configured", "unchanged"})
-        or (semantic_status is not None and semantic_status.get("semantic_ready") is True)
+        or (
+            semantic_status is not None
+            and semantic_status.get("semantic_ready") is True
+            and not privacy_incomplete
+        )
     )
     marker_written = (
         _write_setup_marker(str(registration["outcome"]))
         if mutating_run and setup_complete
         else False
     )
-    integration = _integration_layers()
+    integration = _integration_layers(codex_project)
     consent: str | None = None
     observation = registration.get("observation_consent")
     if isinstance(observation, Mapping):
@@ -3118,7 +3465,7 @@ async def run_setup_wizard(
         hooks=hooks,
         consent_outcome=consent,
         service=service,
-        workspace=Path.cwd(),
+        workspace=codex_project,
         codex_home=selected_codex_home,
     )
     if semantic_status is not None:
@@ -3129,6 +3476,7 @@ async def run_setup_wizard(
         binary=chosen,
         codex_home=selected_codex_home,
         allow_network=interactive and update_checks_choice is True and update_choice_committed,
+        workspace=codex_project,
     )
 
     report: dict[str, JsonValue] = {
@@ -3150,6 +3498,22 @@ async def run_setup_wizard(
     }
     if interactive:
         _emit_human_report(report)
+        if privacy_incomplete:
+            typer.echo("")
+            _emit_privacy_incomplete(
+                reason=privacy.get("reason"),
+                privacy_outcome=str(privacy.get("outcome")),
+                api_key_unstored=provider.get("credential") != "external_runtime_oauth"
+                and not _provider_credential_ready(provider),
+            )
+            return 20
+        if (
+            provider.get("binding") == "configured"
+            and provider.get("credential") == "external_runtime_oauth"
+            and privacy.get("outcome") in _PRIVACY_READY
+        ):
+            typer.echo("")
+            _emit_codex_subscription_layer_report(privacy_outcome=str(privacy.get("outcome")))
     else:
         _emit(report, json_output=json_output)
     return 0

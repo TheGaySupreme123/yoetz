@@ -627,6 +627,80 @@ async def test_provider_switch_preserves_existing_subscription_model_when_omitte
     ]
 
 
+async def test_provider_offers_the_suggested_codex_model_and_marks_it_as_a_suggestion(
+    make_app: MakeApp,
+) -> None:
+    runtime = FakeRuntime()
+    runtime.codex_subscription_defaults = lambda: (  # type: ignore[method-assign]
+        "/opt/codex/codex",
+        "/var/lib/finishup/codex-home",
+        "gpt-6.1-sol",
+        "medium",
+    )
+    app = make_app(runtime=runtime)
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await run_command(pilot, app, "/provider")
+        view = app.open_view
+        assert view is not None
+        view.filter("switch")  # type: ignore[attr-defined]
+        await pilot.press("enter")
+        await pilot.pause()
+        for _ in range(5):  # three entries, final and routine effort
+            await pilot.press("enter")
+            await pilot.pause()
+        view = app.open_view
+        assert view is not None
+        body = " ".join(getattr(view, "body", ()) or getattr(view, "_body", ()))
+        assert "gpt-6.1-sol (suggested; gpt-6-luna if this codex does not list it)" in (
+            body.casefold()
+        )
+        await pilot.press("up")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+    assert [item[2:4] for item in runtime.subscription_setups] == [("gpt-6.1-sol", "medium")]
+    assert runtime.subscription_model_suggestions == [True]
+
+
+async def test_provider_promises_no_fallback_to_an_existing_binding_on_the_suggested_model(
+    make_app: MakeApp,
+) -> None:
+    # An existing binding keeps its model exactly; only a new binding's suggestion can fall back.
+    runtime = FakeRuntime()
+    runtime.codex_subscription_defaults = lambda: (  # type: ignore[method-assign]
+        "/opt/codex/codex",
+        "/var/lib/finishup/codex-home",
+        "gpt-6.1-sol",
+        "medium",
+    )
+    runtime.subscription_model_is_suggested = False
+    app = make_app(runtime=runtime)
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await run_command(pilot, app, "/provider")
+        view = app.open_view
+        assert view is not None
+        view.filter("switch")  # type: ignore[attr-defined]
+        await pilot.press("enter")
+        await pilot.pause()
+        for _ in range(5):  # three entries, final and routine effort
+            await pilot.press("enter")
+            await pilot.pause()
+        view = app.open_view
+        assert view is not None
+        body = " ".join(getattr(view, "body", ()) or getattr(view, "_body", ()))
+        assert "model: gpt-6.1-sol" in body.casefold()
+        assert "suggested" not in body.casefold()
+        await pilot.press("up")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+    assert runtime.subscription_model_suggestions == [False]
+
+
 async def test_provider_discloses_and_reports_a_reused_codex_login(make_app: MakeApp) -> None:
     """Setup on a home Codex already reports signed in reuses it and says so (#534)."""
 
@@ -848,6 +922,54 @@ async def test_connect_offers_inspection_before_any_mutation(make_app: MakeApp) 
         await pilot.press("enter")  # inspect
         await pilot.pause()
         assert runtime.applied == []
+
+
+@pytest.mark.parametrize("connected", [True, False])
+async def test_connect_for_claude_code_or_cursor_sets_up_the_review_answer(
+    make_app: MakeApp, connected: bool
+) -> None:
+    """ADR-049 review round 1 (P2-5): /connect asked the three answers, then dropped them.
+
+    After a successful policy-route connection the answer runs exactly as first-run setup runs
+    it; a connection that did not complete sets nothing up.
+    """
+
+    from finishup.tui.models import HarnessOption
+
+    claude = HarnessOption(
+        executable_path="/usr/local/bin/claude",
+        reported_version="2.0",
+        label="Claude Code 2.0",
+        description="Command-line installation",
+        host="claude",
+    )
+    app = make_app(runtime=FakeRuntime(harnesses=(claude,)))
+    calls: list[tuple[object, ...]] = []
+
+    async def choose(_harnesses: object) -> HarnessOption:
+        return claude
+
+    async def ask_review() -> str:
+        return "agent_opt_in"
+
+    async def connect(option: HarnessOption, *, route: str = "strict", **_: object) -> bool:
+        calls.append(("connect", option.host, route))
+        return connected
+
+    async def initial(choice: str, *, connected: bool, **_: object) -> None:
+        calls.append(("review", choice, connected))
+
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        setattr(app, "_choose_harness", choose)
+        setattr(app, "_ask_review_mode", ask_review)
+        setattr(app, "_connect_selected_host", connect)
+        setattr(app, "_run_initial_review", initial)
+        await app.command_connect()
+    expected: list[tuple[object, ...]] = [("connect", "claude", "policy")]
+    if connected:
+        expected.append(("review", "agent_opt_in", True))
+    assert calls == expected
 
 
 async def test_connect_without_a_harness_points_at_local_verification(
